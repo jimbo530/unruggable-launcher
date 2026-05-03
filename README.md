@@ -13,7 +13,7 @@ Every launch creates floor pools paired against these tokens. More launches = mo
 | MfT | `0x9C2578A4684F3b0C8eeDF4a4A0649671eaF7c5fb` | Network heartbeat — 3 sell walls per launch paired against MfT |
 | BB | `0x5cc2a3f1c5e40E7AB7433F3e25FA0e99b3037F55` | BTC-correlated floor — 30% of every launch seed |
 | EB | `0x07A53C6bBBfb4424B29E8eFA2e1E2440b1e87475` | ETH-correlated floor — 30% of every launch seed |
-| AZUSD | `0x4C4a2f8c81640e47606d3fd77B353E87Ba015584` | Stablecoin floor — 40% of every launch seed |
+| AZUSD | `0x4C4a2f8c81640e47606d3fd77B353E87Ba015584` | Green stablecoin floor — 40% of every launch seed. Environmentally positive asset. |
 | CHAR | `0x20b048fA035D5763685D695e66aDF62c5D9F5055` | Carbon retirement — 6% of seed, burns forever |
 
 ## How It Works
