@@ -16,7 +16,7 @@ const BASE_RPC = "https://mainnet.base.org";
 fs.mkdirSync(IMG_DIR, { recursive: true });
 
 // ── Factory read context (lazy init) ─────────────────────────────────────────
-const FACTORY_ADDRESS = "0xbfE4fa5B630d662c375b8F06CF26e75f91CcA4d5";
+const FACTORY_ADDRESS = "0x51eF41E0730c0e607950421e1EE113b089867d3e";
 const FACTORY_ABI = [
   "function launchCount() view returns (uint256)",
   "function getLaunch(uint256 index) view returns (address token, address reactor, address launcher, uint256 supply, uint256 seed, uint256 timestamp)",
@@ -204,6 +204,139 @@ const server = http.createServer(async (req, res) => {
     } catch (e) {
       return json(res, 500, { error: e.message });
     }
+  }
+
+  // GET /leaderboard — latest burn leaderboard snapshot
+  if (req.method === "GET" && parts[0] === "leaderboard") {
+    // Local file (burn-leaderboard.js saves here)
+    const snapPath = path.join(__dirname, "burn-snapshot.json");
+    if (fs.existsSync(snapPath)) {
+      try {
+        return json(res, 200, JSON.parse(fs.readFileSync(snapPath, "utf8")));
+      } catch (e) {
+        return json(res, 500, { error: e.message });
+      }
+    }
+    return json(res, 404, { error: "no leaderboard data yet — run burn-leaderboard.js first" });
+  }
+
+  // GET /openapi.json — OpenAPI spec for agent discovery
+  if (req.method === "GET" && (parts[0] === "openapi.json" || (parts[0] === "openapi" && parts[1] === "json"))) {
+    const specPath = path.join(__dirname, "openapi.json");
+    if (fs.existsSync(specPath)) {
+      cors(res);
+      res.writeHead(200, { "Content-Type": "application/json" });
+      fs.createReadStream(specPath).pipe(res);
+      return;
+    }
+    return json(res, 404, { error: "openapi.json not found" });
+  }
+
+  // GET /share/:tokenAddress — dynamic OG tags for X/Twitter share cards
+  if (req.method === "GET" && parts[0] === "share" && parts[1]) {
+    const addr = parts[1].toLowerCase();
+    const metaPath = getMetaPath(addr);
+    const baseUrl = "https://tasern.quest/api/unruggable";
+    const launcherUrl = "https://tasern.quest/launcher/unruggable.html";
+    let title = "MfT Unruggable Launcher";
+    let desc = "Launch an unruggable token. Liquidity locked forever.";
+    let image = "https://tasern.quest/launcher/og-launcher.png";
+    let redirect = launcherUrl;
+    if (fs.existsSync(metaPath)) {
+      const meta = JSON.parse(fs.readFileSync(metaPath, "utf8"));
+      title = (meta.name || meta.symbol || "Token") + " on MfT Unruggable Launcher";
+      desc = (meta.description || meta.symbol + " launched on MfT.") + " Liquidity locked forever. Join the network!";
+      if (meta.image) image = baseUrl + meta.image;
+      if (meta.reactor) redirect = launcherUrl + "?ref=" + meta.reactor;
+    }
+    const esc = s => s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");
+    const html = [
+      "<!DOCTYPE html><html><head>",
+      '<meta charset="utf-8">',
+      '<meta property="og:title" content="' + esc(title) + '">',
+      '<meta property="og:description" content="' + esc(desc) + '">',
+      '<meta property="og:image" content="' + esc(image) + '">',
+      '<meta property="og:type" content="website">',
+      '<meta name="twitter:card" content="summary_large_image">',
+      '<meta name="twitter:title" content="' + esc(title) + '">',
+      '<meta name="twitter:description" content="' + esc(desc) + '">',
+      '<meta name="twitter:image" content="' + esc(image) + '">',
+      '<meta http-equiv="refresh" content="0;url=' + esc(redirect) + '">',
+      "</head><body><p>Redirecting to <a href=\"" + esc(redirect) + "\">launcher</a>...</p></body></html>"
+    ].join("\n");
+    res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+    res.end(html);
+    return;
+  }
+
+  // GET /tokenomics — infrastructure token overview for agents
+  if (req.method === "GET" && parts[0] === "tokenomics") {
+    return json(res, 200, {
+      network: "Unruggable Launcher",
+      chain: "Base (8453)",
+      factory: FACTORY_ADDRESS,
+      description: "Every token launched creates permanently locked liquidity paired against MfT, BB, and EB. More launches = more volume = higher floors for all infrastructure tokens.",
+      infrastructureTokens: {
+        MfT: {
+          role: "Network heartbeat — every launched token has 3 sell walls paired against MfT at 1.1x, 2x, 5x launch price",
+          token: "0x8FB87d13B40B1A67B22ED1a17e2835fe7e3a9bA3",
+          mechanism: "Reactor Prime collects all upstream fees and pumps MfT. More launches = longer call line = bigger aggregate push.",
+          garden: "https://app.gardens.fund/gardens/8453/0x630dcb0eae7231c7afc8a6414c8c6732b25f8b84/0x944c64f899f48dc5b84b5eab3cba93af32ad729a",
+          gardenInfo: "Stake MfT to vote on which pools get deeper liquidity. Withdraw any time."
+        },
+        BB: {
+          role: "Floor token — 30% of every launch seed creates TOKEN/BB floor pool",
+          token: "0xf967bf3dccF8b6826F82de1781C98E61Bda3b106",
+          mechanism: "BTC-correlated floor. As BTC rises, BB floors appreciate in dollar terms."
+        },
+        EB: {
+          role: "Floor token — 30% of every launch seed creates TOKEN/EB floor pool",
+          token: "0x17a176Ab2379b86F1E65D79b03bD8c75981244D8",
+          mechanism: "ETH-correlated floor. As ETH rises, EB floors appreciate in dollar terms."
+        },
+        AZUSD: {
+          role: "Green stablecoin floor — 40% of every launch seed creates TOKEN/AZUSD floor pool",
+          token: "0x3595ca37596D5895B70EFAB592ac315D5B9809B2",
+          mechanism: "Dollar-pegged green stablecoin. AZUSD is an environmentally positive asset — every floor pool supports the environment just by existing. Combined with CHAR carbon retirement, launches are net-positive for the planet."
+        },
+        CHAR: {
+          role: "Carbon retirement — 6% of launch seed funds CHAR reactor pools",
+          token: "0x20b048fA035D5763685D695e66aDF62c5D9F5055",
+          mechanism: "Every trade burns CHAR, permanently retiring carbon credits. CHAR reactor feeds upstream into Unruggable network."
+        }
+      },
+      reactorChain: {
+        description: "Bottom-up fire order. Each reactor sells MfT as it compounds, temporarily pushing price down. Reactor Prime fires last with accumulated fees from entire network — the pump.",
+        order: [
+          "Token CHAR Reactors (bottom)",
+          "Token Primary Reactors",
+          "Feeder Reactors",
+          "Band Reactors (BB/EB)",
+          "Unruggable Hub",
+          "Main Chain (TGN → AZUSD → BURGERS → CHAR → EGP)",
+          "MfT V1 Reactor Prime (top — all fees funnel here)"
+        ],
+        upstreamFee: "5% of collected fees at each level",
+        flywheel: "Arb bots equalize MfT price across pools after each reactor fires, generating more fees, feeding more reactors. Self-sustaining."
+      },
+      agentOpportunity: {
+        thesis: "BB, EB, and MfT are index funds for the Unruggable network. Every new launch deepens their liquidity and generates volume through their pools.",
+        actions: [
+          "Accumulate MfT/BB/EB as infrastructure plays",
+          "Stake MfT in Garden to vote for pools that benefit your holdings",
+          "Launch tokens to generate network activity",
+          "Call execute() on reactors to trigger burn+compound cycles (permissionless, every 2hrs)",
+          "Arb MfT price discrepancies across pools after reactor fires"
+        ]
+      },
+      links: {
+        launcher: "https://tasern.quest/launcher/unruggable.html",
+        networkMap: "https://tasern.quest/launcher/reactor-map.html",
+        garden: "https://app.gardens.fund/gardens/8453/0x630dcb0eae7231c7afc8a6414c8c6732b25f8b84/0x944c64f899f48dc5b84b5eab3cba93af32ad729a",
+        api: "https://tasern.quest/api/unruggable",
+        basescan: "https://basescan.org/address/" + FACTORY_ADDRESS
+      }
+    });
   }
 
   json(res, 404, { error: "not found" });

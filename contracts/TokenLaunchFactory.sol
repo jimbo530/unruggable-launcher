@@ -194,7 +194,7 @@ contract TokenLaunchFactory {
         bool isMeshed = msg.value >= meshSeed;
 
         // 1. Deploy token — all supply to this contract
-        tokenAddr = address(new LaunchToken(_name, _symbol, _totalSupply, address(this)));
+        tokenAddr = address(new LaunchToken(_name, _symbol, _totalSupply, address(this), ""));
 
         // 2. Send allocations
         IERC20(tokenAddr).transfer(mftTreasury, _totalSupply * BPS_MFT / 10000);

@@ -11,7 +11,7 @@ const { ethers } = require('ethers');
 
 const BASE_RPC = 'https://mainnet.base.org';
 
-const FACTORY_ADDRESS = '0xbfE4fa5B630d662c375b8F06CF26e75f91CcA4d5';
+const FACTORY_ADDRESS = '0x88f6ba724E0780fB75A86AC32806e28796a07240';
 
 const FACTORY_ABI = [
   'function launch(string _name, string _symbol, uint256 _totalSupply, address _inviteReactor) payable returns (address tokenAddr, address reactorAddr)',

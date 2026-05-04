@@ -131,7 +131,6 @@ contract SporeReactorV2 {
     }
     Pool[] public pools;
     mapping(uint256 => bool) public registeredTokenId;
-    mapping(address => bool) public hasXToken;
 
     // Two-step admin transfer
     address public admin;
@@ -220,7 +219,6 @@ contract SporeReactorV2 {
 
         address xToken = is0 ? token1 : token0;
         require(xToken != token, "xToken cannot be native token");
-        require(!hasXToken[xToken], "xToken already has a pool");
 
         address poolAddr = factory.getPool(token0, token1, fee);
         require(poolAddr != address(0), "pool not found");
@@ -234,7 +232,6 @@ contract SporeReactorV2 {
             disabled:      false
         }));
         registeredTokenId[tokenId] = true;
-        hasXToken[xToken] = true;
 
         emit PoolAdded(tokenId, xToken, poolAddr, fee);
     }
@@ -260,7 +257,6 @@ contract SporeReactorV2 {
         require(poolIndex < pools.length, "invalid index");
 
         Pool memory pool = pools[poolIndex];
-        hasXToken[pool.xToken] = false;
         // registeredTokenId stays true — prevents re-adding the same dead position
 
         pools[poolIndex] = pools[pools.length - 1];

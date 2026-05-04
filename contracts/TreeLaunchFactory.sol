@@ -207,7 +207,8 @@ contract TreeLaunchFactory {
             _name,
             string(abi.encodePacked("TREE-", _uint2str(saplings.length + 1))),
             totalSupply,
-            address(this)
+            address(this),
+            ""
         ));
 
         // 2. Deploy vesting — 50% to charity

@@ -226,7 +226,7 @@ contract MycoPadV2 {
         }
 
         // 2. Deploy token — all supply to this contract
-        tokenAddr = address(new LaunchToken(_name, _symbol, _totalSupply, address(this)));
+        tokenAddr = address(new LaunchToken(_name, _symbol, _totalSupply, address(this), ""));
 
         // 3. Calculate allocations — 5% floor, 95% curve
         uint256 floorSupply = _totalSupply * BPS_FLOOR / 10000;

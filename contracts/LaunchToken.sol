@@ -10,6 +10,7 @@ contract LaunchToken {
     string public symbol;
     uint8  public constant decimals = 18;
     uint256 public totalSupply;
+    string private _baseURI;
 
     mapping(address => uint256) public balanceOf;
     mapping(address => mapping(address => uint256)) public allowance;
@@ -17,14 +18,33 @@ contract LaunchToken {
     event Transfer(address indexed from, address indexed to, uint256 value);
     event Approval(address indexed owner, address indexed spender, uint256 value);
 
-    constructor(string memory _name, string memory _symbol, uint256 _supply, address _recipient) {
+    constructor(string memory _name, string memory _symbol, uint256 _supply, address _recipient, string memory baseURI_) {
         require(_supply > 0, "zero supply");
         require(_recipient != address(0), "zero recipient");
         name = _name;
         symbol = _symbol;
         totalSupply = _supply;
+        _baseURI = baseURI_;
         balanceOf[_recipient] = _supply;
         emit Transfer(address(0), _recipient, _supply);
+    }
+
+    /// @notice EIP-7572 contract-level metadata for aggregators
+    function contractURI() external view returns (string memory) {
+        return string.concat(_baseURI, _toHexString(address(this)));
+    }
+
+    function _toHexString(address addr) internal pure returns (string memory) {
+        bytes memory s = new bytes(42);
+        s[0] = "0";
+        s[1] = "x";
+        bytes memory hex16 = "0123456789abcdef";
+        uint160 v = uint160(addr);
+        for (uint256 i = 41; i > 1; i--) {
+            s[i] = hex16[v & 0xf];
+            v >>= 4;
+        }
+        return string(s);
     }
 
     function transfer(address to, uint256 amount) external returns (bool) {

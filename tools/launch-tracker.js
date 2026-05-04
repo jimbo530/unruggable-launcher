@@ -1,0 +1,117 @@
+#!/usr/bin/env node
+// Polls MycoPadV3 factory for TokenLaunched events, inserts into Supabase
+// Run: node launch-tracker.js
+// PM2: pm2 start launch-tracker.js --name launch-tracker
+
+const path = require("path");
+const fs = require("fs");
+const localEnv = path.join(__dirname, "..", "..", "Baselings", "api", ".env");
+require("dotenv").config({ path: fs.existsSync(localEnv) ? localEnv : path.join(__dirname, ".env") });
+const { ethers } = require("ethers");
+
+const RPC = "https://mainnet.base.org";
+const FACTORY = "0x51eF41E0730c0e607950421e1EE113b089867d3e";
+const SUPABASE_URL = process.env.SUPABASE_URL;
+const SUPABASE_KEY = process.env.SUPABASE_KEY;
+const POLL_MS = 60_000; // 1 minute
+
+const EVENT_ABI = [
+  "event TokenLaunched(address indexed token, address indexed reactor, address indexed charReactor, address launcher, string name, string symbol, uint256 supply, uint256 seed)"
+];
+
+const provider = new ethers.JsonRpcProvider(RPC);
+const factory = new ethers.Contract(FACTORY, EVENT_ABI, provider);
+
+let lastBlock = 0;
+
+async function loadLastBlock() {
+  // Check Supabase for most recent entry's block
+  const res = await fetch(
+    `${SUPABASE_URL}/rest/v1/launched_tokens?select=block_number&order=block_number.desc&limit=1`,
+    { headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}` } }
+  );
+  const rows = await res.json();
+  if (rows.length > 0 && rows[0].block_number) {
+    lastBlock = Number(rows[0].block_number);
+    console.log(`Resuming from block ${lastBlock}`);
+  } else {
+    // Start from current block if no entries
+    lastBlock = await provider.getBlockNumber();
+    console.log(`No prior entries, starting from block ${lastBlock}`);
+  }
+}
+
+async function insertLaunch(event) {
+  const { token, reactor, charReactor, launcher, name, symbol, supply, seed } = event.args;
+  const block = event.blockNumber;
+  const txHash = event.transactionHash;
+
+  const row = {
+    token_address: token,
+    reactor_address: reactor,
+    char_reactor_address: charReactor,
+    launcher_address: launcher,
+    name,
+    symbol,
+    supply: supply.toString(),
+    seed: seed.toString(),
+    factory_address: FACTORY,
+    chain_id: 8453,
+    block_number: block,
+    tx_hash: txHash
+  };
+
+  console.log(`New launch: ${symbol} (${name}) at ${token}`);
+  console.log(`  Reactor: ${reactor}, CHAR Reactor: ${charReactor}`);
+  console.log(`  Seed: ${ethers.formatUnits(seed, 6)} USDC, Block: ${block}`);
+
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/launched_tokens`, {
+    method: "POST",
+    headers: {
+      apikey: SUPABASE_KEY,
+      Authorization: `Bearer ${SUPABASE_KEY}`,
+      "Content-Type": "application/json",
+      Prefer: "return=minimal"
+    },
+    body: JSON.stringify(row)
+  });
+
+  if (res.ok) {
+    console.log(`  Saved to Supabase`);
+  } else {
+    const err = await res.text();
+    console.error(`  Supabase error: ${res.status} ${err}`);
+  }
+}
+
+async function poll() {
+  try {
+    const currentBlock = await provider.getBlockNumber();
+    if (currentBlock <= lastBlock) return;
+
+    const events = await factory.queryFilter("TokenLaunched", lastBlock + 1, currentBlock);
+    for (const event of events) {
+      await insertLaunch(event);
+    }
+
+    lastBlock = currentBlock;
+  } catch (e) {
+    console.error("Poll error:", e.message);
+  }
+}
+
+async function main() {
+  if (!SUPABASE_URL || !SUPABASE_KEY) {
+    console.error("Set SUPABASE_URL and SUPABASE_KEY env vars");
+    process.exit(1);
+  }
+
+  console.log(`Launch tracker started — factory ${FACTORY}`);
+  await loadLastBlock();
+
+  // Poll immediately, then every POLL_MS
+  await poll();
+  setInterval(poll, POLL_MS);
+}
+
+main();

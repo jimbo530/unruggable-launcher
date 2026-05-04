@@ -5,8 +5,9 @@ module.exports = {
     version: "0.8.24",
     settings: {
       viaIR: true,
-      optimizer: { enabled: true, runs: 200 },
-      evmVersion: "paris"
+      optimizer: { enabled: true, runs: 1 },
+      evmVersion: "paris",
+      debug: { revertStrings: "strip" }
     }
   },
   paths: {

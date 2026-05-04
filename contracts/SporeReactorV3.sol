@@ -18,7 +18,7 @@ pragma solidity ^0.8.24;
 ///   - EIP-1167 clone pattern, reentrancy guard, two-step admin
 ///   - Hardcoded 10% fuel to upstream reactor (1000 BPS of X-token fees)
 ///   - Slippage protection via slot0-derived sqrtPriceLimitX96 (3% cap)
-///   - Pool cap (20), safe approve, dust recycling, disable/enable/remove pools
+///   - Pool cap (20), safe approve, dust recycling, disable/enable pools
 ///   - Positions locked forever — no withdraw function exists
 ///   - Anyone can call execute() after 2-hour cooldown
 
@@ -153,7 +153,7 @@ contract SporeReactorV3 {
     event PoolAdded(uint256 indexed tokenId, address xToken, address poolAddr, uint24 fee);
     event PoolDisabled(uint256 indexed poolIndex, uint256 tokenId);
     event PoolEnabled(uint256 indexed poolIndex, uint256 tokenId);
-    event PoolRemoved(uint256 indexed poolIndex, uint256 tokenId);
+
     event PoolSkipped(uint256 indexed poolIndex, uint256 tokenId);
     event FuelSent(address indexed xToken, uint256 amount);
     event FuelFailed(address indexed xToken, uint256 amount);    // V3: visible fuel failures
@@ -205,6 +205,7 @@ contract SporeReactorV3 {
         factory          = IUniswapV3Factory(_factory);
         upstreamReactor  = IUpstreamReactor(_upstreamReactor);
         admin            = msg.sender;
+        _locked          = 1;  // Required: clones don't run constructor initializers
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
@@ -224,7 +225,6 @@ contract SporeReactorV3 {
 
         address xToken = is0 ? token1 : token0;
         require(xToken != token, "xToken cannot be native token");
-        require(!hasXToken[xToken], "xToken already has a pool");
 
         address poolAddr = factory.getPool(token0, token1, fee);
         require(poolAddr != address(0), "pool not found");
@@ -255,20 +255,6 @@ contract SporeReactorV3 {
         require(pools[poolIndex].disabled, "already enabled");
         pools[poolIndex].disabled = false;
         emit PoolEnabled(poolIndex, pools[poolIndex].tokenId);
-    }
-
-    /// @notice Remove a dead pool. Frees the xToken slot for a replacement.
-    ///         Uses swap-and-pop — pool indices may shift after this call.
-    function removePool(uint256 poolIndex) external onlyAdmin {
-        require(poolIndex < pools.length, "invalid index");
-
-        Pool memory pool = pools[poolIndex];
-        hasXToken[pool.xToken] = false;
-
-        pools[poolIndex] = pools[pools.length - 1];
-        pools.pop();
-
-        emit PoolRemoved(poolIndex, pool.tokenId);
     }
 
     // ── Two-step admin transfer ─────────────────────────────────────────────
