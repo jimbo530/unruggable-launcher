@@ -236,7 +236,7 @@ const server = http.createServer(async (req, res) => {
         minSeedUSDC: (Number(minSeed) / 1e6).toFixed(2),
         upstreamReactor: upstream,
         recentLaunches: launches,
-        launchUrl: "https://tasern.quest/launcher/unruggable.html",
+        launchUrl: "https://tasern.quest/launcher/unrugable.html",
       });
     } catch (e) {
       return json(res, 500, { error: e.message });
@@ -286,7 +286,7 @@ const server = http.createServer(async (req, res) => {
     const addr = parts[1].toLowerCase();
     const metaPath = getMetaPath(addr);
     const baseUrl = "https://tasern.quest/api/unruggable";
-    const launcherUrl = "https://tasern.quest/launcher/unruggable.html";
+    const launcherUrl = "https://tasern.quest/launcher/unrugable.html";
     let title = "MfT Unruggable Launcher";
     let desc = "Launch an unruggable token. Liquidity locked forever.";
     let image = "https://tasern.quest/launcher/og-launcher.png";
@@ -326,7 +326,7 @@ const server = http.createServer(async (req, res) => {
       factory: FACTORIES[FACTORIES.length - 1],
       description: "Every token launched creates permanently locked liquidity paired against MfT, BB, and EB.",
       links: {
-        launcher: "https://tasern.quest/launcher/unruggable.html",
+        launcher: "https://tasern.quest/launcher/unrugable.html",
         reactorDashboard: "https://tasern.quest/launcher/reactor-dashboard.html",
         api: "https://tasern.quest/api/unruggable"
       }
