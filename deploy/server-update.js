@@ -112,6 +112,65 @@ async function saveToSupabase(addr, body) {
   }
 }
 
+// ── Reactor cards cache ────────���────────────────────────────────────────────
+// Reads xTokens from all launched reactor pools, caches result.
+// Pools are permanent — once discovered, never removed from cache.
+let reactorCardsCache = {}; // { reactorAddr: [xToken1, xToken2, ...] }
+const REACTOR_POOL_ABI = [
+  "function poolCount() view returns (uint256)",
+  "function pools(uint256) view returns (uint256 tokenId, address xToken, address poolAddress, uint24 fee, bool tokenIsToken0, bool disabled)",
+];
+const CARDS_CACHE_PATH = path.join(__dirname, "reactor-cards.json");
+
+// Load from disk on startup
+if (fs.existsSync(CARDS_CACHE_PATH)) {
+  try { reactorCardsCache = JSON.parse(fs.readFileSync(CARDS_CACHE_PATH, "utf8")); } catch {}
+}
+
+async function refreshReactorCards() {
+  try {
+    const provider = getProvider();
+    // Discover all reactors from all factories
+    const reactors = [];
+    for (const factoryAddr of FACTORIES) {
+      const factory = getFactory(factoryAddr);
+      let count;
+      try { count = Number(await factory.launchCount()); } catch { continue; }
+      for (let i = 0; i < count; i++) {
+        try {
+          const l = await factory.getLaunch(i);
+          reactors.push(l.reactor, l.charReactor);
+        } catch {}
+      }
+    }
+    // For each reactor, read pools and collect xTokens
+    for (const addr of reactors) {
+      const key = addr.toLowerCase();
+      const rx = new ethers.Contract(addr, REACTOR_POOL_ABI, provider);
+      let poolCount;
+      try { poolCount = Number(await rx.poolCount()); } catch { continue; }
+      const existing = new Set(reactorCardsCache[key] || []);
+      for (let i = 0; i < poolCount; i++) {
+        try {
+          const pool = await rx.pools(i);
+          const xt = pool.xToken.toLowerCase();
+          existing.add(xt);
+        } catch {}
+      }
+      reactorCardsCache[key] = [...existing];
+    }
+    // Save to disk
+    fs.writeFileSync(CARDS_CACHE_PATH, JSON.stringify(reactorCardsCache, null, 2));
+    console.log("Reactor cards cache updated:", Object.keys(reactorCardsCache).length, "reactors");
+  } catch (e) {
+    console.error("Reactor cards refresh error:", e.message);
+  }
+}
+
+// Refresh on startup (delayed 10s) then every 30 min
+setTimeout(refreshReactorCards, 10000);
+setInterval(refreshReactorCards, 30 * 60 * 1000);
+
 const server = http.createServer(async (req, res) => {
   cors(res);
   if (req.method === "OPTIONS") { res.writeHead(204); res.end(); return; }
@@ -254,6 +313,11 @@ const server = http.createServer(async (req, res) => {
     } catch (e) {
       return json(res, 500, { error: e.message });
     }
+  }
+
+  // GET /reactor-cards — cached xToken badges per reactor
+  if (req.method === "GET" && parts[0] === "reactor-cards") {
+    return json(res, 200, reactorCardsCache);
   }
 
   // GET /leaderboard
