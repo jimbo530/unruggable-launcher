@@ -11,35 +11,92 @@ const PORT = 3456;
 const DATA_DIR = path.join(__dirname, "data");
 const IMG_DIR = path.join(DATA_DIR, "images");
 const BASE_RPC = "https://mainnet.base.org";
+const BASE_URL = "https://tasern.quest/api/unruggable";
+const LAUNCHER_URL = "https://tasern.quest/launcher/unrugable.html";
+
+const SUPABASE_URL = process.env.SUPABASE_URL || "https://hhniimufxjjgmessjtbc.supabase.co";
+const SUPABASE_KEY = process.env.SUPABASE_KEY || "";
+const API_SECRET = process.env.MYCOPAD_API_SECRET || "";
 
 // Ensure dirs exist
 fs.mkdirSync(IMG_DIR, { recursive: true });
 
-// ── Factory read context (lazy init) ─────────────────────────────────────────
-const FACTORY_ADDRESS = "0x51eF41E0730c0e607950421e1EE113b089867d3e";
-const FACTORY_ABI = [
+// ── Rate limiter (per IP, 5 POSTs per minute) ───────────────────────────────
+const postRateMap = new Map();
+function checkRateLimit(ip) {
+  const now = Date.now();
+  const window = 60000;
+  const max = 5;
+  const entries = (postRateMap.get(ip) || []).filter(t => now - t < window);
+  if (entries.length >= max) return false;
+  entries.push(now);
+  postRateMap.set(ip, entries);
+  return true;
+}
+// Clean rate map every 5 minutes
+setInterval(() => {
+  const now = Date.now();
+  for (const [ip, times] of postRateMap) {
+    const valid = times.filter(t => now - t < 60000);
+    if (valid.length === 0) postRateMap.delete(ip);
+    else postRateMap.set(ip, valid);
+  }
+}, 300000);
+
+// ── Factory configs ──────────────────────────────────────────────────────────
+// Old factories use getLaunch(), new V4.3/V5.2 use launches()
+const OLD_FACTORIES = [
+  "0x655e0Ca995D10912574a92a3a67AE9D466424925",
+  "0xb74fe5fA2D030706B4A0C901fDC42C5244695A6e",
+  "0x2e0b20a4FFEaCAcB8D3CD0cF6b9bBE6660c4262e",
+];
+const NEW_FACTORIES = [
+  "0x51eF41E0730c0e607950421e1EE113b089867d3e",  // V4.3
+  "0xF0c1B3d6Bc0B4dEd2DDF81374feEA8a2c536bD51",  // V5.2
+];
+const OLD_FACTORY_ABI = [
   "function launchCount() view returns (uint256)",
-  "function getLaunch(uint256 index) view returns (address token, address reactor, address launcher, uint256 supply, uint256 seed, uint256 timestamp)",
+  "function getLaunch(uint256 index) view returns (address token, address reactor, address charReactor, address launcher, uint256 supply, uint256 seed, uint256 timestamp)",
   "function isReactor(address) view returns (bool)",
   "function reactorOf(address) view returns (address)",
   "function minSeed() view returns (uint256)",
   "function upstreamReactor() view returns (address)",
 ];
-let _provider, _factory;
-function getFactory() {
-  if (!_factory) {
-    _provider = new ethers.JsonRpcProvider(BASE_RPC);
-    _factory = new ethers.Contract(FACTORY_ADDRESS, FACTORY_ABI, _provider);
-  }
-  return _factory;
+const NEW_FACTORY_ABI = [
+  "function launchCount() view returns (uint256)",
+  "function launches(uint256) view returns (address token, address reactor, address charReactor, address launcher, uint256 supply, uint256 seed, uint256 timestamp)",
+  "function isReactor(address) view returns (bool)",
+  "function minSeed() view returns (uint256)",
+  "function upstreamReactor() view returns (address)",
+];
+const ERC20_ABI = [
+  "function name() view returns (string)",
+  "function symbol() view returns (string)",
+  "function totalSupply() view returns (uint256)",
+  "function decimals() view returns (uint8)",
+];
+
+let _provider;
+function getProvider() {
+  if (!_provider) _provider = new ethers.JsonRpcProvider(BASE_RPC);
+  return _provider;
+}
+function getFactory(addr) {
+  const isNew = NEW_FACTORIES.some(f => f.toLowerCase() === addr.toLowerCase());
+  return new ethers.Contract(addr, isNew ? NEW_FACTORY_ABI : OLD_FACTORY_ABI, getProvider());
 }
 
 function getMetaPath(addr) {
   return path.join(DATA_DIR, addr.toLowerCase() + ".json");
 }
-
 function getImgPath(addr, ext) {
   return path.join(IMG_DIR, addr.toLowerCase() + "." + ext);
+}
+function hasImage(addr) {
+  for (const ext of ["png", "jpg", "jpeg", "gif", "webp"]) {
+    if (fs.existsSync(getImgPath(addr.toLowerCase(), ext))) return true;
+  }
+  return false;
 }
 
 function cors(res) {
@@ -47,13 +104,11 @@ function cors(res) {
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
 }
-
 function json(res, code, data) {
   cors(res);
   res.writeHead(code, { "Content-Type": "application/json" });
   res.end(JSON.stringify(data));
 }
-
 function parseBody(req) {
   return new Promise((resolve, reject) => {
     const chunks = [];
@@ -68,29 +123,201 @@ function parseBody(req) {
   });
 }
 
+// ── EIP-7572 compliant metadata ─────────────────────────────────────────────
+// Wraps stored or generated metadata into EIP-7572 contractURI format
+function toEIP7572(meta) {
+  const addr = (meta.address || "").toLowerCase();
+  const imgPath = hasImage(addr)
+    ? BASE_URL + "/image/" + addr
+    : null;
+  return {
+    name: meta.name || "Unknown Token",
+    symbol: meta.symbol || "???",
+    description: meta.description || (meta.name || meta.symbol || "Token") + " — launched on MfT Unruggable Launcher. Liquidity locked forever.",
+    image: imgPath || meta.image || null,
+    external_link: LAUNCHER_URL,
+    decimals: 18,
+    // Extra fields (not EIP-7572, but useful for galleries/agents)
+    address: addr,
+    supply: meta.supply || null,
+    seed: meta.seed || null,
+    reactor: meta.reactor || null,
+    charReactor: meta.charReactor || null,
+    grower: meta.grower || null,
+    created: meta.created || null,
+  };
+}
+
+// ── Verify token exists in a known factory ──────────────────────────────────
+async function isFactoryToken(addr) {
+  const provider = getProvider();
+  const allFactories = [...OLD_FACTORIES, ...NEW_FACTORIES];
+  for (const factoryAddr of allFactories) {
+    try {
+      const factory = getFactory(factoryAddr);
+      const count = Number(await factory.launchCount());
+      const isNew = NEW_FACTORIES.some(f => f.toLowerCase() === factoryAddr.toLowerCase());
+      for (let i = 0; i < count; i++) {
+        try {
+          const l = isNew ? await factory.launches(i) : await factory.getLaunch(i);
+          const token = (l.token || l[0]).toLowerCase();
+          if (token === addr.toLowerCase()) return true;
+        } catch (e) {
+          console.error("Factory scan error at index", i, e.message);
+        }
+      }
+    } catch (e) {
+      console.error("Factory check error for", factoryAddr, e.message);
+    }
+  }
+  return false;
+}
+
+// ── Chain fallback: fetch name/symbol/supply from ERC20 ─────────────────────
+async function fetchFromChain(addr) {
+  try {
+    const token = new ethers.Contract(addr, ERC20_ABI, getProvider());
+    const [name, symbol, supply] = await Promise.all([
+      token.name(), token.symbol(), token.totalSupply(),
+    ]);
+    return {
+      address: addr.toLowerCase(),
+      name,
+      symbol,
+      supply: ethers.formatUnits(supply, 18),
+    };
+  } catch (e) {
+    console.error("Chain fetch failed for", addr, e.message);
+    return null;
+  }
+}
+
+async function saveToSupabase(addr, body) {
+  try {
+    const supplyStr = body.supply
+      ? String(BigInt(body.supply) * BigInt("1000000000000000000"))
+      : null;
+    const seedStr = body.seed
+      ? String(BigInt(Math.round(parseFloat(body.seed) * 1e6)))
+      : null;
+    const row = {
+      token_address: addr.startsWith("0x") ? addr : "0x" + addr,
+      name: body.name,
+      symbol: body.symbol,
+      supply: supplyStr,
+      seed: seedStr,
+      launcher_address: body.grower || null,
+      factory_address: body.factoryAddress || NEW_FACTORIES[NEW_FACTORIES.length - 1],
+      reactor_address: body.reactor || null,
+      char_reactor_address: body.charReactor || null,
+      tx_hash: body.txHash || null,
+      launched_at: new Date().toISOString()
+    };
+    const res = await fetch(SUPABASE_URL + "/rest/v1/launched_tokens", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        apikey: SUPABASE_KEY,
+        Authorization: "Bearer " + SUPABASE_KEY,
+        Prefer: "return=minimal"
+      },
+      body: JSON.stringify(row)
+    });
+    console.log("Supabase save:", res.status, addr);
+  } catch (e) {
+    console.error("Supabase save error:", e.message);
+  }
+}
+
+// ── Reactor cards cache ─────────────────────────────────────────────────────
+let reactorCardsCache = {};
+const REACTOR_POOL_ABI = [
+  "function poolCount() view returns (uint256)",
+  "function pools(uint256) view returns (uint256 tokenId, address xToken, address poolAddress, uint24 fee, bool tokenIsToken0, bool disabled)",
+];
+const CARDS_CACHE_PATH = path.join(__dirname, "reactor-cards.json");
+
+if (fs.existsSync(CARDS_CACHE_PATH)) {
+  try { reactorCardsCache = JSON.parse(fs.readFileSync(CARDS_CACHE_PATH, "utf8")); } catch (e) { console.error("Failed to load reactor cards cache:", e.message); }
+}
+
+async function refreshReactorCards() {
+  try {
+    const provider = getProvider();
+    const reactors = [];
+    const allFactories = [...OLD_FACTORIES, ...NEW_FACTORIES];
+    for (const factoryAddr of allFactories) {
+      const factory = getFactory(factoryAddr);
+      let count;
+      try { count = Number(await factory.launchCount()); } catch (e) { console.error("launchCount failed for", factoryAddr, e.message); continue; }
+      const isNew = NEW_FACTORIES.some(f => f.toLowerCase() === factoryAddr.toLowerCase());
+      for (let i = 0; i < count; i++) {
+        try {
+          const l = isNew ? await factory.launches(i) : await factory.getLaunch(i);
+          reactors.push(l.reactor || l[1], l.charReactor || l[2]);
+        } catch (e) { console.error("getLaunch failed at", i, e.message); }
+      }
+    }
+    for (const addr of reactors) {
+      if (!addr || addr === ethers.ZeroAddress) continue;
+      const key = addr.toLowerCase();
+      const rx = new ethers.Contract(addr, REACTOR_POOL_ABI, provider);
+      let poolCount;
+      try { poolCount = Number(await rx.poolCount()); } catch (e) { console.error("poolCount failed for", addr, e.message); continue; }
+      const existing = new Set(reactorCardsCache[key] || []);
+      for (let i = 0; i < poolCount; i++) {
+        try {
+          const pool = await rx.pools(i);
+          existing.add((pool.xToken || pool[1]).toLowerCase());
+        } catch (e) { console.error("pool read failed at", i, "for", addr, e.message); }
+      }
+      reactorCardsCache[key] = [...existing];
+    }
+    fs.writeFileSync(CARDS_CACHE_PATH, JSON.stringify(reactorCardsCache, null, 2));
+    console.log("Reactor cards cache updated:", Object.keys(reactorCardsCache).length, "reactors");
+  } catch (e) {
+    console.error("Reactor cards refresh error:", e.message);
+  }
+}
+
+setTimeout(refreshReactorCards, 10000);
+setInterval(refreshReactorCards, 30 * 60 * 1000);
+
+// ── HTTP Server ─────────────────────────────────────────────────────────────
 const server = http.createServer(async (req, res) => {
   cors(res);
   if (req.method === "OPTIONS") { res.writeHead(204); res.end(); return; }
 
-  const url = new URL(req.url, `http://localhost:${PORT}`);
+  const url = new URL(req.url, "http://localhost:" + PORT);
   const parts = url.pathname.split("/").filter(Boolean);
 
-  // GET /metadata/:address — return metadata JSON
+  // GET /metadata/:address — EIP-7572 compliant contractURI response
   if (req.method === "GET" && parts[0] === "metadata" && parts[1]) {
     const addr = parts[1].toLowerCase();
     const metaPath = getMetaPath(addr);
-    if (!fs.existsSync(metaPath)) return json(res, 404, { error: "not found" });
-    const meta = JSON.parse(fs.readFileSync(metaPath, "utf8"));
-    return json(res, 200, meta);
+
+    // Try stored metadata first
+    if (fs.existsSync(metaPath)) {
+      const meta = JSON.parse(fs.readFileSync(metaPath, "utf8"));
+      return json(res, 200, toEIP7572(meta));
+    }
+
+    // Fallback: fetch from chain
+    const chainMeta = await fetchFromChain(addr);
+    if (chainMeta) {
+      return json(res, 200, toEIP7572(chainMeta));
+    }
+
+    return json(res, 404, { error: "not found" });
   }
 
-  // GET /image/:address — return the image file
+  // GET /image/:address
   if (req.method === "GET" && parts[0] === "image" && parts[1]) {
     const addr = parts[1].toLowerCase();
-    for (const ext of ["png", "jpg", "jpeg", "gif", "webp", "svg"]) {
+    for (const ext of ["png", "jpg", "jpeg", "gif", "webp"]) {
       const imgPath = getImgPath(addr, ext);
       if (fs.existsSync(imgPath)) {
-        const mimeMap = { png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif", webp: "image/webp", svg: "image/svg+xml" };
+        const mimeMap = { png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif", webp: "image/webp" };
         cors(res);
         res.writeHead(200, { "Content-Type": mimeMap[ext], "Cache-Control": "public, max-age=86400" });
         fs.createReadStream(imgPath).pipe(res);
@@ -100,48 +327,78 @@ const server = http.createServer(async (req, res) => {
     return json(res, 404, { error: "no image" });
   }
 
-  // POST /metadata/:address — store metadata + image
-  // Body: JSON with { name, symbol, supply, seed, reactor, grower, image (base64 data URL) }
+  // POST /metadata/:address — store metadata + image + save to Supabase
+  // SECURITY: rate-limited, no-overwrite, factory-verified or API-key authenticated
   if (req.method === "POST" && parts[0] === "metadata" && parts[1]) {
     try {
+      const clientIP = req.headers["x-real-ip"] || req.headers["x-forwarded-for"] || req.socket.remoteAddress;
+      if (!checkRateLimit(clientIP)) {
+        return json(res, 429, { error: "rate limit exceeded — max 5 POSTs per minute" });
+      }
+
       const addr = parts[1].toLowerCase();
       if (!/^0x[0-9a-f]{40}$/.test(addr)) return json(res, 400, { error: "invalid address" });
+
+      // No-overwrite: existing metadata cannot be replaced
+      const metaPath = getMetaPath(addr);
+      if (fs.existsSync(metaPath)) {
+        return json(res, 409, { error: "metadata already exists for this token — cannot overwrite" });
+      }
+
+      // Auth: require API secret OR verify token exists in a known factory
+      const authHeader = req.headers["authorization"] || "";
+      const hasApiKey = API_SECRET && authHeader === "Bearer " + API_SECRET;
+
+      if (!hasApiKey) {
+        const isValid = await isFactoryToken(addr);
+        if (!isValid) {
+          console.log("POST rejected: " + addr + " not found in any factory (IP: " + clientIP + ")");
+          return json(res, 403, { error: "token not found in any known factory — unauthorized" });
+        }
+      }
 
       const body = JSON.parse((await parseBody(req)).toString("utf8"));
       const { name, symbol, supply, seed, reactor, grower, image } = body;
 
       if (!name || !symbol) return json(res, 400, { error: "name and symbol required" });
 
-      // Save image if provided (base64 data URL)
+      // Save image if provided (base64 data URL) — reject SVG (XSS risk)
       let imageUrl = null;
       if (image && image.startsWith("data:image/")) {
-        const match = image.match(/^data:image\/(png|jpeg|jpg|gif|webp|svg\+xml);base64,(.+)$/);
+        const match = image.match(/^data:image\/(png|jpeg|jpg|gif|webp);base64,(.+)$/);
         if (match) {
-          const ext = match[1].replace("+xml", "");
+          const ext = match[1];
           const buf = Buffer.from(match[2], "base64");
           if (buf.length > 2 * 1024 * 1024) return json(res, 400, { error: "image too large (2MB max)" });
           fs.writeFileSync(getImgPath(addr, ext), buf);
-          imageUrl = `/image/${addr}`;
+          imageUrl = "/image/" + addr;
         }
       }
 
-      // Save metadata
       const meta = {
         address: addr,
         name,
         symbol,
+        description: body.description || null,
         supply: supply || null,
         seed: seed || null,
+        seedUnit: body.seedUnit || "USDC",
         reactor: reactor || null,
+        charReactor: body.charReactor || null,
         grower: grower || null,
         image: imageUrl,
         created: new Date().toISOString()
       };
       fs.writeFileSync(getMetaPath(addr), JSON.stringify(meta, null, 2));
 
-      return json(res, 200, { ok: true, metadata: meta });
+      if (reactor) {
+        saveToSupabase(addr, body);
+      }
+
+      return json(res, 200, { ok: true, metadata: toEIP7572(meta) });
     } catch (e) {
-      return json(res, 500, { error: e.message });
+      console.error("POST /metadata error:", e.message);
+      return json(res, 500, { error: "internal error" });
     }
   }
 
@@ -149,18 +406,23 @@ const server = http.createServer(async (req, res) => {
   if (req.method === "GET" && parts[0] === "all") {
     try {
       const files = fs.readdirSync(DATA_DIR).filter(f => f.endsWith(".json"));
-      const tokens = files.map(f => JSON.parse(fs.readFileSync(path.join(DATA_DIR, f), "utf8")));
+      const tokens = files.map(f => {
+        const meta = JSON.parse(fs.readFileSync(path.join(DATA_DIR, f), "utf8"));
+        return toEIP7572(meta);
+      });
       tokens.sort((a, b) => new Date(b.created) - new Date(a.created));
       return json(res, 200, tokens);
     } catch (e) {
-      return json(res, 500, { error: e.message });
+      console.error("GET /all error:", e.message);
+      return json(res, 500, { error: "internal error" });
     }
   }
 
   // GET /factory — factory info + recent launches (for agents)
   if (req.method === "GET" && parts[0] === "factory") {
     try {
-      const factory = getFactory();
+      const latestFactory = NEW_FACTORIES[NEW_FACTORIES.length - 1];
+      const factory = getFactory(latestFactory);
       const [launchCount, minSeed, upstream] = await Promise.all([
         factory.launchCount(),
         factory.minSeed(),
@@ -170,57 +432,63 @@ const server = http.createServer(async (req, res) => {
       const count = Math.min(total, 10);
       const launches = [];
       for (let i = total - 1; i >= total - count; i--) {
-        const [token, reactor, launcher, supply, seed, timestamp] = await factory.getLaunch(i);
+        const l = await factory.launches(i);
         launches.push({
-          token, reactor, launcher,
-          supply: ethers.formatUnits(supply, 18),
-          seedETH: ethers.formatEther(seed),
-          date: new Date(Number(timestamp) * 1000).toISOString(),
+          token: l.token, reactor: l.reactor, charReactor: l.charReactor, launcher: l.launcher,
+          supply: ethers.formatUnits(l.supply, 18),
+          seedUSDC: (Number(l.seed) / 1e6).toFixed(2),
+          date: new Date(Number(l.timestamp) * 1000).toISOString(),
         });
       }
       return json(res, 200, {
-        factory: FACTORY_ADDRESS,
+        factory: latestFactory,
         chain: "Base (8453)",
         launchCount: total,
-        minSeedETH: ethers.formatEther(minSeed),
+        minSeedUSDC: (Number(minSeed) / 1e6).toFixed(2),
         upstreamReactor: upstream,
         recentLaunches: launches,
-        launchUrl: "https://mycopad.memefortrees.com",
-        sdkUrl: "npm install / import from agent-sdk/launch.js",
+        launchUrl: LAUNCHER_URL,
       });
     } catch (e) {
-      return json(res, 500, { error: e.message });
+      console.error("GET /factory error:", e.message);
+      return json(res, 500, { error: "internal error" });
     }
   }
 
-  // GET /reactor/:address — check if address is a registered reactor
+  // GET /reactor/:address
   if (req.method === "GET" && parts[0] === "reactor" && parts[1]) {
     try {
       const addr = parts[1].toLowerCase();
       if (!/^0x[0-9a-f]{40}$/.test(addr)) return json(res, 400, { error: "invalid address" });
-      const factory = getFactory();
+      const factory = getFactory(NEW_FACTORIES[NEW_FACTORIES.length - 1]);
       const isReactor = await factory.isReactor(addr);
       return json(res, 200, { address: addr, isReactor });
     } catch (e) {
-      return json(res, 500, { error: e.message });
+      console.error("GET /reactor error:", e.message);
+      return json(res, 500, { error: "internal error" });
     }
   }
 
-  // GET /leaderboard — latest burn leaderboard snapshot
+  // GET /reactor-cards
+  if (req.method === "GET" && parts[0] === "reactor-cards") {
+    return json(res, 200, reactorCardsCache);
+  }
+
+  // GET /leaderboard
   if (req.method === "GET" && parts[0] === "leaderboard") {
-    // Local file (burn-leaderboard.js saves here)
     const snapPath = path.join(__dirname, "burn-snapshot.json");
     if (fs.existsSync(snapPath)) {
       try {
         return json(res, 200, JSON.parse(fs.readFileSync(snapPath, "utf8")));
       } catch (e) {
-        return json(res, 500, { error: e.message });
+        console.error("GET /leaderboard error:", e.message);
+        return json(res, 500, { error: "internal error" });
       }
     }
-    return json(res, 404, { error: "no leaderboard data yet — run burn-leaderboard.js first" });
+    return json(res, 404, { error: "no leaderboard data yet" });
   }
 
-  // GET /openapi.json — OpenAPI spec for agent discovery
+  // GET /openapi.json
   if (req.method === "GET" && (parts[0] === "openapi.json" || (parts[0] === "openapi" && parts[1] === "json"))) {
     const specPath = path.join(__dirname, "openapi.json");
     if (fs.existsSync(specPath)) {
@@ -232,22 +500,21 @@ const server = http.createServer(async (req, res) => {
     return json(res, 404, { error: "openapi.json not found" });
   }
 
-  // GET /share/:tokenAddress — dynamic OG tags for X/Twitter share cards
+  // GET /share/:tokenAddress — dynamic OG tags
   if (req.method === "GET" && parts[0] === "share" && parts[1]) {
     const addr = parts[1].toLowerCase();
+    if (!/^0x[0-9a-f]{40}$/.test(addr)) return json(res, 400, { error: "invalid address" });
     const metaPath = getMetaPath(addr);
-    const baseUrl = "https://tasern.quest/api/unruggable";
-    const launcherUrl = "https://tasern.quest/launcher/unruggable.html";
     let title = "MfT Unruggable Launcher";
     let desc = "Launch an unruggable token. Liquidity locked forever.";
     let image = "https://tasern.quest/launcher/og-launcher.png";
-    let redirect = launcherUrl;
+    let redirect = LAUNCHER_URL;
     if (fs.existsSync(metaPath)) {
       const meta = JSON.parse(fs.readFileSync(metaPath, "utf8"));
       title = (meta.name || meta.symbol || "Token") + " on MfT Unruggable Launcher";
       desc = (meta.description || meta.symbol + " launched on MfT.") + " Liquidity locked forever. Join the network!";
-      if (meta.image) image = baseUrl + meta.image;
-      if (meta.reactor) redirect = launcherUrl + "?ref=" + meta.reactor;
+      if (meta.image) image = BASE_URL + meta.image;
+      if (meta.reactor) redirect = LAUNCHER_URL + "?ref=" + meta.reactor;
     }
     const esc = s => s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");
     const html = [
@@ -269,72 +536,17 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // GET /tokenomics — infrastructure token overview for agents
+  // GET /tokenomics
   if (req.method === "GET" && parts[0] === "tokenomics") {
     return json(res, 200, {
       network: "Unruggable Launcher",
       chain: "Base (8453)",
-      factory: FACTORY_ADDRESS,
-      description: "Every token launched creates permanently locked liquidity paired against MfT, BB, and EB. More launches = more volume = higher floors for all infrastructure tokens.",
-      infrastructureTokens: {
-        MfT: {
-          role: "Network heartbeat — every launched token has 3 sell walls paired against MfT at 1.1x, 2x, 5x launch price",
-          token: "0x8FB87d13B40B1A67B22ED1a17e2835fe7e3a9bA3",
-          mechanism: "Reactor Prime collects all upstream fees and pumps MfT. More launches = longer call line = bigger aggregate push.",
-          garden: "https://app.gardens.fund/gardens/8453/0x630dcb0eae7231c7afc8a6414c8c6732b25f8b84/0x944c64f899f48dc5b84b5eab3cba93af32ad729a",
-          gardenInfo: "Stake MfT to vote on which pools get deeper liquidity. Withdraw any time."
-        },
-        BB: {
-          role: "Floor token — 30% of every launch seed creates TOKEN/BB floor pool",
-          token: "0xf967bf3dccF8b6826F82de1781C98E61Bda3b106",
-          mechanism: "BTC-correlated floor. As BTC rises, BB floors appreciate in dollar terms."
-        },
-        EB: {
-          role: "Floor token — 30% of every launch seed creates TOKEN/EB floor pool",
-          token: "0x17a176Ab2379b86F1E65D79b03bD8c75981244D8",
-          mechanism: "ETH-correlated floor. As ETH rises, EB floors appreciate in dollar terms."
-        },
-        AZUSD: {
-          role: "Green stablecoin floor — 40% of every launch seed creates TOKEN/AZUSD floor pool",
-          token: "0x3595ca37596D5895B70EFAB592ac315D5B9809B2",
-          mechanism: "Dollar-pegged green stablecoin. AZUSD is an environmentally positive asset — every floor pool supports the environment just by existing. Combined with CHAR carbon retirement, launches are net-positive for the planet."
-        },
-        CHAR: {
-          role: "Carbon retirement — 6% of launch seed funds CHAR reactor pools",
-          token: "0x20b048fA035D5763685D695e66aDF62c5D9F5055",
-          mechanism: "Every trade burns CHAR, permanently retiring carbon credits. CHAR reactor feeds upstream into Unruggable network."
-        }
-      },
-      reactorChain: {
-        description: "Bottom-up fire order. Each reactor sells MfT as it compounds, temporarily pushing price down. Reactor Prime fires last with accumulated fees from entire network — the pump.",
-        order: [
-          "Token CHAR Reactors (bottom)",
-          "Token Primary Reactors",
-          "Feeder Reactors",
-          "Band Reactors (BB/EB)",
-          "Unruggable Hub",
-          "Main Chain (TGN → AZUSD → BURGERS → CHAR → EGP)",
-          "MfT V1 Reactor Prime (top — all fees funnel here)"
-        ],
-        upstreamFee: "5% of collected fees at each level",
-        flywheel: "Arb bots equalize MfT price across pools after each reactor fires, generating more fees, feeding more reactors. Self-sustaining."
-      },
-      agentOpportunity: {
-        thesis: "BB, EB, and MfT are index funds for the Unruggable network. Every new launch deepens their liquidity and generates volume through their pools.",
-        actions: [
-          "Accumulate MfT/BB/EB as infrastructure plays",
-          "Stake MfT in Garden to vote for pools that benefit your holdings",
-          "Launch tokens to generate network activity",
-          "Call execute() on reactors to trigger burn+compound cycles (permissionless, every 2hrs)",
-          "Arb MfT price discrepancies across pools after reactor fires"
-        ]
-      },
+      factory: NEW_FACTORIES[NEW_FACTORIES.length - 1],
+      description: "Every token launched creates permanently locked liquidity paired against MfT, BB, and EB.",
       links: {
-        launcher: "https://tasern.quest/launcher/unruggable.html",
-        networkMap: "https://tasern.quest/launcher/reactor-map.html",
-        garden: "https://app.gardens.fund/gardens/8453/0x630dcb0eae7231c7afc8a6414c8c6732b25f8b84/0x944c64f899f48dc5b84b5eab3cba93af32ad729a",
-        api: "https://tasern.quest/api/unruggable",
-        basescan: "https://basescan.org/address/" + FACTORY_ADDRESS
+        launcher: LAUNCHER_URL,
+        reactorDashboard: "https://tasern.quest/launcher/reactor-dashboard.html",
+        api: BASE_URL
       }
     });
   }
@@ -343,11 +555,5 @@ const server = http.createServer(async (req, res) => {
 });
 
 server.listen(PORT, () => {
-  console.log(`MycoPad metadata API running on http://localhost:${PORT}`);
-  console.log(`  POST /metadata/:address  — store token metadata + image`);
-  console.log(`  GET  /metadata/:address  — get token metadata`);
-  console.log(`  GET  /image/:address     — get token image`);
-  console.log(`  GET  /all                — list all tokens`);
-  console.log(`  GET  /factory            — factory info + recent launches (agents)`);
-  console.log(`  GET  /reactor/:address   — check if address is a reactor`);
+  console.log("MycoPad metadata API running on http://localhost:" + PORT);
 });

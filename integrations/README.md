@@ -67,10 +67,10 @@ Base URL: `https://tasern.quest/api/unruggable`
 
 | Contract | Address |
 |----------|---------|
-| Factory (V4.3) | `0x51eF41E0730c0e607950421e1EE113b089867d3e` |
+| Factory (V4.3) | `0x655e0Ca995D10912574a92a3a67AE9D466424925` |
 | Reactor Prime | `0xed3aE91b2bb22307c07438EEebA2500C18EABcFE` |
 | MycoPad Hub Reactor | `0xF5B9Fc40080aAcC262f078eCE374A2268dcdb045` |
-| SporeReactorV3 impl | `0x6E46Db4B596F4f1dc0d4b6A22B7F924FACd62709` |
+| SporeReactorV4 impl | `0xb9630280dc93c503aee06d1eca8e125fc19ab3c5` |
 
 All contracts verified on BaseScan.
 
@@ -86,4 +86,4 @@ All contracts verified on BaseScan.
 
 - Launcher: https://tasern.quest/launcher/unruggable.html
 - Network Map: https://tasern.quest/launcher/reactor-map.html
-- BaseScan: https://basescan.org/address/0x51eF41E0730c0e607950421e1EE113b089867d3e
+- BaseScan: https://basescan.org/address/0x655e0Ca995D10912574a92a3a67AE9D466424925

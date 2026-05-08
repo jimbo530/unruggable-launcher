@@ -1,7 +1,7 @@
 /**
  * Extended Reactor Roll Call — auto-discovers MycoPad launches + fires ALL reactors bottom-up
  *
- * 1. Scans V4.2 factory for TokenLaunched events → gets all launched token reactors + CHAR reactors
+ * 1. Scans ALL MycoPad factories for TokenLaunched events → gets all launched token reactors + CHAR reactors
  * 2. Fires launched CHAR reactors first (bottom), then launched primary reactors, then existing network
  * 3. Order: launched CHAR reactors → launched primary reactors → existing feeders → bands → MycoPad → main chain → Prime
  *
@@ -18,9 +18,11 @@ const { ethers } = require('ethers');
 const RPC = 'https://mainnet.base.org';
 const PK = process.env.AGENT_PRIVATE_KEY || process.env.KEEPER_PRIVATE_KEY;
 
-// V4.2 factory — scanned for auto-discovery
-const FACTORY = '0x51eF41E0730c0e607950421e1EE113b089867d3e';
-const FACTORY_DEPLOY_BLOCK = 45523770; // V4.3 factory deployed 2026-05-03, block 45523780
+// All MycoPad factories — scanned for auto-discovery (oldest first)
+const FACTORIES = [
+  { addr: '0x51eF41E0730c0e607950421e1EE113b089867d3e', deployBlock: 45523770, label: 'V4.3' },
+  { addr: '0xF0c1B3d6Bc0B4dEd2DDF81374feEA8a2c536bD51', deployBlock: 45639600, label: 'V5.2' },
+];
 
 const FACTORY_ABI = [
   'event TokenLaunched(address indexed token, address indexed reactor, address indexed charReactor, address launcher, string name, string symbol, uint256 supply, uint256 seed)'
@@ -84,41 +86,43 @@ function ts() { return new Date().toISOString().slice(11, 19); }
 function short(addr) { return addr.slice(0, 6) + '...' + addr.slice(-4); }
 
 /**
- * Scan factory for all TokenLaunched events → return launched reactors
+ * Scan all factories for TokenLaunched events → return launched reactors
  * Chunks queries to stay under Base RPC's 10,000 block limit
  */
 async function discoverLaunches(provider) {
-  const factory = new ethers.Contract(FACTORY, FACTORY_ABI, provider);
   const currentBlock = await provider.getBlockNumber();
   const CHUNK = 9999;
-
-  console.log('[' + ts() + '] Scanning factory ' + short(FACTORY) + ' blocks ' + FACTORY_DEPLOY_BLOCK + '→' + currentBlock + '...');
-
-  const events = [];
-  for (let from = FACTORY_DEPLOY_BLOCK; from <= currentBlock; from += CHUNK + 1) {
-    const to = Math.min(from + CHUNK, currentBlock);
-    const chunk = await factory.queryFilter('TokenLaunched', from, to);
-    events.push(...chunk);
-  }
   const launches = [];
 
-  for (const ev of events) {
-    const { token, reactor, charReactor, name, symbol } = ev.args;
-    // Skip bricked reactors
-    if (BRICKED.has(reactor)) continue;
+  for (const f of FACTORIES) {
+    const factory = new ethers.Contract(f.addr, FACTORY_ABI, provider);
+    console.log('[' + ts() + '] Scanning ' + f.label + ' factory ' + short(f.addr) + ' blocks ' + f.deployBlock + '→' + currentBlock + '...');
 
-    launches.push({
-      name: symbol,
-      token: token,
-      reactor: reactor,
-      charReactor: charReactor,
-      block: ev.blockNumber
-    });
+    const events = [];
+    for (let from = f.deployBlock; from <= currentBlock; from += CHUNK + 1) {
+      const to = Math.min(from + CHUNK, currentBlock);
+      const chunk = await factory.queryFilter('TokenLaunched', from, to);
+      events.push(...chunk);
+    }
+
+    for (const ev of events) {
+      const { token, reactor, charReactor, symbol } = ev.args;
+      if (BRICKED.has(reactor)) continue;
+
+      launches.push({
+        name: symbol,
+        token: token,
+        reactor: reactor,
+        charReactor: charReactor,
+        block: ev.blockNumber,
+        factory: f.label
+      });
+    }
   }
 
   console.log('[' + ts() + '] Found ' + launches.length + ' launched token(s)');
   for (const l of launches) {
-    console.log('  ' + l.name.padEnd(10) + ' token=' + short(l.token) + ' reactor=' + short(l.reactor) + ' char=' + short(l.charReactor));
+    console.log('  ' + l.name.padEnd(10) + ' [' + l.factory + '] token=' + short(l.token) + ' reactor=' + short(l.reactor) + ' char=' + short(l.charReactor));
   }
 
   return launches;

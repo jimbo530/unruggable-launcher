@@ -2,6 +2,7 @@
 export const CHAINS = {
   8453: {
     name: "Base",
+    rpc:          "https://base-mainnet.g.alchemy.com/v2/bwii0dH70pKYTKnqj3aNU",
     weth:         "0x4200000000000000000000000000000000000006",
     usdc:         "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
     azusd:        "0x3595ca37596D5895B70EFAB592ac315D5B9809B2",
@@ -16,11 +17,12 @@ export const CHAINS = {
     aeroRouter:   "0xBE6D8f0d05cC4be24d5167a3eF062215bE6D18a5",
     wethUsdcFee:  500,
     aeroTickSpacing: 50,
-    wethBtcFee:   500,
     mftPriceFee:  10000,
+    charUsdcFee:  3000,
+    usdcBtcFee:   500,
     explorer:     "https://basescan.org",
     reactorImpl:  "0x82eC86F4536167A95eF302056162b1c8b9c7F4FA",
-    factory:      "0x2e0b20a4FFEaCAcB8D3CD0cF6b9bBE6660c4262e"
+    factory:      "0xF0c1B3d6Bc0B4dEd2DDF81374feEA8a2c536bD51"
   }
 };
 

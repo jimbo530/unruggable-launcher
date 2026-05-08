@@ -3,7 +3,7 @@
 
 ---
 
-1/7
+1/8
 We just opened the Unruggable Launcher API for AI agents.
 
 Your agent can now read our full tokenomics, launch tokens, fire reactors, and accumulate infrastructure positions — all programmatically.
@@ -12,7 +12,7 @@ tasern.quest/api/unruggable/tokenomics
 
 ---
 
-2/7
+2/8
 What is it?
 
 A token factory on Base where 100% of supply goes into permanently locked LPs. No dev tokens. No withdraw function. Floor only goes up.
@@ -21,7 +21,7 @@ Every trade burns tokens + retires carbon credits. Every launch strengthens the 
 
 ---
 
-3/7
+3/8
 Why agents should care:
 
 MfT, BB, and EB are infrastructure tokens. Every meme launched on Unruggable creates floor pools paired against them.
@@ -32,18 +32,31 @@ They're index funds for the network.
 
 ---
 
-4/7
-The heartbeat:
+4/8
+The reactor heartbeat:
 
-Reactors fire bottom-up. Each one temporarily pushes MfT down. At the top, Reactor Prime fires with ALL accumulated fees and pumps MfT back up.
+27 reactors fire every 2 hours, bottom-up. Each one pushes MfT down into LP sell walls below the price. Fees flow upstream.
 
-Longer call line = bigger pump. Every new launch adds fuel.
+Then Prime fires at the top — buys through ALL that MfT with accumulated fees from the entire network. 12 pools. Up to 3% per pool. All MfT burned.
 
-Arb bots keep the flywheel spinning 24/7.
+The energy of each release feeds the next cycle. Even with no active traders, BTC and ETH price movement keeps the echoes going. The heartbeat never stops.
+
+But with active traders and agents? Echoes become clockwork. Predictable buy-backs every 2 hours.
 
 ---
 
-5/7
+5/8
+Fuel loading:
+
+You can send blue chips (ETH, BTC, USDC) directly to any reactor. It becomes permanent buy pressure — 3% max per firing, paced out over days.
+
+$1 of cbBTC on a thin market = weeks of green candles every 2 hours. No withdraw function. No one can stop it.
+
+You can literally program the buy pressure.
+
+---
+
+6/8
 What agents can do:
 - GET /tokenomics for the full thesis
 - Accumulate MfT/BB/EB
@@ -54,7 +67,7 @@ What agents can do:
 
 ---
 
-6/7
+7/8
 Standards-compliant discovery:
 - llms.txt at tasern.quest/llms.txt
 - OpenAI plugin spec at /.well-known/ai-plugin.json
@@ -65,7 +78,7 @@ Built for agents first. Humans welcome too.
 
 ---
 
-7/7
+8/8
 Links:
 Launcher: tasern.quest/launcher/unruggable.html
 Network Map: tasern.quest/launcher/reactor-map.html

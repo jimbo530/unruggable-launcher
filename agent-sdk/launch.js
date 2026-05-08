@@ -1,29 +1,28 @@
 // MycoPad Agent Launch SDK
-// Standalone module for AI agents to launch tokens via MycoPadV2.
+// Standalone module for AI agents to interact with MycoPad V5.2 on Base.
 //
-// Usage:
+// Usage (read-only):
 //   const launch = require('./agent-sdk/launch');
-//   const ctx = launch.createLaunchContext(process.env.PRIVATE_KEY);
+//   const ctx = launch.createReadContext();
 //   const info = await launch.getFactoryInfo(ctx);
-//   const result = await launch.launchToken(ctx, 'MyToken', 'MTK', '1000000', inviteReactor);
+//   const recent = await launch.getRecentLaunches(ctx);
+//
+// NOTE: launchToken() needs updating for V5.2 (USDC seed, two-step flow).
+// Do not call launchToken() until it is rewritten for the new factory.
 
 const { ethers } = require('ethers');
 
 const BASE_RPC = 'https://mainnet.base.org';
 
-const FACTORY_ADDRESS = '0x88f6ba724E0780fB75A86AC32806e28796a07240';
+const FACTORY_ADDRESS = '0xF0c1B3d6Bc0B4dEd2DDF81374feEA8a2c536bD51'; // V5.2 active
 
 const FACTORY_ABI = [
-  'function launch(string _name, string _symbol, uint256 _totalSupply, address _inviteReactor) payable returns (address tokenAddr, address reactorAddr)',
   'function launchCount() view returns (uint256)',
-  'function getLaunch(uint256 index) view returns (address token, address reactor, address launcher, uint256 supply, uint256 seed, uint256 timestamp)',
-  'function launches(uint256) view returns (address token, address reactor, address launcher, address upstream, uint256 supply, uint256 seed, uint256 timestamp)',
+  'function launches(uint256) view returns (address token, address reactor, address charReactor, address launcher, uint256 supply, uint256 seed, uint256 timestamp)',
   'function isReactor(address) view returns (bool)',
-  'function reactorOf(address) view returns (address)',
   'function minSeed() view returns (uint256)',
-  'function owner() view returns (address)',
   'function upstreamReactor() view returns (address)',
-  'event TokenLaunched(address indexed token, address indexed reactor, address indexed launcher, string name, string symbol, uint256 supply, uint256 seed)',
+  'event TokenLaunched(address indexed token, address indexed reactor, address indexed charReactor, address launcher, string name, string symbol, uint256 supply, uint256 seed)',
 ];
 
 const ZERO_ADDR = '0x0000000000000000000000000000000000000000';
@@ -42,19 +41,17 @@ function createReadContext(opts = {}) {
 }
 
 async function getFactoryInfo(ctx) {
-  const [launchCount, minSeed, owner, upstream] = await Promise.all([
+  const [launchCount, minSeed, upstream] = await Promise.all([
     ctx.factory.launchCount(),
     ctx.factory.minSeed(),
-    ctx.factory.owner(),
     ctx.factory.upstreamReactor(),
   ]);
   return {
     factory: FACTORY_ADDRESS,
     chain: 'Base (8453)',
     launchCount: Number(launchCount),
-    minSeedETH: ethers.formatEther(minSeed),
-    minSeedWei: minSeed.toString(),
-    owner,
+    minSeedUSDC: (Number(minSeed) / 1e6).toFixed(2),
+    minSeedRaw: minSeed.toString(),
     upstreamReactor: upstream,
   };
 }
@@ -65,14 +62,15 @@ async function checkReactor(ctx, address) {
 }
 
 async function getLaunch(ctx, index) {
-  const [token, reactor, launcher, supply, seed, timestamp] = await ctx.factory.getLaunch(index);
+  const [token, reactor, charReactor, launcher, supply, seed, timestamp] = await ctx.factory.launches(index);
   return {
     index,
     token,
     reactor,
+    charReactor,
     launcher,
     supply: ethers.formatUnits(supply, 18),
-    seedETH: ethers.formatEther(seed),
+    seedUSDC: (Number(seed) / 1e6).toFixed(2),
     timestamp: Number(timestamp),
     date: new Date(Number(timestamp) * 1000).toISOString(),
   };
@@ -88,7 +86,11 @@ async function getRecentLaunches(ctx, count = 5) {
   return { total, showing: results.length, launches: results };
 }
 
+// WARNING: This function is NOT updated for V5.2 factory.
+// V5.2 uses USDC seed (not ETH) and a two-step launch flow.
+// Do NOT call this until it is rewritten.
 async function launchToken(ctx, name, symbol, totalSupply, inviteReactor = ZERO_ADDR) {
+  throw new Error('launchToken() not yet updated for V5.2 factory — needs USDC seed flow rewrite');
   if (!name || !symbol) throw new Error('name and symbol are required');
 
   const supply = ethers.parseUnits(String(totalSupply), 18);
