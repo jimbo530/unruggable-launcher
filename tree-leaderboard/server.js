@@ -51,8 +51,8 @@ async function detectPoolLabel(addr) {
     try {
       const tc = new ethers.Contract(ethers.getAddress(otherAddr), SYMBOL_ABI, provider);
       const sym = await tc.symbol();
-      return sym + ' / MfTUSD Pool';
-    } catch { return short(otherAddr) + ' / MfTUSD Pool'; }
+      return sym;
+    } catch { return short(otherAddr); }
   } catch { return null; }
 }
 
