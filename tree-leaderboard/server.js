@@ -17,16 +17,61 @@ const DEPLOY_BLOCK = 46_429_325; // exact deploy block from tx receipt
 // trees_per_usd_per_second = 0.03 * 0.45 / (0.10 * 365.25 * 86400)
 const TREES_PER_USD_PER_SEC = (0.03 * 0.45) / (0.10 * 365.25 * 86400);
 
-// Project labels — map holder addresses to project names for leaderboard grouping
-const PROJECT_LABELS = {
-  '0x5a0c13262699b1bc7d44163d840b7b251cbac6b5': 'MfT / MfTUSD Pool',
+// Manual overrides for known non-pool addresses
+const MANUAL_LABELS = {
   '0xe2a4a8b9d77080c57799a94ba8edeb2dd6e0ac10': 'Unruggable Operations',
-  // Add more as new MfTUSD pools/reactors are created:
-  // '0x...': 'TGN Reactor',
-  // '0x...': 'BURGERS Reactor',
 };
 
+// Auto-detected pool labels (populated on startup + after each index)
+let autoLabels = {}; // addr -> label string
+
 const provider = new ethers.JsonRpcProvider(RPC);
+
+const V3_DETECT_ABI = [
+  'function token0() view returns (address)',
+  'function token1() view returns (address)',
+  'function fee() view returns (uint24)',
+];
+const SYMBOL_ABI = ['function symbol() view returns (string)'];
+
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+// Try to identify a V3 pool and label it by its paired token
+async function detectPoolLabel(addr) {
+  try {
+    const c = new ethers.Contract(addr, V3_DETECT_ABI, provider);
+    const t0 = await c.token0();
+    await sleep(300);
+    const t1 = await c.token1();
+    const isMftusd0 = t0.toLowerCase() === MFTUSD.toLowerCase();
+    const isMftusd1 = t1.toLowerCase() === MFTUSD.toLowerCase();
+    if (!isMftusd0 && !isMftusd1) return null;
+    const otherAddr = isMftusd0 ? t1 : t0;
+    await sleep(300);
+    try {
+      const tc = new ethers.Contract(ethers.getAddress(otherAddr), SYMBOL_ABI, provider);
+      const sym = await tc.symbol();
+      return sym + ' / MfTUSD Pool';
+    } catch { return short(otherAddr) + ' / MfTUSD Pool'; }
+  } catch { return null; }
+}
+
+async function labelAllHolders() {
+  for (const addr of Object.keys(holders)) {
+    if (addr === ZERO) continue;
+    if (MANUAL_LABELS[addr] || autoLabels[addr]) continue;
+    await sleep(500);
+    const label = await detectPoolLabel(addr);
+    if (label) {
+      autoLabels[addr] = label;
+      console.log(`Auto-labeled ${addr} as "${label}"`);
+    }
+  }
+}
+
+function getLabel(addr) {
+  return MANUAL_LABELS[addr] || autoLabels[addr] || null;
+}
 const contract = new ethers.Contract(MFTUSD, [
   'event Transfer(address indexed from, address indexed to, uint256 value)',
   'function totalSupply() view returns (uint256)',
@@ -179,7 +224,7 @@ function getProjectLeaderboard() {
     if (h.treeSecs === 0 && h.balance === 0n) continue;
 
     updateHolderTreeSecs(addr, ts);
-    const label = PROJECT_LABELS[addr] || null;
+    const label = getLabel(addr);
     // Group labeled addresses by project; unlabeled get their own entry
     const key = label || addr;
 
@@ -303,12 +348,15 @@ async function main() {
   try {
     await indexEvents();
     console.log(`Initial index complete. ${deposits.length} deposits found.`);
+    await labelAllHolders();
   } catch(e) { console.error('Initial index error:', e.message); }
 
-  // Re-index every 5 minutes
+  // Re-index every 5 minutes, then label any new holders
   setInterval(async () => {
-    try { await indexEvents(); }
-    catch (e) { console.error('Re-index error:', e.message); }
+    try {
+      await indexEvents();
+      await labelAllHolders();
+    } catch (e) { console.error('Re-index error:', e.message); }
   }, 5 * 60 * 1000);
 }
 
