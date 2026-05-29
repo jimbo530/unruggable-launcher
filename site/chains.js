@@ -1,28 +1,25 @@
-// Multi-chain config for Unruggable Launcher
+// Multi-chain config for Unrugable Launcher (V5.8 — ecosystem-native)
 export const CHAINS = {
   8453: {
     name: "Base",
-    rpc:          "https://base-mainnet.g.alchemy.com/v2/bwii0dH70pKYTKnqj3aNU",
-    weth:         "0x4200000000000000000000000000000000000006",
-    usdc:         "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
-    azusd:        "0x3595ca37596D5895B70EFAB592ac315D5B9809B2",
-    wrappedBtc:   "0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf",
+    rpc:          "https://mainnet.base.org",
+    teth:         "0x7D545427c8f548F3A00C1c09B5360BF3D4B842ef",
+    tbtc:         "0x53B6De1726856c4615dc3B05d45993Bc1aa3403c",
     mft:          "0x8FB87d13B40B1A67B22ED1a17e2835fe7e3a9bA3",
     char:         "0x20b048fA035D5763685D695e66aDF62c5D9F5055",
-    btcLabel:     "BTC",
-    ethLabel:     "ETH",
+    mftStable:    "0x85C78B8104D874d17e698b8c5678e3B8072347B1",
+    usdc:         "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+    weth:         "0x4200000000000000000000000000000000000006",
+    btcLabel:     "TBTC",
+    ethLabel:     "TETH",
     v3Factory:    "0x33128a8fC17869897dcE68Ed026d694621f6FDfD",
     pm:           "0x03a520b32C04BF3bEEf7BEb72E919cf822Ed34f1",
     router:       "0x2626664c2603336E57B271c5C0b26F421741e481",
-    aeroRouter:   "0xBE6D8f0d05cC4be24d5167a3eF062215bE6D18a5",
     wethUsdcFee:  500,
-    aeroTickSpacing: 50,
-    mftPriceFee:  10000,
-    charUsdcFee:  3000,
-    usdcBtcFee:   500,
+    mftWethFee:   10000,
     explorer:     "https://basescan.org",
-    reactorImpl:  "0x82eC86F4536167A95eF302056162b1c8b9c7F4FA",
-    factory:      "0xF0c1B3d6Bc0B4dEd2DDF81374feEA8a2c536bD51"
+    reactorImpl:  "0x9c7005Ba0b56e345CCF6CFa03B0c4C58bE0c9b86",
+    factory:      "0xC7b8e67f9e3bEf5A4fc5BC2a7445a547DD635797"
   }
 };
 

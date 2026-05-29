@@ -219,6 +219,11 @@
     <div id="fireStatus" style="font-size:12px;margin-top:6px;text-align:center;color:var(--text-dim);min-height:18px;"></div>
   </div>
 
+  <!-- Loading -->
+  <div id="loadingBar" style="text-align:center;padding:12px;font-size:13px;color:var(--text-dim);margin-bottom:16px;">
+    Loading reactor data from chain... this takes ~30 seconds
+  </div>
+
   <!-- Stats -->
   <div class="glass">
     <div class="stats-grid">
@@ -291,13 +296,13 @@
       <div style="display:flex;gap:12px;flex-wrap:wrap;">
         <div style="flex:1;min-width:140px;">
           <label>BURGERS Amount</label>
-          <input id="tgnAmount" placeholder="0.0" type="text">
+          <input id="tgnAmount" placeholder="0.0" type="text" oninput="autoFill('tgn')">
           <div style="font-size:11px;color:var(--text-dim);margin-top:-8px;">Balance: <span id="tgnBal">-</span> <a id="buyBurgersLink" href="#" target="_blank" style="color:var(--lime);font-size:10px;display:none;">Buy BURGERS</a></div>
         </div>
         <div style="flex:0;display:flex;align-items:center;padding-top:16px;font-size:24px;color:var(--lime);font-weight:700;">+</div>
         <div style="flex:1;min-width:140px;">
           <label id="xTokenLabel">Token X Amount</label>
-          <input id="xAmount" placeholder="0.0" type="text">
+          <input id="xAmount" placeholder="0.0" type="text" oninput="autoFill('x')">
           <div style="font-size:11px;color:var(--text-dim);margin-top:-8px;">Balance: <span id="xBal">-</span> <a id="buyXLink" href="#" target="_blank" style="color:var(--lime);font-size:10px;display:none;">Buy</a></div>
         </div>
       </div>
@@ -487,7 +492,8 @@ let poolCache = []; // [{v3Pool, token0, token1, fee, disabled, sym0, sym1, dec0
 // Spell out MfT tokens for public display (by address, since both use "MfT" on-chain)
 const DISPLAY_BY_ADDR = {
   '0x8fb87d13b40b1a67b22ed1a17e2835fe7e3a9ba3': 'Meme for Trees',
-  '0xe96fa44b4b82f085a457f9b7a0f85ea26ff1652f': 'Money for Trees',
+  '0xe96fa44b4b82f085a457f9b7a0f85ea26ff1652f': 'Money for Trees V1',
+  '0x85c78b8104d874d17e698b8c5678e3b8072347b1': 'Money for Trees',
 };
 function displayName(sym, addr) {
   if (addr) { const dn = DISPLAY_BY_ADDR[addr.toLowerCase()]; if (dn) return dn; }
@@ -570,7 +576,7 @@ window.onPairChange = async function() {
   // Show buy links
   const swapBase = 'https://app.uniswap.org/swap?chain=base&outputCurrency=';
   if (buyBurgers) { buyBurgers.href = swapBase + TGN_TOKEN; buyBurgers.style.display = 'inline'; }
-  const isMfTUSD = xAddr.toLowerCase() === '0xe96fa44b4b82f085a457f9b7a0f85ea26ff1652f';
+  const isMfTUSD = xAddr.toLowerCase() === '0x85c78b8104d874d17e698b8c5678e3b8072347b1' || xAddr.toLowerCase() === '0xe96fa44b4b82f085a457f9b7a0f85ea26ff1652f';
   if (buyX) { buyX.href = isMfTUSD ? 'money-for-trees.html' : swapBase + xAddr; buyX.textContent = isMfTUSD ? 'Mint Money for Trees' : 'Buy ' + displayName(xSym, xAddr); buyX.style.display = 'inline'; }
 
   try {
@@ -583,6 +589,53 @@ window.onPairChange = async function() {
     tgnBal.textContent = '?';
     xBal.textContent = '?';
   }
+
+  await fetchPoolPrice();
+};
+
+let poolPrice = null;
+
+async function fetchPoolPrice() {
+  const idx = document.getElementById('depPair').value;
+  if (idx === '') { poolPrice = null; return; }
+  const p = poolCache[Number(idx)];
+  try {
+    const v3 = new ethers.Contract(p.v3Pool, V3POOL_ABI, signer || reactorRead.runner);
+    const slot = await v3.slot0();
+    const sqrtP = slot[0];
+    const isTgn0 = p.token0.toLowerCase() === TGN_TOKEN.toLowerCase();
+    const xDec = isTgn0 ? p.dec1 : p.dec0;
+    const num = sqrtP * sqrtP;
+    const denom = (2n ** 192n);
+    const rawPrice = Number(num) / Number(denom);
+    if (isTgn0) {
+      const xPerTgn = rawPrice * (10 ** 18) / (10 ** xDec);
+      poolPrice = { xPerTgn, tgnPerX: 1 / xPerTgn, xDec };
+    } else {
+      const tgnPerX = rawPrice * (10 ** xDec) / (10 ** 18);
+      poolPrice = { tgnPerX, xPerTgn: 1 / tgnPerX, xDec };
+    }
+  } catch(e) { poolPrice = null; }
+}
+
+let autoFillLock = false;
+window.autoFill = function(source) {
+  if (autoFillLock || !poolPrice) return;
+  autoFillLock = true;
+  const tgnInput = document.getElementById('tgnAmount');
+  const xInput = document.getElementById('xAmount');
+  if (source === 'tgn') {
+    const v = parseFloat(tgnInput.value);
+    if (!isNaN(v) && v > 0) {
+      xInput.value = (v * poolPrice.xPerTgn).toFixed(poolPrice.xDec <= 6 ? 4 : 4);
+    } else { xInput.value = ''; }
+  } else {
+    const v = parseFloat(xInput.value);
+    if (!isNaN(v) && v > 0) {
+      tgnInput.value = (v * poolPrice.tgnPerX).toFixed(4);
+    } else { tgnInput.value = ''; }
+  }
+  autoFillLock = false;
 };
 
 window.mintAndDeposit = async function() {
@@ -768,9 +821,12 @@ async function refresh() {
   await loadPools();
   await loadMyDeposits();
   await loadPositionDetails();
+  document.getElementById('loadingBar').style.display = 'none';
 }
 
+let poolsLoaded = false;
 async function loadPools() {
+  if (poolsLoaded) return;
   const ct = await reactorRead.poolCount();
   const el = document.getElementById('poolsList');
   if (ct === 0n) { el.innerHTML = '<p style="color:var(--text-dim)">No pools added yet</p>'; poolCache = []; return; }
@@ -779,17 +835,21 @@ async function loadPools() {
   let html = '<table style="width:100%;font-size:12px;"><tr style="color:var(--text-dim);text-align:left;"><th>#</th><th>Pair</th><th>Fee</th><th>Pool</th><th>Status</th></tr>';
   for (let i = 0; i < Number(ct); i++) {
     const p = await reactorRead.pools(i);
+    if (p.disabled) {
+      poolCache.push({ v3Pool: p.v3Pool, token0: p.token0, token1: p.token1, fee: p.fee, disabled: true, sym0: '?', sym1: '?', dec0: 18, dec1: 18 });
+      continue;
+    }
     const [sym0, sym1, dec0, dec1] = await Promise.all([
       getSymbol(p.token0), getSymbol(p.token1),
       getDecimals(p.token0), getDecimals(p.token1)
     ]);
-    poolCache.push({ v3Pool: p.v3Pool, token0: p.token0, token1: p.token1, fee: p.fee, disabled: p.disabled, sym0, sym1, dec0, dec1 });
-    const status = p.disabled ? '<span style="color:var(--red)">Disabled</span>' : '<span style="color:var(--lime)">Active</span>';
-    html += `<tr style="border-top:1px solid rgba(255,255,255,0.05);"><td style="padding:8px 4px;color:var(--lime);">${i}</td><td>${displayName(sym0, p.token0)} / ${displayName(sym1, p.token1)}</td><td>${Number(p.fee)/10000}%</td><td><a href="https://basescan.org/address/${p.v3Pool}" target="_blank" style="color:var(--gold);">${short(p.v3Pool)}</a></td><td>${status}</td></tr>`;
+    poolCache.push({ v3Pool: p.v3Pool, token0: p.token0, token1: p.token1, fee: p.fee, disabled: false, sym0, sym1, dec0, dec1 });
+    html += `<tr style="border-top:1px solid rgba(255,255,255,0.05);"><td style="padding:8px 4px;color:var(--lime);">${i}</td><td>${displayName(sym0, p.token0)} / ${displayName(sym1, p.token1)}</td><td>${Number(p.fee)/10000}%</td><td><a href="https://basescan.org/address/${p.v3Pool}" target="_blank" style="color:var(--gold);">${short(p.v3Pool)}</a></td><td><span style="color:var(--lime)">Active</span></td></tr>`;
   }
   html += '</table>';
   el.innerHTML = html;
   await populatePairSelector();
+  poolsLoaded = true;
 }
 
 async function loadMyDeposits() {
@@ -1098,19 +1158,22 @@ window.renounceAdmin = async function() {
 };
 
 // Calculate trees from MfTUSD held in this reactor's pools
-const MFTUSD = '0xe96fa44b4b82F085a457F9B7a0F85ea26FF1652F';
+const MFTUSD = '0x85C78B8104D874d17e698b8c5678e3B8072347B1';
+const MFTUSD_V1 = '0xe96fa44b4b82F085a457F9B7a0F85ea26FF1652F';
 const MFTUSD_DECIMALS = 6;
 async function loadTreeStats() {
   try {
     const pub = reactorRead.runner;
     let totalMftusd = 0n;
+    const addrs = [MFTUSD.toLowerCase(), MFTUSD_V1.toLowerCase()];
     for (const p of poolCache) {
-      const isMftusd0 = p.token0.toLowerCase() === MFTUSD.toLowerCase();
-      const isMftusd1 = p.token1.toLowerCase() === MFTUSD.toLowerCase();
-      if (!isMftusd0 && !isMftusd1) continue;
-      const mftusdC = new ethers.Contract(MFTUSD, ERC20_ABI, pub);
-      const bal = await mftusdC.balanceOf(p.v3Pool);
-      totalMftusd += bal;
+      for (const mftAddr of addrs) {
+        const match = p.token0.toLowerCase() === mftAddr || p.token1.toLowerCase() === mftAddr;
+        if (!match) continue;
+        const mftusdC = new ethers.Contract(mftAddr, ERC20_ABI, pub);
+        const bal = await mftusdC.balanceOf(p.v3Pool);
+        totalMftusd += bal;
+      }
     }
     const usd = Number(totalMftusd) / (10 ** MFTUSD_DECIMALS);
     const treesPerYear = usd * 0.135;

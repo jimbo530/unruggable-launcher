@@ -1,21 +1,22 @@
 // Tree Leaderboard API
-// Indexes MfTUSD deposits, calculates trees funded per holder
-// Formula: trees = sum(balance_i * duration_i) * 0.03 * 0.45 / (0.10 * 365.25 * 86400)
-// 3% APY, 45% to trees, $0.10 per tree
+// Indexes MfT stablecoin deposits, calculates trees funded per holder
+// V2: 1/3 yield to holders, 1/3 reactor, 1/3 admin (trees)
+// Formula: trees = sum(balance_i * duration_i) * 0.03 * (1/3) / (0.10 * 365.25 * 86400)
 
 const { ethers } = require('ethers');
 const http = require('http');
 
 const PORT = 3008;
 const RPC = process.env.BASE_RPC || 'https://mainnet.base.org';
-const MFTUSD = '0xe96fa44b4b82F085a457F9B7a0F85ea26FF1652F';
+const MFTUSD = '0x85C78B8104D874d17e698b8c5678e3B8072347B1';
+const MFTUSD_V1 = '0xe96fa44b4b82F085a457F9B7a0F85ea26FF1652F';
 const DECIMALS = 6;
 const ZERO = '0x0000000000000000000000000000000000000000';
-const DEPLOY_BLOCK = 46_429_325; // exact deploy block from tx receipt
+const DEPLOY_BLOCK = 46_429_325; // V1 deploy block — V2 starts fresh but keep for V1 history
 
-// 3% APY, 45% to trees, $0.10/tree
-// trees_per_usd_per_second = 0.03 * 0.45 / (0.10 * 365.25 * 86400)
-const TREES_PER_USD_PER_SEC = (0.03 * 0.45) / (0.10 * 365.25 * 86400);
+// 3% APY, 1/3 to trees, $0.10/tree
+// trees_per_usd_per_second = 0.03 * (1/3) / (0.10 * 365.25 * 86400)
+const TREES_PER_USD_PER_SEC = (0.03 * (1/3)) / (0.10 * 365.25 * 86400);
 
 // Manual overrides for known non-pool addresses
 const MANUAL_LABELS = {
