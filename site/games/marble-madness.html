@@ -1,0 +1,1687 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Marble Madness</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body { width: 100%; height: 100%; overflow: hidden; background: #111; touch-action: none; }
+canvas { display: block; margin: 0 auto; }
+#back-link { position: fixed; bottom: 8px; left: 50%; transform: translateX(-50%); color: #666; font-family: monospace; font-size: 12px; text-decoration: none; z-index: 10; }
+#back-link:hover { color: #aaa; }
+</style>
+</head>
+<body>
+<canvas id="gc"></canvas>
+<a id="back-link" href="/games">Back to Arcade</a>
+<script src="nft-loader.js"></script>
+<script>if(window.NftLoader)NftLoader.gate();</script>
+<script src="tasern-engine.js"></script>
+<script>
+(function(){
+"use strict";
+
+// === CONSTANTS ===
+var GW = 480, GH = 480;
+var ctx = TAS.ctx;
+TAS.initCanvas(GW, GH);
+TAS.input.initTouch({ buttons: [], labels: {} });
+
+// Isometric tile dimensions
+var TILE_W = 32;
+var TILE_H = 16;
+var TILE_DEPTH = 10;
+
+// Physics constants
+var ACCEL = 200;
+var FRICTION = 0.91;
+var MAX_SPEED = 150;
+var GRAVITY = 550;
+var SLOPE_FORCE = 110;
+var BOUNCE = 0.4;
+
+// Game state
+var state = 'title';
+var score = 0;
+var highScore = TAS.score.load('marblemadness_hi');
+var level = 1;
+var frame = 0;
+var timeLeft = 60;
+var timerWarning = false;
+var levelComplete = false;
+var levelTransition = 0;
+
+// Marble state
+var marble = {
+  x: 0, y: 0, z: 0,
+  vx: 0, vy: 0, vz: 0,
+  radius: 6, rotation: 0, rotY: 0,
+  grounded: false, stunTimer: 0,
+  trailTimer: 0
+};
+var lastCheckpoint = { x: 0, y: 0 };
+
+// Camera
+var camX = 0, camY = 0;
+var camTargetX = 0, camTargetY = 0;
+
+// Level data
+var tiles = [];
+var levelW = 0, levelH = 0;
+var finishTile = { x: 0, y: 0 };
+var checkpoints = [];
+var enemies = [];
+var hazards = [];
+var disappearingTiles = [];
+var conveyors = [];
+var windZones = [];
+var vacuums = [];
+var electricBarriers = [];
+var spinPlatforms = [];
+
+// Sound timers
+var rollSoundTimer = 0;
+var lastTimerBeep = -1;
+
+// Level color themes
+var THEMES = [
+  { path: '#4488cc', side: '#2266aa', edge: '#336699', bg: '#080e1a', acid: '#224488', name: 'Practice Race' },
+  { path: '#44aa66', side: '#228844', edge: '#2d7a4a', bg: '#081a10', acid: '#116633', name: 'Beginner Race' },
+  { path: '#cc8844', side: '#aa6622', edge: '#996633', bg: '#1a1008', acid: '#44aa22', name: 'Intermediate' },
+  { path: '#8866cc', side: '#6644aa', edge: '#775599', bg: '#10081a', acid: '#6622aa', name: 'Aerial' },
+  { path: '#cc44aa', side: '#aa2288', edge: '#993377', bg: '#1a0810', acid: '#aa2266', name: 'Silly Race' },
+  { path: '#44cccc', side: '#22aaaa', edge: '#339999', bg: '#081a1a', acid: '#22aacc', name: 'Reactor Race' },
+  { path: '#cc4444', side: '#aa2222', edge: '#993333', bg: '#1a0808', acid: '#cc2222', name: 'Ultimate Race' },
+  { path: '#999999', side: '#555555', edge: '#777777', bg: '#080808', acid: '#444444', name: 'Final Race' }
+];
+
+// Tile types
+var T_EMPTY = 0, T_PATH = 1, T_RAMP_N = 2, T_RAMP_S = 3, T_RAMP_E = 4, T_RAMP_W = 5;
+var T_ICE = 6, T_FINISH = 7, T_CHECKPOINT = 8, T_CATAPULT = 9, T_DISAPPEAR = 10;
+var T_CONVEYOR_N = 11, T_CONVEYOR_S = 12, T_CONVEYOR_E = 13, T_CONVEYOR_W = 14;
+var T_SPIN = 15;
+
+// === SEEDED RANDOM ===
+var seed = 1;
+function seedRand(s) { seed = s; }
+function sRand() {
+  seed = (seed * 1664525 + 1013904223) & 0xFFFFFFFF;
+  return (seed >>> 0) / 0xFFFFFFFF;
+}
+
+// === LEVEL GENERATION ===
+function generateLevel(lvl) {
+  tiles = [];
+  enemies = [];
+  hazards = [];
+  disappearingTiles = [];
+  conveyors = [];
+  windZones = [];
+  vacuums = [];
+  electricBarriers = [];
+  spinPlatforms = [];
+  checkpoints = [];
+
+  seedRand(lvl * 7919 + 42);
+
+  // Level size scales with difficulty
+  levelW = 12 + lvl * 2;
+  levelH = 18 + lvl * 3;
+
+  // Init empty grid
+  for (var y = 0; y < levelH; y++) {
+    tiles[y] = [];
+    for (var x = 0; x < levelW; x++) {
+      tiles[y][x] = { type: T_EMPTY, height: 0, visible: true };
+    }
+  }
+
+  // Build path using directed random walk
+  var pathTiles = [];
+  var cx = Math.floor(levelW / 2);
+  var cy = 1;
+  var pathWidth = Math.max(2, 5 - Math.floor(lvl / 2));
+  var startPathWidth = pathWidth;
+
+  // Starting platform (wider)
+  for (var dy = 0; dy < 3; dy++) {
+    for (var dx = -3; dx <= 3; dx++) {
+      var tx = cx + dx, ty = cy + dy;
+      if (tx >= 0 && tx < levelW && ty >= 0 && ty < levelH) {
+        tiles[ty][tx].type = T_PATH;
+        tiles[ty][tx].height = 6;
+      }
+    }
+  }
+
+  marble.x = cx + 0.5;
+  marble.y = cy + 1.5;
+  lastCheckpoint.x = cx + 0.5;
+  lastCheckpoint.y = cy + 1.5;
+
+  // Carve main path downward with turns
+  var height = 6;
+  var segLen = 0;
+  var dir = 0; // 0=south, -1=west, 1=east
+  cy = 4;
+
+  while (cy < levelH - 3) {
+    for (var dx = -Math.floor(pathWidth / 2); dx <= Math.floor(pathWidth / 2); dx++) {
+      var tx = cx + dx;
+      if (tx >= 1 && tx < levelW - 1 && cy >= 0 && cy < levelH) {
+        tiles[cy][tx].type = T_PATH;
+        tiles[cy][tx].height = height;
+        pathTiles.push({ x: tx, y: cy, h: height });
+      }
+    }
+
+    segLen++;
+    if (segLen > 2 + Math.floor(sRand() * 5)) {
+      segLen = 0;
+      if (dir === 0) {
+        dir = sRand() < 0.5 ? -1 : 1;
+        // Sometimes add a height change at turns
+        if (sRand() < 0.35 && lvl > 1) {
+          var dh = sRand() < 0.6 ? -1 : 1;
+          height = TAS.math.clamp(height + dh, 2, 8);
+        }
+      } else {
+        dir = 0;
+      }
+    }
+
+    if (dir === 0) {
+      cy++;
+    } else {
+      cx = TAS.math.clamp(cx + dir, 3, levelW - 4);
+    }
+
+    // Path narrows at higher levels
+    if (lvl >= 3 && sRand() < 0.08) {
+      pathWidth = Math.max(1, pathWidth - 1);
+    }
+    if (sRand() < 0.04) {
+      pathWidth = Math.min(startPathWidth, pathWidth + 1);
+    }
+  }
+
+  // Finish platform
+  finishTile.x = cx;
+  finishTile.y = cy;
+  for (var dy = -1; dy <= 1; dy++) {
+    for (var dx = -2; dx <= 2; dx++) {
+      var tx = cx + dx, ty = cy + dy;
+      if (tx >= 0 && tx < levelW && ty >= 0 && ty < levelH) {
+        tiles[ty][tx].type = (dx === 0 && dy === 0) ? T_FINISH : T_PATH;
+        tiles[ty][tx].height = height;
+      }
+    }
+  }
+
+  // Add ramps where height changes
+  addRamps(pathTiles);
+
+  // Checkpoints evenly spaced
+  var cpCount = Math.max(2, Math.min(5, Math.floor(pathTiles.length / 12)));
+  for (var i = 1; i <= cpCount; i++) {
+    var idx = Math.floor(pathTiles.length * i / (cpCount + 1));
+    var cp = pathTiles[idx];
+    if (cp && tiles[cp.y][cp.x].type === T_PATH) {
+      tiles[cp.y][cp.x].type = T_CHECKPOINT;
+      checkpoints.push({ x: cp.x + 0.5, y: cp.y + 0.5, reached: false });
+    }
+  }
+
+  // Level-specific features
+  if (lvl >= 2) addEnemies(lvl, pathTiles);
+  if (lvl >= 3) addNarrowBridges(lvl, pathTiles);
+  if (lvl >= 3) addIcePatches(lvl, pathTiles);
+  if (lvl >= 4) addWindZonesGen(lvl, pathTiles);
+  if (lvl >= 4) addVacuums(lvl, pathTiles);
+  if (lvl >= 5) addDisappearingGen(lvl, pathTiles);
+  if (lvl >= 5) addSpinPlatforms(lvl, pathTiles);
+  if (lvl >= 5) addCatapults(lvl, pathTiles);
+  if (lvl >= 6) addConveyorsGen(lvl, pathTiles);
+  if (lvl >= 6) addElectricBarriers(lvl, pathTiles);
+  if (lvl >= 7) addHammersGen(lvl, pathTiles);
+  if (lvl >= 8) makePartiallyInvisible(pathTiles);
+}
+
+function addRamps(pathTiles) {
+  for (var y = 1; y < levelH - 1; y++) {
+    for (var x = 1; x < levelW - 1; x++) {
+      var t = tiles[y][x];
+      if (t.type !== T_PATH) continue;
+      var h = t.height;
+      // Check above
+      if (tiles[y-1][x].type !== T_EMPTY && tiles[y-1][x].height !== h) {
+        if (sRand() < 0.5) t.type = tiles[y-1][x].height > h ? T_RAMP_N : T_RAMP_S;
+      }
+      // Check left
+      if (tiles[y][x-1].type !== T_EMPTY && tiles[y][x-1].height !== h) {
+        if (sRand() < 0.3) t.type = tiles[y][x-1].height > h ? T_RAMP_W : T_RAMP_E;
+      }
+    }
+  }
+}
+
+function addEnemies(lvl, pathTiles) {
+  var count = TAS.math.clamp(lvl - 1, 1, 6);
+  for (var i = 0; i < count; i++) {
+    var idx = Math.floor(pathTiles.length * 0.25 + sRand() * pathTiles.length * 0.55);
+    var t = pathTiles[idx % pathTiles.length];
+    enemies.push({
+      x: t.x + 0.5, y: t.y + 0.5,
+      vx: (sRand() < 0.5 ? -1 : 1) * (0.8 + lvl * 0.3),
+      vy: 0,
+      homeX: t.x + 0.5, homeY: t.y + 0.5,
+      patrol: 1.5 + sRand() * 2,
+      timer: sRand() * 6,
+      aggro: lvl >= 5
+    });
+  }
+}
+
+function addNarrowBridges(lvl, pathTiles) {
+  var spacing = Math.max(4, 10 - lvl);
+  for (var i = spacing; i < pathTiles.length - spacing; i += spacing + Math.floor(sRand() * 4)) {
+    var t = pathTiles[i];
+    if (!t) continue;
+    // Remove side tiles to narrow
+    for (var dx = -3; dx <= 3; dx++) {
+      var nx = t.x + dx;
+      if (nx >= 0 && nx < levelW && Math.abs(dx) > 0) {
+        if (tiles[t.y][nx].type === T_PATH && sRand() < 0.4) {
+          tiles[t.y][nx].type = T_EMPTY;
+          tiles[t.y][nx].height = 0;
+        }
+      }
+    }
+  }
+}
+
+function addIcePatches(lvl, pathTiles) {
+  var count = Math.floor(sRand() * 3) + lvl - 2;
+  for (var i = 0; i < count; i++) {
+    var idx = Math.floor(sRand() * pathTiles.length);
+    var t = pathTiles[idx];
+    // Ice patch cluster
+    for (var dy = -1; dy <= 1; dy++) {
+      for (var dx = -1; dx <= 1; dx++) {
+        var nx = t.x + dx, ny = t.y + dy;
+        if (nx >= 0 && nx < levelW && ny >= 0 && ny < levelH) {
+          if (tiles[ny][nx].type === T_PATH) {
+            tiles[ny][nx].type = T_ICE;
+          }
+        }
+      }
+    }
+  }
+}
+
+function addWindZonesGen(lvl, pathTiles) {
+  var count = TAS.math.clamp(lvl - 3, 1, 4);
+  for (var i = 0; i < count; i++) {
+    var idx = Math.floor(sRand() * pathTiles.length * 0.7 + pathTiles.length * 0.15);
+    var t = pathTiles[idx % pathTiles.length];
+    var angle = sRand() * Math.PI * 2;
+    var force = 60 + lvl * 15;
+    windZones.push({
+      x: t.x - 1, y: t.y - 1, w: 3, h: 3,
+      fx: Math.cos(angle) * force,
+      fy: Math.sin(angle) * force * 0.5,
+      pulseTimer: sRand() * 6
+    });
+  }
+}
+
+function addVacuums(lvl, pathTiles) {
+  var count = TAS.math.clamp(lvl - 3, 1, 3);
+  for (var i = 0; i < count; i++) {
+    var idx = Math.floor(sRand() * pathTiles.length);
+    var t = pathTiles[idx];
+    // Place vacuum at path edge
+    var edgeDir = sRand() < 0.5 ? -1 : 1;
+    vacuums.push({
+      x: t.x + edgeDir * 2, y: t.y,
+      strength: 40 + lvl * 10,
+      range: 3
+    });
+  }
+}
+
+function addDisappearingGen(lvl, pathTiles) {
+  var spacing = Math.max(3, 8 - lvl);
+  for (var i = spacing; i < pathTiles.length; i += spacing + Math.floor(sRand() * 3)) {
+    var t = pathTiles[i];
+    if (tiles[t.y][t.x].type === T_PATH) {
+      tiles[t.y][t.x].type = T_DISAPPEAR;
+      disappearingTiles.push({
+        x: t.x, y: t.y,
+        timer: sRand() * 4,
+        period: 1.8 + sRand() * 1.5,
+        visible: true
+      });
+    }
+  }
+}
+
+function addSpinPlatforms(lvl, pathTiles) {
+  var count = TAS.math.clamp(lvl - 4, 1, 3);
+  for (var i = 0; i < count; i++) {
+    var idx = Math.floor(sRand() * pathTiles.length * 0.6 + pathTiles.length * 0.2);
+    var t = pathTiles[idx % pathTiles.length];
+    tiles[t.y][t.x].type = T_SPIN;
+    spinPlatforms.push({
+      x: t.x, y: t.y,
+      angle: 0,
+      speed: (sRand() < 0.5 ? 1 : -1) * (1.5 + sRand())
+    });
+  }
+}
+
+function addCatapults(lvl, pathTiles) {
+  var count = TAS.math.clamp(lvl - 4, 1, 3);
+  for (var i = 0; i < count; i++) {
+    var idx = Math.floor(sRand() * pathTiles.length * 0.5 + pathTiles.length * 0.25);
+    var t = pathTiles[idx % pathTiles.length];
+    if (tiles[t.y][t.x].type === T_PATH) {
+      tiles[t.y][t.x].type = T_CATAPULT;
+    }
+  }
+}
+
+function addConveyorsGen(lvl, pathTiles) {
+  var count = Math.floor(sRand() * 4) + 2;
+  for (var i = 0; i < count; i++) {
+    var idx = Math.floor(sRand() * pathTiles.length);
+    var t = pathTiles[idx];
+    if (tiles[t.y][t.x].type === T_PATH) {
+      var dir = Math.floor(sRand() * 4);
+      tiles[t.y][t.x].type = T_CONVEYOR_N + dir;
+      conveyors.push({ x: t.x, y: t.y, dir: dir });
+    }
+  }
+}
+
+function addElectricBarriers(lvl, pathTiles) {
+  var count = TAS.math.clamp(lvl - 5, 1, 4);
+  for (var i = 0; i < count; i++) {
+    var idx = Math.floor(sRand() * pathTiles.length * 0.6 + pathTiles.length * 0.2);
+    var t = pathTiles[idx % pathTiles.length];
+    electricBarriers.push({
+      x: t.x, y: t.y,
+      timer: sRand() * 4,
+      onTime: 1.2 + sRand() * 0.8,
+      offTime: 1.5 + sRand() * 1.0,
+      active: false,
+      horizontal: sRand() < 0.5
+    });
+  }
+}
+
+function addHammersGen(lvl, pathTiles) {
+  var count = TAS.math.clamp(lvl - 5, 1, 4);
+  for (var i = 0; i < count; i++) {
+    var idx = Math.floor(sRand() * pathTiles.length);
+    var t = pathTiles[idx];
+    hazards.push({
+      type: 'hammer',
+      x: t.x, y: t.y,
+      timer: sRand() * 3,
+      period: 1.8 + sRand() * 1.2,
+      active: false,
+      smashFrame: 0
+    });
+  }
+}
+
+function makePartiallyInvisible(pathTiles) {
+  for (var i = 0; i < pathTiles.length; i++) {
+    var t = pathTiles[i];
+    if (sRand() < 0.55) {
+      tiles[t.y][t.x].visible = false;
+    }
+  }
+}
+
+// === ISO HELPERS ===
+function toIso(x, y, z) {
+  var sx = (x - y) * (TILE_W / 2);
+  var sy = (x + y) * (TILE_H / 2) - (z || 0) * TILE_DEPTH;
+  return { x: sx, y: sy };
+}
+
+// === DRAWING HELPERS ===
+function drawIsoDiamond(sx, sy, w, h, fillColor, strokeColor) {
+  ctx.beginPath();
+  ctx.moveTo(sx, sy - h/2);
+  ctx.lineTo(sx + w/2, sy);
+  ctx.lineTo(sx, sy + h/2);
+  ctx.lineTo(sx - w/2, sy);
+  ctx.closePath();
+  ctx.fillStyle = fillColor;
+  ctx.fill();
+  if (strokeColor) {
+    ctx.strokeStyle = strokeColor;
+    ctx.lineWidth = 0.5;
+    ctx.stroke();
+  }
+}
+
+function shadeColor(color, amount) {
+  if (color.length < 7) return color;
+  var hex = color.replace('#', '');
+  var r = TAS.math.clamp(parseInt(hex.substr(0, 2), 16) + amount, 0, 255);
+  var g = TAS.math.clamp(parseInt(hex.substr(2, 2), 16) + amount, 0, 255);
+  var b = TAS.math.clamp(parseInt(hex.substr(4, 2), 16) + amount, 0, 255);
+  return '#' + r.toString(16).padStart(2,'0') + g.toString(16).padStart(2,'0') + b.toString(16).padStart(2,'0');
+}
+
+function drawIsoTile(sx, sy, tileH, theme, tileType, tileData) {
+  var topColor = theme.path;
+  var sideColor = theme.side;
+  var edgeColor = theme.edge;
+  var depth = tileH * TILE_DEPTH;
+
+  // Color overrides per type
+  switch (tileType) {
+    case T_ICE:
+      topColor = '#aaddff'; sideColor = '#6699bb'; edgeColor = '#88bbdd'; break;
+    case T_FINISH:
+      topColor = '#ffdd44'; sideColor = '#bb9922'; edgeColor = '#ffee88'; break;
+    case T_CHECKPOINT:
+      topColor = '#44ffaa'; sideColor = '#22aa66'; edgeColor = '#66ffcc'; break;
+    case T_CATAPULT:
+      topColor = '#ff8844'; sideColor = '#aa5522'; edgeColor = '#ffaa66'; break;
+    case T_DISAPPEAR:
+      if (tileData && !tileData.visible) return;
+      topColor = theme.path; sideColor = theme.side;
+      ctx.globalAlpha = 0.5 + (tileData ? Math.sin(tileData.timer * 3) * 0.3 : 0);
+      break;
+    case T_SPIN:
+      topColor = '#cc88ff'; sideColor = '#8844aa'; edgeColor = '#aa66dd'; break;
+  }
+  if (tileType >= T_CONVEYOR_N && tileType <= T_CONVEYOR_W) {
+    topColor = '#887755'; sideColor = '#554433'; edgeColor = '#aa9966';
+  }
+
+  // Left side face
+  if (depth > 0) {
+    ctx.beginPath();
+    ctx.moveTo(sx - TILE_W/2, sy);
+    ctx.lineTo(sx, sy + TILE_H/2);
+    ctx.lineTo(sx, sy + TILE_H/2 + depth);
+    ctx.lineTo(sx - TILE_W/2, sy + depth);
+    ctx.closePath();
+    ctx.fillStyle = sideColor;
+    ctx.fill();
+
+    // Right side face
+    ctx.beginPath();
+    ctx.moveTo(sx + TILE_W/2, sy);
+    ctx.lineTo(sx, sy + TILE_H/2);
+    ctx.lineTo(sx, sy + TILE_H/2 + depth);
+    ctx.lineTo(sx + TILE_W/2, sy + depth);
+    ctx.closePath();
+    ctx.fillStyle = shadeColor(sideColor, -15);
+    ctx.fill();
+  }
+
+  // Top face
+  drawIsoDiamond(sx, sy, TILE_W, TILE_H, topColor, edgeColor);
+
+  // Special decorations
+  if (tileType === T_FINISH) {
+    // Checkered finish pattern
+    var pulse = 0.5 + Math.sin(frame * 0.08) * 0.3;
+    ctx.globalAlpha = pulse;
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(sx - 3, sy - 2, 3, 2);
+    ctx.fillRect(sx + 1, sy, 3, 2);
+    ctx.globalAlpha = 1;
+  }
+
+  if (tileType === T_ICE) {
+    // Shimmer
+    ctx.globalAlpha = 0.3;
+    ctx.fillStyle = '#ffffff';
+    var shimX = sx + Math.sin(frame * 0.05 + sx * 0.1) * 4;
+    ctx.fillRect(shimX - 1, sy - 1, 2, 1);
+    ctx.globalAlpha = 1;
+  }
+
+  if (tileType >= T_CONVEYOR_N && tileType <= T_CONVEYOR_W) {
+    // Arrow indicators animated
+    var arrows = [[0, -1], [0, 1], [1, 0], [-1, 0]];
+    var aDir = tileType - T_CONVEYOR_N;
+    var aOff = (frame * 0.06) % 1;
+    ctx.fillStyle = '#ffcc44';
+    ctx.globalAlpha = 0.6;
+    for (var ai = 0; ai < 2; ai++) {
+      var asx = sx + arrows[aDir][0] * (4 + ai * 6 + aOff * 6);
+      var asy = sy + arrows[aDir][1] * (2 + ai * 3 + aOff * 3);
+      ctx.beginPath();
+      ctx.arc(asx, asy, 1.5, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  if (tileType === T_CATAPULT) {
+    // Spring coil
+    ctx.strokeStyle = '#ffaa22';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    for (var ci = 0; ci < 3; ci++) {
+      var cy2 = sy - 1 + ci * 2;
+      ctx.moveTo(sx - 3, cy2);
+      ctx.lineTo(sx + 3, cy2 + 1);
+    }
+    ctx.stroke();
+    ctx.lineWidth = 1;
+  }
+
+  // Reset alpha if disappearing tile changed it
+  if (tileType === T_DISAPPEAR) {
+    ctx.globalAlpha = 1;
+  }
+}
+
+// === MARBLE DRAWING ===
+function drawMarble(sx, sy) {
+  var screenY = sy - marble.z * TILE_DEPTH;
+  var r = marble.radius;
+
+  // Shadow on ground plane
+  var shadowScale = TAS.math.clamp(1 - marble.z * 0.08, 0.3, 1);
+  ctx.globalAlpha = 0.35 * shadowScale;
+  ctx.fillStyle = '#000000';
+  ctx.beginPath();
+  ctx.ellipse(sx, sy + 2, r * 1.3 * shadowScale, r * 0.6 * shadowScale, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.globalAlpha = 1;
+
+  // Marble body gradient
+  var grad = ctx.createRadialGradient(sx - r * 0.3, screenY - r * 0.4, 0, sx, screenY, r);
+  grad.addColorStop(0, '#ffffff');
+  grad.addColorStop(0.2, '#99bbff');
+  grad.addColorStop(0.5, '#4466cc');
+  grad.addColorStop(0.8, '#223388');
+  grad.addColorStop(1, '#0a1133');
+  ctx.fillStyle = grad;
+  ctx.beginPath();
+  ctx.arc(sx, screenY, r, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Rotation stripes (show rolling)
+  var speed = Math.sqrt(marble.vx * marble.vx + marble.vy * marble.vy);
+  ctx.strokeStyle = 'rgba(255,255,255,0.5)';
+  ctx.lineWidth = 1;
+  var rotA = marble.rotation;
+  var stripeX = Math.cos(rotA) * r * 0.5;
+  var stripeY = Math.sin(rotA) * r * 0.25;
+  ctx.beginPath();
+  ctx.arc(sx + stripeX, screenY + stripeY, r * 0.35, rotA, rotA + Math.PI * 0.8);
+  ctx.stroke();
+  // Second stripe perpendicular
+  ctx.beginPath();
+  ctx.arc(sx - stripeX * 0.5, screenY - stripeY * 0.5, r * 0.3, rotA + Math.PI, rotA + Math.PI * 1.6);
+  ctx.stroke();
+  ctx.lineWidth = 1;
+
+  // Highlight spot
+  ctx.fillStyle = 'rgba(255,255,255,0.6)';
+  ctx.beginPath();
+  ctx.arc(sx - r * 0.3, screenY - r * 0.35, r * 0.2, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Speed trail when fast
+  if (speed > 80 && marble.grounded) {
+    ctx.globalAlpha = 0.15;
+    ctx.fillStyle = '#88aaff';
+    for (var ti = 1; ti <= 3; ti++) {
+      var trailR = r * (1 - ti * 0.2);
+      ctx.beginPath();
+      ctx.arc(sx - marble.vx * 0.003 * ti, screenY - marble.vy * 0.003 * ti, trailR, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+  }
+}
+
+// === ENEMY DRAWING ===
+function drawEnemy(en, offsetX, offsetY) {
+  var iso = toIso(en.x, en.y);
+  var esx = iso.x + offsetX;
+  var esy = iso.y + offsetY;
+  var h = getTileHeight(Math.floor(en.x), Math.floor(en.y));
+  if (h < 0) h = 0;
+  esy -= h * TILE_DEPTH;
+
+  // Dark marble enemy with menacing look
+  var grad = ctx.createRadialGradient(esx - 2, esy - 3, 0, esx, esy, 7);
+  grad.addColorStop(0, '#555555');
+  grad.addColorStop(0.4, '#222222');
+  grad.addColorStop(1, '#000000');
+  ctx.fillStyle = grad;
+  ctx.beginPath();
+  ctx.arc(esx, esy, 7, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Pulsing red glow
+  var glow = 0.3 + Math.sin(frame * 0.1 + en.timer) * 0.2;
+  ctx.globalAlpha = glow;
+  ctx.fillStyle = '#ff0000';
+  ctx.beginPath();
+  ctx.arc(esx, esy, 9, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.globalAlpha = 1;
+
+  // Evil eyes
+  ctx.fillStyle = '#ff3333';
+  ctx.beginPath();
+  ctx.arc(esx - 2, esy - 2, 1.5, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.arc(esx + 2, esy - 2, 1.5, 0, Math.PI * 2);
+  ctx.fill();
+}
+
+// === TILE QUERIES ===
+function getTileAt(x, y) {
+  var tx = Math.floor(x);
+  var ty = Math.floor(y);
+  if (tx < 0 || tx >= levelW || ty < 0 || ty >= levelH) return null;
+  return tiles[ty][tx];
+}
+
+function getTileHeight(x, y) {
+  var tile = getTileAt(x, y);
+  if (!tile || tile.type === T_EMPTY) return -1;
+  if (tile.type === T_DISAPPEAR) {
+    for (var i = 0; i < disappearingTiles.length; i++) {
+      var dt2 = disappearingTiles[i];
+      if (dt2.x === Math.floor(x) && dt2.y === Math.floor(y)) {
+        if (!dt2.visible) return -1;
+      }
+    }
+  }
+  return tile.height;
+}
+
+// === GAME FLOW ===
+function startGame() {
+  state = 'playing';
+  score = 0;
+  level = 1;
+  timeLeft = 60;
+  timerWarning = false;
+  levelComplete = false;
+  TAS.particles.clear();
+  startLevel();
+}
+
+function startLevel() {
+  generateLevel(level);
+  marble.vx = 0;
+  marble.vy = 0;
+  marble.vz = 0;
+  marble.z = 0;
+  marble.grounded = true;
+  marble.stunTimer = 0;
+  marble.rotation = 0;
+  marble.rotY = 0;
+  levelComplete = false;
+  levelTransition = 0;
+
+  // Center camera
+  var iso = toIso(marble.x, marble.y);
+  camX = iso.x;
+  camY = iso.y;
+  camTargetX = camX;
+  camTargetY = camY;
+
+  TAS.audio.playMelody([
+    [523, 0.08, 'sine', 0.06], [659, 0.08, 'sine', 0.06], [784, 0.12, 'sine', 0.08]
+  ], 90);
+}
+
+function respawnMarble() {
+  marble.x = lastCheckpoint.x;
+  marble.y = lastCheckpoint.y;
+  marble.vx = 0;
+  marble.vy = 0;
+  marble.vz = 0;
+  marble.z = 0;
+  marble.grounded = true;
+  marble.stunTimer = 0;
+  timeLeft -= 3;
+  TAS.fx.flash('#ff0000', 0.5);
+  TAS.fx.shake(10, 0.85);
+  TAS.audio.playTone(180, 0.4, 'sawtooth', 0.1, 60);
+  TAS.audio.playNoise(0.3, 0.06, 400);
+
+  if (timeLeft <= 0) {
+    timeLeft = 0;
+    gameOver();
+  }
+}
+
+function gameOver() {
+  state = 'gameOver';
+  if (score > highScore) {
+    highScore = score;
+    TAS.score.save('marblemadness_hi', highScore);
+  }
+  TAS.audio.playMelody([
+    [300, 0.15, 'sawtooth', 0.08], [250, 0.15, 'sawtooth', 0.08], [200, 0.2, 'sawtooth', 0.1], [150, 0.4, 'sawtooth', 0.12]
+  ], 180);
+}
+
+function completeLevel() {
+  levelComplete = true;
+  var bonus = Math.floor(timeLeft) * 100;
+  score += bonus + 500 * level;
+  TAS.audio.playMelody([
+    [523, 0.08, 'sine', 0.08], [659, 0.08, 'sine', 0.08], [784, 0.08, 'sine', 0.08], [1047, 0.2, 'sine', 0.1]
+  ], 100);
+  TAS.fx.flash('#ffdd44', 0.4);
+
+  if (level >= 8) {
+    state = 'victory';
+    if (score > highScore) {
+      highScore = score;
+      TAS.score.save('marblemadness_hi', highScore);
+    }
+  } else {
+    levelTransition = 2.0;
+    state = 'transition';
+  }
+}
+
+// === UPDATE ===
+function update(dt) {
+  frame++;
+  TAS.particles.update(dt);
+  TAS.fx.updateEffects(dt);
+
+  if (state === 'title') {
+    if (Object.values(TAS.input.keys).some(Boolean) || TAS.input.touch.up || TAS.input.touch.down || TAS.input.touch.left || TAS.input.touch.right) {
+      TAS.audio.ensureAudio();
+      startGame();
+    }
+    return;
+  }
+
+  if (state === 'gameOver' || state === 'victory') {
+    if (Object.values(TAS.input.keys).some(Boolean) || TAS.input.touch.up) {
+      if (frame % 4 === 0) {
+        state = 'title';
+        frame = 0;
+      }
+    }
+    return;
+  }
+
+  if (state === 'transition') {
+    levelTransition -= dt;
+    if (levelTransition <= 0) {
+      level++;
+      // Carry time forward with minimum
+      timeLeft = Math.max(timeLeft, 25 + (9 - level) * 5);
+      startLevel();
+      state = 'playing';
+    }
+    return;
+  }
+
+  if (state !== 'playing') return;
+
+  // === TIMER ===
+  timeLeft -= dt;
+  if (timeLeft <= 0) {
+    timeLeft = 0;
+    gameOver();
+    return;
+  }
+
+  // Timer warning beeps
+  if (timeLeft <= 10) {
+    timerWarning = true;
+    var sec = Math.floor(timeLeft);
+    if (sec !== lastTimerBeep) {
+      lastTimerBeep = sec;
+      TAS.audio.playTone(880, 0.06, 'square', 0.05);
+    }
+  } else {
+    timerWarning = false;
+  }
+
+  // === STUN ===
+  if (marble.stunTimer > 0) {
+    marble.stunTimer -= dt;
+    if (marble.stunTimer < 0) marble.stunTimer = 0;
+    // Still apply gravity when stunned
+    if (!marble.grounded) {
+      marble.vz -= GRAVITY * dt;
+      marble.z += marble.vz * dt;
+      if (marble.z <= 0) {
+        var h = getTileHeight(Math.floor(marble.x), Math.floor(marble.y));
+        if (h < 0) { respawnMarble(); return; }
+        marble.z = 0;
+        marble.vz = 0;
+        marble.grounded = true;
+      }
+    }
+    return;
+  }
+
+  // === INPUT ===
+  var inputX = 0, inputY = 0;
+  var keys = TAS.input.keys;
+  var touch = TAS.input.touch;
+
+  // Map screen directions to isometric world directions
+  if (keys['ArrowUp'] || keys['KeyW'] || keys['w'] || touch.up) { inputX -= 1; inputY -= 1; }
+  if (keys['ArrowDown'] || keys['KeyS'] || keys['s'] || touch.down) { inputX += 1; inputY += 1; }
+  if (keys['ArrowLeft'] || keys['KeyA'] || keys['a'] || touch.left) { inputX -= 1; inputY += 1; }
+  if (keys['ArrowRight'] || keys['KeyD'] || keys['d'] || touch.right) { inputX += 1; inputY -= 1; }
+
+  // Normalize
+  if (inputX !== 0 || inputY !== 0) {
+    var len = Math.sqrt(inputX * inputX + inputY * inputY);
+    inputX /= len;
+    inputY /= len;
+  }
+
+  // Acceleration
+  marble.vx += inputX * ACCEL * dt;
+  marble.vy += inputY * ACCEL * dt;
+
+  // === TILE EFFECTS ===
+  var curTile = getTileAt(marble.x, marble.y);
+  var tileType = curTile ? curTile.type : T_EMPTY;
+
+  // Friction
+  var fric = FRICTION;
+  if (tileType === T_ICE) fric = 0.985;
+  marble.vx *= Math.pow(fric, dt * 60);
+  marble.vy *= Math.pow(fric, dt * 60);
+
+  // Speed limit
+  var speed = Math.sqrt(marble.vx * marble.vx + marble.vy * marble.vy);
+  if (speed > MAX_SPEED) {
+    marble.vx = (marble.vx / speed) * MAX_SPEED;
+    marble.vy = (marble.vy / speed) * MAX_SPEED;
+    speed = MAX_SPEED;
+  }
+
+  // Slope forces
+  if (tileType === T_RAMP_N) { marble.vy -= SLOPE_FORCE * dt; }
+  if (tileType === T_RAMP_S) { marble.vy += SLOPE_FORCE * dt; }
+  if (tileType === T_RAMP_E) { marble.vx += SLOPE_FORCE * dt; }
+  if (tileType === T_RAMP_W) { marble.vx -= SLOPE_FORCE * dt; }
+
+  // Conveyors
+  if (tileType >= T_CONVEYOR_N && tileType <= T_CONVEYOR_W) {
+    var convForce = 70;
+    if (tileType === T_CONVEYOR_N) marble.vy -= convForce * dt;
+    if (tileType === T_CONVEYOR_S) marble.vy += convForce * dt;
+    if (tileType === T_CONVEYOR_E) marble.vx += convForce * dt;
+    if (tileType === T_CONVEYOR_W) marble.vx -= convForce * dt;
+  }
+
+  // Spin platform effect
+  if (tileType === T_SPIN) {
+    for (var i = 0; i < spinPlatforms.length; i++) {
+      var sp = spinPlatforms[i];
+      if (sp.x === Math.floor(marble.x) && sp.y === Math.floor(marble.y)) {
+        // Centripetal push
+        var dx = marble.x - (sp.x + 0.5);
+        var dy = marble.y - (sp.y + 0.5);
+        var tangentX = -dy * sp.speed * 30;
+        var tangentY = dx * sp.speed * 30;
+        marble.vx += tangentX * dt;
+        marble.vy += tangentY * dt;
+      }
+    }
+  }
+
+  // Catapult launch
+  if (tileType === T_CATAPULT && marble.grounded && marble.vz <= 0) {
+    marble.vz = 200 + level * 20;
+    marble.grounded = false;
+    TAS.audio.playTone(500, 0.2, 'sine', 0.1, 1000);
+    TAS.particles.spawn(0, 0, '#ff8844', 6, 2); // Will be repositioned
+  }
+
+  // === WIND ZONES ===
+  for (var i = 0; i < windZones.length; i++) {
+    var wz = windZones[i];
+    if (marble.x >= wz.x && marble.x <= wz.x + wz.w &&
+        marble.y >= wz.y && marble.y <= wz.y + wz.h) {
+      // Pulsing wind strength
+      var windMult = 0.7 + Math.sin(frame * 0.04 + wz.pulseTimer) * 0.3;
+      marble.vx += wz.fx * windMult * dt;
+      marble.vy += wz.fy * windMult * dt;
+    }
+  }
+
+  // === VACUUMS ===
+  for (var i = 0; i < vacuums.length; i++) {
+    var vc = vacuums[i];
+    var vdx = vc.x - marble.x;
+    var vdy = vc.y - marble.y;
+    var vDist = Math.sqrt(vdx * vdx + vdy * vdy);
+    if (vDist < vc.range && vDist > 0.1) {
+      var pull = vc.strength / (vDist * vDist + 1);
+      marble.vx += (vdx / vDist) * pull * dt;
+      marble.vy += (vdy / vDist) * pull * dt;
+    }
+  }
+
+  // === MOVEMENT ===
+  var newX = marble.x + marble.vx * dt;
+  var newY = marble.y + marble.vy * dt;
+
+  var newH = getTileHeight(Math.floor(newX), Math.floor(newY));
+  var curH = getTileHeight(Math.floor(marble.x), Math.floor(marble.y));
+
+  if (newH >= 0) {
+    // Valid ground
+    marble.x = newX;
+    marble.y = newY;
+    if (!marble.grounded) {
+      marble.vz -= GRAVITY * dt;
+      marble.z += marble.vz * dt;
+      if (marble.z <= 0) {
+        marble.z = 0;
+        marble.vz = 0;
+        marble.grounded = true;
+        if (speed > 50) TAS.audio.playTone(180, 0.04, 'sine', 0.03);
+      }
+    }
+  } else if (!marble.grounded || marble.z > 0) {
+    // Airborne
+    marble.x = newX;
+    marble.y = newY;
+    marble.vz -= GRAVITY * dt;
+    marble.z += marble.vz * dt;
+    if (marble.z <= 0) {
+      marble.z = 0;
+      respawnMarble();
+      return;
+    }
+  } else {
+    // Try axis-separated collision
+    var hX = getTileHeight(Math.floor(newX), Math.floor(marble.y));
+    var hY = getTileHeight(Math.floor(marble.x), Math.floor(newY));
+
+    if (hX >= 0 && hY >= 0) {
+      marble.x = newX;
+      marble.y = newY;
+    } else if (hX >= 0) {
+      marble.x = newX;
+      marble.vy *= -BOUNCE;
+    } else if (hY >= 0) {
+      marble.y = newY;
+      marble.vx *= -BOUNCE;
+    } else {
+      // Falling off edge
+      marble.grounded = false;
+      marble.x = newX;
+      marble.y = newY;
+      marble.vz = -30;
+      TAS.audio.playTone(350, 0.25, 'sine', 0.06, 80);
+    }
+  }
+
+  // === ROTATION VISUAL ===
+  marble.rotation += speed * dt * 0.06;
+  marble.rotY += marble.vx * dt * 0.04;
+
+  // === ROLLING SOUND ===
+  if (speed > 15 && marble.grounded) {
+    rollSoundTimer -= dt;
+    if (rollSoundTimer <= 0) {
+      TAS.audio.playNoise(0.03, 0.008 + speed * 0.00003, 150 + speed);
+      rollSoundTimer = 0.07;
+    }
+  }
+
+  // === DISAPPEARING TILES ===
+  for (var i = 0; i < disappearingTiles.length; i++) {
+    var dt2 = disappearingTiles[i];
+    dt2.timer += dt;
+    var phase = Math.sin(dt2.timer * Math.PI * 2 / dt2.period);
+    dt2.visible = phase > -0.4;
+  }
+
+  // === SPIN PLATFORMS ===
+  for (var i = 0; i < spinPlatforms.length; i++) {
+    spinPlatforms[i].angle += spinPlatforms[i].speed * dt;
+  }
+
+  // === ELECTRIC BARRIERS ===
+  for (var i = 0; i < electricBarriers.length; i++) {
+    var eb = electricBarriers[i];
+    eb.timer += dt;
+    var cycle = eb.onTime + eb.offTime;
+    var phase = eb.timer % cycle;
+    eb.active = phase < eb.onTime;
+
+    // Check collision when active
+    if (eb.active) {
+      var bDist = TAS.math.dist(marble.x, marble.y, eb.x + 0.5, eb.y + 0.5);
+      if (bDist < 1.2) {
+        marble.stunTimer = 1.0;
+        marble.vx *= -0.5;
+        marble.vy *= -0.5;
+        TAS.fx.flash('#44ddff', 0.4);
+        TAS.fx.shake(5, 0.9);
+        TAS.audio.playTone(900, 0.15, 'sawtooth', 0.06, 200);
+        TAS.audio.playNoise(0.1, 0.04, 2000);
+      }
+    }
+  }
+
+  // === ENEMIES ===
+  for (var i = 0; i < enemies.length; i++) {
+    var en = enemies[i];
+    en.timer += dt;
+
+    var edx = marble.x - en.x;
+    var edy = marble.y - en.y;
+    var eDist = Math.sqrt(edx * edx + edy * edy);
+
+    if (en.aggro && eDist < 5) {
+      // Aggressive chase
+      var chaseSpeed = 2.0 + level * 0.3;
+      en.x += (edx / Math.max(0.1, eDist)) * chaseSpeed * dt;
+      en.y += (edy / Math.max(0.1, eDist)) * chaseSpeed * dt;
+    } else {
+      // Patrol around home
+      en.x = en.homeX + Math.sin(en.timer * en.vx) * en.patrol;
+      en.y = en.homeY + Math.cos(en.timer * en.vx * 0.7) * en.patrol * 0.5;
+    }
+
+    // Collision with marble
+    if (eDist < 0.9) {
+      var pushForce = 180 + level * 20;
+      var nx = edx / Math.max(0.1, eDist);
+      var ny = edy / Math.max(0.1, eDist);
+      marble.vx += nx * pushForce * dt * 5;
+      marble.vy += ny * pushForce * dt * 5;
+      TAS.audio.playTone(250, 0.1, 'sawtooth', 0.06);
+      TAS.fx.shake(4, 0.9);
+    }
+  }
+
+  // === HAMMERS ===
+  for (var i = 0; i < hazards.length; i++) {
+    var hz = hazards[i];
+    if (hz.type === 'hammer') {
+      hz.timer += dt;
+      var hPhase = hz.timer % hz.period;
+      var wasActive = hz.active;
+      hz.active = hPhase < 0.2;
+
+      if (hz.active && !wasActive) {
+        hz.smashFrame = frame;
+        // Smash sound if nearby
+        var hDist = TAS.math.dist(marble.x, marble.y, hz.x + 0.5, hz.y + 0.5);
+        if (hDist < 3) TAS.audio.playTone(80, 0.15, 'square', 0.04);
+      }
+
+      // Hit marble
+      if (hz.active && Math.floor(marble.x) === hz.x && Math.floor(marble.y) === hz.y) {
+        marble.stunTimer = 1.5;
+        marble.vx = 0;
+        marble.vy = 0;
+        TAS.fx.shake(8, 0.85);
+        TAS.audio.playTone(60, 0.3, 'square', 0.1);
+      }
+    }
+  }
+
+  // === CHECK FINISH ===
+  if (Math.floor(marble.x) === finishTile.x && Math.floor(marble.y) === finishTile.y && marble.grounded) {
+    completeLevel();
+    return;
+  }
+
+  // === CHECKPOINTS ===
+  for (var i = 0; i < checkpoints.length; i++) {
+    var cp = checkpoints[i];
+    if (!cp.reached) {
+      var cpDist = TAS.math.dist(marble.x, marble.y, cp.x, cp.y);
+      if (cpDist < 1.0) {
+        cp.reached = true;
+        lastCheckpoint.x = cp.x;
+        lastCheckpoint.y = cp.y;
+        score += 100;
+        TAS.audio.playTone(660, 0.08, 'sine', 0.05);
+        TAS.audio.playTone(880, 0.08, 'sine', 0.05);
+      }
+    }
+  }
+
+  // === CAMERA ===
+  var marbleIso = toIso(marble.x, marble.y);
+  var lookAhead = 0.4;
+  camTargetX = marbleIso.x + marble.vx * lookAhead;
+  camTargetY = marbleIso.y + marble.vy * lookAhead;
+  camX = TAS.math.lerp(camX, camTargetX, dt * 5);
+  camY = TAS.math.lerp(camY, camTargetY, dt * 5);
+}
+
+// === DRAW ===
+function draw() {
+  var theme = THEMES[(level - 1) % THEMES.length];
+
+  // Background
+  ctx.fillStyle = theme.bg;
+  ctx.fillRect(0, 0, GW, GH);
+
+  if (state === 'title') {
+    drawTitleScreen();
+    return;
+  }
+
+  if (state === 'gameOver') {
+    TAS.ui.drawGameOver(score, highScore, GW, GH, { frame: frame, extra: 'Reached Level ' + level + ': ' + THEMES[(level-1)%8].name });
+    return;
+  }
+
+  if (state === 'victory') {
+    drawVictoryScreen();
+    return;
+  }
+
+  if (state === 'transition') {
+    drawTransition(theme);
+    return;
+  }
+
+  // === GAME WORLD ===
+  ctx.save();
+  TAS.fx.applyShake();
+
+  var offsetX = GW / 2 - camX;
+  var offsetY = GH / 2 - camY;
+
+  // Draw acid/void below path edges
+  drawVoidBelow(offsetX, offsetY, theme);
+
+  // Draw tiles back-to-front (isometric sort: y first, then x)
+  for (var y = 0; y < levelH; y++) {
+    for (var x = 0; x < levelW; x++) {
+      var tile = tiles[y][x];
+      if (tile.type === T_EMPTY) continue;
+
+      // Invisible tiles (level 8)
+      if (!tile.visible) {
+        if (frame % 180 < 12) {
+          ctx.globalAlpha = 0.25;
+        } else {
+          // Show tiles near marble
+          var mDist = TAS.math.dist(x + 0.5, y + 0.5, marble.x, marble.y);
+          if (mDist < 2) {
+            ctx.globalAlpha = 0.15;
+          } else {
+            continue;
+          }
+        }
+      }
+
+      var iso = toIso(x, y);
+      var sx = iso.x + offsetX;
+      var sy = iso.y + offsetY - tile.height * TILE_DEPTH;
+
+      // Frustum cull
+      if (sx < -TILE_W * 2 || sx > GW + TILE_W * 2 || sy < -50 || sy > GH + 50) {
+        ctx.globalAlpha = 1;
+        continue;
+      }
+
+      // Get disappearing data
+      var tileData = null;
+      if (tile.type === T_DISAPPEAR) {
+        for (var di = 0; di < disappearingTiles.length; di++) {
+          if (disappearingTiles[di].x === x && disappearingTiles[di].y === y) {
+            tileData = disappearingTiles[di];
+            break;
+          }
+        }
+      }
+
+      drawIsoTile(sx, sy, tile.height, theme, tile.type, tileData);
+      ctx.globalAlpha = 1;
+    }
+
+    // Draw enemies/marble/hazards at correct Y depth
+    // Enemies on this row
+    for (var ei = 0; ei < enemies.length; ei++) {
+      if (Math.floor(enemies[ei].y) === y) {
+        drawEnemy(enemies[ei], offsetX, offsetY);
+      }
+    }
+
+    // Marble on this row
+    if (Math.floor(marble.y) === y) {
+      var mIso = toIso(marble.x, marble.y);
+      var msx = mIso.x + offsetX;
+      var msy = mIso.y + offsetY;
+      var mh = getTileHeight(Math.floor(marble.x), Math.floor(marble.y));
+      if (mh < 0) mh = 0;
+      msy -= mh * TILE_DEPTH;
+      drawMarble(msx, msy);
+    }
+  }
+
+  // Draw electric barriers (above tiles)
+  for (var i = 0; i < electricBarriers.length; i++) {
+    drawElectricBarrier(electricBarriers[i], offsetX, offsetY);
+  }
+
+  // Draw hammers
+  for (var i = 0; i < hazards.length; i++) {
+    drawHammer(hazards[i], offsetX, offsetY);
+  }
+
+  // Draw vacuum indicators
+  for (var i = 0; i < vacuums.length; i++) {
+    drawVacuum(vacuums[i], offsetX, offsetY);
+  }
+
+  // Draw wind zone indicators
+  for (var i = 0; i < windZones.length; i++) {
+    drawWindZone(windZones[i], offsetX, offsetY);
+  }
+
+  // Stun stars above marble
+  if (marble.stunTimer > 0) {
+    var mIso2 = toIso(marble.x, marble.y);
+    var msx2 = mIso2.x + offsetX;
+    var msy2 = mIso2.y + offsetY;
+    var mh2 = getTileHeight(Math.floor(marble.x), Math.floor(marble.y));
+    if (mh2 < 0) mh2 = 0;
+    msy2 -= mh2 * TILE_DEPTH - marble.z * TILE_DEPTH;
+    drawStunStars(msx2, msy2 - 14);
+  }
+
+  TAS.particles.draw();
+  ctx.restore();
+
+  TAS.fx.drawFlash(GW, GH);
+
+  // === HUD ===
+  drawHUD(theme);
+
+  // Touch controls
+  TAS.input.drawTouchControls(GW, GH);
+}
+
+function drawVoidBelow(offsetX, offsetY, theme) {
+  ctx.globalAlpha = 0.12 + Math.sin(frame * 0.02) * 0.04;
+  ctx.fillStyle = theme.acid;
+  for (var y = 0; y < levelH; y++) {
+    for (var x = 0; x < levelW; x++) {
+      if (tiles[y][x].type !== T_EMPTY) continue;
+      var near = false;
+      var nx, ny;
+      for (var dy = -1; dy <= 1 && !near; dy++) for (var dx = -1; dx <= 1 && !near; dx++) {
+        nx = x+dx; ny = y+dy;
+        if (nx >= 0 && nx < levelW && ny >= 0 && ny < levelH && tiles[ny][nx].type !== T_EMPTY) near = true;
+      }
+      if (!near) continue;
+      var iso = toIso(x, y);
+      var sx = iso.x + offsetX, sy = iso.y + offsetY + 15;
+      if (sx < -TILE_W || sx > GW + TILE_W || sy < -TILE_H || sy > GH + TILE_H) continue;
+      ctx.beginPath();
+      ctx.moveTo(sx, sy - TILE_H*0.4); ctx.lineTo(sx + TILE_W*0.4, sy);
+      ctx.lineTo(sx, sy + TILE_H*0.4); ctx.lineTo(sx - TILE_W*0.4, sy);
+      ctx.closePath(); ctx.fill();
+    }
+  }
+  ctx.globalAlpha = 1;
+}
+
+function drawElectricBarrier(eb, offsetX, offsetY) {
+  var iso = toIso(eb.x + 0.5, eb.y + 0.5);
+  var sx = iso.x + offsetX, sy = iso.y + offsetY;
+  var h = getTileHeight(eb.x, eb.y); if (h < 0) h = 3;
+  sy -= h * TILE_DEPTH;
+  if (eb.active) {
+    ctx.strokeStyle = '#44eeff'; ctx.lineWidth = 2;
+    ctx.globalAlpha = 0.6 + Math.random() * 0.4;
+    ctx.beginPath();
+    var horiz = eb.horizontal;
+    ctx.moveTo(sx + (horiz ? -10 : 0), sy + (horiz ? 0 : -10));
+    for (var j = -8; j <= 8; j += 4) {
+      var jitter = (Math.random()-0.5)*8;
+      ctx.lineTo(sx + (horiz ? j : jitter), sy + (horiz ? jitter : j));
+    }
+    ctx.lineTo(sx + (horiz ? 10 : 0), sy + (horiz ? 0 : 10));
+    ctx.stroke(); ctx.lineWidth = 1;
+    ctx.globalAlpha = 0.2; ctx.fillStyle = '#44eeff';
+    ctx.beginPath(); ctx.arc(sx, sy, 12, 0, Math.PI*2); ctx.fill();
+    ctx.globalAlpha = 1;
+  } else {
+    ctx.fillStyle = '#444';
+    ctx.fillRect(sx-8, sy-1, 3, 3); ctx.fillRect(sx+5, sy-1, 3, 3);
+  }
+}
+
+function drawHammer(hz, offsetX, offsetY) {
+  if (hz.type !== 'hammer') return;
+  var iso = toIso(hz.x + 0.5, hz.y + 0.5);
+  var sx = iso.x + offsetX, sy = iso.y + offsetY;
+  var h = getTileHeight(hz.x, hz.y); if (h < 0) h = 3;
+  sy -= h * TILE_DEPTH;
+  ctx.fillStyle = '#666'; ctx.fillRect(sx-1.5, sy-28, 3, 22);
+  var headY = sy - 28 + (hz.active ? 20 : 0);
+  ctx.fillStyle = hz.active ? '#ff4444' : '#888';
+  ctx.fillRect(sx-8, headY, 16, 6);
+  ctx.fillStyle = hz.active ? '#cc2222' : '#666';
+  ctx.fillRect(sx-8, headY+6, 16, 3);
+  if (hz.active && frame - hz.smashFrame < 5) {
+    ctx.globalAlpha = 0.4; ctx.fillStyle = '#ffaa00';
+    ctx.beginPath(); ctx.arc(sx, sy, 8, 0, Math.PI*2); ctx.fill(); ctx.globalAlpha = 1;
+  }
+}
+
+function drawVacuum(vc, offsetX, offsetY) {
+  var iso = toIso(vc.x, vc.y);
+  var sx = iso.x + offsetX, sy = iso.y + offsetY;
+  ctx.strokeStyle = '#ff4488'; ctx.lineWidth = 1;
+  ctx.globalAlpha = 0.3 + Math.sin(frame*0.08)*0.15;
+  for (var ri = 0; ri < 3; ri++) {
+    var ra = frame*0.06 + ri*2.1;
+    ctx.beginPath(); ctx.arc(sx, sy, 5+ri*5, ra, ra+1.5); ctx.stroke();
+  }
+  ctx.globalAlpha = 1; ctx.lineWidth = 1;
+  ctx.fillStyle = '#ff2266';
+  ctx.beginPath(); ctx.arc(sx, sy, 3, 0, Math.PI*2); ctx.fill();
+}
+
+function drawWindZone(wz, offsetX, offsetY) {
+  var iso = toIso(wz.x + wz.w/2, wz.y + wz.h/2);
+  var sx = iso.x + offsetX, sy = iso.y + offsetY;
+  ctx.globalAlpha = 0.2 + Math.sin(frame * 0.06 + wz.pulseTimer) * 0.1;
+  ctx.strokeStyle = '#aaccff';
+  ctx.lineWidth = 1;
+  var windDir = Math.atan2(wz.fy, wz.fx);
+  for (var li = 0; li < 4; li++) {
+    var lx = sx + (li-1.5)*6*Math.cos(windDir+Math.PI/2);
+    var ly = sy + (li-1.5)*3*Math.sin(windDir+Math.PI/2);
+    var wo = Math.sin(frame*0.08+li*1.5)*3;
+    ctx.beginPath();
+    ctx.moveTo(lx - Math.cos(windDir)*8, ly - Math.sin(windDir)*4 + wo);
+    ctx.lineTo(lx + Math.cos(windDir)*8, ly + Math.sin(windDir)*4 + wo);
+    ctx.stroke();
+  }
+  ctx.globalAlpha = 1; ctx.lineWidth = 1;
+}
+
+function drawStunStars(sx, sy) {
+  ctx.fillStyle = '#ffdd00';
+  for (var i = 0; i < 4; i++) {
+    var a = frame * 0.12 + i * Math.PI / 2;
+    var px = sx + Math.cos(a) * 10;
+    var py = sy + Math.sin(a) * 4;
+    // 4-point star
+    ctx.beginPath();
+    ctx.moveTo(px, py - 3);
+    ctx.lineTo(px + 1, py);
+    ctx.lineTo(px, py + 3);
+    ctx.lineTo(px - 1, py);
+    ctx.closePath();
+    ctx.fill();
+  }
+}
+
+function drawHUD(theme) {
+  // Top bar
+  ctx.fillStyle = 'rgba(5,5,15,0.85)';
+  ctx.fillRect(0, 0, GW, 30);
+
+  ctx.font = 'bold 12px monospace';
+
+  // Timer
+  var timerColor = timerWarning ? (frame % 16 < 8 ? '#ff3333' : '#ffaa00') : '#ffffff';
+  ctx.fillStyle = timerColor;
+  ctx.textAlign = 'left';
+  ctx.fillText('TIME: ' + Math.ceil(timeLeft) + 's', 8, 20);
+
+  // Score
+  ctx.fillStyle = '#ffdd44';
+  ctx.textAlign = 'center';
+  ctx.fillText(score.toString(), GW / 2, 20);
+
+  // Level
+  ctx.fillStyle = theme.path;
+  ctx.textAlign = 'right';
+  ctx.font = '11px monospace';
+  ctx.fillText('LV' + level + ' ' + theme.name, GW - 55, 20);
+
+  // Minimap
+  drawMinimap();
+}
+
+function drawMinimap() {
+  var mapW = 44, mapH = 60;
+  var mx = GW - mapW - 6, my = 34;
+  var scaleX = mapW / levelW;
+  var scaleY = mapH / levelH;
+
+  ctx.fillStyle = 'rgba(0,0,0,0.6)';
+  ctx.fillRect(mx - 1, my - 1, mapW + 2, mapH + 2);
+
+  // Tiles
+  ctx.fillStyle = 'rgba(80,130,200,0.4)';
+  for (var y = 0; y < levelH; y++) {
+    for (var x = 0; x < levelW; x++) {
+      if (tiles[y][x].type !== T_EMPTY) {
+        ctx.fillRect(mx + x * scaleX, my + y * scaleY, Math.max(1, scaleX), Math.max(1, scaleY));
+      }
+    }
+  }
+
+  // Checkpoints
+  ctx.fillStyle = '#44ffaa';
+  for (var i = 0; i < checkpoints.length; i++) {
+    var cp = checkpoints[i];
+    ctx.fillRect(mx + (cp.x - 0.5) * scaleX, my + (cp.y - 0.5) * scaleY, 2, 2);
+  }
+
+  // Finish
+  ctx.fillStyle = '#ffdd44';
+  ctx.fillRect(mx + finishTile.x * scaleX - 1, my + finishTile.y * scaleY - 1, 3, 3);
+
+  // Marble position
+  ctx.fillStyle = '#ffffff';
+  var mpx = mx + marble.x * scaleX;
+  var mpy = my + marble.y * scaleY;
+  ctx.fillRect(mpx - 1, mpy - 1, 3, 3);
+
+  // Border
+  ctx.strokeStyle = 'rgba(255,255,255,0.2)';
+  ctx.lineWidth = 0.5;
+  ctx.strokeRect(mx - 1, my - 1, mapW + 2, mapH + 2);
+  ctx.lineWidth = 1;
+}
+
+function drawTransition(theme) {
+  ctx.fillStyle = theme.bg;
+  ctx.fillRect(0, 0, GW, GH);
+
+  ctx.textAlign = 'center';
+
+  // Level complete banner
+  ctx.fillStyle = '#ffdd44';
+  ctx.font = 'bold 24px monospace';
+  ctx.fillText('LEVEL ' + level + ' COMPLETE!', GW/2, GH * 0.3);
+
+  // Time bonus
+  ctx.fillStyle = '#ffffff';
+  ctx.font = '14px monospace';
+  ctx.fillText('Time Bonus: ' + Math.floor(timeLeft) + ' x 100 = ' + (Math.floor(timeLeft) * 100), GW/2, GH * 0.45);
+
+  ctx.fillStyle = '#44ff88';
+  ctx.font = 'bold 16px monospace';
+  ctx.fillText('Score: ' + score, GW/2, GH * 0.55);
+
+  // Next level preview
+  var nextTheme = THEMES[level % THEMES.length];
+  ctx.fillStyle = nextTheme.path;
+  ctx.font = '13px monospace';
+  ctx.fillText('Next: ' + nextTheme.name, GW/2, GH * 0.7);
+
+  // Progress bar
+  var progW = 200;
+  var progX = GW/2 - progW/2;
+  var progFill = 1 - (levelTransition / 2.0);
+  ctx.fillStyle = '#333';
+  ctx.fillRect(progX, GH * 0.8, progW, 8);
+  ctx.fillStyle = theme.path;
+  ctx.fillRect(progX, GH * 0.8, progW * progFill, 8);
+}
+
+function drawTitleScreen() {
+  // Animated isometric background tiles
+  ctx.save();
+  var bgTime = frame * 0.3;
+  for (var by = -2; by < 12; by++) {
+    for (var bx = -2; bx < 12; bx++) {
+      var iso = toIso(bx, by);
+      var sx = iso.x + GW/2 + Math.sin(bgTime * 0.01) * 20;
+      var sy = iso.y + 200 + (bgTime * 0.5) % (TILE_H * 2);
+      if (sx < -TILE_W || sx > GW + TILE_W || sy < -TILE_H || sy > GH + TILE_H) continue;
+      ctx.globalAlpha = 0.06 + Math.sin(bx * 0.5 + by * 0.3 + frame * 0.02) * 0.03;
+      drawIsoDiamond(sx, sy, TILE_W * 0.9, TILE_H * 0.9, '#4488cc', null);
+    }
+  }
+  ctx.globalAlpha = 1;
+  ctx.restore();
+
+  // Title shadow
+  ctx.textAlign = 'center';
+  ctx.font = 'bold 30px monospace';
+  ctx.fillStyle = '#000';
+  ctx.fillText('MARBLE MADNESS', GW/2 + 2, 92 + 2);
+  // Title gradient text
+  ctx.fillStyle = '#4488ff';
+  ctx.fillText('MARBLE MADNESS', GW/2, 92);
+  // Highlight
+  ctx.fillStyle = '#88bbff';
+  ctx.globalAlpha = 0.5;
+  ctx.fillText('MARBLE MADNESS', GW/2, 91);
+  ctx.globalAlpha = 1;
+
+  // Subtitle
+  ctx.fillStyle = '#667788';
+  ctx.font = '12px monospace';
+  ctx.fillText('A Tasern Arcade Challenge', GW/2, 118);
+
+  // Animated demo marble
+  var demoX = GW/2 + Math.sin(frame * 0.03) * 40;
+  var demoY = 190 + Math.sin(frame * 0.05) * 12;
+  var demoR = 16;
+  // Shadow
+  ctx.globalAlpha = 0.3;
+  ctx.fillStyle = '#000';
+  ctx.beginPath();
+  ctx.ellipse(demoX, 210, demoR * 1.2, demoR * 0.5, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.globalAlpha = 1;
+  // Marble
+  var dGrad = ctx.createRadialGradient(demoX - 5, demoY - 5, 0, demoX, demoY, demoR);
+  dGrad.addColorStop(0, '#ffffff');
+  dGrad.addColorStop(0.2, '#99bbff');
+  dGrad.addColorStop(0.5, '#4466cc');
+  dGrad.addColorStop(0.8, '#223388');
+  dGrad.addColorStop(1, '#0a1133');
+  ctx.fillStyle = dGrad;
+  ctx.beginPath();
+  ctx.arc(demoX, demoY, demoR, 0, Math.PI * 2);
+  ctx.fill();
+  // Stripe
+  ctx.strokeStyle = 'rgba(255,255,255,0.5)';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.arc(demoX + Math.cos(frame * 0.06) * 8, demoY + Math.sin(frame * 0.06) * 4, 7, 0, Math.PI * 0.8);
+  ctx.stroke();
+  ctx.lineWidth = 1;
+  // Highlight
+  ctx.fillStyle = 'rgba(255,255,255,0.6)';
+  ctx.beginPath();
+  ctx.arc(demoX - 5, demoY - 6, 4, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Controls info
+  ctx.fillStyle = '#aaaaaa';
+  ctx.font = '11px monospace';
+  var infoY = 270;
+  ctx.fillText('Controls: Arrow Keys / WASD', GW/2, infoY);
+  ctx.fillText('Roll to the finish before time expires!', GW/2, infoY + 20);
+  ctx.fillText('Remaining time carries to next level', GW/2, infoY + 38);
+  ctx.fillText('8 increasingly difficult races', GW/2, infoY + 56);
+
+  ctx.font = '9px monospace';
+  ctx.fillStyle = '#556677';
+  for (var i = 0; i < 4; i++) ctx.fillText((i+1)+'. '+THEMES[i].name+'    '+(i+5)+'. '+THEMES[i+4].name, GW/2, 360+i*14);
+
+  // High score
+  if (highScore > 0) {
+    ctx.fillStyle = '#ffdd44';
+    ctx.font = 'bold 12px monospace';
+    ctx.fillText('HIGH SCORE: ' + highScore, GW/2, 425);
+  }
+
+  // Pulsing start prompt
+  var pulse = Math.sin(frame * 0.05) * 0.3 + 0.7;
+  ctx.globalAlpha = pulse;
+  ctx.fillStyle = '#ffdd44';
+  ctx.font = 'bold 13px monospace';
+  ctx.fillText('PRESS ANY KEY TO START', GW/2, 455);
+  ctx.globalAlpha = 1;
+}
+
+function drawVictoryScreen() {
+  ctx.fillStyle = '#080818'; ctx.fillRect(0, 0, GW, GH);
+  if (frame % 8 === 0) {
+    var colors = ['#ffdd44','#44ddff','#ff44aa','#44ff88'];
+    TAS.particles.spawn(TAS.math.randRange(40,GW-40), GH+10, colors[frame%4], 4, 3, {gravity:-1.5});
+  }
+  TAS.particles.draw();
+  ctx.textAlign = 'center';
+  ctx.globalAlpha = 0.8 + Math.sin(frame*0.04)*0.2;
+  ctx.fillStyle = '#ffdd44'; ctx.font = 'bold 32px monospace';
+  ctx.fillText('CHAMPION!', GW/2, 100); ctx.globalAlpha = 1;
+  ctx.fillStyle = '#fff'; ctx.font = '15px monospace';
+  ctx.fillText('All 8 races conquered!', GW/2, 145);
+  ctx.fillStyle = '#ffdd44'; ctx.font = 'bold 22px monospace';
+  ctx.fillText('FINAL SCORE: ' + score, GW/2, 210);
+  if (score >= highScore && score > 0) {
+    ctx.globalAlpha = Math.sin(frame*0.07)*0.3+0.7;
+    ctx.fillStyle = '#44ff88'; ctx.font = 'bold 14px monospace';
+    ctx.fillText('NEW HIGH SCORE!', GW/2, 250); ctx.globalAlpha = 1;
+  }
+  ctx.fillStyle = '#aaa'; ctx.font = '12px monospace';
+  ctx.fillText('Time remaining: '+Math.floor(timeLeft)+'s', GW/2, 300);
+  ctx.fillText('Levels completed: 8/8', GW/2, 320);
+  ctx.globalAlpha = Math.sin(frame*0.05)*0.3+0.7;
+  ctx.fillStyle = '#88ccff'; ctx.font = 'bold 13px monospace';
+  ctx.fillText('PRESS ANY KEY', GW/2, 420); ctx.globalAlpha = 1;
+}
+
+// === START GAME LOOP ===
+TAS.loop.start(update, draw);
+
+})();
+</script>
+</body>
+</html>

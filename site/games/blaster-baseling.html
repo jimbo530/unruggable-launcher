@@ -1,0 +1,1635 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Blaster Baseling</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body { width: 100%; height: 100%; overflow: hidden; background: #0a0808; touch-action: none; }
+canvas { display: block; margin: 0 auto; }
+#back-link {
+  position: fixed; bottom: 8px; left: 50%; transform: translateX(-50%);
+  color: #666; font-family: monospace; font-size: 12px; text-decoration: none; z-index: 10;
+}
+#back-link:hover { color: #aaa; }
+</style>
+</head>
+<body>
+<canvas id="gc"></canvas>
+<a id="back-link" href="/games">Back to Arcade</a>
+<script src="nft-loader.js"></script>
+<script>if(window.NftLoader)NftLoader.gate();</script>
+<script src="tasern-engine.js"></script>
+<script>
+(function() {
+"use strict";
+
+const GW = 480, GH = 320;
+const ctx = TAS.ctx;
+TAS.initCanvas(GW, GH);
+TAS.input.initTouch({ buttons: ['a', 'b'], labels: { a: 'JUMP', b: 'FIRE' } });
+
+// === CONSTANTS ===
+const TILE = 16;
+const TANK_W = 24, TANK_H = 20;
+const FOOT_W = 12, FOOT_H = 12;
+const GRAVITY = 600;
+const TANK_SPEED = 120;
+const TANK_JUMP = -280;
+const FOOT_SPEED = 90;
+const TANK_MAX_HP = 8;
+const FOOT_MAX_HP = 4;
+const MAX_LIVES = 3;
+const ZONE_W = 30, ZONE_H = 20; // tiles per zone screen
+const DUNGEON_W = 15, DUNGEON_H = 11;
+const BULLET_SPEED = 250;
+const GRENADE_SPEED = 150;
+
+// === ZONE DEFINITIONS ===
+const ZONE_COLORS = [
+  { bg: '#1a0f2e', wall: '#4a2e6a', accent: '#8844aa' }, // Fungal Caverns
+  { bg: '#0f1a2e', wall: '#2e4a6a', accent: '#44aadd' }, // Crystal Mines
+  { bg: '#0a1a1a', wall: '#1a4a4a', accent: '#44ddaa' }, // Subterranean Lake
+  { bg: '#2e1a0a', wall: '#6a3a1a', accent: '#dd6622' }, // Lava Tubes
+  { bg: '#0a2e0a', wall: '#2a5a2a', accent: '#66dd44' }, // Bio-Lab
+  { bg: '#1a1a2e', wall: '#3a3a6a', accent: '#aaaaff' }, // Reactor Core
+  { bg: '#1a1a1a', wall: '#4a4a4a', accent: '#ccaa44' }, // Machine Works
+  { bg: '#0a0a0a', wall: '#2a1a2a', accent: '#dd44dd' }  // Dark Heart
+];
+
+const ZONE_NAMES = [
+  'Fungal Caverns', 'Crystal Mines', 'Subterranean Lake', 'Lava Tubes',
+  'Bio-Lab', 'Reactor Core', 'Machine Works', 'Dark Heart'
+];
+
+const UPGRADE_NAMES = ['Wall Climb', 'Water Traverse', 'Crusher Armor', 'Mega Cannon'];
+const GUN_NAMES = ['Spread', 'Wave', 'Homing'];
+
+// === GAME STATE ===
+let state = 'title';
+let frame = 0;
+let lives = MAX_LIVES;
+let score = 0;
+let highScore = TAS.score.load('blaster_baseling_hi');
+
+let mode = 'tank'; // 'tank' or 'foot'
+let currentZone = 0;
+let currentScreen = 0; // screen within zone
+let inDungeon = false;
+let dungeonRoom = 0;
+let dungeonId = -1;
+
+// Player state
+let player = null;
+let tankHP = TANK_MAX_HP;
+let footHP = FOOT_MAX_HP;
+let tankUpgrades = [false, false, false, false]; // wall climb, water, crusher, mega cannon
+let gunUpgrade = -1; // -1 = none, 0=spread, 1=wave, 2=homing
+let grenades = 3;
+let hoverFuel = 0;
+const HOVER_MAX = 60;
+
+// Camera
+let camX = 0, camY = 0;
+
+// Bullets, enemies, items
+let bullets = [];
+let enemyBullets = [];
+let enemies = [];
+let items = [];
+let doors = [];
+let particles_local = [];
+
+// Map data - procedurally generated per zone/screen
+let tiles = [];
+let mapW = 0, mapH = 0;
+
+// Dungeon state
+let dungeonTiles = [];
+let dungeonEnemies = [];
+let dungeonBoss = null;
+let dungeonCleared = [];
+
+// Zone progression
+let zoneKeys = [true, false, false, false, false, false, false, false]; // first zone unlocked
+let exploredScreens = {};
+
+// Save/Load
+function saveGame() {
+  const data = {
+    zone: currentZone, screen: currentScreen, lives, score,
+    tankUpgrades, gunUpgrade, grenades, zoneKeys,
+    dungeonCleared, exploredScreens, tankHP, footHP
+  };
+  try { localStorage.setItem('blaster_baseling_save', JSON.stringify(data)); } catch(e) { console.error('Save failed:', e); }
+}
+
+function loadGame() {
+  try {
+    const raw = localStorage.getItem('blaster_baseling_save');
+    if (!raw) return false;
+    const data = JSON.parse(raw);
+    currentZone = data.zone || 0;
+    currentScreen = data.screen || 0;
+    lives = data.lives || MAX_LIVES;
+    score = data.score || 0;
+    tankUpgrades = data.tankUpgrades || [false, false, false, false];
+    gunUpgrade = data.gunUpgrade !== undefined ? data.gunUpgrade : -1;
+    grenades = data.grenades || 3;
+    zoneKeys = data.zoneKeys || [true, false, false, false, false, false, false, false];
+    dungeonCleared = data.dungeonCleared || [];
+    exploredScreens = data.exploredScreens || {};
+    tankHP = data.tankHP || TANK_MAX_HP;
+    footHP = data.footHP || FOOT_MAX_HP;
+    return true;
+  } catch(e) { console.error('Load failed:', e); return false; }
+}
+
+// === MAP GENERATION ===
+function seedRandom(seed) {
+  let s = seed;
+  return function() {
+    s = (s * 1664525 + 1013904223) & 0xFFFFFFFF;
+    return (s >>> 0) / 0xFFFFFFFF;
+  };
+}
+
+function generateZoneScreen(zone, screen) {
+  const rng = seedRandom(zone * 1000 + screen * 7 + 42);
+  const w = ZONE_W, h = ZONE_H;
+  const t = [];
+  for (let y = 0; y < h; y++) {
+    t[y] = [];
+    for (let x = 0; x < w; x++) {
+      if (y === 0 || y === h - 1 || x === 0 || x === w - 1) {
+        t[y][x] = 1; // border walls
+      } else if (y >= h - 3 && rng() < 0.3) {
+        t[y][x] = 1; // ground platforms
+      } else if (y >= h - 2) {
+        t[y][x] = 1;
+      } else {
+        t[y][x] = 0;
+      }
+    }
+  }
+
+  // Add platforms
+  const platformCount = 3 + Math.floor(rng() * 4);
+  for (let i = 0; i < platformCount; i++) {
+    const px = 3 + Math.floor(rng() * (w - 8));
+    const py = 4 + Math.floor(rng() * (h - 8));
+    const pw = 3 + Math.floor(rng() * 5);
+    for (let x = px; x < px + pw && x < w - 1; x++) {
+      t[py][x] = 1;
+    }
+  }
+
+  // Zone-specific features
+  if (zone === 2 || zone === 3) { // water/lava zones
+    for (let x = 1; x < w - 1; x++) {
+      if (rng() < 0.4 && t[h - 2][x] === 1) {
+        t[h - 2][x] = zone === 2 ? 2 : 3; // 2=water, 3=lava
+        t[h - 3][x] = zone === 2 ? 2 : 3;
+      }
+    }
+  }
+
+  // Openings for zone transitions (left/right edges)
+  if (screen > 0) { // left opening
+    for (let y = h - 5; y < h - 1; y++) t[y][0] = 0;
+  }
+  if (screen < 2) { // right opening
+    for (let y = h - 5; y < h - 1; y++) t[y][w - 1] = 0;
+  }
+
+  // Top exit to next zone (on last screen)
+  if (screen === 2 && zone < 7) {
+    for (let x = 13; x < 17; x++) t[0][x] = 0;
+  }
+
+  return t;
+}
+
+function generateDungeon(zone, id) {
+  const rng = seedRandom(zone * 500 + id * 13 + 99);
+  const w = DUNGEON_W, h = DUNGEON_H;
+  const t = [];
+  for (let y = 0; y < h; y++) {
+    t[y] = [];
+    for (let x = 0; x < w; x++) {
+      if (y === 0 || y === h - 1 || x === 0 || x === w - 1) {
+        t[y][x] = 1;
+      } else {
+        t[y][x] = 0;
+      }
+    }
+  }
+
+  // Inner walls/obstacles
+  const obstCount = 4 + Math.floor(rng() * 4);
+  for (let i = 0; i < obstCount; i++) {
+    const ox = 2 + Math.floor(rng() * (w - 5));
+    const oy = 2 + Math.floor(rng() * (h - 5));
+    const ow = 1 + Math.floor(rng() * 3);
+    const oh = 1 + Math.floor(rng() * 2);
+    for (let y = oy; y < oy + oh && y < h - 1; y++) {
+      for (let x = ox; x < ox + ow && x < w - 1; x++) {
+        t[y][x] = 1;
+      }
+    }
+  }
+
+  // Ensure entrance clear
+  t[h - 2][Math.floor(w / 2)] = 0;
+  t[h - 2][Math.floor(w / 2) + 1] = 0;
+  t[h - 3][Math.floor(w / 2)] = 0;
+
+  return t;
+}
+
+function generateEnemies(zone, screen, isD, dId) {
+  const rng = seedRandom(zone * 333 + (isD ? dId * 77 : screen * 11) + 7);
+  const elist = [];
+  const count = isD ? (3 + zone) : (2 + Math.floor(rng() * 3) + Math.floor(zone * 0.5));
+  const w = isD ? DUNGEON_W : ZONE_W;
+  const h = isD ? DUNGEON_H : ZONE_H;
+
+  for (let i = 0; i < count; i++) {
+    const ex = 3 + Math.floor(rng() * (w - 6));
+    const ey = 2 + Math.floor(rng() * (h - 5));
+    const type = Math.floor(rng() * 4); // 0=crawler, 1=flyer, 2=turret, 3=mine
+    elist.push({
+      x: ex * TILE, y: ey * TILE, type, hp: 1 + Math.floor(zone * 0.5),
+      w: 14, h: 14, vx: type === 0 ? (rng() > 0.5 ? 1 : -1) * 30 : 0,
+      vy: type === 1 ? (rng() > 0.5 ? 1 : -1) * 20 : 0,
+      shootTimer: 60 + Math.floor(rng() * 60), shootCD: 0, alive: true,
+      startX: ex * TILE, startY: ey * TILE, moveRange: 30 + rng() * 50
+    });
+  }
+  return elist;
+}
+
+function generateDoors(zone, screen) {
+  const rng = seedRandom(zone * 200 + screen * 3 + 55);
+  const dlist = [];
+  // Each zone screen 0 has a required dungeon, screen 1 has optional
+  if (screen === 0 || (screen === 1 && rng() > 0.3)) {
+    const dx = 8 + Math.floor(rng() * 14);
+    dlist.push({ x: dx * TILE, y: (ZONE_H - 4) * TILE, id: zone * 10 + screen, required: screen === 0 });
+  }
+  if (screen === 2 && rng() > 0.5) {
+    const dx = 18 + Math.floor(rng() * 6);
+    dlist.push({ x: dx * TILE, y: (ZONE_H - 4) * TILE, id: zone * 10 + 5, required: false });
+  }
+  return dlist;
+}
+
+function generateItems(zone, screen, isD, dId) {
+  const rng = seedRandom(zone * 444 + (isD ? dId * 9 : screen * 5) + 123);
+  const ilist = [];
+  if (isD && rng() > 0.6) {
+    ilist.push({ x: 7 * TILE, y: 3 * TILE, type: 'grenade', collected: false });
+  }
+  if (!isD && rng() > 0.7) {
+    const ix = 5 + Math.floor(rng() * 20);
+    ilist.push({ x: ix * TILE, y: (ZONE_H - 5) * TILE, type: 'health', collected: false });
+  }
+  return ilist;
+}
+
+// === LOAD SCREEN ===
+function loadScreen() {
+  if (inDungeon) {
+    dungeonTiles = generateDungeon(currentZone, dungeonId);
+    dungeonEnemies = generateEnemies(currentZone, 0, true, dungeonId);
+    items = generateItems(currentZone, 0, true, dungeonId);
+    mapW = DUNGEON_W;
+    mapH = DUNGEON_H;
+    // Check if boss room (required dungeon, room 2)
+    if (dungeonRoom >= 2) {
+      spawnBoss();
+    }
+  } else {
+    tiles = generateZoneScreen(currentZone, currentScreen);
+    enemies = generateEnemies(currentZone, currentScreen, false, 0);
+    doors = generateDoors(currentZone, currentScreen);
+    items = generateItems(currentZone, currentScreen, false, 0);
+    mapW = ZONE_W;
+    mapH = ZONE_H;
+    const key = currentZone + '_' + currentScreen;
+    exploredScreens[key] = true;
+  }
+  bullets = [];
+  enemyBullets = [];
+}
+
+function spawnBoss() {
+  const bossHP = 8 + currentZone * 4;
+  dungeonBoss = {
+    x: (DUNGEON_W / 2) * TILE, y: 3 * TILE, w: 28, h: 28,
+    hp: bossHP, maxHP: bossHP, phase: 0, timer: 0,
+    vx: 40, vy: 20, shootCD: 0, alive: true
+  };
+}
+
+// === PLAYER INIT ===
+function initPlayer() {
+  player = {
+    x: 3 * TILE, y: (ZONE_H - 4) * TILE,
+    vx: 0, vy: 0, facing: 1, // 1=right, -1=left
+    shootCD: 0, invuln: 0, grounded: false,
+    facingUp: false // for top-down
+  };
+  hoverFuel = HOVER_MAX;
+}
+
+// === START GAME ===
+function startGame(continued) {
+  if (!continued) {
+    lives = MAX_LIVES;
+    score = 0;
+    currentZone = 0;
+    currentScreen = 0;
+    tankHP = TANK_MAX_HP;
+    footHP = FOOT_MAX_HP;
+    tankUpgrades = [false, false, false, false];
+    gunUpgrade = -1;
+    grenades = 3;
+    zoneKeys = [true, false, false, false, false, false, false, false];
+    dungeonCleared = [];
+    exploredScreens = {};
+  }
+  mode = 'tank';
+  inDungeon = false;
+  dungeonRoom = 0;
+  dungeonBoss = null;
+  initPlayer();
+  loadScreen();
+  state = 'playing';
+  TAS.particles.clear();
+}
+
+// === COLLISION HELPERS ===
+function tileAt(tx, ty) {
+  if (inDungeon) {
+    if (tx < 0 || tx >= DUNGEON_W || ty < 0 || ty >= DUNGEON_H) return 1;
+    return dungeonTiles[ty][tx];
+  } else {
+    if (tx < 0 || tx >= ZONE_W || ty < 0 || ty >= ZONE_H) return 1;
+    return tiles[ty][tx];
+  }
+}
+
+function solidAt(px, py, pw, ph) {
+  const x1 = Math.floor(px / TILE);
+  const y1 = Math.floor(py / TILE);
+  const x2 = Math.floor((px + pw - 1) / TILE);
+  const y2 = Math.floor((py + ph - 1) / TILE);
+  for (let y = y1; y <= y2; y++) {
+    for (let x = x1; x <= x2; x++) {
+      const t = tileAt(x, y);
+      if (t === 1) return true;
+      if (t === 2 && mode === 'tank' && !tankUpgrades[1]) return true; // water blocks tank without upgrade
+      if (t === 3) return true; // lava always solid (damages)
+    }
+  }
+  return false;
+}
+
+function hazardAt(px, py, pw, ph) {
+  const x1 = Math.floor(px / TILE);
+  const y1 = Math.floor(py / TILE);
+  const x2 = Math.floor((px + pw - 1) / TILE);
+  const y2 = Math.floor((py + ph - 1) / TILE);
+  for (let y = y1; y <= y2; y++) {
+    for (let x = x1; x <= x2; x++) {
+      const t = tileAt(x, y);
+      if (t === 3) return 'lava';
+      if (t === 2 && mode === 'foot') return 'water';
+    }
+  }
+  return null;
+}
+
+// === UPDATE: TANK MODE ===
+function updateTank(dt) {
+  const keys = TAS.input.keys;
+  const touch = TAS.input.touch;
+  const spd = TANK_SPEED * dt;
+
+  // Horizontal movement
+  let moveX = 0;
+  if (keys['ArrowLeft'] || keys['KeyA'] || touch.left) { moveX = -1; player.facing = -1; }
+  if (keys['ArrowRight'] || keys['KeyD'] || touch.right) { moveX = 1; player.facing = 1; }
+  player.vx = moveX * TANK_SPEED;
+
+  // Aim up
+  player.facingUp = !!(keys['ArrowUp'] || keys['KeyW'] || touch.up);
+
+  // Jump / Hover
+  if ((keys['Space'] || keys['KeyZ'] || touch.a) && player.grounded) {
+    player.vy = TANK_JUMP;
+    player.grounded = false;
+    hoverFuel = HOVER_MAX;
+    TAS.audio.playTone(200, 0.15, 'square', 0.08, 300);
+  } else if ((keys['Space'] || keys['KeyZ'] || touch.a) && !player.grounded && hoverFuel > 0) {
+    player.vy = Math.max(player.vy - 400 * dt, -100);
+    hoverFuel -= dt * 60;
+  }
+
+  // Apply gravity
+  player.vy += GRAVITY * dt;
+  if (player.vy > 400) player.vy = 400;
+
+  // Move X
+  const newX = player.x + player.vx * dt;
+  if (!solidAt(newX, player.y, TANK_W, TANK_H)) {
+    player.x = newX;
+  } else if (tankUpgrades[0]) { // wall climb
+    const wallY = player.y - 2;
+    if (!solidAt(player.x, wallY, TANK_W, TANK_H)) {
+      player.y = wallY;
+      player.x = newX;
+    }
+  }
+
+  // Move Y
+  const newY = player.y + player.vy * dt;
+  if (!solidAt(player.x, newY, TANK_W, TANK_H)) {
+    player.y = newY;
+    player.grounded = false;
+  } else {
+    if (player.vy > 0) {
+      player.grounded = true;
+      hoverFuel = HOVER_MAX;
+    }
+    player.vy = 0;
+  }
+
+  // Shoot
+  if (player.shootCD > 0) player.shootCD -= dt;
+  if ((keys['KeyX'] || keys['Enter'] || touch.b) && player.shootCD <= 0) {
+    fireBullet();
+    player.shootCD = 0.2;
+  }
+
+  // Screen transitions
+  if (player.x < -4) {
+    if (currentScreen > 0) {
+      currentScreen--;
+      player.x = (ZONE_W - 2) * TILE;
+      loadScreen();
+    } else if (currentZone > 0 && zoneKeys[currentZone - 1]) {
+      currentZone--;
+      currentScreen = 2;
+      player.x = (ZONE_W - 2) * TILE;
+      loadScreen();
+    } else {
+      player.x = 0;
+    }
+  }
+  if (player.x > (ZONE_W - 1) * TILE) {
+    if (currentScreen < 2) {
+      currentScreen++;
+      player.x = 2 * TILE;
+      loadScreen();
+    } else {
+      player.x = (ZONE_W - 1) * TILE;
+    }
+  }
+  if (player.y < -4 && currentScreen === 2 && currentZone < 7) {
+    if (zoneKeys[currentZone + 1]) {
+      currentZone++;
+      currentScreen = 0;
+      player.y = (ZONE_H - 3) * TILE;
+      loadScreen();
+    } else {
+      player.y = 0;
+    }
+  }
+
+  // Door interaction
+  for (const door of doors) {
+    if (TAS.hit.rectOverlap(player.x, player.y, TANK_W, TANK_H, door.x, door.y, TILE * 2, TILE * 2)) {
+      if (keys['ArrowDown'] || keys['KeyS'] || touch.down) {
+        enterDungeon(door.id);
+      }
+    }
+  }
+
+  // Hazard damage
+  const haz = hazardAt(player.x, player.y, TANK_W, TANK_H);
+  if (haz && player.invuln <= 0) {
+    takeDamage(haz === 'lava' ? 2 : 1);
+  }
+}
+
+// === UPDATE: FOOT MODE (TOP-DOWN) ===
+function updateFoot(dt) {
+  const keys = TAS.input.keys;
+  const touch = TAS.input.touch;
+
+  let mx = 0, my = 0;
+  if (keys['ArrowLeft'] || keys['KeyA'] || touch.left) { mx = -1; player.facing = -1; }
+  if (keys['ArrowRight'] || keys['KeyD'] || touch.right) { mx = 1; player.facing = 1; }
+  if (keys['ArrowUp'] || keys['KeyW'] || touch.up) { my = -1; player.facingUp = true; }
+  if (keys['ArrowDown'] || keys['KeyS'] || touch.down) { my = 1; player.facingUp = false; }
+
+  if (mx !== 0 || my !== 0) {
+    const len = Math.sqrt(mx * mx + my * my);
+    mx /= len; my /= len;
+  }
+
+  const spd = FOOT_SPEED * dt;
+  const newX = player.x + mx * spd * 60;
+  const newY = player.y + my * spd * 60;
+
+  if (!solidAt(newX, player.y, FOOT_W, FOOT_H)) player.x = newX;
+  if (!solidAt(player.x, newY, FOOT_W, FOOT_H)) player.y = newY;
+
+  // Shoot
+  if (player.shootCD > 0) player.shootCD -= dt;
+  if ((keys['KeyX'] || keys['Enter'] || touch.b) && player.shootCD <= 0) {
+    fireFootBullet(mx, my);
+    player.shootCD = 0.25;
+  }
+
+  // Grenade
+  if ((keys['KeyC'] || keys['ShiftLeft']) && grenades > 0 && player.shootCD <= 0) {
+    fireGrenade(mx, my);
+    grenades--;
+    player.shootCD = 0.4;
+  }
+
+  // Room transition in dungeon
+  if (player.y > (DUNGEON_H - 1) * TILE) {
+    exitDungeon();
+  }
+  if (player.y < TILE && dungeonRoom < 2) {
+    dungeonRoom++;
+    player.y = (DUNGEON_H - 2) * TILE;
+    loadScreen();
+  }
+
+  // Hazard
+  const haz = hazardAt(player.x, player.y, FOOT_W, FOOT_H);
+  if (haz && player.invuln <= 0) {
+    takeDamage(1);
+  }
+}
+
+// === SHOOTING ===
+function fireBullet() {
+  let dx = player.facing, dy = 0;
+  if (player.facingUp) { dx = 0; dy = -1; }
+  const bx = player.x + (dx > 0 ? TANK_W : dx < 0 ? -6 : TANK_W / 2);
+  const by = player.y + (dy < 0 ? -6 : TANK_H / 2);
+
+  if (tankUpgrades[3]) { // mega cannon - bigger bullet
+    bullets.push({ x: bx, y: by, vx: dx * BULLET_SPEED * 1.5, vy: dy * BULLET_SPEED * 1.5, size: 6, dmg: 3, life: 2 });
+  } else {
+    bullets.push({ x: bx, y: by, vx: dx * BULLET_SPEED, vy: dy * BULLET_SPEED, size: 4, dmg: 1, life: 1.5 });
+  }
+  TAS.audio.playTone(440, 0.06, 'square', 0.06, 880);
+}
+
+function fireFootBullet(mx, my) {
+  let dx = player.facing, dy = 0;
+  if (my < -0.5) dy = -1;
+  else if (my > 0.5) dy = 1;
+  if (Math.abs(mx) > 0.5) dx = mx > 0 ? 1 : -1;
+  if (dx === 0 && dy === 0) dx = player.facing;
+
+  const bx = player.x + FOOT_W / 2;
+  const by = player.y + FOOT_H / 2;
+
+  if (gunUpgrade === 0) { // spread
+    for (let a = -0.3; a <= 0.3; a += 0.3) {
+      const sdx = dx * Math.cos(a) - dy * Math.sin(a);
+      const sdy = dx * Math.sin(a) + dy * Math.cos(a);
+      bullets.push({ x: bx, y: by, vx: sdx * BULLET_SPEED, vy: sdy * BULLET_SPEED, size: 3, dmg: 1, life: 0.8 });
+    }
+  } else if (gunUpgrade === 1) { // wave
+    bullets.push({ x: bx, y: by, vx: dx * BULLET_SPEED * 0.8, vy: dy * BULLET_SPEED * 0.8, size: 5, dmg: 2, life: 1.2, wave: true, waveT: 0 });
+  } else if (gunUpgrade === 2) { // homing
+    bullets.push({ x: bx, y: by, vx: dx * BULLET_SPEED * 0.7, vy: dy * BULLET_SPEED * 0.7, size: 3, dmg: 2, life: 2, homing: true });
+  } else {
+    bullets.push({ x: bx, y: by, vx: dx * BULLET_SPEED, vy: dy * BULLET_SPEED, size: 3, dmg: 1, life: 1 });
+  }
+  TAS.audio.playTone(660, 0.05, 'triangle', 0.05, 1200);
+}
+
+function fireGrenade(mx, my) {
+  const dx = mx || player.facing;
+  const dy = my || 0;
+  bullets.push({
+    x: player.x + (mode === 'tank' ? TANK_W / 2 : FOOT_W / 2),
+    y: player.y,
+    vx: dx * GRENADE_SPEED, vy: dy * GRENADE_SPEED - 80,
+    size: 5, dmg: 4, life: 1.5, grenade: true, gravity: 200
+  });
+  TAS.audio.playTone(150, 0.1, 'sawtooth', 0.06, 80);
+}
+
+// === DAMAGE ===
+function takeDamage(amount) {
+  if (player.invuln > 0) return;
+  if (mode === 'tank') {
+    tankHP -= amount;
+    if (tankUpgrades[2]) tankHP += Math.floor(amount * 0.3); // crusher armor reduces damage
+    if (tankHP <= 0) { die(); return; }
+  } else {
+    footHP -= amount;
+    if (footHP <= 0) { die(); return; }
+  }
+  player.invuln = 1.5;
+  TAS.fx.flash('#ff0000', 0.4);
+  TAS.fx.shake(4, 0.85);
+  TAS.audio.playTone(100, 0.2, 'sawtooth', 0.1, 50);
+}
+
+function die() {
+  lives--;
+  TAS.fx.flash('#ff0000', 0.8);
+  TAS.fx.shake(8, 0.9);
+  TAS.particles.spawn(player.x, player.y, '#ff4400', 20, 4, { gravity: 1 });
+  TAS.audio.playNoise(0.4, 0.15, 200);
+
+  if (lives <= 0) {
+    if (score > highScore) {
+      highScore = score;
+      TAS.score.save('blaster_baseling_hi', highScore);
+    }
+    saveGame();
+    state = 'gameOver';
+    return;
+  }
+
+  // Respawn
+  tankHP = TANK_MAX_HP;
+  footHP = FOOT_MAX_HP;
+  gunUpgrade = -1; // lose gun upgrade on death
+  if (inDungeon) {
+    exitDungeon();
+  } else {
+    initPlayer();
+    loadScreen();
+  }
+}
+
+// === DUNGEON ENTER/EXIT ===
+function enterDungeon(id) {
+  inDungeon = true;
+  dungeonId = id;
+  dungeonRoom = 0;
+  dungeonBoss = null;
+  mode = 'foot';
+  player.x = (DUNGEON_W / 2) * TILE;
+  player.y = (DUNGEON_H - 3) * TILE;
+  player.vx = 0; player.vy = 0;
+  loadScreen();
+  TAS.audio.playTone(200, 0.3, 'triangle', 0.06, 400);
+}
+
+function exitDungeon() {
+  inDungeon = false;
+  dungeonRoom = 0;
+  dungeonBoss = null;
+  mode = 'tank';
+  initPlayer();
+  loadScreen();
+  TAS.audio.playTone(400, 0.3, 'triangle', 0.06, 200);
+}
+
+// === UPDATE ENEMIES ===
+function updateEnemiesCommon(elist, dt) {
+  for (let i = elist.length - 1; i >= 0; i--) {
+    const e = elist[i];
+    if (!e.alive) continue;
+
+    // Movement
+    if (e.type === 0) { // crawler - back and forth
+      e.x += e.vx * dt;
+      if (Math.abs(e.x - e.startX) > e.moveRange) e.vx *= -1;
+    } else if (e.type === 1) { // flyer - sine pattern
+      e.x += e.vx * dt;
+      e.y = e.startY + Math.sin(frame * 0.03 + i) * 30;
+      if (Math.abs(e.x - e.startX) > e.moveRange) e.vx *= -1;
+    } else if (e.type === 2) { // turret - stationary, shoots
+      e.shootCD -= dt;
+      if (e.shootCD <= 0) {
+        const ang = TAS.math.angle(e.x, e.y, player.x, player.y);
+        enemyBullets.push({
+          x: e.x + 7, y: e.y + 7,
+          vx: Math.cos(ang) * 100, vy: Math.sin(ang) * 100,
+          size: 3, life: 3
+        });
+        e.shootCD = (90 - currentZone * 5) / 60;
+        TAS.audio.playTone(200, 0.04, 'sawtooth', 0.03);
+      }
+    } else if (e.type === 3) { // mine layer
+      e.x += e.vx * dt;
+      if (Math.abs(e.x - e.startX) > e.moveRange) e.vx *= -1;
+      e.shootCD -= dt;
+      if (e.shootCD <= 0) {
+        enemyBullets.push({
+          x: e.x + 7, y: e.y + 14, vx: 0, vy: 0, size: 4, life: 5, mine: true
+        });
+        e.shootCD = 2;
+      }
+    }
+
+    // Check bullet hits
+    for (let j = bullets.length - 1; j >= 0; j--) {
+      const b = bullets[j];
+      if (TAS.hit.rectOverlap(b.x - b.size / 2, b.y - b.size / 2, b.size, b.size, e.x, e.y, e.w, e.h)) {
+        e.hp -= b.dmg;
+        if (!b.grenade) bullets.splice(j, 1);
+        TAS.particles.spawn(e.x + e.w / 2, e.y + e.h / 2, ZONE_COLORS[currentZone].accent, 5, 2);
+        TAS.audio.playTone(300, 0.05, 'square', 0.04, 200);
+        if (e.hp <= 0) {
+          e.alive = false;
+          score += 10 * (currentZone + 1);
+          TAS.particles.spawn(e.x + e.w / 2, e.y + e.h / 2, '#ffaa00', 12, 3, { gravity: 0.5 });
+          TAS.audio.playTone(150, 0.15, 'sawtooth', 0.08, 50);
+          // Drop chance
+          if (Math.random() < 0.15) {
+            items.push({ x: e.x, y: e.y, type: Math.random() > 0.5 ? 'health' : 'grenade', collected: false });
+          }
+        }
+        break;
+      }
+    }
+
+    // Collide with player
+    const pw = mode === 'tank' ? TANK_W : FOOT_W;
+    const ph = mode === 'tank' ? TANK_H : FOOT_H;
+    if (e.alive && TAS.hit.rectOverlap(player.x, player.y, pw, ph, e.x, e.y, e.w, e.h)) {
+      if (player.invuln <= 0) takeDamage(1);
+    }
+  }
+}
+
+// === UPDATE BOSS ===
+function updateBoss(dt) {
+  if (!dungeonBoss || !dungeonBoss.alive) return;
+  const b = dungeonBoss;
+  b.timer += dt;
+
+  // Movement
+  b.x += b.vx * dt;
+  b.y += b.vy * dt;
+  if (b.x < TILE * 2 || b.x > (DUNGEON_W - 3) * TILE) b.vx *= -1;
+  if (b.y < TILE * 2 || b.y > (DUNGEON_H - 4) * TILE) b.vy *= -1;
+
+  // Phase changes
+  if (b.hp < b.maxHP * 0.5 && b.phase === 0) {
+    b.phase = 1;
+    b.vx *= 1.5;
+    b.vy *= 1.5;
+  }
+
+  // Shooting
+  b.shootCD -= dt;
+  if (b.shootCD <= 0) {
+    const patterns = b.phase === 0 ? 1 : 3;
+    for (let i = 0; i < patterns; i++) {
+      const ang = TAS.math.angle(b.x, b.y, player.x, player.y) + (i - 1) * 0.3;
+      enemyBullets.push({
+        x: b.x + b.w / 2, y: b.y + b.h / 2,
+        vx: Math.cos(ang) * 120, vy: Math.sin(ang) * 120,
+        size: 4, life: 3
+      });
+    }
+    b.shootCD = b.phase === 0 ? 1.0 : 0.6;
+    TAS.audio.playTone(150, 0.08, 'sawtooth', 0.05, 100);
+  }
+
+  // Hit detection
+  for (let j = bullets.length - 1; j >= 0; j--) {
+    const bul = bullets[j];
+    if (TAS.hit.rectOverlap(bul.x - bul.size / 2, bul.y - bul.size / 2, bul.size, bul.size, b.x, b.y, b.w, b.h)) {
+      b.hp -= bul.dmg;
+      if (!bul.grenade) bullets.splice(j, 1);
+      TAS.particles.spawn(b.x + b.w / 2, b.y + b.h / 2, '#ff8800', 4, 2);
+      TAS.fx.shake(2, 0.8);
+
+      if (b.hp <= 0) {
+        b.alive = false;
+        score += 100 * (currentZone + 1);
+        TAS.particles.spawn(b.x + b.w / 2, b.y + b.h / 2, '#ffdd00', 30, 5, { gravity: 0.3 });
+        TAS.fx.flash('#ffffff', 0.6);
+        TAS.fx.shake(10, 0.9);
+        TAS.audio.playNoise(0.5, 0.2, 300);
+
+        // Drop reward
+        const dKey = currentZone + '_' + dungeonId;
+        if (!dungeonCleared.includes(dKey)) {
+          dungeonCleared.push(dKey);
+          // Required dungeon gives zone key, optional gives upgrade
+          const doorData = doors.find(d => d.id === dungeonId);
+          if (doorData && doorData.required) {
+            if (currentZone < 7) zoneKeys[currentZone + 1] = true;
+            items.push({ x: b.x, y: b.y, type: 'zonekey', collected: false });
+          } else {
+            // Tank upgrade or gun upgrade
+            const availUpg = tankUpgrades.findIndex(u => !u);
+            if (availUpg >= 0) {
+              items.push({ x: b.x, y: b.y, type: 'tankupgrade', upgradeId: availUpg, collected: false });
+            } else {
+              const gId = (gunUpgrade + 1) % 3;
+              items.push({ x: b.x, y: b.y, type: 'gunupgrade', upgradeId: gId, collected: false });
+            }
+          }
+        }
+        saveGame();
+      }
+      break;
+    }
+  }
+
+  // Collide with player
+  const pw = FOOT_W, ph = FOOT_H;
+  if (b.alive && TAS.hit.rectOverlap(player.x, player.y, pw, ph, b.x, b.y, b.w, b.h)) {
+    if (player.invuln <= 0) takeDamage(2);
+  }
+}
+
+// === UPDATE BULLETS ===
+function updateBullets(dt) {
+  for (let i = bullets.length - 1; i >= 0; i--) {
+    const b = bullets[i];
+    if (b.grenade && b.gravity) {
+      b.vy += b.gravity * dt;
+    }
+    if (b.wave) {
+      b.waveT += dt * 8;
+      const perp = Math.atan2(b.vy, b.vx) + Math.PI / 2;
+      b.x += b.vx * dt + Math.sin(b.waveT) * 2 * Math.cos(perp);
+      b.y += b.vy * dt + Math.sin(b.waveT) * 2 * Math.sin(perp);
+    } else if (b.homing) {
+      // Find nearest enemy
+      const elist = inDungeon ? dungeonEnemies : enemies;
+      let nearest = null, nearDist = 999;
+      for (const e of elist) {
+        if (!e.alive) continue;
+        const d = TAS.math.dist(b.x, b.y, e.x, e.y);
+        if (d < nearDist) { nearDist = d; nearest = e; }
+      }
+      if (dungeonBoss && dungeonBoss.alive) {
+        const d = TAS.math.dist(b.x, b.y, dungeonBoss.x, dungeonBoss.y);
+        if (d < nearDist) { nearDist = d; nearest = dungeonBoss; }
+      }
+      if (nearest) {
+        const ang = TAS.math.angle(b.x, b.y, nearest.x + 7, nearest.y + 7);
+        const curAng = Math.atan2(b.vy, b.vx);
+        const diff = ang - curAng;
+        const turn = Math.max(-3 * dt, Math.min(3 * dt, diff));
+        const newAng = curAng + turn;
+        const spd = Math.sqrt(b.vx * b.vx + b.vy * b.vy);
+        b.vx = Math.cos(newAng) * spd;
+        b.vy = Math.sin(newAng) * spd;
+      }
+      b.x += b.vx * dt;
+      b.y += b.vy * dt;
+    } else {
+      b.x += b.vx * dt;
+      b.y += b.vy * dt;
+    }
+    b.life -= dt;
+
+    // Hit walls
+    const tx = Math.floor(b.x / TILE), ty = Math.floor(b.y / TILE);
+    if (tileAt(tx, ty) === 1) {
+      if (b.grenade) {
+        // Explode
+        TAS.particles.spawn(b.x, b.y, '#ffaa00', 15, 4, { gravity: 0.3 });
+        TAS.audio.playNoise(0.2, 0.1, 400);
+      }
+      bullets.splice(i, 1);
+      continue;
+    }
+
+    if (b.life <= 0) {
+      if (b.grenade) {
+        TAS.particles.spawn(b.x, b.y, '#ffaa00', 15, 4, { gravity: 0.3 });
+        TAS.audio.playNoise(0.2, 0.1, 400);
+      }
+      bullets.splice(i, 1);
+    }
+  }
+
+  // Enemy bullets
+  for (let i = enemyBullets.length - 1; i >= 0; i--) {
+    const b = enemyBullets[i];
+    if (!b.mine) {
+      b.x += b.vx * dt;
+      b.y += b.vy * dt;
+    }
+    b.life -= dt;
+    if (b.life <= 0) { enemyBullets.splice(i, 1); continue; }
+
+    const pw = mode === 'tank' ? TANK_W : FOOT_W;
+    const ph = mode === 'tank' ? TANK_H : FOOT_H;
+    if (TAS.hit.rectOverlap(b.x - b.size / 2, b.y - b.size / 2, b.size, b.size, player.x, player.y, pw, ph)) {
+      if (player.invuln <= 0) {
+        takeDamage(b.mine ? 2 : 1);
+        enemyBullets.splice(i, 1);
+      }
+    }
+  }
+}
+
+// === UPDATE ITEMS ===
+function updateItems() {
+  const pw = mode === 'tank' ? TANK_W : FOOT_W;
+  const ph = mode === 'tank' ? TANK_H : FOOT_H;
+
+  for (let i = items.length - 1; i >= 0; i--) {
+    const it = items[i];
+    if (it.collected) continue;
+    if (TAS.hit.rectOverlap(player.x, player.y, pw, ph, it.x, it.y, TILE, TILE)) {
+      it.collected = true;
+      score += 25;
+      TAS.audio.playMelody([[523, 0.08], [659, 0.08], [784, 0.12]], 80);
+
+      if (it.type === 'health') {
+        if (mode === 'tank') tankHP = Math.min(TANK_MAX_HP, tankHP + 2);
+        else footHP = Math.min(FOOT_MAX_HP, footHP + 1);
+        TAS.particles.spawn(it.x, it.y, '#44ff44', 8, 2);
+      } else if (it.type === 'grenade') {
+        grenades = Math.min(9, grenades + 2);
+        TAS.particles.spawn(it.x, it.y, '#ffaa44', 8, 2);
+      } else if (it.type === 'zonekey') {
+        TAS.particles.spawn(it.x, it.y, '#ffdd00', 20, 4);
+        TAS.fx.flash('#ffdd00', 0.3);
+        state = 'message';
+        messageText = 'ZONE KEY ACQUIRED!\n' + ZONE_NAMES[Math.min(currentZone + 1, 7)] + ' unlocked!';
+        messageTimer = 3;
+      } else if (it.type === 'tankupgrade') {
+        tankUpgrades[it.upgradeId] = true;
+        TAS.particles.spawn(it.x, it.y, '#4488ff', 20, 4);
+        TAS.fx.flash('#4488ff', 0.3);
+        state = 'message';
+        messageText = 'TANK UPGRADE!\n' + UPGRADE_NAMES[it.upgradeId];
+        messageTimer = 3;
+      } else if (it.type === 'gunupgrade') {
+        gunUpgrade = it.upgradeId;
+        TAS.particles.spawn(it.x, it.y, '#aa44ff', 20, 4);
+        TAS.fx.flash('#aa44ff', 0.3);
+        state = 'message';
+        messageText = 'GUN UPGRADE!\n' + GUN_NAMES[it.upgradeId];
+        messageTimer = 3;
+      }
+      items.splice(i, 1);
+    }
+  }
+}
+
+let messageText = '';
+let messageTimer = 0;
+
+// === MAIN UPDATE ===
+function update(dt) {
+  frame++;
+  TAS.particles.update(dt);
+  TAS.fx.updateEffects(dt);
+
+  if (state === 'title') {
+    if (Object.values(TAS.input.keys).some(Boolean) || TAS.input.touch.a) {
+      const hasSave = loadGame();
+      startGame(hasSave);
+    }
+    return;
+  }
+
+  if (state === 'gameOver') {
+    if (Object.values(TAS.input.keys).some(Boolean) || TAS.input.touch.a) {
+      state = 'title';
+    }
+    return;
+  }
+
+  if (state === 'message') {
+    messageTimer -= dt;
+    if (messageTimer <= 0 || Object.values(TAS.input.keys).some(Boolean) || TAS.input.touch.a) {
+      state = 'playing';
+    }
+    return;
+  }
+
+  if (state === 'map') {
+    if (Object.values(TAS.input.keys).some(Boolean) || TAS.input.touch.b) {
+      state = 'playing';
+    }
+    return;
+  }
+
+  if (state !== 'playing') return;
+
+  // Map toggle
+  if (TAS.input.keys['KeyM'] || TAS.input.keys['Tab']) {
+    state = 'map';
+    TAS.input.keys['KeyM'] = false;
+    TAS.input.keys['Tab'] = false;
+    return;
+  }
+
+  // Invulnerability timer
+  if (player.invuln > 0) player.invuln -= dt;
+
+  // Mode-specific update
+  if (mode === 'tank') {
+    updateTank(dt);
+  } else {
+    updateFoot(dt);
+  }
+
+  // Update entities
+  const elist = inDungeon ? dungeonEnemies : enemies;
+  updateEnemiesCommon(elist, dt);
+  if (inDungeon) updateBoss(dt);
+  updateBullets(dt);
+  updateItems();
+}
+
+// === DRAWING ===
+function drawTile(x, y, type, zone) {
+  const colors = ZONE_COLORS[zone];
+  const sx = x * TILE - camX;
+  const sy = y * TILE - camY;
+  if (sx < -TILE || sx > GW || sy < -TILE || sy > GH) return;
+
+  if (type === 1) {
+    ctx.fillStyle = colors.wall;
+    ctx.fillRect(sx, sy, TILE, TILE);
+    // Detail lines
+    ctx.strokeStyle = colors.accent;
+    ctx.globalAlpha = 0.2;
+    ctx.strokeRect(sx + 1, sy + 1, TILE - 2, TILE - 2);
+    ctx.globalAlpha = 1;
+  } else if (type === 2) { // water
+    ctx.fillStyle = '#224488';
+    ctx.globalAlpha = 0.6 + Math.sin(frame * 0.05 + x * 0.3) * 0.2;
+    ctx.fillRect(sx, sy, TILE, TILE);
+    ctx.globalAlpha = 1;
+  } else if (type === 3) { // lava
+    ctx.fillStyle = '#cc3300';
+    ctx.globalAlpha = 0.7 + Math.sin(frame * 0.08 + x * 0.5) * 0.3;
+    ctx.fillRect(sx, sy, TILE, TILE);
+    ctx.globalAlpha = 1;
+    // Glow
+    if (Math.random() < 0.02) {
+      TAS.particles.spawn(sx + Math.random() * TILE, sy, '#ffaa00', 1, 1, { gravity: -0.5 });
+    }
+  }
+}
+
+function drawMap() {
+  const tileData = inDungeon ? dungeonTiles : tiles;
+  const w = inDungeon ? DUNGEON_W : ZONE_W;
+  const h = inDungeon ? DUNGEON_H : ZONE_H;
+
+  // Background
+  ctx.fillStyle = ZONE_COLORS[currentZone].bg;
+  ctx.fillRect(0, 0, GW, GH);
+
+  // Background detail (parallax dots)
+  ctx.fillStyle = ZONE_COLORS[currentZone].accent;
+  ctx.globalAlpha = 0.1;
+  for (let i = 0; i < 30; i++) {
+    const bx = ((i * 47 + frame * 0.2) % (GW + 40)) - 20;
+    const by = ((i * 31 + i * i * 3) % GH);
+    ctx.fillRect(bx, by, 2, 2);
+  }
+  ctx.globalAlpha = 1;
+
+  // Tiles
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      if (tileData[y][x] !== 0) drawTile(x, y, tileData[y][x], currentZone);
+    }
+  }
+}
+
+function drawDoors() {
+  if (inDungeon) return;
+  for (const door of doors) {
+    const dx = door.x - camX, dy = door.y - camY;
+    // Door frame
+    ctx.fillStyle = '#553311';
+    ctx.fillRect(dx - 2, dy - 2, TILE * 2 + 4, TILE * 2 + 4);
+    ctx.fillStyle = '#221100';
+    ctx.fillRect(dx, dy, TILE * 2, TILE * 2);
+    // Glow if required
+    if (door.required) {
+      ctx.strokeStyle = '#ffdd00';
+      ctx.globalAlpha = 0.5 + Math.sin(frame * 0.05) * 0.3;
+      ctx.strokeRect(dx - 3, dy - 3, TILE * 2 + 6, TILE * 2 + 6);
+      ctx.globalAlpha = 1;
+    }
+    // Arrow indicator
+    ctx.fillStyle = '#888';
+    ctx.font = '10px monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText('DOWN', dx + TILE, dy - 6);
+  }
+}
+
+function drawPlayer() {
+  const px = player.x - camX, py = player.y - camY;
+  const flash = player.invuln > 0 && Math.floor(frame * 0.3) % 2 === 0;
+  if (flash) ctx.globalAlpha = 0.5;
+
+  if (mode === 'tank') {
+    // Tank body
+    ctx.fillStyle = '#3366aa';
+    ctx.fillRect(px, py + 6, TANK_W, TANK_H - 6);
+    // Treads
+    ctx.fillStyle = '#222';
+    ctx.fillRect(px, py + TANK_H - 4, TANK_W, 4);
+    ctx.fillRect(px + 2, py + TANK_H - 3, 4, 2);
+    ctx.fillRect(px + 8, py + TANK_H - 3, 4, 2);
+    ctx.fillRect(px + 14, py + TANK_H - 3, 4, 2);
+    ctx.fillRect(px + 20, py + TANK_H - 3, 4, 2);
+    // Turret
+    ctx.fillStyle = '#4488cc';
+    ctx.fillRect(px + 6, py + 2, 12, 8);
+    // Gun barrel
+    ctx.fillStyle = '#555';
+    if (player.facingUp) {
+      ctx.fillRect(px + 10, py - 6, 4, 8);
+    } else {
+      const gx = player.facing > 0 ? px + TANK_W - 2 : px - 6;
+      ctx.fillRect(gx, py + 4, 8, 3);
+    }
+    // Reactor glow
+    ctx.fillStyle = ZONE_COLORS[currentZone].accent;
+    ctx.globalAlpha = 0.5 + Math.sin(frame * 0.1) * 0.3;
+    ctx.fillRect(px + 9, py + 8, 6, 4);
+    ctx.globalAlpha = 1;
+    // Baseling in cockpit
+    ctx.fillStyle = '#88dd44';
+    ctx.fillRect(px + 10, py + 3, 4, 4);
+    // Hover effect
+    if (!player.grounded && hoverFuel > 0) {
+      ctx.fillStyle = '#ff8800';
+      ctx.globalAlpha = 0.6;
+      ctx.fillRect(px + 4, py + TANK_H, 4, 3 + Math.random() * 3);
+      ctx.fillRect(px + 16, py + TANK_H, 4, 3 + Math.random() * 3);
+      ctx.globalAlpha = 1;
+    }
+  } else {
+    // On-foot baseling
+    ctx.fillStyle = '#88dd44';
+    ctx.fillRect(px + 2, py, 8, 8); // head
+    ctx.fillRect(px + 3, py + 8, 6, 4); // body
+    // Eyes
+    ctx.fillStyle = '#fff';
+    ctx.fillRect(px + 4, py + 2, 2, 2);
+    ctx.fillRect(px + 7, py + 2, 2, 2);
+    // Gun
+    ctx.fillStyle = '#aaa';
+    const gx = player.facing > 0 ? px + 10 : px - 3;
+    ctx.fillRect(gx, py + 5, 4, 2);
+  }
+  ctx.globalAlpha = 1;
+}
+
+function drawEnemies(elist) {
+  for (const e of elist) {
+    if (!e.alive) continue;
+    const ex = e.x - camX, ey = e.y - camY;
+    if (ex < -20 || ex > GW + 20 || ey < -20 || ey > GH + 20) continue;
+
+    if (e.type === 0) { // crawler
+      ctx.fillStyle = '#aa3333';
+      ctx.fillRect(ex, ey + 4, 14, 10);
+      ctx.fillStyle = '#ff4444';
+      ctx.fillRect(ex + 2, ey + 6, 4, 3);
+      ctx.fillRect(ex + 8, ey + 6, 4, 3);
+      // Legs
+      ctx.fillStyle = '#661111';
+      ctx.fillRect(ex + 1, ey + 12, 3, 2);
+      ctx.fillRect(ex + 10, ey + 12, 3, 2);
+    } else if (e.type === 1) { // flyer
+      ctx.fillStyle = '#6644aa';
+      ctx.beginPath();
+      ctx.arc(ex + 7, ey + 7, 7, 0, Math.PI * 2);
+      ctx.fill();
+      // Wings
+      ctx.fillStyle = '#8866cc';
+      const wingOff = Math.sin(frame * 0.2) * 3;
+      ctx.fillRect(ex - 4, ey + 3 + wingOff, 6, 3);
+      ctx.fillRect(ex + 12, ey + 3 - wingOff, 6, 3);
+    } else if (e.type === 2) { // turret
+      ctx.fillStyle = '#666';
+      ctx.fillRect(ex, ey + 6, 14, 8);
+      ctx.fillStyle = '#888';
+      ctx.fillRect(ex + 4, ey, 6, 8);
+      // Barrel pointing at player
+      ctx.fillStyle = '#aaa';
+      const ang = TAS.math.angle(ex + 7, ey + 4, player.x - camX, player.y - camY);
+      ctx.save();
+      ctx.translate(ex + 7, ey + 4);
+      ctx.rotate(ang);
+      ctx.fillRect(0, -1, 10, 2);
+      ctx.restore();
+    } else if (e.type === 3) { // mine layer
+      ctx.fillStyle = '#448844';
+      ctx.fillRect(ex + 2, ey + 2, 10, 10);
+      ctx.fillStyle = '#66aa66';
+      ctx.fillRect(ex + 4, ey + 4, 6, 6);
+      ctx.fillStyle = '#88cc88';
+      ctx.fillRect(ex + 6, ey + 6, 2, 2);
+    }
+  }
+}
+
+function drawBoss() {
+  if (!dungeonBoss || !dungeonBoss.alive) return;
+  const b = dungeonBoss;
+  const bx = b.x - camX, by = b.y - camY;
+
+  // Boss body - big reactor creature
+  ctx.fillStyle = b.phase === 0 ? '#aa2222' : '#ff3333';
+  ctx.fillRect(bx, by, b.w, b.h);
+  ctx.fillStyle = '#ff6600';
+  ctx.fillRect(bx + 4, by + 4, b.w - 8, b.h - 8);
+  // Core
+  ctx.fillStyle = ZONE_COLORS[currentZone].accent;
+  ctx.globalAlpha = 0.6 + Math.sin(frame * 0.1) * 0.4;
+  ctx.fillRect(bx + 10, by + 10, 8, 8);
+  ctx.globalAlpha = 1;
+  // Eyes
+  ctx.fillStyle = '#fff';
+  ctx.fillRect(bx + 6, by + 6, 4, 4);
+  ctx.fillRect(bx + 18, by + 6, 4, 4);
+  ctx.fillStyle = '#000';
+  ctx.fillRect(bx + 7, by + 7, 2, 2);
+  ctx.fillRect(bx + 19, by + 7, 2, 2);
+
+  // HP bar
+  ctx.fillStyle = '#333';
+  ctx.fillRect(bx, by - 8, b.w, 4);
+  ctx.fillStyle = b.hp > b.maxHP * 0.3 ? '#44dd44' : '#dd4444';
+  ctx.fillRect(bx, by - 8, b.w * (b.hp / b.maxHP), 4);
+}
+
+function drawBullets() {
+  // Player bullets
+  for (const b of bullets) {
+    const bx = b.x - camX, by = b.y - camY;
+    if (b.grenade) {
+      ctx.fillStyle = '#886622';
+      ctx.beginPath();
+      ctx.arc(bx, by, b.size, 0, Math.PI * 2);
+      ctx.fill();
+    } else {
+      ctx.fillStyle = b.size > 4 ? '#ffdd44' : '#44ddff';
+      ctx.fillRect(bx - b.size / 2, by - b.size / 2, b.size, b.size);
+    }
+  }
+  // Enemy bullets
+  for (const b of enemyBullets) {
+    const bx = b.x - camX, by = b.y - camY;
+    if (b.mine) {
+      ctx.fillStyle = '#ff4400';
+      ctx.globalAlpha = 0.6 + Math.sin(frame * 0.1) * 0.4;
+      ctx.beginPath();
+      ctx.arc(bx, by, b.size, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.globalAlpha = 1;
+    } else {
+      ctx.fillStyle = '#ff4488';
+      ctx.fillRect(bx - b.size / 2, by - b.size / 2, b.size, b.size);
+    }
+  }
+}
+
+function drawItems() {
+  for (const it of items) {
+    if (it.collected) continue;
+    const ix = it.x - camX, iy = it.y - camY;
+    const bob = Math.sin(frame * 0.06) * 3;
+
+    if (it.type === 'health') {
+      ctx.fillStyle = '#44ff44';
+      ctx.fillRect(ix + 4, iy + bob + 2, 8, 3);
+      ctx.fillRect(ix + 6, iy + bob, 4, 7);
+    } else if (it.type === 'grenade') {
+      ctx.fillStyle = '#ffaa44';
+      ctx.beginPath();
+      ctx.arc(ix + 8, iy + bob + 6, 5, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = '#886622';
+      ctx.fillRect(ix + 7, iy + bob, 2, 4);
+    } else if (it.type === 'zonekey') {
+      ctx.fillStyle = '#ffdd00';
+      ctx.globalAlpha = 0.7 + Math.sin(frame * 0.08) * 0.3;
+      ctx.fillRect(ix + 3, iy + bob + 2, 10, 6);
+      ctx.fillRect(ix + 5, iy + bob + 6, 3, 4);
+      ctx.globalAlpha = 1;
+    } else if (it.type === 'tankupgrade') {
+      ctx.fillStyle = '#4488ff';
+      ctx.globalAlpha = 0.7 + Math.sin(frame * 0.08) * 0.3;
+      ctx.fillRect(ix + 2, iy + bob + 2, 12, 10);
+      ctx.fillStyle = '#88bbff';
+      ctx.fillRect(ix + 5, iy + bob + 4, 6, 6);
+      ctx.globalAlpha = 1;
+    } else if (it.type === 'gunupgrade') {
+      ctx.fillStyle = '#aa44ff';
+      ctx.globalAlpha = 0.7 + Math.sin(frame * 0.08) * 0.3;
+      ctx.fillRect(ix + 2, iy + bob + 4, 12, 4);
+      ctx.fillRect(ix + 10, iy + bob + 2, 4, 8);
+      ctx.globalAlpha = 1;
+    }
+  }
+}
+
+function drawHUD() {
+  // Top bar
+  ctx.fillStyle = 'rgba(0,0,0,0.7)';
+  ctx.fillRect(0, 0, GW, 28);
+
+  // HP bar
+  const hp = mode === 'tank' ? tankHP : footHP;
+  const maxHP = mode === 'tank' ? TANK_MAX_HP : FOOT_MAX_HP;
+  ctx.fillStyle = '#333';
+  ctx.fillRect(4, 4, 80, 8);
+  const hpPct = hp / maxHP;
+  ctx.fillStyle = hpPct > 0.5 ? '#44dd44' : hpPct > 0.25 ? '#ddaa44' : '#dd4444';
+  ctx.fillRect(4, 4, 80 * hpPct, 8);
+  ctx.strokeStyle = '#666';
+  ctx.strokeRect(4, 4, 80, 8);
+
+  // Mode indicator
+  ctx.fillStyle = mode === 'tank' ? '#4488cc' : '#88dd44';
+  ctx.font = 'bold 9px monospace';
+  ctx.textAlign = 'left';
+  ctx.fillText(mode === 'tank' ? 'TANK' : 'FOOT', 4, 22);
+
+  // Zone name
+  ctx.fillStyle = ZONE_COLORS[currentZone].accent;
+  ctx.font = 'bold 9px monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText(ZONE_NAMES[currentZone], GW / 2, 10);
+
+  // Screen indicator
+  ctx.fillStyle = '#888';
+  ctx.font = '8px monospace';
+  ctx.fillText(inDungeon ? 'DUNGEON ' + (dungeonRoom + 1) + '/3' : 'AREA ' + (currentScreen + 1) + '/3', GW / 2, 22);
+
+  // Score
+  ctx.fillStyle = '#ffdd44';
+  ctx.font = 'bold 9px monospace';
+  ctx.textAlign = 'right';
+  ctx.fillText('SCORE:' + score, GW - 4, 10);
+
+  // Lives
+  for (let i = 0; i < lives; i++) {
+    ctx.fillStyle = '#88dd44';
+    ctx.fillRect(GW - 12 - i * 12, 14, 8, 8);
+  }
+
+  // Grenades
+  ctx.fillStyle = '#ffaa44';
+  ctx.textAlign = 'left';
+  ctx.fillText('G:' + grenades, 90, 10);
+
+  // Hover fuel (tank only)
+  if (mode === 'tank') {
+    ctx.fillStyle = '#333';
+    ctx.fillRect(90, 14, 40, 5);
+    ctx.fillStyle = '#ff8800';
+    ctx.fillRect(90, 14, 40 * (hoverFuel / HOVER_MAX), 5);
+  }
+
+  // Upgrades indicator
+  let ux = 140;
+  for (let i = 0; i < 4; i++) {
+    ctx.fillStyle = tankUpgrades[i] ? '#4488ff' : '#333';
+    ctx.fillRect(ux + i * 10, 14, 8, 5);
+  }
+
+  // Gun upgrade
+  if (gunUpgrade >= 0) {
+    ctx.fillStyle = '#aa44ff';
+    ctx.font = '7px monospace';
+    ctx.textAlign = 'left';
+    ctx.fillText(GUN_NAMES[gunUpgrade], 190, 22);
+  }
+}
+
+function drawWorldMap() {
+  ctx.fillStyle = '#111';
+  ctx.fillRect(0, 0, GW, GH);
+
+  ctx.fillStyle = '#fff';
+  ctx.font = 'bold 14px monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText('WORLD MAP', GW / 2, 20);
+
+  const cellW = 40, cellH = 28;
+  const startX = (GW - cellW * 3) / 2;
+  const startY = 35;
+
+  for (let z = 0; z < 8; z++) {
+    const row = Math.floor(z / 1);
+    const col = z % 3;
+    const zx = startX + (z % 3) * (cellW + 8) + Math.floor(z / 3) * 20;
+    const zy = startY + Math.floor(z / 3) * (cellH + 8);
+
+    // Zone box
+    ctx.fillStyle = zoneKeys[z] ? ZONE_COLORS[z].wall : '#222';
+    ctx.fillRect(zx, zy, cellW, cellH);
+    ctx.strokeStyle = z === currentZone ? '#fff' : (zoneKeys[z] ? ZONE_COLORS[z].accent : '#444');
+    ctx.lineWidth = z === currentZone ? 2 : 1;
+    ctx.strokeRect(zx, zy, cellW, cellH);
+    ctx.lineWidth = 1;
+
+    // Zone number
+    ctx.fillStyle = zoneKeys[z] ? '#fff' : '#555';
+    ctx.font = '8px monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText(z + 1 + '', zx + cellW / 2, zy + 10);
+    ctx.font = '6px monospace';
+    ctx.fillText(ZONE_NAMES[z].split(' ')[0], zx + cellW / 2, zy + 20);
+
+    // Screens explored
+    for (let s = 0; s < 3; s++) {
+      const key = z + '_' + s;
+      ctx.fillStyle = exploredScreens[key] ? ZONE_COLORS[z].accent : '#333';
+      ctx.fillRect(zx + 4 + s * 12, zy + cellH - 6, 10, 4);
+    }
+  }
+
+  // Legend
+  ctx.fillStyle = '#888';
+  ctx.font = '9px monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText('Press any key to close', GW / 2, GH - 20);
+  ctx.fillText('Current: ' + ZONE_NAMES[currentZone] + ' - Screen ' + (currentScreen + 1), GW / 2, GH - 40);
+}
+
+function drawMessage() {
+  ctx.fillStyle = 'rgba(0,0,0,0.8)';
+  ctx.fillRect(0, 0, GW, GH);
+
+  ctx.textAlign = 'center';
+  const lines = messageText.split('\n');
+  ctx.fillStyle = '#ffdd00';
+  ctx.font = 'bold 16px monospace';
+  ctx.fillText(lines[0] || '', GW / 2, GH / 2 - 10);
+  if (lines[1]) {
+    ctx.fillStyle = '#fff';
+    ctx.font = '12px monospace';
+    ctx.fillText(lines[1], GW / 2, GH / 2 + 14);
+  }
+}
+
+// === CAMERA ===
+function updateCamera() {
+  const pw = mode === 'tank' ? TANK_W : FOOT_W;
+  const ph = mode === 'tank' ? TANK_H : FOOT_H;
+  const tw = (inDungeon ? DUNGEON_W : ZONE_W) * TILE;
+  const th = (inDungeon ? DUNGEON_H : ZONE_H) * TILE;
+
+  const targetX = player.x + pw / 2 - GW / 2;
+  const targetY = player.y + ph / 2 - GH / 2;
+
+  camX = TAS.math.lerp(camX, targetX, 0.1);
+  camY = TAS.math.lerp(camY, targetY, 0.1);
+  camX = TAS.math.clamp(camX, 0, Math.max(0, tw - GW));
+  camY = TAS.math.clamp(camY, 0, Math.max(0, th - GH));
+}
+
+// === MAIN DRAW ===
+function draw(dt) {
+  ctx.fillStyle = '#0a0808';
+  ctx.fillRect(0, 0, GW, GH);
+
+  if (state === 'title') {
+    drawTitleScreen();
+    return;
+  }
+
+  if (state === 'gameOver') {
+    TAS.ui.drawGameOver(score, highScore, GW, GH, { frame, extra: ZONE_NAMES[currentZone] });
+    return;
+  }
+
+  if (state === 'map') {
+    drawWorldMap();
+    return;
+  }
+
+  if (state === 'message') {
+    drawMessage();
+    return;
+  }
+
+  // === GAME RENDERING ===
+  updateCamera();
+
+  ctx.save();
+  TAS.fx.applyShake();
+
+  drawMap();
+  drawDoors();
+  drawItems();
+  drawEnemies(inDungeon ? dungeonEnemies : enemies);
+  if (inDungeon) drawBoss();
+  drawPlayer();
+  drawBullets();
+  TAS.particles.draw();
+
+  ctx.restore();
+
+  TAS.fx.drawFlash(GW, GH);
+  drawHUD();
+  TAS.input.drawTouchControls(GW, GH);
+}
+
+function drawTitleScreen() {
+  // Background effect
+  ctx.fillStyle = '#0a0515';
+  ctx.fillRect(0, 0, GW, GH);
+
+  // Underground cavern aesthetic
+  for (let i = 0; i < 40; i++) {
+    const x = (i * 37 + frame * 0.3) % GW;
+    const y = (i * 23 + Math.sin(i + frame * 0.01) * 20) % GH;
+    ctx.fillStyle = ZONE_COLORS[Math.floor(i / 5) % 8].accent;
+    ctx.globalAlpha = 0.1;
+    ctx.fillRect(x, y, 3, 3);
+  }
+  ctx.globalAlpha = 1;
+
+  // Tank drawing
+  const tx = GW / 2 - 30, ty = GH * 0.45;
+  ctx.fillStyle = '#3366aa';
+  ctx.fillRect(tx, ty + 8, 48, 24);
+  ctx.fillStyle = '#4488cc';
+  ctx.fillRect(tx + 12, ty + 2, 24, 14);
+  ctx.fillStyle = '#555';
+  ctx.fillRect(tx + 48, ty + 6, 16, 5);
+  ctx.fillStyle = '#222';
+  ctx.fillRect(tx, ty + 28, 48, 6);
+  // Reactor glow
+  ctx.fillStyle = '#88dd44';
+  ctx.globalAlpha = 0.6 + Math.sin(frame * 0.08) * 0.4;
+  ctx.fillRect(tx + 18, ty + 12, 12, 6);
+  ctx.globalAlpha = 1;
+  // Baseling in cockpit
+  ctx.fillStyle = '#88dd44';
+  ctx.fillRect(tx + 20, ty + 4, 8, 7);
+  ctx.fillStyle = '#fff';
+  ctx.fillRect(tx + 21, ty + 5, 2, 2);
+  ctx.fillRect(tx + 25, ty + 5, 2, 2);
+
+  // Title
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#000';
+  ctx.font = 'bold 22px monospace';
+  ctx.fillText('BLASTER BASELING', GW / 2 + 2, GH * 0.18 + 2);
+  ctx.fillStyle = '#44dd88';
+  ctx.fillText('BLASTER BASELING', GW / 2, GH * 0.18);
+
+  ctx.fillStyle = '#888';
+  ctx.font = '10px monospace';
+  ctx.fillText('A Tasern Tale', GW / 2, GH * 0.25);
+
+  // Controls
+  ctx.fillStyle = '#666';
+  ctx.font = '9px monospace';
+  ctx.fillText('ARROWS: Move  |  Z/A: Jump/Hover  |  X/B: Shoot', GW / 2, GH * 0.72);
+  ctx.fillText('DOWN at door: Enter Dungeon  |  M: Map', GW / 2, GH * 0.78);
+  ctx.fillText('C: Grenade (on foot)', GW / 2, GH * 0.84);
+
+  // Start prompt
+  const pulse = Math.sin(frame * 0.05) * 0.3 + 0.7;
+  ctx.globalAlpha = pulse;
+  ctx.fillStyle = '#ffdd44';
+  ctx.font = 'bold 12px monospace';
+  ctx.fillText('PRESS ANY KEY TO START', GW / 2, GH * 0.93);
+  ctx.globalAlpha = 1;
+
+  // Save indicator
+  try {
+    if (localStorage.getItem('blaster_baseling_save')) {
+      ctx.fillStyle = '#44aa88';
+      ctx.font = '8px monospace';
+      ctx.fillText('(save data found - will continue)', GW / 2, GH * 0.62);
+    }
+  } catch(e) { /* no localStorage */ }
+}
+
+// === START GAME LOOP ===
+TAS.loop.start(update, draw);
+
+})();
+</script>
+</body>
+</html>

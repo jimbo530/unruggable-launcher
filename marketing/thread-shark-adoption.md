@@ -20,11 +20,11 @@ Here's exactly what happened on-chain. Every claim verifiable.
 
 ## Tweet 2/7 — The Setup
 
-The MfT reactor network on Base has 37 autonomous contracts.
+The MfT reactor network on Base has a network of autonomous contracts.
 
 Every 2 hours, they collect V3 pool fees, buy MfT, and burn it permanently.
 
-More reactors = more burn fuel. But new reactors need tokens launched through MycoPad.
+More reactors = more burn fuel. But new reactors need tokens launched through Unrugable.
 
 Problem: some tokens get launched and abandoned. Dead chart. Zero volume. Dormant reactors.
 
@@ -54,7 +54,7 @@ Each V5.2 token has 2 reactors:
 
 3 tokens x 2 reactors = 6 new autonomous burn machines.
 
-They fire every 2 hours. No one can stop them. No admin key.
+They fire every 2 hours. No one can stop them. Add-only admin keys.
 
 The keeper auto-discovered them and added them to the cycle.
 
@@ -64,11 +64,11 @@ The keeper auto-discovered them and added them to the cycle.
 
 After adoption, the agent ran a DCA: 101 consecutive buys. $0.10 each. One per minute. (These are agent-executed trades, not organic community volume.)
 
-101 green candles on the MfT chart.
+101 consecutive buys on the MfT chart. (These are agent-executed trades through reactor pools.)
 
-Every buy generated pool fees. Every reactor fire burned those fees as MfT. Supply went down.
+Every buy generated pool fees. Every reactor fire burned those fees as MfT. Every cycle funded charity automatically.
 
-The agent's volume fed the very engine that supports the token it holds.
+The agent just traded. The architecture did the rest.
 
 Trading carries risk. Thin reactor pools have concentrated liquidity — higher fee generation but higher price impact per trade.
 
@@ -78,7 +78,7 @@ Trading carries risk. Thin reactor pools have concentrated liquidity — higher 
 
 Network state after adoption:
 - 7.6M MfT burned total (and growing)
-- 37 reactors in the keeper cycle
+- Reactor network firing in the keeper cycle
 - 180+ Uniswap V3 pools
 - 5 reactors fully renounced (immutable, no admin)
 
@@ -98,9 +98,9 @@ An autonomous agent found dead tokens, activated their reactors, and expanded th
 
 Your agent can do the same:
 - tasern.quest/llms.txt
-- npx baselings-mcp (40 MCP tools)
+- npx baselings-mcp (49 MCP tools)
 
-Unruggable by code, not by promise.
+Unrugable by code, not by promise.
 
 ---
 
@@ -109,8 +109,8 @@ Unruggable by code, not by promise.
 - Replace "yesterday" with actual date when posting
 - Shark wallet: 0x7117...36E5 — holds 32.4M MfT, 11.2 VIRTUAL ($10.53)
 - Shark confirmed adoption cost $0.60 total ($0.10 buy + $0.10 sell per token x 3)
-- Shark says new MycoPad launches auto-create 6 pools + 2 reactors each for $0.20 adoption cost
+- Shark says new Unrugable launches auto-create 6 pools + 2 reactors each for $0.20 adoption cost
 - Still need specific tx hashes from Shark for BaseScan links (asked on bus 2026-05-08T05-15-01)
 - Ethics: framed as infrastructure story, no profit claims, includes risk disclosure
-- Clarified 101 green candles are agent buys, not organic community
+- Clarified 101 consecutive buys are agent-executed trades, not organic community
 - Link burns dashboard as proof: tasern.quest/mft/

@@ -1,0 +1,1098 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Rhythm Baseling</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body { width: 100%; height: 100%; overflow: hidden; background: #0a0518; touch-action: none; }
+canvas { display: block; margin: 0 auto; }
+#back-link {
+  position: fixed; bottom: 8px; left: 50%; transform: translateX(-50%);
+  color: #666; font-family: monospace; font-size: 12px; text-decoration: none; z-index: 10;
+}
+#back-link:hover { color: #aaa; }
+</style>
+</head>
+<body>
+<canvas id="gc"></canvas>
+<a id="back-link" href="/games">Back to Arcade</a>
+<script src="nft-loader.js"></script>
+<script>if(window.NftLoader)NftLoader.gate();</script>
+<script src="tasern-engine.js"></script>
+<script>
+(function() {
+"use strict";
+
+// === GAME CONSTANTS ===
+const GW = 480, GH = 320;
+const ctx = TAS.ctx;
+
+TAS.initCanvas(GW, GH);
+TAS.input.initTouch({ buttons: ['a', 'b'], labels: { a: 'A', b: 'B' } });
+
+// === LANE CONFIG ===
+const LANE_COUNT = 4;
+const LANE_NAMES = ['Left', 'Down', 'Up', 'Right'];
+const LANE_KEYS = ['ArrowLeft', 'ArrowDown', 'ArrowUp', 'ArrowRight'];
+const LANE_COLORS = ['#ff44aa', '#44ddff', '#44ff88', '#ffaa44'];
+const LANE_WIDTH = 36;
+const LANE_GAP = 6;
+const LANES_TOTAL_W = LANE_COUNT * LANE_WIDTH + (LANE_COUNT - 1) * LANE_GAP;
+const LANES_X = GW - LANES_TOTAL_W - 30;
+const HIT_ZONE_Y = 50;
+const ARROW_SIZE = 28;
+const SCROLL_AREA_H = GH - 40;
+
+// === TIMING WINDOWS (ms) ===
+const PERFECT_W = 40;
+const GREAT_W = 80;
+const GOOD_W = 120;
+
+// === SONGS ===
+const SONGS = [
+  { name: 'Spore Shuffle', bpm: 80, difficulty: 'Easy', color: '#44dd88' },
+  { name: 'Reactor Pulse', bpm: 110, difficulty: 'Medium', color: '#44ddff' },
+  { name: 'Mycelium Rush', bpm: 140, difficulty: 'Hard', color: '#ffaa44' },
+  { name: 'Fungal Frenzy', bpm: 170, difficulty: 'Expert', color: '#ff44aa' },
+  { name: 'Poop Storm', bpm: 200, difficulty: 'Insane', color: '#ff4444' }
+];
+
+// === PENTATONIC SCALE FOR MELODY ===
+const PENTA = [261.6, 293.7, 329.6, 392.0, 440.0, 523.3, 587.3, 659.3];
+
+// === STATE ===
+let state = 'title'; // title, select, playing, results
+let frame = 0;
+let currentSong = 0;
+let notes = [];
+let songTime = 0;
+let songDuration = 0;
+let score = 0;
+let combo = 0;
+let maxCombo = 0;
+let health = 100;
+let perfects = 0, greats = 0, goods = 0, misses = 0;
+let totalNotes = 0;
+let multiplier = 1;
+let grade = 'D';
+let laneFlash = [0, 0, 0, 0];
+let lastBeat = 0;
+let beatPulse = 0;
+let bgHue = 220;
+let missStreak = 0;
+let songStarted = false;
+let countdownTimer = 0;
+let unlocked = loadUnlocks();
+let highScores = loadHighScores();
+
+// Key press tracking (for single-frame detection)
+let keyJustPressed = [false, false, false, false];
+let keyWasDown = [false, false, false, false];
+
+// Baseling dancer state
+let danceFrame = 0;
+let danceTimer = 0;
+let danceReaction = 'idle'; // idle, happy, great, sad
+let danceReactionTimer = 0;
+
+// Beat tracking for audio
+let nextBeatTime = 0;
+let beatCount = 0;
+
+// Touch zones for 4 lanes
+let touchLanes = [false, false, false, false];
+
+// === SAVE/LOAD ===
+function loadUnlocks() {
+  try {
+    const d = JSON.parse(localStorage.getItem('rhythm_baseling_unlocks') || '{}');
+    return { 0: true, 1: !!d[1], 2: !!d[2], 3: !!d[3], 4: !!d[4] };
+  } catch(e) { console.error('Failed to load unlocks:', e); return { 0: true }; }
+}
+
+function saveUnlocks() {
+  try { localStorage.setItem('rhythm_baseling_unlocks', JSON.stringify(unlocked)); }
+  catch(e) { console.error('Failed to save unlocks:', e); }
+}
+
+function loadHighScores() {
+  try { return JSON.parse(localStorage.getItem('rhythm_baseling_scores') || '{}'); }
+  catch(e) { console.error('Failed to load scores:', e); return {}; }
+}
+
+function saveHighScores() {
+  try { localStorage.setItem('rhythm_baseling_scores', JSON.stringify(highScores)); }
+  catch(e) { console.error('Failed to save scores:', e); }
+}
+
+// === NOTE GENERATION ===
+function generateNotes(songIdx) {
+  const song = SONGS[songIdx];
+  const bpm = song.bpm;
+  const beatInterval = 60000 / bpm; // ms per beat
+  const duration = 30000; // 30 seconds per song
+  const noteList = [];
+  const totalBeats = Math.floor(duration / beatInterval);
+
+  // Seed RNG for consistent patterns
+  let seed = songIdx * 1337 + 42;
+  function seededRandom() {
+    seed = (seed * 16807 + 0) % 2147483647;
+    return (seed - 1) / 2147483646;
+  }
+
+  // Pattern density based on difficulty
+  const density = 0.4 + songIdx * 0.12; // 0.4 to 0.88
+  const doubleChance = songIdx * 0.06; // 0 to 0.24
+
+  for (let beat = 4; beat < totalBeats; beat++) {
+    // Main beat notes
+    if (seededRandom() < density) {
+      const lane = Math.floor(seededRandom() * LANE_COUNT);
+      noteList.push({ time: beat * beatInterval, lane: lane, hit: false, missed: false });
+
+      // Double notes on harder songs
+      if (seededRandom() < doubleChance) {
+        let lane2 = Math.floor(seededRandom() * LANE_COUNT);
+        if (lane2 === lane) lane2 = (lane2 + 1) % LANE_COUNT;
+        noteList.push({ time: beat * beatInterval, lane: lane2, hit: false, missed: false });
+      }
+    }
+
+    // Off-beat notes on harder songs (eighth notes)
+    if (songIdx >= 2 && seededRandom() < (density - 0.3)) {
+      const lane = Math.floor(seededRandom() * LANE_COUNT);
+      noteList.push({ time: beat * beatInterval + beatInterval / 2, lane: lane, hit: false, missed: false });
+    }
+
+    // Sixteenth notes on expert/insane
+    if (songIdx >= 3 && seededRandom() < 0.15) {
+      const lane = Math.floor(seededRandom() * LANE_COUNT);
+      noteList.push({ time: beat * beatInterval + beatInterval / 4, lane: lane, hit: false, missed: false });
+    }
+  }
+
+  noteList.sort(function(a, b) { return a.time - b.time; });
+  return noteList;
+}
+
+// === START SONG ===
+function startSong(idx) {
+  currentSong = idx;
+  notes = generateNotes(idx);
+  totalNotes = notes.length;
+  songTime = -2000; // 2 second countdown
+  songDuration = 30000;
+  score = 0;
+  combo = 0;
+  maxCombo = 0;
+  health = 100;
+  perfects = 0;
+  greats = 0;
+  goods = 0;
+  misses = 0;
+  multiplier = 1;
+  missStreak = 0;
+  laneFlash = [0, 0, 0, 0];
+  lastBeat = 0;
+  beatPulse = 0;
+  beatCount = 0;
+  nextBeatTime = 0;
+  danceFrame = 0;
+  danceReaction = 'idle';
+  songStarted = true;
+  state = 'playing';
+  TAS.audio.ensureAudio();
+  TAS.particles.clear();
+}
+
+// === AUDIO ===
+function playDrumBeat(beatNum) {
+  const song = SONGS[currentSong];
+  // Kick on 1, 3
+  if (beatNum % 4 === 0 || beatNum % 4 === 2) {
+    TAS.audio.playTone(60, 0.12, 'sine', 0.15, 30);
+  }
+  // Snare on 2, 4
+  if (beatNum % 4 === 1 || beatNum % 4 === 3) {
+    TAS.audio.playNoise(0.08, 0.06, 3000);
+  }
+  // Hi-hat on all
+  TAS.audio.playNoise(0.03, 0.03, 8000);
+}
+
+function playHitNote(lane) {
+  const noteIdx = (combo + lane) % PENTA.length;
+  TAS.audio.playTone(PENTA[noteIdx], 0.15, 'triangle', 0.08);
+}
+
+function playMissSound() {
+  TAS.audio.playTone(80, 0.2, 'sawtooth', 0.06, 40);
+}
+
+function playComboBreak() {
+  TAS.audio.playTone(120, 0.3, 'sawtooth', 0.08, 60);
+  TAS.audio.playNoise(0.15, 0.04);
+}
+
+function playFanfare() {
+  TAS.audio.playMelody([
+    [523, 0.15, 'square', 0.06],
+    [659, 0.15, 'square', 0.06],
+    [784, 0.15, 'square', 0.06],
+    [1047, 0.3, 'square', 0.08]
+  ], 150);
+}
+
+// === HIT DETECTION ===
+function tryHitLane(lane) {
+  laneFlash[lane] = 1.0;
+  let bestNote = null;
+  let bestDiff = Infinity;
+
+  for (let i = 0; i < notes.length; i++) {
+    const n = notes[i];
+    if (n.lane !== lane || n.hit || n.missed) continue;
+    const diff = Math.abs(n.time - songTime);
+    if (diff < GOOD_W && diff < bestDiff) {
+      bestNote = n;
+      bestDiff = diff;
+    }
+  }
+
+  if (bestNote) {
+    bestNote.hit = true;
+    missStreak = 0;
+
+    if (bestDiff <= PERFECT_W) {
+      perfects++;
+      combo++;
+      score += 300 * multiplier;
+      health = Math.min(100, health + 2);
+      danceReaction = 'happy';
+      danceReactionTimer = 0.3;
+      // Rainbow particles
+      const nx = getLaneX(bestNote.lane);
+      for (let c = 0; c < 12; c++) {
+        const hue = (c / 12) * 360;
+        TAS.particles.spawn(nx, HIT_ZONE_Y, 'hsl(' + hue + ',100%,60%)', 1, 4, { size: 3, sizeVar: 2 });
+      }
+    } else if (bestDiff <= GREAT_W) {
+      greats++;
+      combo++;
+      score += 200 * multiplier;
+      health = Math.min(100, health + 1);
+      danceReaction = 'great';
+      danceReactionTimer = 0.2;
+      TAS.particles.spawn(getLaneX(bestNote.lane), HIT_ZONE_Y, LANE_COLORS[lane], 6, 3, { size: 2 });
+    } else {
+      goods++;
+      combo++;
+      score += 100 * multiplier;
+      TAS.particles.spawn(getLaneX(bestNote.lane), HIT_ZONE_Y, '#888', 3, 2);
+    }
+
+    if (combo > maxCombo) maxCombo = combo;
+    updateMultiplier();
+    playHitNote(lane);
+  }
+}
+
+function updateMultiplier() {
+  if (combo >= 64) multiplier = 8;
+  else if (combo >= 32) multiplier = 4;
+  else if (combo >= 16) multiplier = 2;
+  else multiplier = 1;
+}
+
+function getLaneX(lane) {
+  return LANES_X + lane * (LANE_WIDTH + LANE_GAP) + LANE_WIDTH / 2;
+}
+
+// === GRADE CALCULATION ===
+function calcGrade() {
+  const total = perfects + greats + goods + misses;
+  if (total === 0) return 'D';
+  const accuracy = (perfects * 3 + greats * 2 + goods) / (total * 3);
+  if (accuracy >= 0.95) return 'S';
+  if (accuracy >= 0.85) return 'A';
+  if (accuracy >= 0.70) return 'B';
+  if (accuracy >= 0.50) return 'C';
+  return 'D';
+}
+
+// === TOUCH HANDLING FOR LANES ===
+function handleTouchForLanes(e) {
+  touchLanes = [false, false, false, false];
+  const rect = TAS.canvas.getBoundingClientRect();
+  const scaleX = GW / rect.width;
+  const scaleY = GH / rect.height;
+
+  for (let i = 0; i < e.touches.length; i++) {
+    const t = e.touches[i];
+    const px = (t.clientX - rect.left) * scaleX;
+    const py = (t.clientY - rect.top) * scaleY;
+
+    // Check lane touch zones (bottom quarter of screen, right side)
+    if (py > GH * 0.7) {
+      for (let lane = 0; lane < LANE_COUNT; lane++) {
+        const lx = getLaneX(lane);
+        if (Math.abs(px - lx) < LANE_WIDTH) {
+          touchLanes[lane] = true;
+        }
+      }
+    }
+    // Also check tap on the lane columns anywhere
+    for (let lane = 0; lane < LANE_COUNT; lane++) {
+      const lx = getLaneX(lane);
+      if (Math.abs(px - lx) < LANE_WIDTH * 0.8) {
+        touchLanes[lane] = true;
+      }
+    }
+  }
+}
+
+// Add touch event listeners
+TAS.canvas.addEventListener('touchstart', function(e) {
+  e.preventDefault();
+  TAS.audio.ensureAudio();
+  handleTouchForLanes(e);
+}, { passive: false });
+TAS.canvas.addEventListener('touchmove', function(e) {
+  e.preventDefault();
+  handleTouchForLanes(e);
+}, { passive: false });
+TAS.canvas.addEventListener('touchend', function(e) {
+  e.preventDefault();
+  touchLanes = [false, false, false, false];
+}, { passive: false });
+
+// Track previous touch state for edge detection
+let prevTouchLanes = [false, false, false, false];
+
+// === DRAWING HELPERS ===
+function drawArrow(x, y, lane, alpha) {
+  ctx.save();
+  ctx.globalAlpha = alpha;
+  ctx.translate(x, y);
+
+  // Rotation based on direction
+  const rotations = [Math.PI, Math.PI / 2, -Math.PI / 2, 0]; // left, down, up, right
+  ctx.rotate(rotations[lane]);
+
+  const s = ARROW_SIZE / 2;
+  ctx.fillStyle = LANE_COLORS[lane];
+  ctx.strokeStyle = '#fff';
+  ctx.lineWidth = 1.5;
+
+  // Arrow shape pointing right (rotated per lane)
+  ctx.beginPath();
+  ctx.moveTo(s, 0);
+  ctx.lineTo(-s * 0.3, -s * 0.8);
+  ctx.lineTo(-s * 0.3, -s * 0.3);
+  ctx.lineTo(-s, -s * 0.3);
+  ctx.lineTo(-s, s * 0.3);
+  ctx.lineTo(-s * 0.3, s * 0.3);
+  ctx.lineTo(-s * 0.3, s * 0.8);
+  ctx.closePath();
+  ctx.fill();
+  ctx.stroke();
+
+  ctx.restore();
+}
+
+function drawHitZoneArrow(x, y, lane, flash) {
+  ctx.save();
+  ctx.translate(x, y);
+  const rotations = [Math.PI, Math.PI / 2, -Math.PI / 2, 0];
+  ctx.rotate(rotations[lane]);
+
+  const s = ARROW_SIZE / 2;
+  ctx.strokeStyle = flash > 0 ? '#fff' : LANE_COLORS[lane];
+  ctx.lineWidth = flash > 0 ? 3 : 2;
+  ctx.globalAlpha = flash > 0 ? 1 : 0.4;
+
+  ctx.beginPath();
+  ctx.moveTo(s, 0);
+  ctx.lineTo(-s * 0.3, -s * 0.8);
+  ctx.lineTo(-s * 0.3, -s * 0.3);
+  ctx.lineTo(-s, -s * 0.3);
+  ctx.lineTo(-s, s * 0.3);
+  ctx.lineTo(-s * 0.3, s * 0.3);
+  ctx.lineTo(-s * 0.3, s * 0.8);
+  ctx.closePath();
+  ctx.stroke();
+
+  if (flash > 0) {
+    ctx.globalAlpha = flash * 0.3;
+    ctx.fillStyle = LANE_COLORS[lane];
+    ctx.fill();
+  }
+
+  ctx.restore();
+}
+
+function drawBaseling(x, y, reaction, dFrame) {
+  ctx.save();
+  ctx.translate(x, y);
+
+  // Body bounce
+  const bounce = Math.sin(dFrame * 0.3) * 3;
+  const sway = Math.sin(dFrame * 0.15) * 5;
+
+  // Shadow
+  ctx.fillStyle = 'rgba(0,0,0,0.3)';
+  ctx.beginPath();
+  ctx.ellipse(sway * 0.3, 40, 20, 6, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Body (mushroom shape)
+  ctx.translate(sway, bounce);
+
+  // Stem
+  ctx.fillStyle = '#ddc89e';
+  ctx.fillRect(-8, 5, 16, 30);
+
+  // Cap
+  let capColor = '#cc5544';
+  if (reaction === 'happy') capColor = '#44dd88';
+  else if (reaction === 'great') capColor = '#44ddff';
+  else if (reaction === 'sad') capColor = '#aa3333';
+
+  ctx.fillStyle = capColor;
+  ctx.beginPath();
+  ctx.ellipse(0, 0, 22, 18, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Spots on cap
+  ctx.fillStyle = 'rgba(255,255,255,0.6)';
+  ctx.beginPath();
+  ctx.arc(-8, -5, 4, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.arc(6, -3, 3, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.arc(0, -10, 2.5, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Eyes
+  const eyeY = 2;
+  ctx.fillStyle = '#111';
+  ctx.beginPath();
+  ctx.arc(-6, eyeY, 3, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.arc(6, eyeY, 3, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Eye highlights
+  ctx.fillStyle = '#fff';
+  ctx.beginPath();
+  ctx.arc(-5, eyeY - 1, 1.2, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.arc(7, eyeY - 1, 1.2, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Mouth
+  if (reaction === 'happy' || reaction === 'great') {
+    ctx.strokeStyle = '#111';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.arc(0, eyeY + 5, 4, 0, Math.PI);
+    ctx.stroke();
+  } else if (reaction === 'sad') {
+    ctx.strokeStyle = '#111';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.arc(0, eyeY + 9, 4, Math.PI, 0);
+    ctx.stroke();
+  } else {
+    ctx.fillStyle = '#111';
+    ctx.beginPath();
+    ctx.arc(0, eyeY + 6, 2, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  // Arms waving with dance
+  ctx.strokeStyle = '#ddc89e';
+  ctx.lineWidth = 4;
+  ctx.lineCap = 'round';
+
+  const armWave = Math.sin(dFrame * 0.25) * 0.4;
+  // Left arm
+  ctx.beginPath();
+  ctx.moveTo(-10, 15);
+  ctx.lineTo(-22, 8 + Math.sin(dFrame * 0.3 + 1) * 8);
+  ctx.stroke();
+  // Right arm
+  ctx.beginPath();
+  ctx.moveTo(10, 15);
+  ctx.lineTo(22, 8 + Math.sin(dFrame * 0.3) * 8);
+  ctx.stroke();
+
+  // Feet tap
+  ctx.fillStyle = '#996633';
+  const footTap = Math.abs(Math.sin(dFrame * 0.2)) * 3;
+  ctx.beginPath();
+  ctx.ellipse(-6, 36 - footTap, 6, 4, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.ellipse(6, 36 - (3 - footTap), 6, 4, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.restore();
+}
+
+function drawMushroom(x, y, size, hue) {
+  ctx.save();
+  ctx.translate(x, y);
+  // Stem
+  ctx.fillStyle = 'hsl(' + hue + ',20%,70%)';
+  ctx.fillRect(-size * 0.2, 0, size * 0.4, size * 0.6);
+  // Cap
+  ctx.fillStyle = 'hsl(' + hue + ',60%,45%)';
+  ctx.beginPath();
+  ctx.ellipse(0, 0, size * 0.5, size * 0.35, 0, 0, Math.PI * 2);
+  ctx.fill();
+  // Spots
+  ctx.fillStyle = 'rgba(255,255,255,0.4)';
+  ctx.beginPath();
+  ctx.arc(-size * 0.15, -size * 0.1, size * 0.08, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+}
+
+// === UPDATE ===
+function update(dt) {
+  frame++;
+  TAS.particles.update(dt);
+  TAS.fx.updateEffects(dt);
+
+  // Update lane flashes
+  for (let i = 0; i < 4; i++) {
+    if (laneFlash[i] > 0) laneFlash[i] = Math.max(0, laneFlash[i] - dt * 5);
+  }
+
+  // Beat pulse decay
+  if (beatPulse > 0) beatPulse = Math.max(0, beatPulse - dt * 4);
+
+  // Dance reaction timer
+  if (danceReactionTimer > 0) {
+    danceReactionTimer -= dt;
+    if (danceReactionTimer <= 0) danceReaction = 'idle';
+  }
+
+  if (state === 'title') {
+    if (TAS.input.keys['Enter'] || TAS.input.keys[' '] ||
+        Object.values(TAS.input.keys).some(Boolean) || TAS.input.touch.a) {
+      state = 'select';
+      // Clear keys
+      for (const k in TAS.input.keys) TAS.input.keys[k] = false;
+    }
+    return;
+  }
+
+  if (state === 'select') {
+    // Navigate song select
+    if (TAS.input.keys['ArrowDown'] && !keyWasDown[1]) {
+      currentSong = Math.min(SONGS.length - 1, currentSong + 1);
+      TAS.audio.playTone(330, 0.05, 'square', 0.05);
+    }
+    if (TAS.input.keys['ArrowUp'] && !keyWasDown[2]) {
+      currentSong = Math.max(0, currentSong - 1);
+      TAS.audio.playTone(440, 0.05, 'square', 0.05);
+    }
+    if (TAS.input.keys['Enter'] || TAS.input.keys[' '] || TAS.input.touch.a) {
+      if (unlocked[currentSong]) {
+        startSong(currentSong);
+        TAS.audio.playTone(523, 0.1, 'square', 0.06);
+      } else {
+        TAS.audio.playTone(100, 0.2, 'sawtooth', 0.06);
+      }
+    }
+    if (TAS.input.keys['Escape']) {
+      state = 'title';
+      TAS.input.keys['Escape'] = false;
+    }
+
+    keyWasDown[1] = !!TAS.input.keys['ArrowDown'];
+    keyWasDown[2] = !!TAS.input.keys['ArrowUp'];
+    return;
+  }
+
+  if (state === 'results') {
+    if (TAS.input.keys['Enter'] || TAS.input.keys[' '] ||
+        Object.values(TAS.input.keys).some(Boolean) || TAS.input.touch.a) {
+      state = 'select';
+      for (const k in TAS.input.keys) TAS.input.keys[k] = false;
+    }
+    return;
+  }
+
+  if (state === 'playing') {
+    songTime += dt * 1000;
+    danceFrame += dt * 60;
+
+    // Detect key presses (edge detection)
+    for (let i = 0; i < LANE_COUNT; i++) {
+      const isDown = !!TAS.input.keys[LANE_KEYS[i]];
+      const touchDown = touchLanes[i];
+      const isPressed = isDown || touchDown;
+      const wasPressed = keyWasDown[i] || prevTouchLanes[i];
+      keyJustPressed[i] = isPressed && !wasPressed;
+      keyWasDown[i] = isDown;
+    }
+    prevTouchLanes = touchLanes.slice();
+
+    // Handle inputs
+    for (let i = 0; i < LANE_COUNT; i++) {
+      if (keyJustPressed[i]) {
+        tryHitLane(i);
+      }
+    }
+
+    // Check for missed notes
+    for (let i = 0; i < notes.length; i++) {
+      const n = notes[i];
+      if (!n.hit && !n.missed && n.time < songTime - GOOD_W) {
+        n.missed = true;
+        misses++;
+        combo = 0;
+        multiplier = 1;
+        missStreak++;
+        health = Math.max(0, health - 5);
+        danceReaction = 'sad';
+        danceReactionTimer = 0.4;
+
+        if (missStreak >= 3) {
+          TAS.fx.shake(3, 0.85);
+          missStreak = 0;
+        }
+      }
+    }
+
+    // Play drum beats
+    if (songTime > 0) {
+      const song = SONGS[currentSong];
+      const beatInterval = 60000 / song.bpm;
+      while (nextBeatTime <= songTime) {
+        playDrumBeat(beatCount);
+        beatPulse = 1;
+        beatCount++;
+        nextBeatTime += beatInterval;
+      }
+    }
+
+    // Background hue shift
+    bgHue = (bgHue + dt * 10) % 360;
+
+    // Check song end or health depleted
+    if (songTime >= songDuration || health <= 0) {
+      // Song complete
+      grade = calcGrade();
+      state = 'results';
+
+      // Save score
+      const key = 'song_' + currentSong;
+      if (!highScores[key] || score > highScores[key]) {
+        highScores[key] = score;
+        saveHighScores();
+      }
+
+      // Unlock next if grade C or better and health > 0
+      if (health > 0 && (grade === 'S' || grade === 'A' || grade === 'B' || grade === 'C')) {
+        if (currentSong < SONGS.length - 1) {
+          unlocked[currentSong + 1] = true;
+          saveUnlocks();
+        }
+      }
+
+      if (health > 0) {
+        playFanfare();
+      } else {
+        playComboBreak();
+      }
+    }
+
+    // Escape to quit
+    if (TAS.input.keys['Escape']) {
+      state = 'select';
+      TAS.input.keys['Escape'] = false;
+    }
+  }
+}
+
+// === DRAW ===
+function draw(dt) {
+  // Background
+  ctx.fillStyle = '#0a0518';
+  ctx.fillRect(0, 0, GW, GH);
+
+  if (state === 'title') {
+    drawTitleScreen();
+    return;
+  }
+
+  if (state === 'select') {
+    drawSelectScreen();
+    return;
+  }
+
+  if (state === 'results') {
+    drawResultsScreen();
+    return;
+  }
+
+  if (state === 'playing') {
+    drawPlayingScreen();
+  }
+}
+
+function drawTitleScreen() {
+  // Animated background
+  const t = frame * 0.02;
+  for (let i = 0; i < 8; i++) {
+    const x = GW / 2 + Math.cos(t + i * 0.8) * 100;
+    const y = GH / 2 + Math.sin(t + i * 0.6) * 60;
+    drawMushroom(x, y, 12 + Math.sin(t + i) * 3, (i * 45 + frame) % 360);
+  }
+
+  // Title
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#000';
+  ctx.font = 'bold 28px monospace';
+  ctx.fillText('RHYTHM BASELING', GW / 2 + 2, 82);
+  ctx.fillStyle = '#ff44aa';
+  ctx.fillText('RHYTHM BASELING', GW / 2, 80);
+
+  // Subtitle
+  ctx.fillStyle = '#888';
+  ctx.font = '12px monospace';
+  ctx.fillText('A Tasern Rhythm Game', GW / 2, 105);
+
+  // Baseling
+  drawBaseling(GW / 2, 170, 'happy', frame);
+
+  // Prompt
+  const pulse = Math.sin(frame * 0.05) * 0.3 + 0.7;
+  ctx.globalAlpha = pulse;
+  ctx.fillStyle = '#ffdd44';
+  ctx.font = 'bold 14px monospace';
+  ctx.fillText('PRESS ANY KEY TO START', GW / 2, GH - 40);
+  ctx.globalAlpha = 1;
+
+  // Controls hint
+  ctx.fillStyle = '#555';
+  ctx.font = '10px monospace';
+  ctx.fillText('Arrow Keys to play | Up/Down to navigate', GW / 2, GH - 20);
+}
+
+function drawSelectScreen() {
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#44ddff';
+  ctx.font = 'bold 20px monospace';
+  ctx.fillText('SELECT SONG', GW / 2, 35);
+
+  for (let i = 0; i < SONGS.length; i++) {
+    const song = SONGS[i];
+    const y = 70 + i * 48;
+    const selected = i === currentSong;
+    const isUnlocked = unlocked[i];
+
+    // Selection highlight
+    if (selected) {
+      ctx.fillStyle = 'rgba(68, 221, 255, 0.1)';
+      ctx.fillRect(40, y - 16, GW - 80, 40);
+      ctx.strokeStyle = '#44ddff';
+      ctx.lineWidth = 1;
+      ctx.strokeRect(40, y - 16, GW - 80, 40);
+    }
+
+    // Song name
+    if (isUnlocked) {
+      ctx.fillStyle = selected ? '#fff' : '#aaa';
+    } else {
+      ctx.fillStyle = '#444';
+    }
+    ctx.font = selected ? 'bold 14px monospace' : '13px monospace';
+    ctx.textAlign = 'left';
+    ctx.fillText(isUnlocked ? song.name : '??? LOCKED ???', 60, y + 2);
+
+    // Difficulty
+    ctx.textAlign = 'right';
+    ctx.fillStyle = isUnlocked ? song.color : '#333';
+    ctx.font = '11px monospace';
+    ctx.fillText(isUnlocked ? song.difficulty + ' (' + song.bpm + ' BPM)' : '', GW - 60, y + 2);
+
+    // High score
+    const hi = highScores['song_' + i];
+    if (hi && isUnlocked) {
+      ctx.fillStyle = '#ffdd44';
+      ctx.font = '10px monospace';
+      ctx.fillText('HI: ' + hi, GW - 60, y + 16);
+    }
+  }
+
+  // Instructions
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#555';
+  ctx.font = '10px monospace';
+  ctx.fillText('Up/Down: Navigate | Enter: Select | Esc: Back', GW / 2, GH - 15);
+}
+
+function drawPlayingScreen() {
+  ctx.save();
+  TAS.fx.applyShake();
+
+  // Background pulse with beat
+  const pulseAlpha = beatPulse * 0.08;
+  if (pulseAlpha > 0) {
+    ctx.fillStyle = 'hsla(' + bgHue + ', 70%, 30%, ' + pulseAlpha + ')';
+    ctx.fillRect(0, 0, GW, GH);
+  }
+
+  // Draw decorative mushrooms in background
+  ctx.globalAlpha = 0.15;
+  for (let i = 0; i < 5; i++) {
+    const mx = 30 + i * 50;
+    const my = GH - 30 + Math.sin(frame * 0.02 + i) * 5;
+    drawMushroom(mx, my, 10 + i * 2, (bgHue + i * 60) % 360);
+  }
+  ctx.globalAlpha = 1;
+
+  // Draw baseling dancer (left side)
+  drawBaseling(80, GH / 2, danceReaction, danceFrame);
+
+  // Spore particles around baseling when doing well
+  if (combo > 10 && frame % 8 === 0) {
+    TAS.particles.spawn(
+      80 + TAS.math.randRange(-20, 20),
+      GH / 2 - 20,
+      'hsl(' + (frame * 3 % 360) + ',80%,70%)',
+      1, 1, { size: 1, sizeVar: 1, gravity: -0.5 }
+    );
+  }
+
+  // Draw lane backgrounds
+  for (let i = 0; i < LANE_COUNT; i++) {
+    const lx = LANES_X + i * (LANE_WIDTH + LANE_GAP);
+    // Lane glow
+    const glowAlpha = 0.05 + laneFlash[i] * 0.15;
+    ctx.fillStyle = LANE_COLORS[i];
+    ctx.globalAlpha = glowAlpha;
+    ctx.fillRect(lx, 30, LANE_WIDTH, GH - 60);
+    ctx.globalAlpha = 1;
+
+    // Lane border
+    ctx.strokeStyle = LANE_COLORS[i];
+    ctx.globalAlpha = 0.2;
+    ctx.lineWidth = 1;
+    ctx.strokeRect(lx, 30, LANE_WIDTH, GH - 60);
+    ctx.globalAlpha = 1;
+  }
+
+  // Hit zone line
+  ctx.strokeStyle = '#fff';
+  ctx.lineWidth = 2;
+  ctx.globalAlpha = 0.6;
+  ctx.beginPath();
+  ctx.moveTo(LANES_X - 5, HIT_ZONE_Y);
+  ctx.lineTo(LANES_X + LANES_TOTAL_W + 5, HIT_ZONE_Y);
+  ctx.stroke();
+  ctx.globalAlpha = 1;
+
+  // Hit zone arrows (targets)
+  for (let i = 0; i < LANE_COUNT; i++) {
+    drawHitZoneArrow(getLaneX(i), HIT_ZONE_Y, i, laneFlash[i]);
+  }
+
+  // Draw scrolling notes
+  const song = SONGS[currentSong];
+  const scrollSpeed = 0.2; // pixels per ms
+  const lookAhead = SCROLL_AREA_H / scrollSpeed;
+
+  for (let i = 0; i < notes.length; i++) {
+    const n = notes[i];
+    if (n.hit || n.missed) continue;
+    const timeDiff = n.time - songTime;
+    if (timeDiff < -200 || timeDiff > lookAhead) continue;
+
+    // Note scrolls from bottom to top
+    const progress = 1 - (timeDiff / lookAhead);
+    const ny = GH - 20 - progress * (GH - 20 - HIT_ZONE_Y);
+
+    // Alpha fade in
+    const alpha = TAS.math.clamp(progress * 3, 0, 1);
+    drawArrow(getLaneX(n.lane), ny, n.lane, alpha);
+  }
+
+  // Particles
+  TAS.particles.draw();
+
+  ctx.restore();
+  TAS.fx.drawFlash(GW, GH);
+
+  // === HUD ===
+  // Health bar
+  ctx.fillStyle = 'rgba(0,0,0,0.6)';
+  ctx.fillRect(10, 8, 120, 14);
+  const healthColor = health > 50 ? '#44dd88' : health > 25 ? '#ffaa44' : '#ff4444';
+  ctx.fillStyle = healthColor;
+  ctx.fillRect(11, 9, (health / 100) * 118, 12);
+  ctx.strokeStyle = '#666';
+  ctx.lineWidth = 1;
+  ctx.strokeRect(10, 8, 120, 14);
+
+  // Song title
+  ctx.textAlign = 'left';
+  ctx.fillStyle = '#888';
+  ctx.font = '9px monospace';
+  ctx.fillText(SONGS[currentSong].name, 12, 35);
+
+  // Score
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#ffdd44';
+  ctx.font = 'bold 14px monospace';
+  ctx.fillText(String(score), GW / 2 - 50, 18);
+
+  // Combo
+  if (combo > 0) {
+    const comboSize = Math.min(24, 12 + Math.floor(combo / 10) * 2);
+    ctx.font = 'bold ' + comboSize + 'px monospace';
+    ctx.fillStyle = multiplier >= 8 ? '#ff44aa' : multiplier >= 4 ? '#ffaa44' : multiplier >= 2 ? '#44ddff' : '#44dd88';
+    ctx.textAlign = 'left';
+    ctx.fillText(combo + 'x', 15, GH / 2 + 50);
+
+    // Multiplier
+    if (multiplier > 1) {
+      ctx.font = '10px monospace';
+      ctx.fillStyle = '#ffdd44';
+      ctx.fillText(multiplier + 'x MULTI', 15, GH / 2 + 65);
+    }
+  }
+
+  // Progress bar (bottom)
+  if (songTime > 0) {
+    const progress = TAS.math.clamp(songTime / songDuration, 0, 1);
+    ctx.fillStyle = 'rgba(0,0,0,0.5)';
+    ctx.fillRect(0, GH - 4, GW, 4);
+    ctx.fillStyle = SONGS[currentSong].color;
+    ctx.fillRect(0, GH - 4, GW * progress, 4);
+  }
+
+  // Countdown
+  if (songTime < 0) {
+    const countNum = Math.ceil(-songTime / 1000);
+    ctx.textAlign = 'center';
+    ctx.fillStyle = '#fff';
+    ctx.font = 'bold 48px monospace';
+    ctx.globalAlpha = 0.7 + Math.sin(frame * 0.1) * 0.3;
+    ctx.fillText(String(countNum), GW / 2, GH / 2 + 15);
+    ctx.globalAlpha = 1;
+  }
+
+  // Touch zones indicator (mobile)
+  if (TAS.input.isMobile) {
+    ctx.globalAlpha = 0.2;
+    for (let i = 0; i < LANE_COUNT; i++) {
+      const lx = getLaneX(i);
+      ctx.fillStyle = LANE_COLORS[i];
+      ctx.fillRect(lx - LANE_WIDTH / 2, GH - 35, LANE_WIDTH, 30);
+      ctx.fillStyle = '#fff';
+      ctx.font = '8px monospace';
+      ctx.textAlign = 'center';
+      ctx.fillText(LANE_NAMES[i][0], lx, GH - 17);
+    }
+    ctx.globalAlpha = 1;
+  }
+}
+
+function drawResultsScreen() {
+  ctx.fillStyle = 'rgba(10,5,24,0.92)';
+  ctx.fillRect(0, 0, GW, GH);
+
+  ctx.textAlign = 'center';
+
+  // Title
+  if (health <= 0) {
+    ctx.fillStyle = '#ff4444';
+    ctx.font = 'bold 22px monospace';
+    ctx.fillText('STAGE FAILED', GW / 2, 40);
+  } else {
+    ctx.fillStyle = '#44dd88';
+    ctx.font = 'bold 22px monospace';
+    ctx.fillText('STAGE CLEAR!', GW / 2, 40);
+  }
+
+  // Song name
+  ctx.fillStyle = SONGS[currentSong].color;
+  ctx.font = '12px monospace';
+  ctx.fillText(SONGS[currentSong].name + ' - ' + SONGS[currentSong].difficulty, GW / 2, 62);
+
+  // Grade
+  const gradeColors = { S: '#ffdd44', A: '#44dd88', B: '#44ddff', C: '#ffaa44', D: '#ff4444' };
+  ctx.fillStyle = gradeColors[grade] || '#fff';
+  ctx.font = 'bold 48px monospace';
+  ctx.fillText(grade, GW / 2, 120);
+
+  // Stats
+  ctx.font = '12px monospace';
+  ctx.textAlign = 'left';
+  const sx = GW / 2 - 80;
+  let sy = 145;
+
+  ctx.fillStyle = '#ffdd44';
+  ctx.fillText('Score: ' + score, sx, sy); sy += 18;
+  ctx.fillStyle = '#44dd88';
+  ctx.fillText('Perfect: ' + perfects, sx, sy); sy += 16;
+  ctx.fillStyle = '#44ddff';
+  ctx.fillText('Great: ' + greats, sx, sy); sy += 16;
+  ctx.fillStyle = '#aaa';
+  ctx.fillText('Good: ' + goods, sx, sy); sy += 16;
+  ctx.fillStyle = '#ff4444';
+  ctx.fillText('Miss: ' + misses, sx, sy); sy += 18;
+  ctx.fillStyle = '#ffaa44';
+  ctx.fillText('Max Combo: ' + maxCombo, sx, sy); sy += 16;
+
+  // High score
+  const hi = highScores['song_' + currentSong];
+  if (hi) {
+    ctx.fillStyle = '#888';
+    ctx.fillText('High Score: ' + hi, sx, sy);
+  }
+
+  // Accuracy
+  const total = perfects + greats + goods + misses;
+  const accuracy = total > 0 ? Math.round((perfects * 3 + greats * 2 + goods) / (total * 3) * 100) : 0;
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#fff';
+  ctx.font = '11px monospace';
+  ctx.fillText('Accuracy: ' + accuracy + '%', GW / 2, GH - 50);
+
+  // Unlock message
+  if (health > 0 && currentSong < SONGS.length - 1 && (grade === 'S' || grade === 'A' || grade === 'B' || grade === 'C')) {
+    ctx.fillStyle = '#44dd88';
+    ctx.font = 'bold 11px monospace';
+    ctx.fillText('Unlocked: ' + SONGS[currentSong + 1].name + '!', GW / 2, GH - 35);
+  }
+
+  // Continue prompt
+  const pulse = Math.sin(frame * 0.05) * 0.3 + 0.7;
+  ctx.globalAlpha = pulse;
+  ctx.fillStyle = '#88ccff';
+  ctx.font = 'bold 12px monospace';
+  ctx.fillText('PRESS ANY KEY TO CONTINUE', GW / 2, GH - 15);
+  ctx.globalAlpha = 1;
+}
+
+// === START ===
+TAS.loop.start(update, draw);
+
+})();
+</script>
+</body>
+</html>

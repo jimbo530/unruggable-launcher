@@ -1,0 +1,2156 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Whodunit</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body { width: 100%; height: 100%; overflow: hidden; background: #0a0a12; touch-action: none; }
+canvas { display: block; margin: 0 auto; }
+#back-link {
+  position: fixed; bottom: 8px; left: 50%; transform: translateX(-50%);
+  color: #666; font-family: monospace; font-size: 12px; text-decoration: none; z-index: 10;
+}
+#back-link:hover { color: #aaa; }
+</style>
+</head>
+<body>
+<canvas id="gc"></canvas>
+<a id="back-link" href="/games">Back to Arcade</a>
+<script src="nft-loader.js"></script>
+<script>if(window.NftLoader)NftLoader.gate();</script>
+<script>
+(function() {
+"use strict";
+
+// ============================================================
+// THEME DATA
+// ============================================================
+var SUSPECTS = [
+  { name: "The Whale",      short: "Whale",   color: "#00ccff", icon: "W" },
+  { name: "The Rug Puller", short: "Rugger",  color: "#ff3366", icon: "R" },
+  { name: "The Degen",      short: "Degen",   color: "#33ff66", icon: "D" },
+  { name: "The Anon Dev",   short: "Anon",    color: "#aa66ff", icon: "A" },
+  { name: "The Influencer", short: "Influ",   color: "#ffcc00", icon: "I" },
+  { name: "The VC",         short: "VC",      color: "#ff8833", icon: "V" }
+];
+
+var WEAPONS = [
+  "Smart Contract Exploit",
+  "Flash Loan",
+  "Reentrancy Attack",
+  "Private Key Theft",
+  "Governance Vote",
+  "Bridge Hack"
+];
+
+var ROOMS = [
+  "The DEX",
+  "The Liquidity Pool",
+  "The DAO Treasury",
+  "The NFT Gallery",
+  "The Staking Vault",
+  "The Bridge",
+  "The Launchpad",
+  "The Discord Server",
+  "The Wallet"
+];
+
+var ROOM_COLORS = [
+  "#0d2233", "#0d3322", "#33220d",
+  "#220d33", "#0d3333", "#33330d",
+  "#330d22", "#0d2222", "#22330d"
+];
+
+var ROOM_GLOW = [
+  "#00aaff", "#00ff88", "#ffaa00",
+  "#aa44ff", "#00dddd", "#dddd00",
+  "#ff4488", "#00bbbb", "#88ff00"
+];
+
+// Room grid: 3x3, each at (col, row)
+var ROOM_GRID = [
+  {r:0,c:0},{r:0,c:1},{r:0,c:2},
+  {r:1,c:0},{r:1,c:1},{r:1,c:2},
+  {r:2,c:0},{r:2,c:1},{r:2,c:2}
+];
+
+// Secret passages: corner to corner diagonal
+var SECRET_PASSAGES = { 0:8, 8:0, 2:6, 6:2 };
+
+// ============================================================
+// AUDIO
+// ============================================================
+var audioCtx = null;
+function initAudio() {
+  if (!audioCtx) {
+    try { audioCtx = new (window.AudioContext || window.webkitAudioContext)(); }
+    catch(e) { console.warn("Web Audio unavailable:", e); }
+  }
+}
+
+function playTone(freq, dur, type, vol) {
+  if (!audioCtx) return;
+  try {
+    var osc = audioCtx.createOscillator();
+    var gain = audioCtx.createGain();
+    osc.type = type || "sine";
+    osc.frequency.value = freq;
+    gain.gain.setValueAtTime(vol || 0.1, audioCtx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + dur);
+    osc.connect(gain);
+    gain.connect(audioCtx.destination);
+    osc.start();
+    osc.stop(audioCtx.currentTime + dur);
+  } catch(e) { console.warn("Audio error:", e); }
+}
+
+function sfxDice() {
+  for (var i = 0; i < 4; i++) {
+    (function(d){ setTimeout(function(){ playTone(300 + Math.random()*400, 0.05, "triangle", 0.06); }, d*60); })(i);
+  }
+}
+function sfxMove() { playTone(440, 0.08, "sine", 0.08); }
+function sfxEnterRoom() { playTone(330, 0.15, "sine", 0.1); setTimeout(function(){ playTone(440, 0.12, "sine", 0.08); }, 80); }
+function sfxSuggest() { playTone(523, 0.15, "square", 0.06); setTimeout(function(){ playTone(659, 0.15, "square", 0.06); }, 120); }
+function sfxShowCard() { playTone(700, 0.1, "sine", 0.08); }
+function sfxNoCard() { playTone(200, 0.2, "sawtooth", 0.05); }
+function sfxAccuse() { playTone(330, 0.2, "sawtooth", 0.07); setTimeout(function(){ playTone(440, 0.2, "sawtooth", 0.07); }, 180); setTimeout(function(){ playTone(554, 0.3, "sawtooth", 0.07); }, 360); }
+function sfxWin() { [523,659,784,1047].forEach(function(f,i){ setTimeout(function(){ playTone(f, 0.35, "sine", 0.12); }, i*150); }); }
+function sfxLose() { [400,350,300,200].forEach(function(f,i){ setTimeout(function(){ playTone(f, 0.4, "sawtooth", 0.08); }, i*200); }); }
+function sfxEliminate() { playTone(150, 0.5, "sawtooth", 0.1); }
+
+// ============================================================
+// CANVAS SETUP
+// ============================================================
+var canvas = document.getElementById("gc");
+var ctx = canvas.getContext("2d");
+var W = 800, H = 800;
+
+function resize() {
+  var dpr = window.devicePixelRatio || 1;
+  var w = window.innerWidth;
+  var h = window.innerHeight - 24;
+  var sz = Math.min(w, h);
+  W = sz; H = sz;
+  canvas.style.width = sz + "px";
+  canvas.style.height = sz + "px";
+  canvas.width = sz * dpr;
+  canvas.height = sz * dpr;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+}
+
+// ============================================================
+// GAME STATE
+// ============================================================
+var SCREEN_MENU = 0, SCREEN_GAME = 1;
+var screen = SCREEN_MENU;
+var menuSelection = { numAI: 3, playerSuspect: 0 };
+
+var G = null; // game object
+
+// Board layout constants (recomputed on render)
+var MARGIN = 0;
+var cellW = 0, cellH = 0;
+var boardOX = 0, boardOY = 0, boardSz = 0;
+
+// UI state
+var reachableSpots = [];
+var hoverRoom = -1;
+var showNotepad = false;
+var showingDialog = null; // null, "suggest", "accuse"
+var dialogSelections = { suspect: 0, weapon: 0, room: 0 };
+var messageQueue = [];
+var currentMessage = null;
+var messageTimer = 0;
+var showingResult = null; // null or {won, text, sub}
+
+// Log
+var logEntries = [];
+var MAX_LOG = 40;
+
+function addLog(msg, cls) {
+  logEntries.push({ msg: msg, cls: cls || "" });
+  if (logEntries.length > MAX_LOG) logEntries.shift();
+}
+
+function showMessage(msg, duration) {
+  messageQueue.push({ msg: msg, dur: duration || 2000 });
+  if (!currentMessage) popMessage();
+}
+
+function popMessage() {
+  if (messageQueue.length === 0) { currentMessage = null; return; }
+  currentMessage = messageQueue.shift();
+  messageTimer = Date.now() + currentMessage.dur;
+}
+
+// ============================================================
+// GAME INIT
+// ============================================================
+function newGame(numAI, playerSuspectIdx) {
+  var totalPlayers = 1 + numAI;
+
+  // Build and separate solution
+  var solSuspect = Math.floor(Math.random() * 6);
+  var solWeapon = Math.floor(Math.random() * 6);
+  var solRoom = Math.floor(Math.random() * 9);
+
+  // Build remaining deck
+  var deck = [];
+  for (var i = 0; i < 6; i++) if (i !== solSuspect) deck.push({ type: "suspect", index: i });
+  for (var i = 0; i < 6; i++) if (i !== solWeapon) deck.push({ type: "weapon", index: i });
+  for (var i = 0; i < 9; i++) if (i !== solRoom) deck.push({ type: "room", index: i });
+
+  // Shuffle
+  for (var i = deck.length - 1; i > 0; i--) {
+    var j = Math.floor(Math.random() * (i + 1));
+    var tmp = deck[i]; deck[i] = deck[j]; deck[j] = tmp;
+  }
+
+  // Assign suspect tokens to players
+  var usedSuspects = {};
+  usedSuspects[playerSuspectIdx] = true;
+  var playerSuspects = [playerSuspectIdx];
+  for (var i = 0; i < numAI; i++) {
+    var s;
+    do { s = Math.floor(Math.random() * 6); } while (usedSuspects[s]);
+    usedSuspects[s] = true;
+    playerSuspects.push(s);
+  }
+
+  // Deal cards
+  var hands = [];
+  for (var i = 0; i < totalPlayers; i++) hands.push([]);
+  for (var i = 0; i < deck.length; i++) hands[i % totalPlayers].push(deck[i]);
+
+  // Starting positions -- hallways around the board edges
+  var startPositions = [
+    {hx:1,hy:0},{hx:3,hy:0},{hx:0,hy:1},
+    {hx:4,hy:1},{hx:1,hy:4},{hx:3,hy:4}
+  ];
+
+  var players = [];
+  for (var i = 0; i < totalPlayers; i++) {
+    var sp = startPositions[playerSuspects[i] % startPositions.length];
+    players.push({
+      suspectIdx: playerSuspects[i],
+      hand: hands[i],
+      isHuman: i === 0,
+      alive: true,
+      inRoom: -1,
+      hallX: sp.hx,
+      hallY: sp.hy,
+      // AI knowledge tracking
+      known: {
+        hasSuspect: [false,false,false,false,false,false],
+        hasWeapon: [false,false,false,false,false,false],
+        hasRoom: [false,false,false,false,false,false,false,false,false],
+        // Track which player showed what (for smarter deduction)
+        shownBy: {} // "s0": playerIdx, etc.
+      }
+    });
+    // AI marks own cards as known
+    if (i > 0) {
+      hands[i].forEach(function(c) {
+        if (c.type === "suspect") players[i].known.hasSuspect[c.index] = true;
+        if (c.type === "weapon") players[i].known.hasWeapon[c.index] = true;
+        if (c.type === "room") players[i].known.hasRoom[c.index] = true;
+      });
+    }
+  }
+
+  // Player notepad: 0=blank, 1=have/confirmed, 2=eliminated, 3=maybe
+  var notepad = {};
+  for (var i = 0; i < 6; i++) {
+    notepad["s"+i] = {};
+    for (var p = 0; p < totalPlayers; p++) notepad["s"+i][p] = 0;
+    notepad["s"+i].sol = 0;
+  }
+  for (var i = 0; i < 6; i++) {
+    notepad["w"+i] = {};
+    for (var p = 0; p < totalPlayers; p++) notepad["w"+i][p] = 0;
+    notepad["w"+i].sol = 0;
+  }
+  for (var i = 0; i < 9; i++) {
+    notepad["r"+i] = {};
+    for (var p = 0; p < totalPlayers; p++) notepad["r"+i][p] = 0;
+    notepad["r"+i].sol = 0;
+  }
+
+  // Auto-mark own cards
+  hands[0].forEach(function(c) {
+    var key = (c.type === "suspect" ? "s" : c.type === "weapon" ? "w" : "r") + c.index;
+    notepad[key][0] = 1;
+    for (var p = 1; p < totalPlayers; p++) notepad[key][p] = 2;
+    notepad[key].sol = 2;
+  });
+
+  G = {
+    solution: { suspect: solSuspect, weapon: solWeapon, room: solRoom },
+    players: players,
+    totalPlayers: totalPlayers,
+    currentPlayer: 0,
+    phase: "roll", // roll, move, suggest, endturn, gameover
+    diceResult: [0,0],
+    diceTotal: 0,
+    notepad: notepad,
+    turnCount: 1,
+    gameOver: false,
+    winner: -1,
+    suggestedThisTurn: false,
+    animatingDice: false,
+    diceAnim: null
+  };
+
+  logEntries = [];
+  addLog("The investigation begins! " + totalPlayers + " detectives enter the network.");
+  addLog("You are " + SUSPECTS[playerSuspects[0]].name + ". You hold " + hands[0].length + " cards.");
+  addLog("--- Your turn ---", "hl");
+
+  reachableSpots = [];
+  showNotepad = false;
+  showingDialog = null;
+  showingResult = null;
+  messageQueue = [];
+  currentMessage = null;
+
+  saveGame();
+}
+
+// ============================================================
+// BOARD GEOMETRY - 5x5 grid, rooms at even coords, hallways at odd
+// ============================================================
+function computeLayout() {
+  MARGIN = W * 0.03;
+  boardSz = W - MARGIN * 2;
+  boardOX = MARGIN;
+  boardOY = MARGIN;
+  cellW = boardSz / 5;
+  cellH = boardSz / 5;
+}
+
+function roomPixelRect(roomIdx) {
+  var g = ROOM_GRID[roomIdx];
+  var x = boardOX + g.c * 2 * cellW;
+  var y = boardOY + g.r * 2 * cellH;
+  return { x: x + 2, y: y + 2, w: cellW - 4, h: cellH - 4 };
+}
+
+function hallPixelCenter(hx, hy) {
+  return {
+    x: boardOX + hx * cellW + cellW / 2,
+    y: boardOY + hy * cellH + cellH / 2
+  };
+}
+
+function isHallwayCell(hx, hy) {
+  if (hx < 0 || hx > 4 || hy < 0 || hy > 4) return false;
+  if (hx % 2 === 0 && hy % 2 === 0) return false; // room cells
+  return true;
+}
+
+function roomDoors(roomIdx) {
+  var g = ROOM_GRID[roomIdx];
+  var cx = g.c * 2, cy = g.r * 2;
+  var doors = [];
+  if (cy > 0) doors.push({hx:cx, hy:cy-1});
+  if (cy < 4) doors.push({hx:cx, hy:cy+1});
+  if (cx > 0) doors.push({hx:cx-1, hy:cy});
+  if (cx < 4) doors.push({hx:cx+1, hy:cy});
+  return doors;
+}
+
+function hallAdjacentRooms(hx, hy) {
+  var rooms = [];
+  for (var i = 0; i < 9; i++) {
+    var doors = roomDoors(i);
+    for (var d = 0; d < doors.length; d++) {
+      if (doors[d].hx === hx && doors[d].hy === hy) { rooms.push(i); break; }
+    }
+  }
+  return rooms;
+}
+
+function hallNeighbors(hx, hy) {
+  var dirs = [[0,-1],[0,1],[-1,0],[1,0]];
+  var result = [];
+  for (var i = 0; i < dirs.length; i++) {
+    var nx = hx + dirs[i][0], ny = hy + dirs[i][1];
+    if (nx < 0 || nx > 4 || ny < 0 || ny > 4) continue;
+    if (isHallwayCell(nx, ny)) {
+      result.push({hx:nx, hy:ny, room:-1});
+    } else {
+      // room cell -- can enter
+      for (var r = 0; r < 9; r++) {
+        var g = ROOM_GRID[r];
+        if (g.c*2 === nx && g.r*2 === ny) { result.push({hx:nx, hy:ny, room:r}); break; }
+      }
+    }
+  }
+  return result;
+}
+
+// BFS from player position with given number of steps
+function getReachable(player, steps) {
+  if (steps <= 0) return [];
+  var results = [];
+  var visited = {};
+
+  var starts = [];
+  if (player.inRoom >= 0) {
+    var doors = roomDoors(player.inRoom);
+    for (var i = 0; i < doors.length; i++) {
+      starts.push({hx: doors[i].hx, hy: doors[i].hy, dist: 1});
+    }
+    // Secret passage
+    if (SECRET_PASSAGES[player.inRoom] !== undefined) {
+      results.push({hx:-1, hy:-1, room: SECRET_PASSAGES[player.inRoom], dist:1, secret:true});
+    }
+  } else {
+    starts.push({hx: player.hallX, hy: player.hallY, dist: 0});
+  }
+
+  var queue = [];
+  for (var i = 0; i < starts.length; i++) {
+    var s = starts[i];
+    var key = s.hx + "," + s.hy;
+    if (visited[key]) continue;
+    visited[key] = true;
+    queue.push(s);
+    if (s.dist > 0 && s.dist <= steps) {
+      // This hallway is reachable
+      results.push({hx:s.hx, hy:s.hy, room:-1, dist:s.dist});
+      // Check adjacent rooms
+      var adjR = hallAdjacentRooms(s.hx, s.hy);
+      for (var j = 0; j < adjR.length; j++) {
+        if (adjR[j] !== player.inRoom) {
+          results.push({hx:s.hx, hy:s.hy, room:adjR[j], dist:s.dist});
+        }
+      }
+    }
+  }
+
+  while (queue.length > 0) {
+    var cur = queue.shift();
+    if (cur.dist >= steps) continue;
+    var neighbors = hallNeighbors(cur.hx, cur.hy);
+    for (var n = 0; n < neighbors.length; n++) {
+      var nb = neighbors[n];
+      if (nb.room >= 0) {
+        if (nb.room !== player.inRoom) {
+          results.push({hx:cur.hx, hy:cur.hy, room:nb.room, dist:cur.dist+1});
+        }
+      } else {
+        var nkey = nb.hx + "," + nb.hy;
+        if (!visited[nkey]) {
+          visited[nkey] = true;
+          var nd = cur.dist + 1;
+          if (nd <= steps) {
+            results.push({hx:nb.hx, hy:nb.hy, room:-1, dist:nd});
+            var adjR2 = hallAdjacentRooms(nb.hx, nb.hy);
+            for (var j = 0; j < adjR2.length; j++) {
+              if (adjR2[j] !== player.inRoom) {
+                results.push({hx:nb.hx, hy:nb.hy, room:adjR2[j], dist:nd});
+              }
+            }
+          }
+          queue.push({hx:nb.hx, hy:nb.hy, dist:nd});
+        }
+      }
+    }
+  }
+
+  // Deduplicate
+  var seenRooms = {}, seenHalls = {};
+  var deduped = [];
+  for (var i = 0; i < results.length; i++) {
+    var r = results[i];
+    if (r.room >= 0) {
+      if (!seenRooms[r.room]) { seenRooms[r.room] = true; deduped.push(r); }
+    } else {
+      var hk = r.hx+","+r.hy;
+      if (!seenHalls[hk]) { seenHalls[hk] = true; deduped.push(r); }
+    }
+  }
+  return deduped;
+}
+
+// ============================================================
+// RENDERING
+// ============================================================
+function drawBoard() {
+  computeLayout();
+  var c = ctx;
+
+  // Background
+  c.fillStyle = "#0a0a12";
+  c.fillRect(0, 0, W, H);
+
+  // Subtle grid glow
+  c.strokeStyle = "#151525";
+  c.lineWidth = 1;
+  for (var x = 0; x <= 5; x++) {
+    c.beginPath();
+    c.moveTo(boardOX + x*cellW, boardOY);
+    c.lineTo(boardOX + x*cellW, boardOY + boardSz);
+    c.stroke();
+  }
+  for (var y = 0; y <= 5; y++) {
+    c.beginPath();
+    c.moveTo(boardOX, boardOY + y*cellH);
+    c.lineTo(boardOX + boardSz, boardOY + y*cellH);
+    c.stroke();
+  }
+
+  // Hallway paths
+  c.strokeStyle = "#1a1a2a";
+  c.lineWidth = Math.max(3, cellW * 0.25);
+  c.lineCap = "round";
+  for (var hy = 0; hy <= 4; hy++) {
+    for (var hx = 0; hx <= 4; hx++) {
+      if (!isHallwayCell(hx, hy)) continue;
+      var p = hallPixelCenter(hx, hy);
+      var nbs = hallNeighbors(hx, hy);
+      for (var n = 0; n < nbs.length; n++) {
+        if (nbs[n].room < 0 && (nbs[n].hx > hx || nbs[n].hy > hy)) {
+          var p2 = hallPixelCenter(nbs[n].hx, nbs[n].hy);
+          c.beginPath();
+          c.moveTo(p.x, p.y);
+          c.lineTo(p2.x, p2.y);
+          c.stroke();
+        }
+      }
+    }
+  }
+
+  // Rooms
+  for (var i = 0; i < 9; i++) {
+    var rr = roomPixelRect(i);
+    var isReachable = false;
+    for (var j = 0; j < reachableSpots.length; j++) {
+      if (reachableSpots[j].room === i) { isReachable = true; break; }
+    }
+    var isHover = hoverRoom === i && isReachable;
+
+    // Glow effect for reachable rooms
+    if (isReachable) {
+      c.save();
+      c.shadowColor = ROOM_GLOW[i];
+      c.shadowBlur = isHover ? 20 : 10;
+      c.fillStyle = lighten(ROOM_COLORS[i], isHover ? 35 : 15);
+      roundRect(c, rr.x, rr.y, rr.w, rr.h, 6);
+      c.fill();
+      c.restore();
+      c.strokeStyle = ROOM_GLOW[i];
+      c.lineWidth = isHover ? 2.5 : 1.5;
+    } else {
+      c.fillStyle = ROOM_COLORS[i];
+      c.strokeStyle = "#333";
+      c.lineWidth = 1;
+    }
+    roundRect(c, rr.x, rr.y, rr.w, rr.h, 6);
+    if (!isReachable) c.fill();
+    c.stroke();
+
+    // Room name
+    var fs = Math.max(8, Math.min(13, rr.w * 0.1));
+    c.font = fs + "px monospace";
+    c.textAlign = "center";
+    c.textBaseline = "middle";
+    c.fillStyle = isReachable ? "#ddd" : "#888";
+    var lines = wordWrap(ROOMS[i], rr.w - 10, c);
+    var lh = fs * 1.3;
+    var startY = rr.y + rr.h * 0.35 - (lines.length - 1) * lh / 2;
+    for (var li = 0; li < lines.length; li++) {
+      c.fillText(lines[li], rr.x + rr.w / 2, startY + li * lh);
+    }
+
+    // Secret passage indicator
+    if (SECRET_PASSAGES[i] !== undefined) {
+      c.fillStyle = "#ffcc0077";
+      c.font = Math.max(7, fs * 0.7) + "px monospace";
+      c.fillText("[passage]", rr.x + rr.w / 2, rr.y + rr.h - fs);
+    }
+
+    // Door indicators
+    var doors = roomDoors(i);
+    for (var d = 0; d < doors.length; d++) {
+      var dp = hallPixelCenter(doors[d].hx, doors[d].hy);
+      var rcx = rr.x + rr.w/2, rcy = rr.y + rr.h/2;
+      var dx = dp.x - rcx, dy = dp.y - rcy;
+      var len = Math.sqrt(dx*dx + dy*dy) || 1;
+      var doorX = rcx + dx/len * (rr.w/2);
+      var doorY = rcy + dy/len * (rr.h/2);
+      c.fillStyle = isReachable ? ROOM_GLOW[i] : "#444";
+      c.fillRect(doorX - 3, doorY - 3, 6, 6);
+    }
+  }
+
+  // Reachable hallway spots
+  for (var i = 0; i < reachableSpots.length; i++) {
+    var rs = reachableSpots[i];
+    if (rs.room < 0) {
+      var hp = hallPixelCenter(rs.hx, rs.hy);
+      c.fillStyle = "#00ff8844";
+      c.beginPath();
+      c.arc(hp.x, hp.y, cellW * 0.12, 0, Math.PI * 2);
+      c.fill();
+      c.strokeStyle = "#00ff8866";
+      c.lineWidth = 1;
+      c.stroke();
+    }
+  }
+
+  // Draw players
+  var roomOccupants = {};
+  for (var i = 0; i < G.players.length; i++) {
+    if (!G.players[i].alive) continue;
+    if (G.players[i].inRoom >= 0) {
+      if (!roomOccupants[G.players[i].inRoom]) roomOccupants[G.players[i].inRoom] = [];
+      roomOccupants[G.players[i].inRoom].push(i);
+    }
+  }
+
+  for (var i = 0; i < G.players.length; i++) {
+    var pl = G.players[i];
+    if (!pl.alive) continue;
+    var sus = SUSPECTS[pl.suspectIdx];
+    var px, py;
+    var radius = Math.max(8, cellW * 0.12);
+
+    if (pl.inRoom >= 0) {
+      var rr2 = roomPixelRect(pl.inRoom);
+      var occ = roomOccupants[pl.inRoom] || [i];
+      var idx = occ.indexOf(i);
+      var cols = Math.min(occ.length, 3);
+      var row = Math.floor(idx / 3);
+      var col = idx % 3;
+      var spacing = rr2.w / (cols + 1);
+      px = rr2.x + spacing * (col + 1);
+      py = rr2.y + rr2.h * 0.6 + row * (radius * 2.8);
+    } else {
+      var hp2 = hallPixelCenter(pl.hallX, pl.hallY);
+      px = hp2.x;
+      py = hp2.y;
+    }
+
+    // Shadow
+    c.fillStyle = "rgba(0,0,0,0.5)";
+    c.beginPath();
+    c.arc(px + 2, py + 2, radius, 0, Math.PI * 2);
+    c.fill();
+
+    // Token
+    var grad = c.createRadialGradient(px - radius*0.3, py - radius*0.3, 0, px, py, radius);
+    grad.addColorStop(0, lighten(sus.color, 40));
+    grad.addColorStop(1, sus.color);
+    c.fillStyle = grad;
+    c.beginPath();
+    c.arc(px, py, radius, 0, Math.PI * 2);
+    c.fill();
+
+    // Current player ring
+    if (i === G.currentPlayer) {
+      c.strokeStyle = "#ffffff";
+      c.lineWidth = 2.5;
+      c.beginPath();
+      c.arc(px, py, radius + 3, 0, Math.PI * 2);
+      c.stroke();
+
+      // Pulse glow
+      c.save();
+      c.shadowColor = sus.color;
+      c.shadowBlur = 8 + Math.sin(Date.now()/300)*4;
+      c.strokeStyle = sus.color;
+      c.lineWidth = 1;
+      c.beginPath();
+      c.arc(px, py, radius + 5, 0, Math.PI * 2);
+      c.stroke();
+      c.restore();
+    }
+
+    // Letter
+    c.fillStyle = "#0a0a12";
+    c.font = "bold " + (radius * 1.2) + "px monospace";
+    c.textAlign = "center";
+    c.textBaseline = "middle";
+    c.fillText(sus.icon, px, py + 1);
+  }
+}
+
+function drawHUD() {
+  var c = ctx;
+  var hudH = W * 0.065;
+  var hudY = W - hudH - 2;
+  var fs = Math.max(9, hudH * 0.4);
+
+  // Semi-transparent bar at bottom
+  c.fillStyle = "rgba(10,10,18,0.92)";
+  c.fillRect(0, hudY, W, hudH + 2);
+  c.strokeStyle = "#222";
+  c.lineWidth = 1;
+  c.beginPath();
+  c.moveTo(0, hudY);
+  c.lineTo(W, hudY);
+  c.stroke();
+
+  // Turn info left
+  var pl = G.players[G.currentPlayer];
+  var sus = SUSPECTS[pl.suspectIdx];
+  c.font = "bold " + fs + "px monospace";
+  c.textAlign = "left";
+  c.textBaseline = "middle";
+  c.fillStyle = sus.color;
+  var turnText = pl.isHuman ? "YOUR TURN" : sus.short + "'s turn";
+  if (G.gameOver) turnText = "GAME OVER";
+  c.fillText(turnText, 8, hudY + hudH/2);
+
+  // Phase info
+  c.font = (fs * 0.75) + "px monospace";
+  c.fillStyle = "#666";
+  var phaseText = "";
+  if (!G.gameOver) {
+    if (G.phase === "roll") phaseText = "[Roll dice]";
+    else if (G.phase === "move") phaseText = "[Move: " + G.diceTotal + " steps]";
+    else if (G.phase === "suggest") phaseText = "[Suggest/Accuse/End]";
+    else if (G.phase === "endturn") phaseText = "[End turn]";
+  }
+  c.textAlign = "center";
+  c.fillText(phaseText, W/2, hudY + hudH/2);
+
+  // Turn counter right
+  c.textAlign = "right";
+  c.fillStyle = "#555";
+  c.fillText("Turn " + G.turnCount, W - 8, hudY + hudH/2);
+
+  // Dice display (top-left corner)
+  var diceY = 6;
+  var diceSize = Math.max(20, W * 0.04);
+  drawDie(8, diceY, diceSize, G.diceResult[0]);
+  drawDie(8 + diceSize + 6, diceY, diceSize, G.diceResult[1]);
+  if (G.diceResult[0] > 0) {
+    c.font = (diceSize*0.5) + "px monospace";
+    c.textAlign = "left";
+    c.fillStyle = "#00ff88";
+    c.fillText("=" + G.diceTotal, 8 + diceSize*2 + 14, diceY + diceSize/2 + 1);
+  }
+
+  // Action buttons (top-right)
+  drawActionButtons();
+
+  // Cards display (below dice on left)
+  drawPlayerCards();
+}
+
+function drawDie(x, y, sz, val) {
+  var c = ctx;
+  c.fillStyle = "#1a1a2a";
+  c.strokeStyle = val > 0 ? "#00ff88" : "#333";
+  c.lineWidth = 1.5;
+  roundRect(c, x, y, sz, sz, 4);
+  c.fill();
+  c.stroke();
+  c.fillStyle = val > 0 ? "#00ff88" : "#555";
+  c.font = "bold " + (sz*0.55) + "px monospace";
+  c.textAlign = "center";
+  c.textBaseline = "middle";
+  c.fillText(val > 0 ? val : "?", x + sz/2, y + sz/2);
+}
+
+var btnRects = {}; // store hit areas
+
+function drawActionButtons() {
+  var c = ctx;
+  var btnH = Math.max(18, W * 0.032);
+  var btnW = Math.max(50, W * 0.1);
+  var gap = 4;
+  var startX = W - 8;
+  var y = 6;
+  var isHuman = G.currentPlayer === 0 && !G.gameOver;
+
+  var buttons = [];
+  // Always show notepad button
+  buttons.push({ id: "notepad", label: "Notepad", enabled: true, color: "#8866ff" });
+
+  if (!G.gameOver) {
+    buttons.push({ id: "roll", label: "Roll", enabled: isHuman && G.phase === "roll", color: "#00ff88" });
+    buttons.push({ id: "suggest", label: "Suggest", enabled: isHuman && G.phase === "suggest" && G.players[0].inRoom >= 0 && !G.suggestedThisTurn, color: "#00ccff" });
+    buttons.push({ id: "accuse", label: "Accuse!", enabled: isHuman && (G.phase === "suggest" || G.phase === "roll" || G.phase === "endturn"), color: "#ff3366" });
+    buttons.push({ id: "endturn", label: "End Turn", enabled: isHuman && (G.phase === "endturn" || G.phase === "suggest"), color: "#ffcc00" });
+  } else {
+    buttons.push({ id: "newgame", label: "New Game", enabled: true, color: "#00ff88" });
+  }
+
+  // Draw right to left
+  var bx = startX;
+  for (var i = buttons.length - 1; i >= 0; i--) {
+    var b = buttons[i];
+    bx -= btnW;
+    c.fillStyle = b.enabled ? "#1a1a2a" : "#111118";
+    roundRect(c, bx, y, btnW, btnH, 4);
+    c.fill();
+    c.strokeStyle = b.enabled ? b.color : "#222";
+    c.lineWidth = b.enabled ? 1.5 : 1;
+    roundRect(c, bx, y, btnW, btnH, 4);
+    c.stroke();
+    c.fillStyle = b.enabled ? b.color : "#333";
+    c.font = (btnH * 0.5) + "px monospace";
+    c.textAlign = "center";
+    c.textBaseline = "middle";
+    c.fillText(b.label, bx + btnW/2, y + btnH/2);
+
+    btnRects[b.id] = { x: bx, y: y, w: btnW, h: btnH, enabled: b.enabled };
+    bx -= gap;
+  }
+}
+
+function drawPlayerCards() {
+  if (!G) return;
+  var c = ctx;
+  var hand = G.players[0].hand;
+  var cardH = Math.max(14, W * 0.022);
+  var cardW = Math.max(50, W * 0.1);
+  var startY = Math.max(30, W * 0.055);
+  var x = 8;
+
+  c.font = (cardH * 0.6) + "px monospace";
+  c.textAlign = "left";
+  c.textBaseline = "middle";
+  c.fillStyle = "#555";
+  c.fillText("YOUR CARDS:", x, startY);
+
+  for (var i = 0; i < hand.length; i++) {
+    var card = hand[i];
+    var cy = startY + (i + 1) * (cardH + 2);
+    var bgColor, borderColor, label;
+    if (card.type === "suspect") {
+      bgColor = "#1a1025"; borderColor = "#8855aa"; label = SUSPECTS[card.index].short;
+    } else if (card.type === "weapon") {
+      bgColor = "#0f1a15"; borderColor = "#55aa55"; label = WEAPONS[card.index];
+    } else {
+      bgColor = "#0f1520"; borderColor = "#5577cc"; label = ROOMS[card.index];
+    }
+
+    // Truncate long names
+    var maxChars = Math.floor(cardW / (cardH * 0.3));
+    if (label.length > maxChars) label = label.substring(0, maxChars - 1) + "..";
+
+    c.fillStyle = bgColor;
+    roundRect(c, x, cy, cardW, cardH, 3);
+    c.fill();
+    c.strokeStyle = borderColor;
+    c.lineWidth = 1;
+    roundRect(c, x, cy, cardW, cardH, 3);
+    c.stroke();
+    c.fillStyle = borderColor;
+    c.font = (cardH * 0.55) + "px monospace";
+    c.fillText(label, x + 4, cy + cardH/2);
+  }
+}
+
+function drawLog() {
+  if (!G) return;
+  var c = ctx;
+  var logH = Math.max(14, W * 0.018);
+  var logW = W * 0.42;
+  var logX = W - logW - 6;
+  var logY = Math.max(30, W * 0.055);
+  var maxLines = Math.min(logEntries.length, Math.floor((W * 0.45) / (logH + 1)));
+  var entries = logEntries.slice(-maxLines);
+
+  c.font = (logH * 0.7) + "px monospace";
+  c.textAlign = "left";
+  c.textBaseline = "top";
+  c.fillStyle = "#444";
+  c.fillText("LOG:", logX, logY - logH);
+
+  for (var i = 0; i < entries.length; i++) {
+    var e = entries[i];
+    var ey = logY + i * (logH + 1);
+    if (e.cls === "hl") c.fillStyle = "#ffcc00";
+    else if (e.cls === "good") c.fillStyle = "#00ff88";
+    else if (e.cls === "bad") c.fillStyle = "#ff4444";
+    else c.fillStyle = "#666";
+
+    // Truncate
+    var text = e.msg;
+    var maxW = logW - 4;
+    while (c.measureText(text).width > maxW && text.length > 3) {
+      text = text.substring(0, text.length - 4) + "..";
+    }
+    c.fillText(text, logX, ey);
+  }
+}
+
+// ============================================================
+// NOTEPAD OVERLAY
+// ============================================================
+var notepadScroll = 0;
+var notepadCells = []; // {x,y,w,h,key,player} for click detection
+
+function drawNotepad() {
+  var c = ctx;
+  var pad = W * 0.04;
+  var panelW = W - pad * 2;
+  var panelH = H - pad * 2;
+  var px = pad, py = pad;
+
+  // Overlay
+  c.fillStyle = "rgba(0,0,0,0.88)";
+  c.fillRect(0, 0, W, H);
+
+  // Panel
+  c.fillStyle = "#111118";
+  roundRect(c, px, py, panelW, panelH, 8);
+  c.fill();
+  c.strokeStyle = "#333";
+  c.lineWidth = 2;
+  roundRect(c, px, py, panelW, panelH, 8);
+  c.stroke();
+
+  // Title
+  var titleFs = Math.max(12, W * 0.025);
+  c.font = "bold " + titleFs + "px monospace";
+  c.textAlign = "center";
+  c.textBaseline = "middle";
+  c.fillStyle = "#00ff88";
+  c.fillText("DEDUCTION NOTEPAD", W/2, py + titleFs + 4);
+
+  // Close button
+  var closeSize = titleFs * 1.5;
+  var closeX = px + panelW - closeSize - 4;
+  var closeY = py + 4;
+  btnRects.closeNotepad = { x: closeX, y: closeY, w: closeSize, h: closeSize, enabled: true };
+  c.fillStyle = "#333";
+  roundRect(c, closeX, closeY, closeSize, closeSize, 4);
+  c.fill();
+  c.fillStyle = "#aaa";
+  c.font = "bold " + (closeSize*0.6) + "px monospace";
+  c.textAlign = "center";
+  c.textBaseline = "middle";
+  c.fillText("X", closeX + closeSize/2, closeY + closeSize/2);
+
+  // Legend
+  c.font = (titleFs * 0.55) + "px monospace";
+  c.textAlign = "left";
+  c.fillStyle = "#666";
+  c.fillText("Click cells to cycle: blank > ? > X > check", px + 10, py + titleFs * 2 + 6);
+
+  // Table
+  var tableY = py + titleFs * 2.8;
+  var rowH = Math.max(16, (panelH - titleFs * 3.5) / (6 + 6 + 9 + 3 + 1));
+  var labelW = Math.max(100, panelW * 0.28);
+  var colW = Math.max(24, (panelW - labelW - 10) / (G.totalPlayers + 1));
+  var tableX = px + 8;
+
+  notepadCells = [];
+
+  // Header row
+  c.font = (rowH * 0.5) + "px monospace";
+  c.textAlign = "center";
+  c.textBaseline = "middle";
+  for (var p = 0; p < G.totalPlayers; p++) {
+    var s = SUSPECTS[G.players[p].suspectIdx];
+    c.fillStyle = s.color;
+    var colX = tableX + labelW + p * colW;
+    // Rotated text: draw short name
+    c.save();
+    c.translate(colX + colW/2, tableY - 2);
+    c.rotate(-Math.PI/4);
+    c.fillText(p === 0 ? "You" : s.short, 0, 0);
+    c.restore();
+  }
+  // Solution column
+  c.fillStyle = "#ffcc00";
+  c.save();
+  c.translate(tableX + labelW + G.totalPlayers * colW + colW/2, tableY - 2);
+  c.rotate(-Math.PI/4);
+  c.fillText("Sol?", 0, 0);
+  c.restore();
+
+  var curY = tableY + rowH * 0.3;
+
+  // Sections
+  var sections = [
+    { label: "SUSPECTS", prefix: "s", items: SUSPECTS.map(function(s,i){return{name:s.short,color:s.color,idx:i};}), count: 6 },
+    { label: "WEAPONS", prefix: "w", items: WEAPONS.map(function(w,i){return{name:w.length>18?w.substring(0,16)+"..":w,color:"#55aa55",idx:i};}), count: 6 },
+    { label: "ROOMS", prefix: "r", items: ROOMS.map(function(r,i){return{name:r.length>18?r.substring(0,16)+"..":r,color:"#5577cc",idx:i};}), count: 9 }
+  ];
+
+  for (var s = 0; s < sections.length; s++) {
+    var sec = sections[s];
+    // Section header
+    c.fillStyle = "#1a1a25";
+    c.fillRect(tableX, curY, panelW - 16, rowH);
+    c.fillStyle = "#666";
+    c.font = (rowH * 0.45) + "px monospace";
+    c.textAlign = "left";
+    c.fillText(sec.label, tableX + 4, curY + rowH/2);
+    curY += rowH;
+
+    for (var r = 0; r < sec.count; r++) {
+      var item = sec.items[r];
+      var key = sec.prefix + item.idx;
+
+      // Row bg
+      c.fillStyle = r % 2 === 0 ? "#0d0d18" : "#101020";
+      c.fillRect(tableX, curY, panelW - 16, rowH);
+
+      // Label
+      c.fillStyle = item.color;
+      c.font = (rowH * 0.5) + "px monospace";
+      c.textAlign = "left";
+      c.fillText(item.name, tableX + 4, curY + rowH/2);
+
+      // Player columns
+      for (var p = 0; p < G.totalPlayers; p++) {
+        var val = G.notepad[key] ? G.notepad[key][p] || 0 : 0;
+        var colX = tableX + labelW + p * colW;
+
+        // Cell bg based on value
+        if (val === 1) c.fillStyle = "#0a2a0a";
+        else if (val === 2) c.fillStyle = "#2a0a0a";
+        else c.fillStyle = "transparent";
+        if (val === 1 || val === 2) {
+          c.fillRect(colX, curY, colW, rowH);
+        }
+
+        // Cell border
+        c.strokeStyle = "#222";
+        c.lineWidth = 0.5;
+        c.strokeRect(colX, curY, colW, rowH);
+
+        // Symbol
+        c.font = (rowH * 0.55) + "px monospace";
+        c.textAlign = "center";
+        if (val === 1) { c.fillStyle = "#00ff88"; c.fillText("\u2713", colX + colW/2, curY + rowH/2); }
+        else if (val === 2) { c.fillStyle = "#ff4444"; c.fillText("\u2717", colX + colW/2, curY + rowH/2); }
+        else if (val === 3) { c.fillStyle = "#ffcc00"; c.fillText("?", colX + colW/2, curY + rowH/2); }
+
+        notepadCells.push({ x: colX, y: curY, w: colW, h: rowH, key: key, player: p, isSol: false });
+      }
+
+      // Solution column
+      var solVal = G.notepad[key] ? G.notepad[key].sol || 0 : 0;
+      var solX = tableX + labelW + G.totalPlayers * colW;
+      if (solVal === 1) c.fillStyle = "#0a2a0a";
+      else if (solVal === 2) c.fillStyle = "#2a0a0a";
+      else c.fillStyle = "transparent";
+      if (solVal === 1 || solVal === 2) c.fillRect(solX, curY, colW, rowH);
+      c.strokeStyle = "#333";
+      c.lineWidth = 0.5;
+      c.strokeRect(solX, curY, colW, rowH);
+      c.font = (rowH * 0.55) + "px monospace";
+      c.textAlign = "center";
+      if (solVal === 1) { c.fillStyle = "#00ff88"; c.fillText("\u2713", solX + colW/2, curY + rowH/2); }
+      else if (solVal === 2) { c.fillStyle = "#ff4444"; c.fillText("\u2717", solX + colW/2, curY + rowH/2); }
+      else if (solVal === 3) { c.fillStyle = "#ffcc00"; c.fillText("?", solX + colW/2, curY + rowH/2); }
+
+      notepadCells.push({ x: solX, y: curY, w: colW, h: rowH, key: key, player: -1, isSol: true });
+
+      curY += rowH;
+    }
+  }
+}
+
+// ============================================================
+// DIALOG OVERLAYS
+// ============================================================
+var dialogBtnRects = {};
+
+function drawDialog() {
+  if (!showingDialog) return;
+  var c = ctx;
+
+  c.fillStyle = "rgba(0,0,0,0.85)";
+  c.fillRect(0, 0, W, H);
+
+  var dlgW = Math.min(360, W * 0.8);
+  var dlgH = showingDialog === "accuse" ? 320 : 260;
+  var dlgX = (W - dlgW) / 2;
+  var dlgY = (H - dlgH) / 2;
+
+  c.fillStyle = "#111118";
+  roundRect(c, dlgX, dlgY, dlgW, dlgH, 8);
+  c.fill();
+  c.strokeStyle = showingDialog === "accuse" ? "#ff3366" : "#00ccff";
+  c.lineWidth = 2;
+  roundRect(c, dlgX, dlgY, dlgW, dlgH, 8);
+  c.stroke();
+
+  // Title
+  var fs = Math.max(12, dlgW * 0.045);
+  c.font = "bold " + (fs * 1.2) + "px monospace";
+  c.textAlign = "center";
+  c.textBaseline = "middle";
+  c.fillStyle = showingDialog === "accuse" ? "#ff3366" : "#00ccff";
+  var title = showingDialog === "accuse" ? "MAKE AN ACCUSATION" : "MAKE A SUGGESTION";
+  c.fillText(title, W/2, dlgY + 30);
+
+  if (showingDialog === "suggest") {
+    c.font = (fs * 0.7) + "px monospace";
+    c.fillStyle = "#888";
+    c.fillText("in " + ROOMS[G.players[0].inRoom], W/2, dlgY + 50);
+  }
+
+  var optY = dlgY + 65;
+  var optH = 28;
+  var optW = dlgW - 40;
+  var optX = dlgX + 20;
+
+  // Suspect selector
+  c.fillStyle = "#888";
+  c.font = (fs * 0.7) + "px monospace";
+  c.textAlign = "left";
+  c.fillText("Suspect:", optX, optY);
+  optY += 14;
+  drawSelector(optX, optY, optW, optH, "dlg_suspect", SUSPECTS.map(function(s){return s.name;}), dialogSelections.suspect);
+  optY += optH + 10;
+
+  // Weapon selector
+  c.fillStyle = "#888";
+  c.fillText("Weapon:", optX, optY);
+  optY += 14;
+  drawSelector(optX, optY, optW, optH, "dlg_weapon", WEAPONS, dialogSelections.weapon);
+  optY += optH + 10;
+
+  // Room selector (accusation only)
+  if (showingDialog === "accuse") {
+    c.fillStyle = "#888";
+    c.fillText("Room:", optX, optY);
+    optY += 14;
+    drawSelector(optX, optY, optW, optH, "dlg_room", ROOMS, dialogSelections.room);
+    optY += optH + 10;
+  }
+
+  // Buttons
+  var btnW2 = (dlgW - 50) / 2;
+  var btnH2 = 32;
+  var btnY = dlgY + dlgH - btnH2 - 16;
+
+  // Cancel
+  c.fillStyle = "#222";
+  roundRect(c, dlgX + 15, btnY, btnW2, btnH2, 4);
+  c.fill();
+  c.strokeStyle = "#555";
+  c.lineWidth = 1;
+  roundRect(c, dlgX + 15, btnY, btnW2, btnH2, 4);
+  c.stroke();
+  c.fillStyle = "#aaa";
+  c.font = (btnH2 * 0.5) + "px monospace";
+  c.textAlign = "center";
+  c.fillText("Cancel", dlgX + 15 + btnW2/2, btnY + btnH2/2);
+  dialogBtnRects.cancel = { x: dlgX+15, y: btnY, w: btnW2, h: btnH2, enabled: true };
+
+  // Confirm
+  var confirmColor = showingDialog === "accuse" ? "#ff3366" : "#00ff88";
+  c.fillStyle = confirmColor;
+  roundRect(c, dlgX + 15 + btnW2 + 20, btnY, btnW2, btnH2, 4);
+  c.fill();
+  c.fillStyle = "#0a0a12";
+  c.font = "bold " + (btnH2 * 0.5) + "px monospace";
+  c.fillText("Confirm", dlgX + 15 + btnW2 + 20 + btnW2/2, btnY + btnH2/2);
+  dialogBtnRects.confirm = { x: dlgX+15+btnW2+20, y: btnY, w: btnW2, h: btnH2, enabled: true };
+}
+
+function drawSelector(x, y, w, h, id, options, selectedIdx) {
+  var c = ctx;
+  c.fillStyle = "#1a1a2a";
+  roundRect(c, x, y, w, h, 4);
+  c.fill();
+  c.strokeStyle = "#444";
+  c.lineWidth = 1;
+  roundRect(c, x, y, w, h, 4);
+  c.stroke();
+
+  var text = options[selectedIdx] || "???";
+  if (text.length > 28) text = text.substring(0, 26) + "..";
+  c.fillStyle = "#ddd";
+  c.font = (h * 0.5) + "px monospace";
+  c.textAlign = "left";
+  c.textBaseline = "middle";
+  c.fillText(text, x + 8, y + h/2);
+
+  // Left/right arrows
+  var arrowW = h;
+  // Left arrow
+  c.fillStyle = "#555";
+  c.font = (h * 0.6) + "px monospace";
+  c.textAlign = "center";
+  c.fillText("<", x + w - arrowW*2, y + h/2);
+  // Right arrow
+  c.fillText(">", x + w - arrowW*0.5, y + h/2);
+
+  dialogBtnRects[id + "_left"] = { x: x + w - arrowW*2.5, y: y, w: arrowW, h: h, enabled: true };
+  dialogBtnRects[id + "_right"] = { x: x + w - arrowW, y: y, w: arrowW, h: h, enabled: true };
+}
+
+// ============================================================
+// RESULT OVERLAY
+// ============================================================
+function drawResultOverlay() {
+  if (!showingResult) return;
+  var c = ctx;
+  c.fillStyle = "rgba(0,0,0,0.92)";
+  c.fillRect(0, 0, W, H);
+
+  var fs = Math.max(16, W * 0.04);
+  c.font = "bold " + (fs * 1.5) + "px monospace";
+  c.textAlign = "center";
+  c.textBaseline = "middle";
+  c.fillStyle = showingResult.won ? "#00ff88" : "#ff4444";
+  c.fillText(showingResult.text, W/2, H/2 - fs * 2);
+
+  c.font = (fs * 0.7) + "px monospace";
+  c.fillStyle = "#aaa";
+  // Word wrap the subtitle
+  var subLines = wordWrap(showingResult.sub, W * 0.7, c);
+  for (var i = 0; i < subLines.length; i++) {
+    c.fillText(subLines[i], W/2, H/2 - fs * 0.3 + i * (fs * 0.9));
+  }
+
+  // New Game button
+  var btnW = 200, btnH = 40;
+  var btnX = W/2 - btnW/2, btnY = H/2 + fs * 2.5;
+  c.fillStyle = "#00ff88";
+  roundRect(c, btnX, btnY, btnW, btnH, 6);
+  c.fill();
+  c.fillStyle = "#0a0a12";
+  c.font = "bold " + (btnH * 0.45) + "px monospace";
+  c.fillText("New Game", W/2, btnY + btnH/2);
+  btnRects.resultNewGame = { x: btnX, y: btnY, w: btnW, h: btnH, enabled: true };
+}
+
+// ============================================================
+// MESSAGE TOAST
+// ============================================================
+function drawMessage() {
+  if (!currentMessage) return;
+  if (Date.now() > messageTimer) { popMessage(); return; }
+  var c = ctx;
+  var fs = Math.max(12, W * 0.025);
+  var msgW = Math.min(W * 0.8, c.measureText(currentMessage.msg).width + 40);
+  // Doesn't measure accurately before setting font, so set font first
+  c.font = (fs) + "px monospace";
+  msgW = Math.min(W * 0.85, ctx.measureText(currentMessage.msg).width + 40);
+  var msgH = fs * 2;
+  var msgX = (W - msgW) / 2;
+  var msgY = H * 0.45;
+
+  c.fillStyle = "rgba(0,20,10,0.92)";
+  roundRect(c, msgX, msgY, msgW, msgH, 6);
+  c.fill();
+  c.strokeStyle = "#00ff88";
+  c.lineWidth = 1.5;
+  roundRect(c, msgX, msgY, msgW, msgH, 6);
+  c.stroke();
+  c.fillStyle = "#00ff88";
+  c.textAlign = "center";
+  c.textBaseline = "middle";
+  c.fillText(currentMessage.msg, W/2, msgY + msgH/2);
+}
+
+// ============================================================
+// MENU SCREEN
+// ============================================================
+var menuBtnRects = {};
+
+function drawMenu() {
+  var c = ctx;
+  c.fillStyle = "#0a0a12";
+  c.fillRect(0, 0, W, H);
+
+  var titleFs = Math.min(48, W * 0.07);
+  c.font = "bold " + titleFs + "px monospace";
+  c.textAlign = "center";
+  c.textBaseline = "middle";
+
+  // Magnifying glass + title
+  c.fillStyle = "#00ff88";
+  c.fillText("\uD83D\uDD0D WHODUNIT", W/2, H * 0.15);
+
+  c.font = (titleFs * 0.35) + "px monospace";
+  c.fillStyle = "#666";
+  c.fillText("A Crypto Mystery", W/2, H * 0.15 + titleFs * 0.8);
+
+  // Suspect chips display
+  var chipY = H * 0.28;
+  var chipW = W * 0.22;
+  var chipH = titleFs * 0.55;
+  var chipGap = 6;
+  var cols = 3;
+  for (var i = 0; i < 6; i++) {
+    var row = Math.floor(i / cols);
+    var col = i % cols;
+    var cx = W/2 - (cols * chipW + (cols-1)*chipGap)/2 + col * (chipW + chipGap);
+    var cy = chipY + row * (chipH + chipGap);
+    c.fillStyle = "#1a1a2a";
+    roundRect(c, cx, cy, chipW, chipH, chipH/2);
+    c.fill();
+    c.strokeStyle = SUSPECTS[i].color;
+    c.lineWidth = 1;
+    roundRect(c, cx, cy, chipW, chipH, chipH/2);
+    c.stroke();
+    c.fillStyle = SUSPECTS[i].color;
+    c.font = (chipH * 0.5) + "px monospace";
+    c.textAlign = "center";
+    c.fillText(SUSPECTS[i].short, cx + chipW/2, cy + chipH/2);
+  }
+
+  // Settings area
+  var setY = H * 0.48;
+  var setFs = Math.max(12, W * 0.025);
+  var optW = Math.min(280, W * 0.55);
+  var optH = setFs * 2;
+  var optX = W/2 - optW/2;
+
+  // AI count
+  c.font = setFs + "px monospace";
+  c.textAlign = "center";
+  c.fillStyle = "#aaa";
+  c.fillText("AI Opponents: " + menuSelection.numAI, W/2, setY);
+
+  var arrowW = optH;
+  // Minus
+  c.fillStyle = "#222";
+  roundRect(c, optX, setY + 8, arrowW, optH, 4);
+  c.fill();
+  c.strokeStyle = "#555";
+  c.lineWidth = 1;
+  roundRect(c, optX, setY + 8, arrowW, optH, 4);
+  c.stroke();
+  c.fillStyle = "#aaa";
+  c.font = "bold " + (optH*0.5) + "px monospace";
+  c.fillText("-", optX + arrowW/2, setY + 8 + optH/2);
+  menuBtnRects.aiMinus = { x: optX, y: setY+8, w: arrowW, h: optH, enabled: true };
+
+  // Plus
+  c.fillStyle = "#222";
+  roundRect(c, optX + optW - arrowW, setY + 8, arrowW, optH, 4);
+  c.fill();
+  c.strokeStyle = "#555";
+  roundRect(c, optX + optW - arrowW, setY + 8, arrowW, optH, 4);
+  c.stroke();
+  c.fillStyle = "#aaa";
+  c.fillText("+", optX + optW - arrowW/2, setY + 8 + optH/2);
+  menuBtnRects.aiPlus = { x: optX+optW-arrowW, y: setY+8, w: arrowW, h: optH, enabled: true };
+
+  // Player suspect
+  setY += optH + 24;
+  c.font = setFs + "px monospace";
+  c.fillStyle = "#aaa";
+  c.fillText("Your Suspect:", W/2, setY);
+
+  var susName = SUSPECTS[menuSelection.playerSuspect].name;
+  c.fillStyle = SUSPECTS[menuSelection.playerSuspect].color;
+  c.font = "bold " + (setFs * 1.1) + "px monospace";
+  c.fillText(susName, W/2, setY + setFs * 1.5);
+
+  // Arrows for suspect
+  c.fillStyle = "#222";
+  roundRect(c, optX, setY + setFs*0.6, arrowW, optH, 4);
+  c.fill();
+  c.strokeStyle = "#555";
+  roundRect(c, optX, setY + setFs*0.6, arrowW, optH, 4);
+  c.stroke();
+  c.fillStyle = "#aaa";
+  c.font = "bold " + (optH*0.5) + "px monospace";
+  c.fillText("<", optX + arrowW/2, setY + setFs*0.6 + optH/2);
+  menuBtnRects.susMinus = { x: optX, y: setY+setFs*0.6, w: arrowW, h: optH, enabled: true };
+
+  c.fillStyle = "#222";
+  roundRect(c, optX + optW - arrowW, setY + setFs*0.6, arrowW, optH, 4);
+  c.fill();
+  c.strokeStyle = "#555";
+  roundRect(c, optX + optW - arrowW, setY + setFs*0.6, arrowW, optH, 4);
+  c.stroke();
+  c.fillStyle = "#aaa";
+  c.fillText(">", optX + optW - arrowW/2, setY + setFs*0.6 + optH/2);
+  menuBtnRects.susPlus = { x: optX+optW-arrowW, y: setY+setFs*0.6, w: arrowW, h: optH, enabled: true };
+
+  // Start button
+  var startY = H * 0.78;
+  var startW = Math.min(280, W * 0.55);
+  var startH = setFs * 2.5;
+  var startX = W/2 - startW/2;
+  c.fillStyle = "#00ff88";
+  roundRect(c, startX, startY, startW, startH, 8);
+  c.fill();
+  c.fillStyle = "#0a0a12";
+  c.font = "bold " + (startH * 0.4) + "px monospace";
+  c.fillText("BEGIN INVESTIGATION", W/2, startY + startH/2);
+  menuBtnRects.start = { x: startX, y: startY, w: startW, h: startH, enabled: true };
+
+  // Hint
+  c.font = (setFs * 0.6) + "px monospace";
+  c.fillStyle = "#444";
+  c.fillText("Roll dice. Enter rooms. Deduce the culprit.", W/2, startY + startH + setFs);
+
+  // Resume save?
+  try {
+    var saved = localStorage.getItem("whodunit-save");
+    if (saved) {
+      var parsedSave = JSON.parse(saved);
+      if (parsedSave && !parsedSave.gameOver) {
+        var resumeY = startY + startH + setFs * 2.2;
+        var resumeW = startW;
+        var resumeH = startH * 0.8;
+        var resumeX = W/2 - resumeW/2;
+        c.fillStyle = "#1a1a2a";
+        roundRect(c, resumeX, resumeY, resumeW, resumeH, 6);
+        c.fill();
+        c.strokeStyle = "#00ff88";
+        c.lineWidth = 1;
+        roundRect(c, resumeX, resumeY, resumeW, resumeH, 6);
+        c.stroke();
+        c.fillStyle = "#00ff88";
+        c.font = (resumeH * 0.4) + "px monospace";
+        c.fillText("RESUME SAVED GAME", W/2, resumeY + resumeH/2);
+        menuBtnRects.resume = { x: resumeX, y: resumeY, w: resumeW, h: resumeH, enabled: true };
+      }
+    }
+  } catch(e) { console.warn("Save check failed:", e); }
+}
+
+// ============================================================
+// GAME LOGIC
+// ============================================================
+function rollDice() {
+  if (!G || G.phase !== "roll" || G.currentPlayer !== 0) return;
+  sfxDice();
+  G.animatingDice = true;
+  var ticks = 0;
+  var interval = setInterval(function() {
+    ticks++;
+    var d1 = Math.floor(Math.random()*6)+1;
+    var d2 = Math.floor(Math.random()*6)+1;
+    G.diceResult = [d1, d2];
+    if (ticks >= 10) {
+      clearInterval(interval);
+      G.animatingDice = false;
+      G.diceTotal = d1 + d2;
+      addLog("You rolled " + d1 + " + " + d2 + " = " + G.diceTotal);
+      G.phase = "move";
+      reachableSpots = getReachable(G.players[0], G.diceTotal);
+    }
+  }, 70);
+}
+
+function movePlayerTo(playerIdx, target) {
+  var p = G.players[playerIdx];
+  if (target.room >= 0) {
+    p.inRoom = target.room;
+    p.hallX = -1;
+    p.hallY = -1;
+    if (p.isHuman) {
+      sfxEnterRoom();
+      addLog("You entered " + ROOMS[target.room] + "." + (target.secret ? " (Secret passage!)" : ""));
+      G.phase = "suggest";
+      G.suggestedThisTurn = false;
+    }
+  } else {
+    p.inRoom = -1;
+    p.hallX = target.hx;
+    p.hallY = target.hy;
+    if (p.isHuman) {
+      sfxMove();
+      addLog("You moved through the hallway.");
+      G.phase = "endturn";
+    }
+  }
+  reachableSpots = [];
+  hoverRoom = -1;
+}
+
+function makeSuggestion(playerIdx, suspectIdx, weaponIdx, roomIdx) {
+  var p = G.players[playerIdx];
+  var pName = p.isHuman ? "You" : SUSPECTS[p.suspectIdx].name;
+  var sName = SUSPECTS[suspectIdx].name;
+  var wName = WEAPONS[weaponIdx];
+  var rName = ROOMS[roomIdx];
+
+  sfxSuggest();
+  addLog(pName + " suggest" + (p.isHuman ? "" : "s") + ": " + sName + " with " + wName + " in " + rName, "hl");
+  G.suggestedThisTurn = true;
+
+  // Move named suspect to room (if they are a player)
+  for (var i = 0; i < G.players.length; i++) {
+    if (G.players[i].suspectIdx === suspectIdx && i !== playerIdx && G.players[i].alive) {
+      G.players[i].inRoom = roomIdx;
+      G.players[i].hallX = -1;
+      G.players[i].hallY = -1;
+    }
+  }
+
+  // Ask each other player clockwise
+  var shown = false;
+  for (var offset = 1; offset < G.totalPlayers; offset++) {
+    var askIdx = (playerIdx + offset) % G.totalPlayers;
+    var askP = G.players[askIdx];
+    if (!askP.alive) continue;
+
+    var matching = [];
+    for (var ci = 0; ci < askP.hand.length; ci++) {
+      var card = askP.hand[ci];
+      if ((card.type === "suspect" && card.index === suspectIdx) ||
+          (card.type === "weapon" && card.index === weaponIdx) ||
+          (card.type === "room" && card.index === roomIdx)) {
+        matching.push(card);
+      }
+    }
+
+    var askName = askP.isHuman ? "You" : SUSPECTS[askP.suspectIdx].name;
+
+    if (matching.length > 0) {
+      var showCard = matching[Math.floor(Math.random() * matching.length)];
+      var cardName = showCard.type === "suspect" ? SUSPECTS[showCard.index].name :
+                     showCard.type === "weapon" ? WEAPONS[showCard.index] : ROOMS[showCard.index];
+
+      if (playerIdx === 0) {
+        // Human made suggestion, AI shows card to human
+        sfxShowCard();
+        addLog(askName + " shows you: " + cardName, "good");
+        autoMarkNotepad(showCard.type, showCard.index, askIdx);
+      } else if (askIdx === 0) {
+        // Human shows card to AI
+        addLog("You show " + SUSPECTS[G.players[playerIdx].suspectIdx].name + ": " + cardName);
+        aiLearnCard(playerIdx, showCard.type, showCard.index);
+      } else {
+        // AI shows card to AI
+        addLog(askName + " shows a card to " + pName + " (hidden).");
+        aiLearnCard(playerIdx, showCard.type, showCard.index);
+      }
+      shown = true;
+
+      // All other AIs who are watching learn that askIdx could have one of the three
+      for (var ai = 0; ai < G.totalPlayers; ai++) {
+        if (ai === playerIdx || ai === askIdx || !G.players[ai].alive || ai === 0) continue;
+        // They know askP showed something but not what -- limited info
+      }
+
+      break;
+    } else {
+      sfxNoCard();
+      addLog(askName + " ha" + (askP.isHuman ? "ve" : "s") + " nothing to show.");
+
+      // All AIs learn this player has NONE of these three
+      for (var ai = 0; ai < G.totalPlayers; ai++) {
+        if (ai === 0 || !G.players[ai].alive) continue;
+        aiLearnNone(ai, askIdx, suspectIdx, weaponIdx, roomIdx);
+      }
+    }
+  }
+
+  if (!shown) {
+    addLog("Nobody could disprove it!", "hl");
+  }
+
+  G.phase = "endturn";
+  saveGame();
+}
+
+function makeAccusation(playerIdx, suspectIdx, weaponIdx, roomIdx) {
+  var p = G.players[playerIdx];
+  var pName = p.isHuman ? "You" : SUSPECTS[p.suspectIdx].name;
+
+  sfxAccuse();
+  addLog(pName + " ACCUSE" + (p.isHuman ? "" : "S") + ": " + SUSPECTS[suspectIdx].name + " with " + WEAPONS[weaponIdx] + " in " + ROOMS[roomIdx] + "!", "hl");
+
+  var correct = suspectIdx === G.solution.suspect &&
+                weaponIdx === G.solution.weapon &&
+                roomIdx === G.solution.room;
+
+  if (correct) {
+    G.gameOver = true;
+    G.winner = playerIdx;
+    G.phase = "gameover";
+    if (p.isHuman) {
+      sfxWin();
+      addLog("CORRECT! You solved the mystery!", "good");
+      showingResult = {
+        won: true,
+        text: "MYSTERY SOLVED!",
+        sub: "It was " + SUSPECTS[G.solution.suspect].name + " with the " + WEAPONS[G.solution.weapon] + " in " + ROOMS[G.solution.room] + "!"
+      };
+    } else {
+      sfxLose();
+      addLog(pName + " solved the mystery!", "bad");
+      showingResult = {
+        won: false,
+        text: "CASE CLOSED",
+        sub: pName + " cracked it! It was " + SUSPECTS[G.solution.suspect].name + " with the " + WEAPONS[G.solution.weapon] + " in " + ROOMS[G.solution.room] + "."
+      };
+    }
+  } else {
+    sfxEliminate();
+    addLog("WRONG! " + pName + (p.isHuman ? " are" : " is") + " eliminated!", "bad");
+    p.alive = false;
+
+    if (p.isHuman) {
+      addLog("Truth: " + SUSPECTS[G.solution.suspect].name + ", " + WEAPONS[G.solution.weapon] + ", " + ROOMS[G.solution.room], "hl");
+    }
+
+    // Check if only one player left
+    var aliveCount = 0, lastAlive = -1;
+    for (var i = 0; i < G.players.length; i++) {
+      if (G.players[i].alive) { aliveCount++; lastAlive = i; }
+    }
+    if (aliveCount <= 1) {
+      G.gameOver = true;
+      G.winner = lastAlive;
+      G.phase = "gameover";
+      var wName = lastAlive >= 0 ? (G.players[lastAlive].isHuman ? "You" : SUSPECTS[G.players[lastAlive].suspectIdx].name) : "Nobody";
+      addLog(wName + " win" + (lastAlive >= 0 && G.players[lastAlive].isHuman ? "" : "s") + " by default!");
+      var isHumanWin = lastAlive >= 0 && G.players[lastAlive].isHuman;
+      showingResult = {
+        won: isHumanWin,
+        text: isHumanWin ? "YOU WIN!" : "CASE CLOSED",
+        sub: "The truth: " + SUSPECTS[G.solution.suspect].name + " with the " + WEAPONS[G.solution.weapon] + " in " + ROOMS[G.solution.room] + "."
+      };
+    }
+  }
+
+  G.phase = "endturn";
+  saveGame();
+}
+
+function autoMarkNotepad(cardType, cardIndex, playerIdx) {
+  var key = (cardType === "suspect" ? "s" : cardType === "weapon" ? "w" : "r") + cardIndex;
+  if (!G.notepad[key]) G.notepad[key] = {};
+  G.notepad[key][playerIdx] = 1;
+  for (var p = 0; p < G.totalPlayers; p++) {
+    if (p !== playerIdx) G.notepad[key][p] = 2;
+  }
+  G.notepad[key].sol = 2;
+}
+
+// ============================================================
+// AI LOGIC
+// ============================================================
+function aiLearnCard(aiIdx, cardType, cardIndex) {
+  var ai = G.players[aiIdx];
+  if (!ai.known) return;
+  if (cardType === "suspect") ai.known.hasSuspect[cardIndex] = true;
+  if (cardType === "weapon") ai.known.hasWeapon[cardIndex] = true;
+  if (cardType === "room") ai.known.hasRoom[cardIndex] = true;
+}
+
+function aiLearnNone(aiIdx, noPlayerIdx, suspectIdx, weaponIdx, roomIdx) {
+  // AI learns that noPlayerIdx has none of these three cards
+  // This is tracked implicitly -- the AI's deduction works by elimination
+  // More sophisticated tracking could be added but for gameplay this works
+  var ai = G.players[aiIdx];
+  if (!ai.known) return;
+  var key = "none_" + noPlayerIdx + "_" + suspectIdx + "_" + weaponIdx + "_" + roomIdx;
+  if (!ai.known.shownBy) ai.known.shownBy = {};
+  ai.known.shownBy[key] = true;
+}
+
+function aiPickSuspect(aiIdx) {
+  var ai = G.players[aiIdx];
+  var unknowns = [];
+  for (var i = 0; i < 6; i++) {
+    if (!ai.known.hasSuspect[i]) unknowns.push(i);
+  }
+  if (unknowns.length > 0) return unknowns[Math.floor(Math.random() * unknowns.length)];
+  return Math.floor(Math.random() * 6);
+}
+
+function aiPickWeapon(aiIdx) {
+  var ai = G.players[aiIdx];
+  var unknowns = [];
+  for (var i = 0; i < 6; i++) {
+    if (!ai.known.hasWeapon[i]) unknowns.push(i);
+  }
+  if (unknowns.length > 0) return unknowns[Math.floor(Math.random() * unknowns.length)];
+  return Math.floor(Math.random() * 6);
+}
+
+function aiGetSolution(aiIdx) {
+  var ai = G.players[aiIdx];
+  var solS = [], solW = [], solR = [];
+  for (var i = 0; i < 6; i++) if (!ai.known.hasSuspect[i]) solS.push(i);
+  for (var i = 0; i < 6; i++) if (!ai.known.hasWeapon[i]) solW.push(i);
+  for (var i = 0; i < 9; i++) if (!ai.known.hasRoom[i]) solR.push(i);
+  if (solS.length === 1 && solW.length === 1 && solR.length === 1) {
+    return { suspect: solS[0], weapon: solW[0], room: solR[0] };
+  }
+  return null;
+}
+
+function aiTurn(playerIdx) {
+  var p = G.players[playerIdx];
+  if (!p.alive || G.gameOver) { endTurn(); return; }
+
+  var name = SUSPECTS[p.suspectIdx].name;
+  addLog(name + "'s turn...");
+
+  // Roll dice
+  var d1 = Math.floor(Math.random()*6)+1;
+  var d2 = Math.floor(Math.random()*6)+1;
+  var total = d1 + d2;
+  G.diceResult = [d1, d2];
+  G.diceTotal = total;
+
+  setTimeout(function() {
+    sfxDice();
+    addLog(name + " rolls " + total + ".");
+
+    // Find reachable rooms
+    var reachable = getReachable(p, total);
+    var reachableRooms = [];
+    for (var i = 0; i < reachable.length; i++) {
+      if (reachable[i].room >= 0) reachableRooms.push(reachable[i]);
+    }
+
+    var targetRoom = -1;
+    if (reachableRooms.length > 0) {
+      // Prefer rooms we don't know about
+      var unknown = [];
+      for (var i = 0; i < reachableRooms.length; i++) {
+        if (!p.known.hasRoom[reachableRooms[i].room]) unknown.push(reachableRooms[i]);
+      }
+      if (unknown.length > 0) {
+        // Pick one different from current room if possible
+        var diff = [];
+        for (var i = 0; i < unknown.length; i++) {
+          if (unknown[i].room !== p.inRoom) diff.push(unknown[i]);
+        }
+        targetRoom = (diff.length > 0 ? diff : unknown)[Math.floor(Math.random() * (diff.length > 0 ? diff : unknown).length)].room;
+      } else {
+        var diff2 = [];
+        for (var i = 0; i < reachableRooms.length; i++) {
+          if (reachableRooms[i].room !== p.inRoom) diff2.push(reachableRooms[i]);
+        }
+        targetRoom = (diff2.length > 0 ? diff2 : reachableRooms)[Math.floor(Math.random() * (diff2.length > 0 ? diff2 : reachableRooms).length)].room;
+      }
+    }
+
+    if (targetRoom >= 0) {
+      p.inRoom = targetRoom;
+      p.hallX = -1;
+      p.hallY = -1;
+      addLog(name + " enters " + ROOMS[targetRoom] + ".");
+
+      setTimeout(function() {
+        // Make suggestion
+        var sg = aiPickSuspect(playerIdx);
+        var wg = aiPickWeapon(playerIdx);
+        makeSuggestion(playerIdx, sg, wg, targetRoom);
+
+        setTimeout(function() {
+          // Consider accusation
+          var sol = aiGetSolution(playerIdx);
+          if (sol) {
+            makeAccusation(playerIdx, sol.suspect, sol.weapon, sol.room);
+          }
+          if (!G.gameOver) {
+            setTimeout(function(){ endTurn(); }, 400);
+          }
+        }, 400);
+      }, 500);
+    } else {
+      // Move to hallway
+      var hallSpots = [];
+      for (var i = 0; i < reachable.length; i++) {
+        if (reachable[i].room < 0) hallSpots.push(reachable[i]);
+      }
+      if (hallSpots.length > 0) {
+        var spot = hallSpots[Math.floor(Math.random() * hallSpots.length)];
+        p.inRoom = -1;
+        p.hallX = spot.hx;
+        p.hallY = spot.hy;
+        addLog(name + " moves through the hallway.");
+      } else {
+        addLog(name + " stays put.");
+      }
+      setTimeout(function(){ endTurn(); }, 500);
+    }
+  }, 500);
+}
+
+function endTurn() {
+  if (G.gameOver) return;
+  G.turnCount++;
+  reachableSpots = [];
+  hoverRoom = -1;
+
+  // Find next alive player
+  var next = (G.currentPlayer + 1) % G.totalPlayers;
+  var safety = 0;
+  while (!G.players[next].alive && safety < G.totalPlayers) {
+    next = (next + 1) % G.totalPlayers;
+    safety++;
+  }
+
+  G.currentPlayer = next;
+  G.phase = "roll";
+  G.suggestedThisTurn = false;
+  G.diceResult = [0, 0];
+  G.diceTotal = 0;
+
+  if (next !== 0) {
+    setTimeout(function() { aiTurn(next); }, 600);
+  } else {
+    addLog("--- Your turn ---", "hl");
+  }
+
+  saveGame();
+}
+
+// ============================================================
+// INPUT HANDLING
+// ============================================================
+function hitTest(px, py, rect) {
+  return rect && px >= rect.x && px <= rect.x + rect.w && py >= rect.y && py <= rect.y + rect.h;
+}
+
+function handleInput(px, py) {
+  initAudio();
+
+  // Result overlay
+  if (showingResult) {
+    if (btnRects.resultNewGame && hitTest(px, py, btnRects.resultNewGame)) {
+      showingResult = null;
+      screen = SCREEN_MENU;
+      G = null;
+      clearSave();
+    }
+    return;
+  }
+
+  // Notepad
+  if (showNotepad) {
+    if (btnRects.closeNotepad && hitTest(px, py, btnRects.closeNotepad)) {
+      showNotepad = false;
+      return;
+    }
+    // Cell clicks
+    for (var i = 0; i < notepadCells.length; i++) {
+      var cell = notepadCells[i];
+      if (hitTest(px, py, cell)) {
+        if (cell.isSol) {
+          var cur = G.notepad[cell.key].sol || 0;
+          G.notepad[cell.key].sol = [3,0,1,2][cur];
+        } else {
+          var cur2 = G.notepad[cell.key][cell.player] || 0;
+          // Don't allow changing auto-marked own cards
+          if (cell.player === 0 && cur2 === 1) return;
+          G.notepad[cell.key][cell.player] = [3,0,1,2][cur2];
+        }
+        saveGame();
+        return;
+      }
+    }
+    return;
+  }
+
+  // Dialog
+  if (showingDialog) {
+    // Arrow buttons for selectors
+    if (hitTest(px, py, dialogBtnRects.dlg_suspect_left)) {
+      dialogSelections.suspect = (dialogSelections.suspect + 5) % 6;
+      return;
+    }
+    if (hitTest(px, py, dialogBtnRects.dlg_suspect_right)) {
+      dialogSelections.suspect = (dialogSelections.suspect + 1) % 6;
+      return;
+    }
+    if (hitTest(px, py, dialogBtnRects.dlg_weapon_left)) {
+      dialogSelections.weapon = (dialogSelections.weapon + 5) % 6;
+      return;
+    }
+    if (hitTest(px, py, dialogBtnRects.dlg_weapon_right)) {
+      dialogSelections.weapon = (dialogSelections.weapon + 1) % 6;
+      return;
+    }
+    if (showingDialog === "accuse") {
+      if (hitTest(px, py, dialogBtnRects.dlg_room_left)) {
+        dialogSelections.room = (dialogSelections.room + 8) % 9;
+        return;
+      }
+      if (hitTest(px, py, dialogBtnRects.dlg_room_right)) {
+        dialogSelections.room = (dialogSelections.room + 1) % 9;
+        return;
+      }
+    }
+    if (hitTest(px, py, dialogBtnRects.cancel)) {
+      showingDialog = null;
+      return;
+    }
+    if (hitTest(px, py, dialogBtnRects.confirm)) {
+      if (showingDialog === "suggest") {
+        showingDialog = null;
+        makeSuggestion(0, dialogSelections.suspect, dialogSelections.weapon, G.players[0].inRoom);
+      } else if (showingDialog === "accuse") {
+        showingDialog = null;
+        makeAccusation(0, dialogSelections.suspect, dialogSelections.weapon, dialogSelections.room);
+      }
+      return;
+    }
+    return;
+  }
+
+  // Menu screen
+  if (screen === SCREEN_MENU) {
+    if (hitTest(px, py, menuBtnRects.aiMinus)) {
+      menuSelection.numAI = Math.max(2, menuSelection.numAI - 1);
+      return;
+    }
+    if (hitTest(px, py, menuBtnRects.aiPlus)) {
+      menuSelection.numAI = Math.min(5, menuSelection.numAI + 1);
+      return;
+    }
+    if (hitTest(px, py, menuBtnRects.susMinus)) {
+      menuSelection.playerSuspect = (menuSelection.playerSuspect + 5) % 6;
+      return;
+    }
+    if (hitTest(px, py, menuBtnRects.susPlus)) {
+      menuSelection.playerSuspect = (menuSelection.playerSuspect + 1) % 6;
+      return;
+    }
+    if (hitTest(px, py, menuBtnRects.start)) {
+      screen = SCREEN_GAME;
+      newGame(menuSelection.numAI, menuSelection.playerSuspect);
+      return;
+    }
+    if (menuBtnRects.resume && hitTest(px, py, menuBtnRects.resume)) {
+      if (loadGame()) {
+        screen = SCREEN_GAME;
+        reachableSpots = [];
+        showNotepad = false;
+        showingDialog = null;
+        showingResult = null;
+        if (G.currentPlayer !== 0 && !G.gameOver) {
+          setTimeout(function(){ aiTurn(G.currentPlayer); }, 500);
+        }
+      }
+      return;
+    }
+    return;
+  }
+
+  // Game screen buttons
+  if (btnRects.notepad && hitTest(px, py, btnRects.notepad) && btnRects.notepad.enabled) {
+    showNotepad = true;
+    return;
+  }
+  if (btnRects.roll && hitTest(px, py, btnRects.roll) && btnRects.roll.enabled) {
+    rollDice();
+    return;
+  }
+  if (btnRects.suggest && hitTest(px, py, btnRects.suggest) && btnRects.suggest.enabled) {
+    dialogSelections.suspect = 0;
+    dialogSelections.weapon = 0;
+    showingDialog = "suggest";
+    return;
+  }
+  if (btnRects.accuse && hitTest(px, py, btnRects.accuse) && btnRects.accuse.enabled) {
+    dialogSelections.suspect = 0;
+    dialogSelections.weapon = 0;
+    dialogSelections.room = 0;
+    showingDialog = "accuse";
+    return;
+  }
+  if (btnRects.endturn && hitTest(px, py, btnRects.endturn) && btnRects.endturn.enabled) {
+    endTurn();
+    return;
+  }
+  if (btnRects.newgame && hitTest(px, py, btnRects.newgame) && btnRects.newgame.enabled) {
+    screen = SCREEN_MENU;
+    G = null;
+    clearSave();
+    return;
+  }
+
+  // Board clicks (movement)
+  if (G && G.phase === "move" && G.currentPlayer === 0) {
+    computeLayout();
+
+    // Check room clicks
+    for (var i = 0; i < reachableSpots.length; i++) {
+      var rs = reachableSpots[i];
+      if (rs.room >= 0) {
+        var rr = roomPixelRect(rs.room);
+        if (px >= rr.x && px <= rr.x + rr.w && py >= rr.y && py <= rr.y + rr.h) {
+          movePlayerTo(0, rs);
+          return;
+        }
+      }
+    }
+
+    // Check hallway clicks
+    for (var i = 0; i < reachableSpots.length; i++) {
+      var rs2 = reachableSpots[i];
+      if (rs2.room < 0) {
+        var hp = hallPixelCenter(rs2.hx, rs2.hy);
+        var dx = px - hp.x, dy = py - hp.y;
+        if (Math.sqrt(dx*dx + dy*dy) < cellW * 0.2) {
+          movePlayerTo(0, rs2);
+          return;
+        }
+      }
+    }
+  }
+}
+
+function handleHover(px, py) {
+  if (screen !== SCREEN_GAME || !G || G.phase !== "move" || G.currentPlayer !== 0) {
+    hoverRoom = -1;
+    return;
+  }
+  if (showNotepad || showingDialog || showingResult) { hoverRoom = -1; return; }
+
+  computeLayout();
+  var found = -1;
+  for (var i = 0; i < reachableSpots.length; i++) {
+    if (reachableSpots[i].room >= 0) {
+      var rr = roomPixelRect(reachableSpots[i].room);
+      if (px >= rr.x && px <= rr.x + rr.w && py >= rr.y && py <= rr.y + rr.h) {
+        found = reachableSpots[i].room;
+        break;
+      }
+    }
+  }
+  hoverRoom = found;
+}
+
+// ============================================================
+// SAVE / LOAD
+// ============================================================
+function saveGame() {
+  if (!G) return;
+  try {
+    localStorage.setItem("whodunit-save", JSON.stringify({
+      solution: G.solution,
+      players: G.players,
+      totalPlayers: G.totalPlayers,
+      currentPlayer: G.currentPlayer,
+      phase: G.phase,
+      diceResult: G.diceResult,
+      diceTotal: G.diceTotal,
+      notepad: G.notepad,
+      turnCount: G.turnCount,
+      gameOver: G.gameOver,
+      winner: G.winner,
+      suggestedThisTurn: G.suggestedThisTurn
+    }));
+  } catch(e) { console.warn("Save failed:", e); }
+}
+
+function loadGame() {
+  try {
+    var data = localStorage.getItem("whodunit-save");
+    if (data) {
+      var parsed = JSON.parse(data);
+      G = parsed;
+      G.animatingDice = false;
+      G.diceAnim = null;
+      // Restore log
+      logEntries = [{ msg: "Game resumed from save.", cls: "hl" }];
+      return true;
+    }
+  } catch(e) { console.warn("Load failed:", e); }
+  return false;
+}
+
+function clearSave() {
+  try { localStorage.removeItem("whodunit-save"); } catch(e) { console.warn("Clear save failed:", e); }
+}
+
+// ============================================================
+// UTILITY
+// ============================================================
+function roundRect(c, x, y, w, h, r) {
+  c.beginPath();
+  c.moveTo(x + r, y);
+  c.lineTo(x + w - r, y);
+  c.arcTo(x + w, y, x + w, y + r, r);
+  c.lineTo(x + w, y + h - r);
+  c.arcTo(x + w, y + h, x + w - r, y + h, r);
+  c.lineTo(x + r, y + h);
+  c.arcTo(x, y + h, x, y + h - r, r);
+  c.lineTo(x, y + r);
+  c.arcTo(x, y, x + r, y, r);
+  c.closePath();
+}
+
+function lighten(hex, amt) {
+  var r = parseInt(hex.slice(1,3), 16);
+  var g = parseInt(hex.slice(3,5), 16);
+  var b = parseInt(hex.slice(5,7), 16);
+  r = Math.min(255, r + amt);
+  g = Math.min(255, g + amt);
+  b = Math.min(255, b + amt);
+  return "#" + [r,g,b].map(function(v){ return v.toString(16).padStart(2,"0"); }).join("");
+}
+
+function wordWrap(text, maxW, c) {
+  var words = text.split(" ");
+  var lines = [];
+  var line = "";
+  for (var i = 0; i < words.length; i++) {
+    var test = line ? line + " " + words[i] : words[i];
+    if (c.measureText(test).width > maxW && line) {
+      lines.push(line);
+      line = words[i];
+    } else {
+      line = test;
+    }
+  }
+  if (line) lines.push(line);
+  return lines;
+}
+
+// ============================================================
+// EVENTS
+// ============================================================
+canvas.addEventListener("mousedown", function(e) {
+  e.preventDefault();
+  handleInput(e.offsetX, e.offsetY);
+});
+
+canvas.addEventListener("mousemove", function(e) {
+  handleHover(e.offsetX, e.offsetY);
+});
+
+canvas.addEventListener("touchstart", function(e) {
+  e.preventDefault();
+  var rect = canvas.getBoundingClientRect();
+  var touch = e.touches[0];
+  handleInput(touch.clientX - rect.left, touch.clientY - rect.top);
+}, {passive: false});
+
+// ============================================================
+// GAME LOOP
+// ============================================================
+function frame() {
+  resize();
+
+  if (screen === SCREEN_MENU) {
+    drawMenu();
+  } else if (screen === SCREEN_GAME && G) {
+    drawBoard();
+    drawHUD();
+    drawLog();
+    drawPlayerCards();
+
+    if (showNotepad) drawNotepad();
+    if (showingDialog) drawDialog();
+    if (showingResult) drawResultOverlay();
+    if (currentMessage && !showNotepad && !showingDialog && !showingResult) drawMessage();
+  }
+
+  requestAnimationFrame(frame);
+}
+
+window.addEventListener("resize", resize);
+resize();
+requestAnimationFrame(frame);
+
+})();
+</script>
+</body>
+</html>

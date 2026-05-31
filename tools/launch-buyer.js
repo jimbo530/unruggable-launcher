@@ -26,9 +26,9 @@ const FACTORY       = '0xF0c1B3d6Bc0B4dEd2DDF81374feEA8a2c536bD51';
 const FACTORY_BLOCK  = 45639600;
 const POLL_MS        = 60_000;       // check for new launches every 60s
 const SETTLE_MS      = 120_000;      // wait 2min after launch before buying
-const BUY_TOTAL_USD  = 5.0;          // total to buy per token
-const BUY_PER_SWAP   = 0.50;         // per swap
-const BUY_INTERVAL   = 15_000;       // 15s between swaps
+const BUY_PER_SWAP   = 0.10;         // $0.10 max per swap (project rule)
+const BUY_INTERVAL   = 60_000;       // 60s between swaps (project rule: 1/min)
+const SLIPPAGE_BPS   = 300;          // 3% slippage protection
 const GAS_RESERVE    = ethers.parseEther('0.0003');
 
 const STATE_FILE = path.join(__dirname, 'launch-buyer-state.json');
@@ -87,7 +87,8 @@ async function getEthPrice(provider) {
   try {
     const out = await v2.getAmountsOut(ethers.parseEther('0.001'), [WETH_ADDR, USDC_ADDR]);
     return Number(out[1]) / 1e6 * 1000;
-  } catch {
+  } catch (e) {
+    console.warn('[launch-buyer] ETH price fallback $2500:', e.message || e);
     return 2500;
   }
 }
@@ -105,56 +106,70 @@ function saveState(state) {
 }
 
 // --- Buy logic ---
-async function buyToken(wallet, provider, tokenAddr, symbol) {
+async function buyToken(wallet, provider, tokenAddr, symbol, seedUsd) {
   const ethPrice = await getEthPrice(provider);
-  const swapsNeeded = Math.ceil(BUY_TOTAL_USD / BUY_PER_SWAP);
 
-  console.log(`[${ts()}] DCA buying $${BUY_TOTAL_USD} of ${symbol} (${short(tokenAddr)})`);
+  // Dynamic total: 10% of seed, clamped $1-$10
+  const buyTotal = Math.max(1, Math.min(10, seedUsd * 0.10));
+  const swapsNeeded = Math.ceil(buyTotal / BUY_PER_SWAP);
+
+  console.log(`[${ts()}] DCA buying $${buyTotal.toFixed(2)} of ${symbol} (${short(tokenAddr)}) [10% of $${seedUsd} seed]`);
   console.log(`[${ts()}]   ${swapsNeeded} swaps of $${BUY_PER_SWAP}, ${BUY_INTERVAL / 1000}s apart`);
-  console.log(`[${ts()}]   Route: WETH -> MfT -> ${symbol} (V3 multi-hop)`);
+  console.log(`[${ts()}]   Route: WETH -> MfT -> ${symbol} (V3 multi-hop, ${SLIPPAGE_BPS / 100}% slippage)`);
 
   const weth = new ethers.Contract(WETH_ADDR, WETH_ABI, wallet);
   const v3 = new ethers.Contract(V3_ROUTER, V3_ABI, wallet);
   // WETH(10000)→MfT(10000)→TOKEN
   const path = encodePath([WETH_ADDR, MFT_ADDR, tokenAddr], [10000, 10000]);
 
+  // Upfront: wrap total ETH needed + approve once (saves gas vs per-swap)
+  const totalEthNeeded = buyTotal / ethPrice;
+  const totalWei = ethers.parseEther(totalEthNeeded.toFixed(18));
+  const bal = await provider.getBalance(wallet.address);
+  if (bal < totalWei + GAS_RESERVE) {
+    console.log(`[${ts()}]   Not enough ETH. Need ~${ethers.formatEther(totalWei)}, have ${ethers.formatEther(bal)}`);
+    return { bought: 0, spent: 0 };
+  }
+
+  // Wrap all WETH upfront
+  await (await weth.deposit({ value: totalWei })).wait();
+  console.log(`[${ts()}]   Wrapped ${ethers.formatEther(totalWei)} ETH → WETH`);
+
+  // Approve once
+  const allowance = await weth.allowance(wallet.address, V3_ROUTER);
+  if (allowance < totalWei) {
+    await (await weth.approve(V3_ROUTER, ethers.MaxUint256)).wait();
+  }
+
   let bought = 0;
   let spent = 0;
 
   for (let i = 0; i < swapsNeeded; i++) {
-    const thisUsd = Math.min(BUY_PER_SWAP, BUY_TOTAL_USD - spent);
+    const thisUsd = Math.min(BUY_PER_SWAP, buyTotal - spent);
     const ethAmt = thisUsd / ethPrice;
     const ethWei = ethers.parseEther(ethAmt.toFixed(18));
 
-    // Check balance
-    const bal = await provider.getBalance(wallet.address);
-    if (bal < ethWei + GAS_RESERVE) {
-      console.log(`[${ts()}]   Not enough ETH. Have: ${ethers.formatEther(bal)}, stopping.`);
-      break;
-    }
-
     try {
-      // Wrap ETH → WETH
-      await (await weth.deposit({ value: ethWei })).wait();
+      // Get quote for slippage calc (use V2 as rough oracle)
+      let minOut = 0n;
+      try {
+        const v2 = new ethers.Contract(V2_ROUTER, V2_ABI, provider);
+        const amts = await v2.getAmountsOut(ethWei, [WETH_ADDR, MFT_ADDR]);
+        // 3% slippage tolerance on quoted amount
+        minOut = amts[1] * 97n / 100n;
+      } catch (e) { console.warn('[launch-buyer] V2 quote failed, using 0 minOut:', e.message || e); }
 
-      // Ensure V3 router approval
-      const allowance = await weth.allowance(wallet.address, V3_ROUTER);
-      if (allowance < ethWei) {
-        await (await weth.approve(V3_ROUTER, ethers.MaxUint256)).wait();
-      }
-
-      // V3 multi-hop: WETH → MfT → TOKEN
       const tx = await v3.exactInput({
         path,
         recipient: wallet.address,
         amountIn: ethWei,
-        amountOutMinimum: 0n,
+        amountOutMinimum: minOut,
       });
       const r = await tx.wait();
 
       spent += thisUsd;
       bought++;
-      console.log(`[${ts()}]   ${bought}/${swapsNeeded} | $${spent.toFixed(2)} spent | gas: ${r.gasUsed} | tx: ${r.hash.slice(0, 14)}...`);
+      console.log(`[${ts()}]   ${bought}/${swapsNeeded} | $${spent.toFixed(2)}/$${buyTotal.toFixed(2)} | gas: ${r.gasUsed} | tx: ${r.hash.slice(0, 14)}...`);
 
     } catch (e) {
       console.log(`[${ts()}]   Swap ${i + 1} failed: ${(e.reason || e.message || '').slice(0, 100)}`);
@@ -170,7 +185,8 @@ async function buyToken(wallet, provider, tokenAddr, symbol) {
   try {
     const finalBal = await tokenContract.balanceOf(wallet.address);
     console.log(`[${ts()}]   Done! ${symbol} balance: ${ethers.formatUnits(finalBal, 18)}`);
-  } catch {
+  } catch (e) {
+    console.warn('[launch-buyer] final balance read:', e.message || e);
     console.log(`[${ts()}]   Done! ${bought} swaps, ~$${spent.toFixed(2)} spent`);
   }
 
@@ -224,7 +240,7 @@ async function poll(provider, wallet, state) {
 
       await sleep(SETTLE_MS);
 
-      const result = await buyToken(wallet, provider, launch.token, launch.symbol);
+      const result = await buyToken(wallet, provider, launch.token, launch.symbol, parseFloat(launch.seed));
       state.bought[launch.token] = {
         symbol: launch.symbol,
         swaps: result.bought,
@@ -253,7 +269,7 @@ async function main() {
   console.log('=== Launch Buyer ===');
   console.log(`[${ts()}] Trade wallet: ${wallet.address}`);
   console.log(`[${ts()}] ETH balance: ${ethers.formatEther(bal)}`);
-  console.log(`[${ts()}] Buy: $${BUY_TOTAL_USD}/token, $${BUY_PER_SWAP}/swap, ${BUY_INTERVAL / 1000}s apart`);
+  console.log(`[${ts()}] Buy: 10% of seed ($1-$10), $${BUY_PER_SWAP}/swap, ${BUY_INTERVAL / 1000}s apart, ${SLIPPAGE_BPS / 100}% slippage`);
   console.log(`[${ts()}] Factory: ${short(FACTORY)}`);
   console.log(`[${ts()}] Scanning from block ${state.lastBlock || 'current'}`);
   console.log(`[${ts()}] Already bought: ${Object.keys(state.bought).length} token(s)`);

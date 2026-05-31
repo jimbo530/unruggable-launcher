@@ -1,0 +1,1284 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Fire N Ice</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body { width: 100%; height: 100%; overflow: hidden; background: #111; touch-action: none; }
+canvas { display: block; margin: 0 auto; }
+#back-link { position: fixed; bottom: 8px; left: 50%; transform: translateX(-50%); color: #666; font-family: monospace; font-size: 12px; text-decoration: none; z-index: 10; }
+#back-link:hover { color: #aaa; }
+</style>
+</head>
+<body>
+<canvas id="gc"></canvas>
+<a id="back-link" href="/games">Back to Arcade</a>
+<script src="nft-loader.js"></script>
+<script>if(window.NftLoader)NftLoader.gate();</script>
+<script src="tasern-engine.js"></script>
+<script>
+(function(){
+"use strict";
+
+// === CONSTANTS ===
+var GW = 384, GH = 320;
+var COLS = 12, ROWS = 10, TS = 32;
+var ctx = TAS.ctx;
+
+TAS.initCanvas(GW, GH);
+TAS.input.initTouch({ buttons: ['a', 'b'], labels: { a: 'JUMP', b: 'ICE' } });
+
+// Tile types
+var T_EMPTY = 0, T_PLATFORM = 1, T_FIRE = 2, T_ICE = 3, T_PIPE_L = 4, T_PIPE_R = 5, T_SPRING = 6;
+
+// === STATE ===
+var state = 'title';
+var frame = 0;
+var level = 0;
+var moves = 0;
+var totalMoves = 0;
+var grid = [];
+var player = { x: 0, y: 0, dir: 1, animFrame: 0, moving: false };
+var undoStack = [];
+var maxUndo = 20;
+var animQueue = []; // animations in progress
+var animating = false;
+var levelComplete = false;
+var levelCompleteTimer = 0;
+var selectCursor = 0;
+
+// Progress
+var progress = loadProgress();
+var bestMoves = loadBestMoves();
+
+// Input cooldowns
+var inputCooldown = 0;
+var jumpPressed = false;
+var icePressed = false;
+
+function loadProgress() {
+  try { var d = JSON.parse(localStorage.getItem('firennice_progress')); return d || []; }
+  catch(e) { return []; }
+}
+function saveProgress() {
+  try { localStorage.setItem('firennice_progress', JSON.stringify(progress)); } catch(e) { console.warn('[fire-n-ice] save progress:', e.message || e); }
+}
+function loadBestMoves() {
+  try { return parseInt(localStorage.getItem('firennice_hi') || '0', 10); } catch(e) { return 0; }
+}
+function saveBestMoves() {
+  try { localStorage.setItem('firennice_hi', String(bestMoves)); } catch(e) { console.warn('[fire-n-ice] save best moves:', e.message || e); }
+}
+
+// === LEVELS ===
+// Legend: 0=empty, 1=platform, 2=fire, 3=ice(prebuilt), 4=pipeL, 5=pipeR, 6=spring
+// P = player start (replaced with 0 in grid, position stored separately)
+var LEVELS = [
+  // Level 1: Single fire, push ice into it
+  { grid: [
+    [0,0,0,0,0,0,0,0,0,0,0,0],
+    [0,0,0,0,0,0,0,0,0,0,0,0],
+    [0,0,0,0,0,0,0,0,0,0,0,0],
+    [0,0,0,0,0,0,0,0,0,0,0,0],
+    [0,0,0,0,0,0,0,0,0,0,0,0],
+    [0,0,0,0,0,0,0,0,0,0,0,0],
+    [0,0,0,0,0,0,0,0,0,0,0,0],
+    [0,0,0,0,0,0,0,0,0,2,0,0],
+    [1,1,1,1,1,1,1,1,1,1,1,1],
+    [1,1,1,1,1,1,1,1,1,1,1,1]
+  ], px: 3, py: 7 },
+  // Level 2: Two fires on a shelf
+  { grid: [
+    [0,0,0,0,0,0,0,0,0,0,0,0],
+    [0,0,0,0,0,0,0,0,0,0,0,0],
+    [0,0,0,0,0,0,0,0,0,0,0,0],
+    [0,0,0,0,0,0,0,0,0,0,0,0],
+    [0,0,0,0,0,0,0,0,0,0,0,0],
+    [0,0,0,0,0,0,0,0,2,0,0,0],
+    [0,0,0,0,0,0,1,1,1,1,0,0],
+    [0,0,0,2,0,0,0,0,0,0,0,0],
+    [1,1,1,1,1,1,1,1,1,1,1,1],
+    [1,1,1,1,1,1,1,1,1,1,1,1]
+  ], px: 1, py: 7 },
+  // Level 3: Fire below - create ice, let it fall
+  { grid: [
+    [0,0,0,0,0,0,0,0,0,0,0,0],
+    [0,0,0,0,0,0,0,0,0,0,0,0],
+    [0,0,0,0,0,0,0,0,0,0,0,0],
+    [0,0,0,0,0,0,0,0,0,0,0,0],
+    [0,0,0,0,0,0,0,0,0,0,0,0],
+    [0,0,1,1,1,1,1,0,0,0,0,0],
+    [0,0,0,0,0,0,0,0,0,0,0,0],
+    [0,0,0,0,0,0,0,0,0,0,0,0],
+    [0,0,0,0,2,0,0,0,0,0,0,0],
+    [1,1,1,1,1,1,1,1,1,1,1,1]
+  ], px: 4, py: 4 },
+  // Level 4: Two stacked fires
+  { grid: [
+    [0,0,0,0,0,0,0,0,0,0,0,0],
+    [0,0,0,0,0,0,0,0,0,0,0,0],
+    [0,0,0,0,0,0,0,0,0,0,0,0],
+    [0,0,0,0,0,0,0,0,0,0,0,0],
+    [0,0,0,0,0,0,0,0,0,0,0,0],
+    [0,0,0,0,0,0,0,0,0,0,0,0],
+    [0,0,0,0,0,0,0,2,0,0,0,0],
+    [0,0,0,0,0,0,0,2,0,0,0,0],
+    [1,1,1,1,1,1,1,1,1,1,1,1],
+    [1,1,1,1,1,1,1,1,1,1,1,1]
+  ], px: 3, py: 7 },
+  // Level 5: Fire on a high ledge
+  { grid: [
+    [0,0,0,0,0,0,0,0,0,0,0,0],
+    [0,0,0,0,0,0,0,0,0,0,0,0],
+    [0,0,0,0,0,0,0,0,0,0,0,0],
+    [0,0,0,0,0,2,0,0,0,0,0,0],
+    [0,0,0,0,1,1,1,0,0,0,0,0],
+    [0,0,0,0,0,0,0,0,0,0,0,0],
+    [0,0,0,0,0,0,0,0,0,0,0,0],
+    [0,0,0,0,0,0,0,0,0,0,0,0],
+    [1,1,1,1,1,1,1,1,1,1,1,1],
+    [1,1,1,1,1,1,1,1,1,1,1,1]
+  ], px: 2, py: 7 },
+  // Level 6: Stack ice to reach high fire
+  { grid: [
+    [0,0,0,0,0,0,0,0,0,0,0,0],
+    [0,0,0,0,0,0,0,0,0,0,0,0],
+    [0,0,0,0,0,0,0,2,0,0,0,0],
+    [0,0,0,0,0,0,0,0,0,0,0,0],
+    [0,0,0,0,0,0,0,0,0,0,0,0],
+    [0,0,0,0,0,0,0,0,0,0,0,0],
+    [0,0,0,0,0,0,0,0,0,0,0,0],
+    [0,0,0,0,0,0,0,0,0,0,0,0],
+    [1,1,1,1,1,1,1,1,1,1,1,1],
+    [1,1,1,1,1,1,1,1,1,1,1,1]
+  ], px: 3, py: 7 },
+  // Level 7: Two fires, different heights
+  { grid: [
+    [0,0,0,0,0,0,0,0,0,0,0,0],
+    [0,0,0,0,0,0,0,0,0,0,0,0],
+    [0,0,0,0,0,0,0,0,0,0,0,0],
+    [0,0,2,0,0,0,0,0,0,0,0,0],
+    [0,1,1,1,0,0,0,0,0,0,0,0],
+    [0,0,0,0,0,0,0,0,2,0,0,0],
+    [0,0,0,0,0,0,0,1,1,1,0,0],
+    [0,0,0,0,0,0,0,0,0,0,0,0],
+    [1,1,1,1,1,1,1,1,1,1,1,1],
+    [1,1,1,1,1,1,1,1,1,1,1,1]
+  ], px: 5, py: 7 },
+  // Level 8: Bridge building - fire across gap
+  { grid: [
+    [0,0,0,0,0,0,0,0,0,0,0,0],
+    [0,0,0,0,0,0,0,0,0,0,0,0],
+    [0,0,0,0,0,0,0,0,0,0,0,0],
+    [0,0,0,0,0,0,0,0,0,0,0,0],
+    [0,0,0,0,0,0,0,0,0,0,0,0],
+    [0,0,0,0,0,0,0,0,0,0,0,0],
+    [0,0,0,0,0,0,0,0,0,0,2,0],
+    [1,1,1,0,0,0,0,0,0,1,1,1],
+    [1,1,1,0,0,0,0,0,0,1,1,1],
+    [1,1,1,1,1,1,1,1,1,1,1,1]
+  ], px: 1, py: 6 },
+  // Level 9: Staircase fires
+  { grid: [
+    [0,0,0,0,0,0,0,0,0,0,0,0],
+    [0,0,0,0,0,0,0,0,0,0,0,0],
+    [0,0,0,0,0,0,0,0,0,0,0,0],
+    [0,0,0,0,0,0,0,0,0,0,2,0],
+    [0,0,0,0,0,0,0,0,0,1,1,1],
+    [0,0,0,0,0,0,0,2,0,0,0,0],
+    [0,0,0,0,0,0,1,1,0,0,0,0],
+    [0,0,0,0,2,0,0,0,0,0,0,0],
+    [1,1,1,1,1,1,1,1,1,1,1,1],
+    [1,1,1,1,1,1,1,1,1,1,1,1]
+  ], px: 1, py: 7 },
+  // Level 10: Push through a corridor
+  { grid: [
+    [0,0,0,0,0,0,0,0,0,0,0,0],
+    [0,0,0,0,0,0,0,0,0,0,0,0],
+    [0,0,0,0,0,0,0,0,0,0,0,0],
+    [0,0,0,0,0,0,0,0,0,0,0,0],
+    [1,1,1,1,1,1,1,1,1,1,0,0],
+    [0,0,0,0,0,0,0,0,0,0,0,0],
+    [0,0,0,0,0,0,0,0,0,0,0,2],
+    [0,0,1,1,1,1,1,1,1,1,1,1],
+    [0,0,0,0,0,0,0,0,0,0,0,0],
+    [1,1,1,1,1,1,1,1,1,1,1,1]
+  ], px: 1, py: 3 },
+  // Level 11: Chain reaction - ice falls through gap
+  { grid: [
+    [0,0,0,0,0,0,0,0,0,0,0,0],
+    [0,0,0,0,0,0,0,0,0,0,0,0],
+    [0,0,0,0,0,0,0,0,0,0,0,0],
+    [0,0,0,0,0,0,0,0,0,0,0,0],
+    [1,1,1,1,0,1,1,1,1,1,1,1],
+    [0,0,0,0,0,0,0,0,0,0,0,0],
+    [0,0,0,0,2,0,0,0,0,0,0,0],
+    [0,0,0,1,1,1,0,0,0,0,0,0],
+    [0,0,0,0,0,0,0,0,0,2,0,0],
+    [1,1,1,1,1,1,1,1,1,1,1,1]
+  ], px: 2, py: 3 },
+  // Level 12: L-shaped drop
+  { grid: [
+    [0,0,0,0,0,0,0,0,0,0,0,0],
+    [0,0,0,0,0,0,0,0,0,0,0,0],
+    [0,0,0,0,0,0,0,0,0,0,0,0],
+    [0,0,0,0,0,0,0,0,0,0,0,0],
+    [1,1,1,1,1,1,0,0,0,0,0,0],
+    [0,0,0,0,0,0,0,0,0,0,0,0],
+    [0,0,0,0,0,0,0,0,0,0,0,0],
+    [0,0,0,0,0,0,1,1,1,1,0,0],
+    [0,0,0,0,0,0,0,0,0,2,0,0],
+    [1,1,1,1,1,1,1,1,1,1,1,1]
+  ], px: 2, py: 3 },
+  // Level 13: Multiple drops in sequence
+  { grid: [
+    [0,0,0,0,0,0,0,0,0,0,0,0],
+    [0,0,0,0,0,0,0,0,0,0,0,0],
+    [0,0,0,0,0,0,0,0,0,0,0,0],
+    [1,1,0,1,1,0,1,1,0,1,1,1],
+    [0,0,0,0,0,0,0,0,0,0,0,0],
+    [0,0,0,0,0,0,0,0,0,0,0,0],
+    [0,2,0,0,2,0,0,2,0,0,0,0],
+    [1,1,1,1,1,1,1,1,1,0,0,0],
+    [0,0,0,0,0,0,0,0,0,0,0,0],
+    [1,1,1,1,1,1,1,1,1,1,1,1]
+  ], px: 10, py: 2 },
+  // Level 14: Fire in a pit
+  { grid: [
+    [0,0,0,0,0,0,0,0,0,0,0,0],
+    [0,0,0,0,0,0,0,0,0,0,0,0],
+    [0,0,0,0,0,0,0,0,0,0,0,0],
+    [0,0,0,0,0,0,0,0,0,0,0,0],
+    [0,0,0,0,0,0,0,0,0,0,0,0],
+    [1,1,1,1,1,0,1,1,1,1,1,1],
+    [1,1,1,1,1,0,1,1,1,1,1,1],
+    [1,1,1,1,1,0,1,1,1,1,1,1],
+    [1,1,1,1,1,2,1,1,1,1,1,1],
+    [1,1,1,1,1,1,1,1,1,1,1,1]
+  ], px: 3, py: 4 },
+  // Level 15: Fire behind wall, push ice over
+  { grid: [
+    [0,0,0,0,0,0,0,0,0,0,0,0],
+    [0,0,0,0,0,0,0,0,0,0,0,0],
+    [0,0,0,0,0,0,0,0,0,0,0,0],
+    [0,0,0,0,0,0,0,0,0,0,0,0],
+    [0,0,0,0,0,1,0,0,0,0,0,0],
+    [0,0,0,0,0,1,0,0,0,0,0,0],
+    [0,0,0,0,0,1,0,0,0,0,0,0],
+    [0,0,0,0,0,1,0,2,0,0,0,0],
+    [1,1,1,1,1,1,1,1,1,1,1,1],
+    [1,1,1,1,1,1,1,1,1,1,1,1]
+  ], px: 2, py: 7 },
+  // Level 16: Spring bounce
+  { grid: [
+    [0,0,0,0,0,0,0,0,0,0,0,0],
+    [0,0,0,0,0,0,0,0,0,0,0,0],
+    [0,0,0,0,0,0,0,0,0,2,0,0],
+    [0,0,0,0,0,0,0,0,1,1,1,0],
+    [0,0,0,0,0,0,0,0,0,0,0,0],
+    [0,0,0,0,0,0,0,0,0,0,0,0],
+    [0,0,0,0,0,0,0,0,0,0,0,0],
+    [0,0,0,0,0,0,0,0,0,0,0,0],
+    [1,1,1,1,1,1,1,1,6,1,1,1],
+    [1,1,1,1,1,1,1,1,1,1,1,1]
+  ], px: 2, py: 7 },
+  // Level 17: Double spring
+  { grid: [
+    [0,0,0,0,0,0,0,0,0,0,0,0],
+    [0,0,0,0,0,0,0,0,0,0,0,0],
+    [0,0,0,0,2,0,0,0,0,0,0,0],
+    [0,0,0,1,1,1,0,0,0,0,0,0],
+    [0,0,0,0,0,0,0,0,0,0,0,0],
+    [0,0,0,0,0,0,0,0,2,0,0,0],
+    [0,0,0,0,0,0,0,1,1,1,0,0],
+    [0,0,0,0,0,0,0,0,0,0,0,0],
+    [1,1,6,1,1,1,1,6,1,1,1,1],
+    [1,1,1,1,1,1,1,1,1,1,1,1]
+  ], px: 0, py: 7 },
+  // Level 18: Pipe puzzle - redirect ice
+  { grid: [
+    [0,0,0,0,0,0,0,0,0,0,0,0],
+    [0,0,0,0,0,0,0,0,0,0,0,0],
+    [0,0,0,0,0,0,0,0,0,0,0,0],
+    [0,0,0,0,0,0,0,0,0,0,0,0],
+    [0,0,0,0,0,4,0,0,0,0,0,0],
+    [0,0,0,0,0,1,0,0,0,0,0,0],
+    [0,0,0,0,0,1,0,0,0,0,0,0],
+    [0,2,0,0,0,1,0,0,0,0,0,0],
+    [1,1,1,1,1,1,1,1,1,1,1,1],
+    [1,1,1,1,1,1,1,1,1,1,1,1]
+  ], px: 8, py: 3 },
+  // Level 19: Spring chain
+  { grid: [
+    [0,0,0,0,0,0,0,0,0,0,0,0],
+    [0,0,0,0,0,0,0,0,0,0,0,0],
+    [0,0,0,0,0,0,0,0,0,2,0,0],
+    [0,0,0,0,0,0,0,0,1,1,1,0],
+    [0,0,0,0,0,0,0,0,0,0,0,0],
+    [0,0,0,0,0,6,0,0,0,0,0,0],
+    [0,0,0,0,1,1,1,0,0,0,0,0],
+    [0,0,0,0,0,0,0,0,0,0,0,0],
+    [1,1,1,1,6,1,1,1,1,1,1,1],
+    [1,1,1,1,1,1,1,1,1,1,1,1]
+  ], px: 1, py: 7 },
+  // Level 20: Multi-fire with spring
+  { grid: [
+    [0,0,0,0,0,0,0,0,0,0,0,0],
+    [0,0,0,0,0,0,0,0,0,0,0,0],
+    [0,0,2,0,0,0,0,0,0,2,0,0],
+    [0,1,1,1,0,0,0,0,1,1,1,0],
+    [0,0,0,0,0,0,0,0,0,0,0,0],
+    [0,0,0,0,0,0,0,0,0,0,0,0],
+    [0,0,0,0,0,2,0,0,0,0,0,0],
+    [0,0,0,0,1,1,1,0,0,0,0,0],
+    [1,1,6,1,1,1,1,1,6,1,1,1],
+    [1,1,1,1,1,1,1,1,1,1,1,1]
+  ], px: 5, py: 7 },
+  // Level 21: Complex multi-step puzzle
+  { grid: [
+    [0,0,0,0,0,0,0,0,0,0,0,0],
+    [0,0,0,0,0,0,0,0,0,0,0,0],
+    [0,0,0,0,0,0,0,0,0,0,0,0],
+    [0,0,2,0,0,0,0,0,0,0,0,0],
+    [0,1,1,1,0,0,0,0,0,0,0,0],
+    [0,0,0,0,0,0,0,0,0,0,0,0],
+    [0,0,0,0,1,1,0,0,0,0,0,0],
+    [0,0,0,0,0,0,0,2,0,2,0,0],
+    [1,1,1,1,1,1,1,1,1,1,1,1],
+    [1,1,1,1,1,1,1,1,1,1,1,1]
+  ], px: 6, py: 7 },
+  // Level 22: Tower puzzle
+  { grid: [
+    [0,0,0,0,0,0,0,0,0,0,0,0],
+    [0,0,0,0,0,2,0,0,0,0,0,0],
+    [0,0,0,0,0,0,0,0,0,0,0,0],
+    [0,0,0,0,0,2,0,0,0,0,0,0],
+    [0,0,0,0,0,0,0,0,0,0,0,0],
+    [0,0,0,0,0,2,0,0,0,0,0,0],
+    [0,0,0,0,1,1,1,0,0,0,0,0],
+    [0,0,0,0,0,0,0,0,0,0,0,0],
+    [1,1,1,1,1,1,1,1,1,1,1,1],
+    [1,1,1,1,1,1,1,1,1,1,1,1]
+  ], px: 2, py: 7 },
+  // Level 23: Zigzag descent
+  { grid: [
+    [0,0,0,0,0,0,0,0,0,0,0,0],
+    [0,0,0,0,0,0,0,0,0,0,0,0],
+    [1,1,1,0,0,0,0,0,0,0,0,0],
+    [0,0,0,0,0,0,0,0,0,2,0,0],
+    [0,0,0,0,0,0,0,0,1,1,1,1],
+    [0,0,0,0,0,2,0,0,0,0,0,0],
+    [0,0,0,0,1,1,1,0,0,0,0,0],
+    [0,2,0,0,0,0,0,0,0,0,0,0],
+    [1,1,1,0,0,0,0,0,0,0,0,0],
+    [1,1,1,1,1,1,1,1,1,1,1,1]
+  ], px: 1, py: 1 },
+  // Level 24: Enclosed fires
+  { grid: [
+    [0,0,0,0,0,0,0,0,0,0,0,0],
+    [0,0,0,0,0,0,0,0,0,0,0,0],
+    [0,0,0,0,0,0,0,0,0,0,0,0],
+    [0,0,0,1,0,1,0,1,0,0,0,0],
+    [0,0,0,1,2,1,2,1,0,0,0,0],
+    [0,0,0,1,1,1,1,1,0,0,0,0],
+    [0,0,0,0,0,0,0,0,0,0,0,0],
+    [0,0,0,0,0,0,0,0,0,0,0,0],
+    [1,1,1,1,1,1,1,1,1,1,1,1],
+    [1,1,1,1,1,1,1,1,1,1,1,1]
+  ], px: 1, py: 7 },
+  // Level 25: Ice bridge and drop
+  { grid: [
+    [0,0,0,0,0,0,0,0,0,0,0,0],
+    [0,0,0,0,0,0,0,0,0,0,0,0],
+    [0,0,0,0,0,0,0,0,0,0,0,0],
+    [1,1,1,0,0,0,0,0,0,1,1,1],
+    [0,0,0,0,0,0,0,0,0,0,0,0],
+    [0,0,0,0,0,0,0,0,0,0,0,0],
+    [0,0,0,0,0,0,0,0,0,0,0,0],
+    [0,0,0,2,0,0,0,2,0,0,0,0],
+    [0,0,1,1,1,0,1,1,1,0,0,0],
+    [1,1,1,1,1,1,1,1,1,1,1,1]
+  ], px: 1, py: 2 },
+  // Level 26: Expert - tight geometry
+  { grid: [
+    [0,0,0,0,0,0,0,0,0,0,0,0],
+    [0,0,0,0,0,0,0,0,0,0,0,0],
+    [0,2,0,0,0,0,0,0,0,0,0,0],
+    [1,1,1,0,0,0,0,0,0,0,0,0],
+    [0,0,0,0,2,0,0,0,0,0,0,0],
+    [0,0,0,1,1,1,0,0,0,0,0,0],
+    [0,0,0,0,0,0,0,2,0,0,0,0],
+    [0,0,0,0,0,0,1,1,1,0,0,0],
+    [0,0,0,0,0,0,0,0,0,0,2,0],
+    [1,1,1,1,1,1,1,1,1,1,1,1]
+  ], px: 9, py: 8 },
+  // Level 27: Narrow corridors
+  { grid: [
+    [0,0,0,0,0,0,0,0,0,0,0,0],
+    [1,0,1,0,1,0,1,0,1,0,1,0],
+    [1,0,1,0,1,0,1,0,1,0,1,0],
+    [1,0,1,0,1,0,1,0,1,0,1,0],
+    [1,0,1,0,1,0,1,0,1,0,1,0],
+    [1,0,1,0,1,0,1,0,1,0,1,0],
+    [1,0,1,0,1,0,1,0,1,0,1,0],
+    [1,0,1,0,1,0,1,0,1,0,1,0],
+    [1,2,1,2,1,2,1,2,1,2,1,0],
+    [1,1,1,1,1,1,1,1,1,1,1,1]
+  ], px: 5, py: 0 },
+  // Level 28: The gauntlet
+  { grid: [
+    [0,0,0,0,0,0,0,0,0,0,0,0],
+    [0,0,0,0,0,0,0,0,0,0,0,0],
+    [0,2,0,2,0,2,0,2,0,2,0,0],
+    [1,1,1,1,1,1,1,1,1,1,1,1],
+    [0,0,0,0,0,0,0,0,0,0,0,0],
+    [0,0,0,0,0,0,0,0,0,0,0,0],
+    [0,0,2,0,2,0,2,0,2,0,0,0],
+    [0,1,1,1,1,1,1,1,1,1,0,0],
+    [0,0,0,0,0,0,0,0,0,0,0,0],
+    [1,1,1,1,1,1,1,1,1,1,1,1]
+  ], px: 0, py: 1 },
+  // Level 29: The tower
+  { grid: [
+    [0,0,0,0,0,2,0,0,0,0,0,0],
+    [0,0,0,0,1,1,1,0,0,0,0,0],
+    [0,0,0,0,0,0,0,0,0,0,0,0],
+    [0,0,0,2,0,0,0,2,0,0,0,0],
+    [0,0,1,1,1,0,1,1,1,0,0,0],
+    [0,0,0,0,0,0,0,0,0,0,0,0],
+    [0,2,0,0,0,0,0,0,0,2,0,0],
+    [1,1,1,0,0,0,0,0,1,1,1,0],
+    [0,0,0,0,0,0,0,0,0,0,0,0],
+    [1,1,1,1,1,1,1,1,1,1,1,1]
+  ], px: 5, py: 8 },
+  // Level 30: Grand finale
+  { grid: [
+    [0,0,0,0,0,0,0,0,0,0,0,0],
+    [0,2,0,0,0,0,0,0,0,0,2,0],
+    [1,1,1,0,0,0,0,0,0,1,1,1],
+    [0,0,0,0,0,2,0,0,0,0,0,0],
+    [0,0,0,0,1,1,1,0,0,0,0,0],
+    [0,0,0,0,0,0,0,0,0,0,0,0],
+    [0,2,0,0,0,0,0,0,0,0,2,0],
+    [1,1,0,0,0,6,0,0,0,0,1,1],
+    [0,0,0,0,0,0,0,0,0,0,0,0],
+    [1,1,1,1,1,1,1,1,1,1,1,1]
+  ], px: 5, py: 8 }
+];
+
+// === HELPERS ===
+function cloneGrid(g) {
+  var out = [];
+  for (var r = 0; r < ROWS; r++) { out.push(g[r].slice()); }
+  return out;
+}
+
+function countFires() {
+  var c = 0;
+  for (var r = 0; r < ROWS; r++) {
+    for (var col = 0; col < COLS; col++) {
+      if (grid[r][col] === T_FIRE) c++;
+    }
+  }
+  return c;
+}
+
+function isSolid(col, row) {
+  if (col < 0 || col >= COLS || row < 0 || row >= ROWS) return true;
+  var t = grid[row][col];
+  return t === T_PLATFORM || t === T_ICE;
+}
+
+function isEmpty(col, row) {
+  if (col < 0 || col >= COLS || row < 0 || row >= ROWS) return false;
+  return grid[row][col] === T_EMPTY;
+}
+
+function pushUndo() {
+  undoStack.push({
+    grid: cloneGrid(grid),
+    px: player.x,
+    py: player.y,
+    dir: player.dir,
+    moves: moves
+  });
+  if (undoStack.length > maxUndo) undoStack.shift();
+}
+
+function popUndo() {
+  if (undoStack.length === 0) return;
+  var snap = undoStack.pop();
+  grid = snap.grid;
+  player.x = snap.px;
+  player.y = snap.py;
+  player.dir = snap.dir;
+  moves = snap.moves;
+  TAS.audio.playTone(300, 0.1, 'sine', 0.05);
+}
+
+// === LEVEL LOADING ===
+function loadLevel(idx) {
+  var lv = LEVELS[idx];
+  grid = cloneGrid(lv.grid);
+  player.x = lv.px;
+  player.y = lv.py;
+  player.dir = 1;
+  player.animFrame = 0;
+  player.moving = false;
+  moves = 0;
+  undoStack = [];
+  animQueue = [];
+  animating = false;
+  levelComplete = false;
+  levelCompleteTimer = 0;
+  level = idx;
+  state = 'playing';
+}
+
+// === PHYSICS: GRAVITY FOR ICE ===
+function applyGravity() {
+  var moved = true;
+  while (moved) {
+    moved = false;
+    for (var r = ROWS - 2; r >= 0; r--) {
+      for (var c = 0; c < COLS; c++) {
+        if (grid[r][c] === T_ICE) {
+          var below = r + 1;
+          if (below < ROWS) {
+            if (grid[below][c] === T_EMPTY) {
+              grid[below][c] = T_ICE;
+              grid[r][c] = T_EMPTY;
+              moved = true;
+            } else if (grid[below][c] === T_FIRE) {
+              // Ice extinguishes fire
+              grid[r][c] = T_EMPTY;
+              grid[below][c] = T_EMPTY;
+              spawnExtinguish(c * TS + TS / 2, below * TS + TS / 2);
+              sfxExtinguish();
+              moved = true;
+            } else if (grid[below][c] === T_SPRING) {
+              // Spring bounces ice up
+              grid[r][c] = T_EMPTY;
+              var bounceY = r - 4;
+              if (bounceY < 0) bounceY = 0;
+              // Find where it lands
+              for (var by = bounceY; by <= r; by++) {
+                if (by + 1 < ROWS && isSolid(c, by + 1)) {
+                  if (grid[by][c] === T_EMPTY) {
+                    grid[by][c] = T_ICE;
+                  } else if (grid[by][c] === T_FIRE) {
+                    grid[by][c] = T_EMPTY;
+                    spawnExtinguish(c * TS + TS / 2, by * TS + TS / 2);
+                    sfxExtinguish();
+                  }
+                  break;
+                }
+                if (by === r) {
+                  // Put it at the top available spot
+                  if (grid[bounceY][c] === T_EMPTY) {
+                    grid[bounceY][c] = T_ICE;
+                  } else if (grid[bounceY][c] === T_FIRE) {
+                    grid[bounceY][c] = T_EMPTY;
+                    spawnExtinguish(c * TS + TS / 2, bounceY * TS + TS / 2);
+                    sfxExtinguish();
+                  }
+                }
+              }
+              spawnSpringBounce(c * TS + TS / 2, (r + 1) * TS);
+              sfxSpring();
+              moved = true;
+            }
+          }
+        }
+      }
+    }
+  }
+  // Check for pipe redirects
+  for (var r2 = 0; r2 < ROWS; r2++) {
+    for (var c2 = 0; c2 < COLS; c2++) {
+      if (grid[r2][c2] === T_ICE) {
+        // Check if sitting on a pipe
+        if (r2 + 1 < ROWS && grid[r2 + 1][c2] === T_PIPE_L) {
+          // Redirect left
+          slideIce(c2, r2, -1);
+        } else if (r2 + 1 < ROWS && grid[r2 + 1][c2] === T_PIPE_R) {
+          // Redirect right
+          slideIce(c2, r2, 1);
+        }
+      }
+    }
+  }
+}
+
+function slideIce(col, row, dir) {
+  grid[row][col] = T_EMPTY;
+  var c = col + dir;
+  while (c >= 0 && c < COLS) {
+    if (grid[row][c] === T_FIRE) {
+      grid[row][c] = T_EMPTY;
+      spawnExtinguish(c * TS + TS / 2, row * TS + TS / 2);
+      sfxExtinguish();
+      return;
+    }
+    if (isSolid(c, row)) {
+      grid[row][c - dir] = T_ICE;
+      spawnIceShatter(c * TS + (dir > 0 ? 0 : TS), row * TS + TS / 2);
+      return;
+    }
+    // Check if floor disappears (ice falls)
+    if (row + 1 < ROWS && !isSolid(c, row + 1) && grid[row + 1][c] !== T_SPRING && grid[row + 1][c] !== T_PIPE_L && grid[row + 1][c] !== T_PIPE_R) {
+      grid[row][c] = T_ICE;
+      applyGravity();
+      return;
+    }
+    c += dir;
+  }
+  // Hit wall
+  grid[row][col] = T_ICE;
+}
+
+// === PLAYER ACTIONS ===
+function tryMove(dir) {
+  var nx = player.x + dir;
+  if (nx < 0 || nx >= COLS) return;
+  var ny = player.y;
+
+  if (isSolid(nx, ny)) {
+    // Try to push ice
+    if (grid[ny][nx] === T_ICE) {
+      var pushX = nx + dir;
+      if (pushX >= 0 && pushX < COLS) {
+        if (grid[ny][pushX] === T_EMPTY) {
+          pushUndo();
+          grid[ny][pushX] = T_ICE;
+          grid[ny][nx] = T_EMPTY;
+          player.x = nx;
+          player.dir = dir;
+          moves++;
+          sfxPush();
+          applyGravity();
+          checkWin();
+          return;
+        } else if (grid[ny][pushX] === T_FIRE) {
+          pushUndo();
+          grid[ny][pushX] = T_EMPTY;
+          grid[ny][nx] = T_EMPTY;
+          player.x = nx;
+          player.dir = dir;
+          moves++;
+          spawnExtinguish(pushX * TS + TS / 2, ny * TS + TS / 2);
+          sfxExtinguish();
+          applyGravity();
+          checkWin();
+          return;
+        }
+      }
+    }
+    return; // blocked by platform
+  }
+
+  // Move freely
+  pushUndo();
+  player.x = nx;
+  player.dir = dir;
+  moves++;
+
+  // Gravity for player
+  while (player.y + 1 < ROWS && !isSolid(player.x, player.y + 1)) {
+    player.y++;
+  }
+  checkWin();
+}
+
+function tryJump() {
+  // Jump up one tile if space above is free and there is a platform to land on
+  var above = player.y - 1;
+  if (above < 0) return;
+  if (isSolid(player.x, above)) return;
+
+  // Can jump if currently on solid ground
+  if (player.y + 1 >= ROWS || isSolid(player.x, player.y + 1)) {
+    pushUndo();
+    player.y = above;
+    moves++;
+    // Check if we can stand here (need support or it was just one tile jump)
+    // If no floor, fall
+    if (player.y + 1 < ROWS && !isSolid(player.x, player.y + 1)) {
+      // We jumped but have no floor - stay if we have a ledge on either side above
+      // Actually for this game, jump is just 1 tile up, player stays
+    }
+    sfxJump();
+  }
+}
+
+function tryCreateIce() {
+  var iceX = player.x + player.dir;
+  var iceY = player.y;
+  if (iceX < 0 || iceX >= COLS) return;
+  if (grid[iceY][iceX] === T_EMPTY) {
+    pushUndo();
+    grid[iceY][iceX] = T_ICE;
+    moves++;
+    spawnIceCreate(iceX * TS + TS / 2, iceY * TS + TS / 2);
+    sfxCreate();
+    applyGravity();
+    checkWin();
+  } else if (grid[iceY][iceX] === T_ICE) {
+    // Destroy existing ice
+    pushUndo();
+    grid[iceY][iceX] = T_EMPTY;
+    moves++;
+    spawnIceShatter(iceX * TS + TS / 2, iceY * TS + TS / 2);
+    sfxCreate();
+    applyGravity();
+  }
+}
+
+function checkWin() {
+  if (countFires() === 0) {
+    levelComplete = true;
+    levelCompleteTimer = 120;
+    if (progress.indexOf(level) === -1) {
+      progress.push(level);
+      saveProgress();
+    }
+    totalMoves += moves;
+    if (bestMoves === 0 || totalMoves < bestMoves) {
+      bestMoves = totalMoves;
+      saveBestMoves();
+    }
+    sfxClear();
+    TAS.fx.flash('#88eeff', 0.4);
+  }
+}
+
+// Apply gravity to player
+function playerGravity() {
+  while (player.y + 1 < ROWS && !isSolid(player.x, player.y + 1)) {
+    player.y++;
+  }
+}
+
+// === SFX ===
+function sfxCreate() {
+  TAS.audio.playTone(800, 0.08, 'sine', 0.06);
+  TAS.audio.playTone(1200, 0.1, 'sine', 0.04);
+}
+function sfxPush() {
+  TAS.audio.playNoise(0.1, 0.04, 600);
+}
+function sfxExtinguish() {
+  TAS.audio.playNoise(0.3, 0.06, 1200);
+  TAS.audio.playTone(200, 0.2, 'sawtooth', 0.03, 80);
+}
+function sfxClear() {
+  TAS.audio.playMelody([
+    [523, 0.12], [659, 0.12], [784, 0.12], [1047, 0.2]
+  ], 100);
+}
+function sfxJump() {
+  TAS.audio.playTone(400, 0.08, 'square', 0.04, 600);
+}
+function sfxSpring() {
+  TAS.audio.playTone(300, 0.15, 'sine', 0.05, 900);
+}
+
+// === PARTICLES ===
+function spawnIceCreate(x, y) {
+  TAS.particles.spawn(x, y, '#aaeeff', 8, 2, { size: 2, sizeVar: 2, gravity: -0.5 });
+  TAS.particles.spawn(x, y, '#ffffff', 4, 1.5, { size: 1, sizeVar: 1 });
+}
+function spawnExtinguish(x, y) {
+  TAS.particles.spawn(x, y, '#ffffff', 12, 2.5, { size: 3, sizeVar: 2, gravity: -1 });
+  TAS.particles.spawn(x, y, '#aaccdd', 8, 1.5, { size: 2, sizeVar: 1, gravity: -0.8 });
+}
+function spawnIceShatter(x, y) {
+  TAS.particles.spawn(x, y, '#88ccff', 6, 3, { size: 2, sizeVar: 2, shape: 'rect' });
+}
+function spawnSpringBounce(x, y) {
+  TAS.particles.spawn(x, y, '#ffff44', 6, 2, { size: 2, sizeVar: 1, gravity: 0.5 });
+}
+
+// === DRAWING ===
+function drawTile(col, row) {
+  var x = col * TS, y = row * TS;
+  var tile = grid[row][col];
+
+  if (tile === T_PLATFORM) {
+    // Dark stone
+    ctx.fillStyle = '#2a2a3a';
+    ctx.fillRect(x, y, TS, TS);
+    ctx.fillStyle = '#3a3a4a';
+    ctx.fillRect(x + 1, y + 1, TS - 2, TS - 2);
+    // Stone texture lines
+    ctx.strokeStyle = '#222235';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(x, y + TS / 2); ctx.lineTo(x + TS, y + TS / 2);
+    ctx.moveTo(x + TS / 2, y); ctx.lineTo(x + TS / 2, y + TS);
+    ctx.stroke();
+  } else if (tile === T_FIRE) {
+    // Animated fire
+    var flicker = Math.sin(frame * 0.15 + col * 2 + row) * 3;
+    var flicker2 = Math.cos(frame * 0.2 + col) * 2;
+    // Base glow
+    ctx.fillStyle = 'rgba(255,100,0,0.3)';
+    ctx.beginPath();
+    ctx.arc(x + TS / 2, y + TS / 2, TS / 2 + 2, 0, Math.PI * 2);
+    ctx.fill();
+    // Flame body
+    ctx.fillStyle = '#ff6600';
+    ctx.beginPath();
+    ctx.moveTo(x + 6, y + TS - 4);
+    ctx.quadraticCurveTo(x + TS / 2 + flicker2, y + 4 + flicker, x + TS - 6, y + TS - 4);
+    ctx.fill();
+    // Inner flame
+    ctx.fillStyle = '#ffcc00';
+    ctx.beginPath();
+    ctx.moveTo(x + 10, y + TS - 4);
+    ctx.quadraticCurveTo(x + TS / 2 - flicker2, y + 10 - flicker, x + TS - 10, y + TS - 4);
+    ctx.fill();
+    // Bright core
+    ctx.fillStyle = '#fff8dd';
+    ctx.beginPath();
+    ctx.ellipse(x + TS / 2, y + TS - 10, 4, 6, 0, 0, Math.PI * 2);
+    ctx.fill();
+  } else if (tile === T_ICE) {
+    // Crystalline ice block
+    var shimmer = Math.sin(frame * 0.08 + col + row * 3) * 10;
+    ctx.fillStyle = 'rgba(100,200,255,0.8)';
+    ctx.fillRect(x + 2, y + 2, TS - 4, TS - 4);
+    // Highlight
+    ctx.fillStyle = 'rgba(200,240,255,0.6)';
+    ctx.fillRect(x + 4, y + 4, 8, 8);
+    // Crystal lines
+    ctx.strokeStyle = 'rgba(255,255,255,' + (0.4 + shimmer / 40) + ')';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(x + 4, y + 16); ctx.lineTo(x + 16, y + 4);
+    ctx.moveTo(x + 12, y + 28); ctx.lineTo(x + 28, y + 12);
+    ctx.stroke();
+    // Border
+    ctx.strokeStyle = '#88ddff';
+    ctx.lineWidth = 2;
+    ctx.strokeRect(x + 2, y + 2, TS - 4, TS - 4);
+  } else if (tile === T_PIPE_L || tile === T_PIPE_R) {
+    // Pipe/chute indicator
+    ctx.fillStyle = '#4a4a5a';
+    ctx.fillRect(x, y, TS, TS);
+    ctx.fillStyle = '#5a5a6a';
+    ctx.fillRect(x + 2, y + 8, TS - 4, TS - 16);
+    // Arrow direction
+    ctx.fillStyle = '#88aacc';
+    var arrowDir = (tile === T_PIPE_L) ? -1 : 1;
+    ctx.beginPath();
+    var ax = x + TS / 2 + arrowDir * 8;
+    ctx.moveTo(ax, y + TS / 2);
+    ctx.lineTo(ax - arrowDir * 8, y + TS / 2 - 5);
+    ctx.lineTo(ax - arrowDir * 8, y + TS / 2 + 5);
+    ctx.fill();
+  } else if (tile === T_SPRING) {
+    // Spring pad
+    ctx.fillStyle = '#3a3a3a';
+    ctx.fillRect(x, y + TS / 2, TS, TS / 2);
+    // Coil
+    ctx.strokeStyle = '#ffcc00';
+    ctx.lineWidth = 2;
+    var springAnim = Math.sin(frame * 0.1) * 2;
+    ctx.beginPath();
+    for (var i = 0; i < 4; i++) {
+      var sy = y + TS / 2 + i * 4 + 2 + springAnim * (i === 0 ? 1 : 0);
+      ctx.moveTo(x + 6, sy); ctx.lineTo(x + TS - 6, sy);
+    }
+    ctx.stroke();
+    // Top plate
+    ctx.fillStyle = '#ffdd44';
+    ctx.fillRect(x + 4, y + TS / 2 - 2 + springAnim, TS - 8, 4);
+  }
+}
+
+function drawPlayer() {
+  var x = player.x * TS, y = player.y * TS;
+  var bob = Math.sin(frame * 0.1) * 1;
+
+  // Body - frost baseling (round creature)
+  ctx.fillStyle = '#66bbee';
+  ctx.beginPath();
+  ctx.ellipse(x + TS / 2, y + TS / 2 + 2 + bob, 11, 12, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Lighter belly
+  ctx.fillStyle = '#aaddff';
+  ctx.beginPath();
+  ctx.ellipse(x + TS / 2, y + TS / 2 + 4 + bob, 7, 7, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Eyes
+  var eyeOff = player.dir * 3;
+  ctx.fillStyle = '#fff';
+  ctx.beginPath();
+  ctx.arc(x + TS / 2 - 4 + eyeOff, y + TS / 2 - 2 + bob, 3.5, 0, Math.PI * 2);
+  ctx.arc(x + TS / 2 + 4 + eyeOff, y + TS / 2 - 2 + bob, 3.5, 0, Math.PI * 2);
+  ctx.fill();
+  // Pupils
+  ctx.fillStyle = '#112244';
+  ctx.beginPath();
+  ctx.arc(x + TS / 2 - 3 + eyeOff + player.dir, y + TS / 2 - 2 + bob, 1.8, 0, Math.PI * 2);
+  ctx.arc(x + TS / 2 + 5 + eyeOff + player.dir, y + TS / 2 - 2 + bob, 1.8, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Ice crystals on head
+  ctx.fillStyle = '#ccf0ff';
+  ctx.beginPath();
+  ctx.moveTo(x + TS / 2 - 6, y + 6 + bob); ctx.lineTo(x + TS / 2 - 4, y + bob); ctx.lineTo(x + TS / 2 - 2, y + 6 + bob);
+  ctx.moveTo(x + TS / 2 + 2, y + 5 + bob); ctx.lineTo(x + TS / 2 + 5, y - 1 + bob); ctx.lineTo(x + TS / 2 + 8, y + 5 + bob);
+  ctx.fill();
+
+  // Direction indicator (frost aura on facing side)
+  var auraX = x + TS / 2 + player.dir * 14;
+  ctx.globalAlpha = 0.3 + Math.sin(frame * 0.15) * 0.1;
+  ctx.fillStyle = '#88eeff';
+  ctx.beginPath();
+  ctx.arc(auraX, y + TS / 2 + bob, 4, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.globalAlpha = 1;
+}
+
+function drawBackground() {
+  // Cool gradient background
+  var grd = ctx.createLinearGradient(0, 0, 0, GH);
+  grd.addColorStop(0, '#0a1428');
+  grd.addColorStop(1, '#1a2a44');
+  ctx.fillStyle = grd;
+  ctx.fillRect(0, 0, GW, GH);
+
+  // Subtle snowfall
+  ctx.fillStyle = 'rgba(200,230,255,0.3)';
+  for (var i = 0; i < 20; i++) {
+    var sx = ((frame * 0.3 + i * 47) % GW);
+    var sy = ((frame * 0.5 + i * 31) % GH);
+    ctx.fillRect(sx, sy, 1, 1);
+  }
+}
+
+function drawGrid() {
+  for (var r = 0; r < ROWS; r++) {
+    for (var c = 0; c < COLS; c++) {
+      if (grid[r][c] !== T_EMPTY) {
+        drawTile(c, r);
+      }
+    }
+  }
+}
+
+function drawHUD() {
+  ctx.fillStyle = 'rgba(10,5,20,0.7)';
+  ctx.fillRect(0, 0, GW, 24);
+  ctx.font = 'bold 11px monospace';
+
+  ctx.fillStyle = '#88ccff';
+  ctx.textAlign = 'left';
+  ctx.fillText('LEVEL ' + (level + 1) + '/30', 6, 16);
+
+  ctx.fillStyle = '#ffdd44';
+  ctx.textAlign = 'center';
+  ctx.fillText('MOVES: ' + moves, GW / 2, 16);
+
+  ctx.fillStyle = '#aaa';
+  ctx.textAlign = 'right';
+  ctx.fillText('R=RESET  Z=UNDO', GW - 6, 16);
+
+  // Fire counter
+  var fires = countFires();
+  if (fires > 0) {
+    ctx.fillStyle = '#ff6600';
+    ctx.textAlign = 'center';
+    ctx.fillText('FIRES: ' + fires, GW / 2, GH - 8);
+  }
+}
+
+// === TITLE SCREEN ===
+function drawTitle() {
+  drawBackground();
+
+  // Decorative ice/fire
+  for (var i = 0; i < 5; i++) {
+    var fx = 60 + i * 70;
+    var fy = 200 + Math.sin(frame * 0.05 + i) * 10;
+    ctx.fillStyle = (i % 2 === 0) ? '#ff6600' : '#88ddff';
+    ctx.beginPath();
+    ctx.arc(fx, fy, 8 + Math.sin(frame * 0.1 + i) * 2, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  ctx.textAlign = 'center';
+
+  // Title
+  ctx.fillStyle = '#000';
+  ctx.font = 'bold 28px monospace';
+  ctx.fillText('FIRE N ICE', GW / 2 + 2, 82);
+
+  // Fire-colored title
+  var tgrd = ctx.createLinearGradient(GW / 2 - 80, 60, GW / 2 + 80, 90);
+  tgrd.addColorStop(0, '#ff6600');
+  tgrd.addColorStop(0.4, '#ffcc00');
+  tgrd.addColorStop(0.6, '#88ddff');
+  tgrd.addColorStop(1, '#44aaff');
+  ctx.fillStyle = tgrd;
+  ctx.font = 'bold 28px monospace';
+  ctx.fillText('FIRE N ICE', GW / 2, 80);
+
+  ctx.fillStyle = '#aabbcc';
+  ctx.font = '12px monospace';
+  ctx.fillText('A Tasern Arcade Puzzle', GW / 2, 105);
+
+  ctx.fillStyle = '#88aacc';
+  ctx.font = '11px monospace';
+  ctx.fillText('Create and push ice blocks', GW / 2, 140);
+  ctx.fillText('to extinguish all fires!', GW / 2, 155);
+
+  ctx.fillStyle = '#667788';
+  ctx.font = '10px monospace';
+  ctx.fillText('ARROWS = Move    UP/A = Jump', GW / 2, 240);
+  ctx.fillText('X/B = Create/Destroy Ice', GW / 2, 255);
+  ctx.fillText('Z = Undo    R = Reset Level', GW / 2, 270);
+
+  var pulse = Math.sin(frame * 0.05) * 0.3 + 0.7;
+  ctx.globalAlpha = pulse;
+  ctx.fillStyle = '#ffdd44';
+  ctx.font = 'bold 13px monospace';
+  ctx.fillText('PRESS ANY KEY TO START', GW / 2, GH - 30);
+  ctx.globalAlpha = 1;
+}
+
+// === LEVEL SELECT ===
+function drawLevelSelect() {
+  drawBackground();
+  ctx.textAlign = 'center';
+
+  ctx.fillStyle = '#88ddff';
+  ctx.font = 'bold 18px monospace';
+  ctx.fillText('SELECT LEVEL', GW / 2, 30);
+
+  // Grid of level buttons: 6 columns x 5 rows
+  var cols = 6, startX = 42, startY = 50, cellW = 54, cellH = 44;
+  for (var i = 0; i < 30; i++) {
+    var col = i % cols;
+    var row = Math.floor(i / cols);
+    var bx = startX + col * cellW;
+    var by = startY + row * cellH;
+    var beaten = progress.indexOf(i) !== -1;
+    var unlocked = (i === 0) || (progress.indexOf(i - 1) !== -1);
+    var selected = (i === selectCursor);
+
+    // Background
+    if (selected) {
+      ctx.fillStyle = '#446688';
+      ctx.fillRect(bx - 2, by - 2, 44, 34);
+    }
+    ctx.fillStyle = beaten ? '#225544' : (unlocked ? '#2a3a4a' : '#1a1a2a');
+    ctx.fillRect(bx, by, 40, 30);
+
+    // Border
+    ctx.strokeStyle = beaten ? '#44cc88' : (unlocked ? '#4488aa' : '#333');
+    ctx.lineWidth = selected ? 2 : 1;
+    ctx.strokeRect(bx, by, 40, 30);
+
+    // Number
+    ctx.fillStyle = beaten ? '#88ffcc' : (unlocked ? '#aabbcc' : '#444');
+    ctx.font = 'bold 12px monospace';
+    ctx.fillText(String(i + 1), bx + 20, by + 19);
+  }
+
+  // Instructions
+  ctx.fillStyle = '#667788';
+  ctx.font = '10px monospace';
+  ctx.fillText('ARROWS to select, ENTER/A to play', GW / 2, GH - 20);
+
+  // Progress
+  ctx.fillStyle = '#88aacc';
+  ctx.font = '11px monospace';
+  ctx.fillText('Completed: ' + progress.length + '/30', GW / 2, GH - 40);
+}
+
+// === LEVEL COMPLETE OVERLAY ===
+function drawLevelComplete() {
+  ctx.fillStyle = 'rgba(0,20,40,0.7)';
+  ctx.fillRect(0, 0, GW, GH);
+  ctx.textAlign = 'center';
+
+  ctx.fillStyle = '#88eeff';
+  ctx.font = 'bold 22px monospace';
+  ctx.fillText('LEVEL CLEAR!', GW / 2, GH / 2 - 30);
+
+  ctx.fillStyle = '#ffdd44';
+  ctx.font = '14px monospace';
+  ctx.fillText('Moves: ' + moves, GW / 2, GH / 2 + 10);
+
+  var pulse = Math.sin(frame * 0.06) * 0.3 + 0.7;
+  ctx.globalAlpha = pulse;
+  ctx.fillStyle = '#aaddff';
+  ctx.font = '12px monospace';
+  if (level < 29) {
+    ctx.fillText('Press any key for next level', GW / 2, GH / 2 + 50);
+  } else {
+    ctx.fillText('Congratulations! All levels complete!', GW / 2, GH / 2 + 50);
+  }
+  ctx.globalAlpha = 1;
+}
+
+// === UPDATE ===
+function update(dt) {
+  frame++;
+  TAS.particles.update(dt);
+  TAS.fx.updateEffects(dt);
+
+  if (inputCooldown > 0) inputCooldown--;
+
+  if (state === 'title') {
+    if (anyKey()) {
+      TAS.audio.ensureAudio();
+      state = 'select';
+      selectCursor = 0;
+      inputCooldown = 15;
+    }
+    return;
+  }
+
+  if (state === 'select') {
+    if (inputCooldown > 0) return;
+    var cols = 6;
+    if (keyDown('ArrowRight') || TAS.input.touch.right) { selectCursor = Math.min(29, selectCursor + 1); inputCooldown = 10; }
+    if (keyDown('ArrowLeft') || TAS.input.touch.left) { selectCursor = Math.max(0, selectCursor - 1); inputCooldown = 10; }
+    if (keyDown('ArrowDown') || TAS.input.touch.down) { selectCursor = Math.min(29, selectCursor + cols); inputCooldown = 10; }
+    if (keyDown('ArrowUp') || TAS.input.touch.up) { selectCursor = Math.max(0, selectCursor - cols); inputCooldown = 10; }
+    if (keyDown('Enter') || keyDown('x') || keyDown('X') || TAS.input.touch.a || TAS.input.touch.b) {
+      var unlocked = (selectCursor === 0) || (progress.indexOf(selectCursor - 1) !== -1);
+      if (unlocked) {
+        loadLevel(selectCursor);
+        inputCooldown = 15;
+      }
+    }
+    if (keyDown('Escape')) { state = 'title'; inputCooldown = 15; }
+    return;
+  }
+
+  if (state === 'playing') {
+    if (levelComplete) {
+      levelCompleteTimer--;
+      if (levelCompleteTimer <= 0 && anyKey()) {
+        if (level < 29) {
+          loadLevel(level + 1);
+        } else {
+          state = 'select';
+        }
+        inputCooldown = 15;
+      }
+      return;
+    }
+
+    if (inputCooldown > 0) return;
+
+    // Reset
+    if (keyDown('r') || keyDown('R')) {
+      loadLevel(level);
+      inputCooldown = 10;
+      return;
+    }
+    // Undo
+    if (keyDown('z') || keyDown('Z')) {
+      popUndo();
+      playerGravity();
+      inputCooldown = 8;
+      return;
+    }
+    // Escape to menu
+    if (keyDown('Escape')) {
+      state = 'select';
+      inputCooldown = 15;
+      return;
+    }
+
+    // Movement
+    if (keyDown('ArrowLeft') || TAS.input.touch.left) {
+      tryMove(-1);
+      inputCooldown = 8;
+    } else if (keyDown('ArrowRight') || TAS.input.touch.right) {
+      tryMove(1);
+      inputCooldown = 8;
+    }
+
+    // Jump
+    if (keyDown('ArrowUp') || TAS.input.touch.up || TAS.input.touch.a) {
+      if (!jumpPressed) {
+        tryJump();
+        jumpPressed = true;
+        inputCooldown = 8;
+      }
+    } else {
+      jumpPressed = false;
+    }
+
+    // Create/destroy ice
+    if (keyDown('x') || keyDown('X') || keyDown(' ') || TAS.input.touch.b) {
+      if (!icePressed) {
+        tryCreateIce();
+        icePressed = true;
+        inputCooldown = 8;
+      }
+    } else {
+      icePressed = false;
+    }
+  }
+}
+
+function anyKey() {
+  if (TAS.input.touch.a || TAS.input.touch.b || TAS.input.touch.left || TAS.input.touch.right || TAS.input.touch.up || TAS.input.touch.down) return true;
+  for (var k in TAS.input.keys) { if (TAS.input.keys[k]) return true; }
+  return false;
+}
+
+function keyDown(k) {
+  return TAS.input.keys[k];
+}
+
+// === DRAW ===
+function draw(dt) {
+  if (state === 'title') {
+    drawTitle();
+    TAS.input.drawTouchControls(GW, GH);
+    return;
+  }
+
+  if (state === 'select') {
+    drawLevelSelect();
+    TAS.input.drawTouchControls(GW, GH);
+    return;
+  }
+
+  if (state === 'playing') {
+    drawBackground();
+    ctx.save();
+    TAS.fx.applyShake();
+    drawGrid();
+    drawPlayer();
+    TAS.particles.draw();
+    ctx.restore();
+    TAS.fx.drawFlash(GW, GH);
+    drawHUD();
+    if (levelComplete) {
+      drawLevelComplete();
+    }
+    TAS.input.drawTouchControls(GW, GH);
+  }
+}
+
+// === START ===
+TAS.loop.start(update, draw);
+
+})();
+</script>
+</body>
+</html>

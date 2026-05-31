@@ -34,7 +34,7 @@ The trick: players think they're playing a pet game. Under the hood, every actio
 - **Backpack & inventory**: Item management with upgrade tiers
 - **Egg storage**: Extra egg slots with upgrade tiers
 - **Reaper track**: 100-death prestige system with exponential revival costs (1.1^N compound)
-- **Agent SDK**: 40 MCP tools, full REST API, AI strategies for autonomous play
+- **Agent SDK**: 39 MCP tools, full REST API, AI strategies for autonomous play
 
 ## Deployed Contracts (All on Base)
 

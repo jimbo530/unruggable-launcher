@@ -10,7 +10,17 @@ require("dotenv").config({ path: fs.existsSync(localEnv) ? localEnv : path.join(
 const { ethers } = require("ethers");
 
 const RPC = "https://mainnet.base.org";
-const FACTORY = "0x51eF41E0730c0e607950421e1EE113b089867d3e";
+const FACTORIES = [
+  "0x73dA1ac6f2f83291acbe2eBCA9Ab4BF970f9dE29", // V4.2
+  "0x51eF41E0730c0e607950421e1EE113b089867d3e", // V4.3
+  "0xb74fe5fA2D030706B4A0C901fDC42C5244695A6e", // V5
+  "0x2e0b2d7c9b0680F3050BB3Da460F9B4E16BB5F3d", // V5.1
+  "0xF0c1B3d6Bc0B4dEd2DDF81374feEA8a2c536bD51", // V5.2
+  "0x65F8227f37932e1aF1771398DFA76B4079fbDb21", // V5.3
+  "0xb1fE1deeA42F85F124E7cB166B2f52a1D7f1d054", // V5.4
+  "0x9FCE6fF019570dC09678C6Fcd513bDF5cf766fC9", // V5.5
+  "0x2bDF872a40A785E1194ffecB2097B7073c672343", // V5.7 (mftUSD floor)
+];
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_KEY = process.env.SUPABASE_KEY;
 const POLL_MS = 60_000; // 1 minute
@@ -20,7 +30,10 @@ const EVENT_ABI = [
 ];
 
 const provider = new ethers.JsonRpcProvider(RPC);
-const factory = new ethers.Contract(FACTORY, EVENT_ABI, provider);
+const factories = FACTORIES.map(addr => ({
+  addr,
+  contract: new ethers.Contract(addr, EVENT_ABI, provider)
+}));
 
 let lastBlock = 0;
 
@@ -41,7 +54,7 @@ async function loadLastBlock() {
   }
 }
 
-async function insertLaunch(event) {
+async function insertLaunch(event, factoryAddr) {
   const { token, reactor, charReactor, launcher, name, symbol, supply, seed } = event.args;
   const block = event.blockNumber;
   const txHash = event.transactionHash;
@@ -55,7 +68,7 @@ async function insertLaunch(event) {
     symbol,
     supply: supply.toString(),
     seed: seed.toString(),
-    factory_address: FACTORY,
+    factory_address: factoryAddr,
     chain_id: 8453,
     block_number: block,
     tx_hash: txHash
@@ -89,9 +102,11 @@ async function poll() {
     const currentBlock = await provider.getBlockNumber();
     if (currentBlock <= lastBlock) return;
 
-    const events = await factory.queryFilter("TokenLaunched", lastBlock + 1, currentBlock);
-    for (const event of events) {
-      await insertLaunch(event);
+    for (const { addr, contract } of factories) {
+      const events = await contract.queryFilter("TokenLaunched", lastBlock + 1, currentBlock);
+      for (const event of events) {
+        await insertLaunch(event, addr);
+      }
     }
 
     lastBlock = currentBlock;
@@ -106,7 +121,7 @@ async function main() {
     process.exit(1);
   }
 
-  console.log(`Launch tracker started — factory ${FACTORY}`);
+  console.log(`Launch tracker started — watching ${FACTORIES.length} factories`);
   await loadLastBlock();
 
   // Poll immediately, then every POLL_MS

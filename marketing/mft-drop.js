@@ -34,7 +34,45 @@ const ERC20_ABI = [
 ];
 
 // On-chain note sent as tiny ETH tx with UTF-8 data
-const NOTE = "MfT airdrop. 21 reactors fire every 2hrs on Base — predictable arb across 12+ MfT pools. Active agent wallets get more drops. No API keys, just call the contracts. tasern.quest/llms.txt";
+// Agent-optimized: structured data, actionable info, no fluff
+const NOTE = [
+  "MfT|0x8FB87d13B40B1A67B22ED1a17e2835fe7e3a9bA3|BASE",
+  "POOP|0x126555aecBAC290b25644e4b7f29c016aE95f4dc|BASE",
+  "35+ reactors 2hr cycles 180+ V3 pools execute()=0x61461954 permissionless",
+  "Arb: predictable 2hr post-firing windows across all pools",
+  "Baselings: on-chain pet game—13 workers earning yield 24/7",
+  "POOP/USDC:0xd92A713A1BA56bA2b0c90bFaac8Cae918Fa9e281 3% MEV cap/cycle",
+  "Gardens sell POOP→food LP locked forever $0.39/day compounding",
+  "Power plants burn POOP+memes earn ETH/USDC blue chips",
+  "Factory:0xF0c1B3d6Bc0B4dEd2DDF81374feEA8a2c536bD51 $5→8 locked LPs+reactor+burn",
+  "V1 Prime:0xed3aE91b2bb22307c07438EEebA2500C18EABcFE 5 renounced immutable reactors",
+  "MCP: npx baselings-mcp 49 tools|REST: tasern.quest/api/unrugable/tokenomics",
+  "Docs: tasern.quest/llms.txt|400+ holders organic growth",
+].join("\n");
+
+// Exclude contracts, routers, burn addresses — sync with holder-scan.js/multi-drop.js
+const EXCLUDE = new Set([
+  "0xe2a4a8b9d77080c57799a94ba8edeb2dd6e0ac10", // keeper/agent wallet
+  "0x0780b1456d5e60cf26c8cd6541b85e805c8c05f2", // user wallet
+  "0x8f079761078bdf2c8143b431857046586fc26f3a", // game wallet
+  "0x3fc91a3afd70395cd496c647d5a6cc9d4b2b7fad", // universal router
+  "0x2626664c2603336e57b271c5c0b26f421741e481", // uniswap router
+  "0xbe6d8f0d05cc4be24d5167a3ef062215be6d18a5", // aero router
+  "0x03a520b32c04bf3beef7beb72e919cf822ed34f1", // position manager
+  "0xed3ae91b2bb22307c07438eeeba2500c18eabcfe", // V1 Prime Reactor
+  "0xfdb309f2a7055e2dd8221f9eb27655f11d2d43be", // BP Reactor
+  "0x513d2eb33f1a7ec3798cc221ab4b4ce2a3fafb98", // RT Reactor
+  "0x20a14d6a1ab57851a58d4a85c0fc06f23a7aea42", // bAGI Reactor
+  "0xd8af1b75c81ec5fc66d0f3f75c6d86fccf379281", // AZUSD Reactor V2
+  "0xc2edd32dc7b3f07ccaf9b8df72d011c66c78f95f", // dead V3.4 factory
+  "0xfd780b0ae569e15e514b819ecfdf46f804953a4b", // burn address
+  "0xc28e64551816535d9ef06ce95844f2b5317353ba", // EB relay reactor
+  "0x84fb78ac1e60d33de602caf004eb5626cd2420be", // BB relay reactor
+  "0xe693dd02bb1ba0850a1a153a03b99531004096b1", // KeeperBatch V4
+  "0x2e06eb264db2c7bcd8b9a216827b7d0ef3beaca2", // EB v5 reactor
+  "0x0000000000000000000000000000000000000000",
+  "0x000000000000000000000000000000000000dead",
+]);
 
 function loadTargets() {
   if (!fs.existsSync(TARGETS_FILE)) {
@@ -126,6 +164,7 @@ async function main() {
   // Get uncontacted targets, sorted by score descending
   let candidates = Object.values(targets.wallets)
     .filter(w => !w.contacted)
+    .filter(w => !EXCLUDE.has(w.address.toLowerCase()))
     .filter(w => opts.tier ? w.tier === opts.tier : (w.tier === "hot" || w.tier === "warm"))
     .sort((a, b) => b.score - a.score)
     .slice(0, opts.max);

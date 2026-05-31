@@ -87,7 +87,8 @@ async function getLifetimeBurn(tokenAddr, decimals) {
   try {
     const bal = await contract.balanceOf(BURN);
     return { raw: bal, formatted: ethers.formatUnits(bal, decimals) };
-  } catch {
+  } catch (e) {
+    console.warn('[burn-board] balance read failed:', e.message || e);
     return { raw: 0n, formatted: '0' };
   }
 }
@@ -146,7 +147,7 @@ async function main() {
     // Get decimals for launched token
     const contract = new ethers.Contract(l.token, ERC20_ABI, provider);
     let decimals = 18;
-    try { decimals = Number(await contract.decimals()); } catch {}
+    try { decimals = Number(await contract.decimals()); } catch (e) { console.warn('[burn-board] decimals fallback 18:', l.symbol, e.message || e); }
     allTokens.push({ symbol: l.symbol, token: l.token, decimals, source: 'launched', launcher: l.launcher });
   }
 

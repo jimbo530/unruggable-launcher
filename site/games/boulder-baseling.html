@@ -1,0 +1,1175 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Boulder Baseling</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body { width: 100%; height: 100%; overflow: hidden; background: #111; touch-action: none; }
+canvas { display: block; margin: 0 auto; }
+#back-link { position: fixed; bottom: 8px; left: 50%; transform: translateX(-50%); color: #666; font-family: monospace; font-size: 12px; text-decoration: none; z-index: 10; }
+#back-link:hover { color: #aaa; }
+</style>
+</head>
+<body>
+<canvas id="gc"></canvas>
+<a id="back-link" href="/games">Back to Arcade</a>
+<script src="nft-loader.js"></script>
+<script>if(window.NftLoader)NftLoader.gate();</script>
+<script src="tasern-engine.js"></script>
+<script>
+(function(){
+"use strict";
+
+// === CONSTANTS ===
+var GW = 480, GH = 384;
+var TILE = 16;
+var COLS = 30, ROWS = 24;
+var VIEW_COLS = 20, VIEW_ROWS = 15;
+var ctx = TAS.ctx;
+
+TAS.initCanvas(GW, GH);
+TAS.input.initTouch({ buttons: [], labels: {} });
+
+// Tile types
+var T_EMPTY = 0, T_DIRT = 1, T_WALL = 2, T_BOULDER = 3, T_GEM = 4;
+var T_EXIT = 5, T_PLAYER = 6, T_BUTTERFLY = 7, T_FIREFLY = 8;
+var T_MAGIC_WALL = 9, T_EXPAND_WALL = 10;
+
+// Game state
+var state = 'title';
+var score = 0, highScore = TAS.score.load('boulderbaseling_hi');
+var lives = 3, level = 1;
+var frame = 0;
+var grid = [];
+var playerX = 1, playerY = 1;
+var gemsCollected = 0, gemsRequired = 0;
+var exitOpen = false, exitX = 0, exitY = 0;
+var timeLeft = 0, timerMax = 0;
+var enemies = [];
+var fallingObjects = []; // tracks which objects are currently falling
+var magicWallActive = false, magicWallTimer = 0;
+var expandTimer = 0;
+var camX = 0, camY = 0;
+var deathTimer = 0;
+var winTimer = 0;
+var moveTimer = 0;
+var MOVE_DELAY = 0.12;
+var lastDir = -1;
+var inputHeld = false;
+
+// Seeded random for level generation
+var seed = 1;
+function seededRandom() {
+  seed = (seed * 16807 + 0) % 2147483647;
+  return (seed - 1) / 2147483646;
+}
+
+// === LEVEL GENERATION ===
+function generateLevel(lvl) {
+  seed = lvl * 7919 + 31337;
+  grid = [];
+  enemies = [];
+  fallingObjects = [];
+  magicWallActive = false;
+  magicWallTimer = 0;
+  expandTimer = 0;
+  exitOpen = false;
+  gemsCollected = 0;
+
+  // Initialize grid with dirt
+  for (var y = 0; y < ROWS; y++) {
+    grid[y] = [];
+    for (var x = 0; x < COLS; x++) {
+      if (y === 0 || y === ROWS - 1 || x === 0 || x === COLS - 1) {
+        grid[y][x] = T_WALL;
+      } else {
+        grid[y][x] = T_DIRT;
+      }
+    }
+  }
+
+  // Density parameters scale with level
+  var boulderChance = 0.08 + lvl * 0.012;
+  var gemChance = 0.04 + lvl * 0.005;
+  var wallChance = 0.03 + lvl * 0.008;
+
+  // Place random tiles
+  for (var y = 2; y < ROWS - 2; y++) {
+    for (var x = 2; x < COLS - 2; x++) {
+      var r = seededRandom();
+      if (r < boulderChance) {
+        grid[y][x] = T_BOULDER;
+      } else if (r < boulderChance + gemChance) {
+        grid[y][x] = T_GEM;
+      } else if (r < boulderChance + gemChance + wallChance) {
+        grid[y][x] = T_WALL;
+      }
+    }
+  }
+
+  // Place player at top-left area
+  playerX = 1 + Math.floor(seededRandom() * 3);
+  playerY = 1 + Math.floor(seededRandom() * 3);
+  grid[playerY][playerX] = T_EMPTY;
+  // Clear area around player
+  for (var dy = -1; dy <= 1; dy++) {
+    for (var dx = -1; dx <= 1; dx++) {
+      var nx = playerX + dx, ny = playerY + dy;
+      if (nx > 0 && nx < COLS - 1 && ny > 0 && ny < ROWS - 1) {
+        if (grid[ny][nx] === T_BOULDER || grid[ny][nx] === T_GEM) {
+          grid[ny][nx] = T_DIRT;
+        }
+      }
+    }
+  }
+
+  // Place exit far from player
+  exitX = COLS - 2 - Math.floor(seededRandom() * 4);
+  exitY = ROWS - 2 - Math.floor(seededRandom() * 4);
+  grid[exitY][exitX] = T_WALL; // hidden until opened
+
+  // Count gems and set requirement
+  var totalGems = 0;
+  for (var y = 0; y < ROWS; y++) {
+    for (var x = 0; x < COLS; x++) {
+      if (grid[y][x] === T_GEM) totalGems++;
+    }
+  }
+  gemsRequired = Math.max(3, Math.floor(totalGems * (0.5 + lvl * 0.02)));
+  if (gemsRequired > totalGems) gemsRequired = totalGems;
+
+  // Place enemies based on level
+  var numButterflies = lvl >= 6 ? Math.min(Math.floor((lvl - 4) * 0.8), 6) : 0;
+  var numFireflies = lvl >= 11 ? Math.min(Math.floor((lvl - 9) * 0.6), 4) : 0;
+
+  for (var i = 0; i < numButterflies; i++) {
+    placeEnemy(T_BUTTERFLY);
+  }
+  for (var i = 0; i < numFireflies; i++) {
+    placeEnemy(T_FIREFLY);
+  }
+
+  // Magic walls (level 11+)
+  if (lvl >= 11) {
+    var numMagic = Math.min(Math.floor((lvl - 9) * 0.5), 4);
+    for (var i = 0; i < numMagic; i++) {
+      var mx = 3 + Math.floor(seededRandom() * (COLS - 6));
+      var my = 5 + Math.floor(seededRandom() * (ROWS - 10));
+      var mw = 3 + Math.floor(seededRandom() * 4);
+      for (var j = 0; j < mw && mx + j < COLS - 1; j++) {
+        if (grid[my][mx + j] === T_DIRT || grid[my][mx + j] === T_WALL) {
+          grid[my][mx + j] = T_MAGIC_WALL;
+        }
+      }
+    }
+  }
+
+  // Expanding walls (level 13+)
+  if (lvl >= 13) {
+    var numExpand = Math.min(Math.floor((lvl - 11) * 0.4), 3);
+    for (var i = 0; i < numExpand; i++) {
+      var ex = 5 + Math.floor(seededRandom() * (COLS - 10));
+      var ey = 5 + Math.floor(seededRandom() * (ROWS - 10));
+      if (grid[ey][ex] === T_DIRT) {
+        grid[ey][ex] = T_EXPAND_WALL;
+      }
+    }
+  }
+
+  // Timer based on level
+  timerMax = Math.max(60, 180 - lvl * 5);
+  timeLeft = timerMax;
+}
+
+function placeEnemy(type) {
+  for (var attempts = 0; attempts < 50; attempts++) {
+    var ex = 5 + Math.floor(seededRandom() * (COLS - 10));
+    var ey = 5 + Math.floor(seededRandom() * (ROWS - 10));
+    if (grid[ey][ex] === T_DIRT && Math.abs(ex - playerX) > 5 && Math.abs(ey - playerY) > 5) {
+      grid[ey][ex] = T_EMPTY;
+      // Clear small area for enemy
+      for (var dy = -1; dy <= 0; dy++) {
+        for (var dx = -1; dx <= 0; dx++) {
+          var nx = ex + dx, ny = ey + dy;
+          if (nx > 0 && nx < COLS - 1 && ny > 0 && ny < ROWS - 1) {
+            if (grid[ny][nx] === T_DIRT) grid[ny][nx] = T_EMPTY;
+          }
+        }
+      }
+      enemies.push({ x: ex, y: ey, type: type, dir: 0, moveTimer: 0 });
+      return;
+    }
+  }
+}
+
+// === PHYSICS ===
+var physicsTimer = 0;
+var PHYSICS_RATE = 0.10; // physics tick rate
+
+function isFalling(x, y) {
+  for (var i = 0; i < fallingObjects.length; i++) {
+    if (fallingObjects[i].x === x && fallingObjects[i].y === y) return true;
+  }
+  return false;
+}
+
+function setFalling(x, y, val) {
+  if (val) {
+    if (!isFalling(x, y)) fallingObjects.push({ x: x, y: y });
+  } else {
+    for (var i = fallingObjects.length - 1; i >= 0; i--) {
+      if (fallingObjects[i].x === x && fallingObjects[i].y === y) {
+        fallingObjects.splice(i, 1);
+      }
+    }
+  }
+}
+
+function isRounded(tile) {
+  return tile === T_BOULDER || tile === T_GEM || tile === T_WALL;
+}
+
+function physicsTick() {
+  var newFalling = [];
+
+  // Process from bottom to top
+  for (var y = ROWS - 2; y >= 1; y--) {
+    for (var x = 1; x < COLS - 1; x++) {
+      var tile = grid[y][x];
+      if (tile !== T_BOULDER && tile !== T_GEM) continue;
+
+      var below = grid[y + 1][x];
+      var wasFalling = isFalling(x, y);
+
+      // Fall straight down
+      if (below === T_EMPTY) {
+        grid[y + 1][x] = tile;
+        grid[y][x] = T_EMPTY;
+        setFalling(x, y, false);
+        newFalling.push({ x: x, y: y + 1 });
+        continue;
+      }
+
+      // Pass through magic wall
+      if (below === T_MAGIC_WALL && y + 2 < ROWS - 1 && grid[y + 2][x] === T_EMPTY) {
+        magicWallActive = true;
+        magicWallTimer = 5;
+        // Transform: boulder->gem, gem->boulder
+        var transformed = (tile === T_BOULDER) ? T_GEM : T_BOULDER;
+        grid[y + 2][x] = transformed;
+        grid[y][x] = T_EMPTY;
+        setFalling(x, y, false);
+        newFalling.push({ x: x, y: y + 2 });
+        TAS.audio.playTone(800, 0.1, 'sine', 0.06);
+        continue;
+      }
+
+      // Kill on impact
+      if (wasFalling && below !== T_EMPTY) {
+        // Check if landing on player
+        if (y + 1 === playerY && x === playerX) {
+          killPlayer();
+        }
+        // Check if landing on enemy
+        for (var ei = enemies.length - 1; ei >= 0; ei--) {
+          if (enemies[ei].x === x && enemies[ei].y === y + 1) {
+            explodeEnemy(ei);
+          }
+        }
+        setFalling(x, y, false);
+      }
+
+      // Roll off rounded objects
+      if (isRounded(below) || below === T_BOULDER || below === T_GEM) {
+        // Try roll left
+        if (x > 1 && grid[y][x - 1] === T_EMPTY && grid[y + 1][x - 1] === T_EMPTY) {
+          grid[y][x - 1] = tile;
+          grid[y][x] = T_EMPTY;
+          setFalling(x, y, false);
+          newFalling.push({ x: x - 1, y: y });
+          continue;
+        }
+        // Try roll right
+        if (x < COLS - 2 && grid[y][x + 1] === T_EMPTY && grid[y + 1][x + 1] === T_EMPTY) {
+          grid[y][x + 1] = tile;
+          grid[y][x] = T_EMPTY;
+          setFalling(x, y, false);
+          newFalling.push({ x: x + 1, y: y });
+          continue;
+        }
+      }
+    }
+  }
+
+  // Update falling state
+  fallingObjects = newFalling;
+
+  // Check if falling objects hit player
+  for (var i = 0; i < fallingObjects.length; i++) {
+    var fo = fallingObjects[i];
+    if (fo.x === playerX && fo.y === playerY) {
+      killPlayer();
+    }
+  }
+}
+
+function explodeEnemy(idx) {
+  var e = enemies[idx];
+  var isButterfly = (e.type === T_BUTTERFLY);
+  enemies.splice(idx, 1);
+
+  TAS.fx.shake(4, 0.85);
+  TAS.audio.playNoise(0.3, 0.12, 400);
+
+  // Explode into 3x3 area
+  for (var dy = -1; dy <= 1; dy++) {
+    for (var dx = -1; dx <= 1; dx++) {
+      var nx = e.x + dx, ny = e.y + dy;
+      if (nx <= 0 || nx >= COLS - 1 || ny <= 0 || ny >= ROWS - 1) continue;
+      if (grid[ny][nx] === T_WALL) continue;
+
+      // Kill player if in blast zone
+      if (nx === playerX && ny === playerY) {
+        killPlayer();
+      }
+      // Kill other enemies in blast zone
+      for (var j = enemies.length - 1; j >= 0; j--) {
+        if (enemies[j].x === nx && enemies[j].y === ny) {
+          enemies.splice(j, 1);
+        }
+      }
+
+      if (isButterfly) {
+        grid[ny][nx] = T_GEM;
+        TAS.particles.spawn(nx * TILE + 8, ny * TILE + 8, '#44ffff', 3, 2);
+      } else {
+        grid[ny][nx] = T_EMPTY;
+        TAS.particles.spawn(nx * TILE + 8, ny * TILE + 8, '#ff4422', 3, 2);
+      }
+    }
+  }
+}
+
+// === ENEMY AI ===
+var enemyPhysicsTimer = 0;
+var ENEMY_RATE = 0.18;
+
+function moveEnemies() {
+  // Directions: 0=up, 1=right, 2=down, 3=left
+  var DX = [0, 1, 0, -1];
+  var DY = [-1, 0, 1, 0];
+
+  for (var i = 0; i < enemies.length; i++) {
+    var e = enemies[i];
+    var turnDir = (e.type === T_BUTTERFLY) ? 1 : -1; // butterfly turns right, firefly turns left
+
+    // Try to turn preferred direction first
+    var preferredDir = (e.dir + turnDir + 4) % 4;
+    var nx = e.x + DX[preferredDir];
+    var ny = e.y + DY[preferredDir];
+
+    if (canEnemyMove(nx, ny)) {
+      e.dir = preferredDir;
+      e.x = nx;
+      e.y = ny;
+    } else {
+      // Try straight
+      nx = e.x + DX[e.dir];
+      ny = e.y + DY[e.dir];
+      if (canEnemyMove(nx, ny)) {
+        e.x = nx;
+        e.y = ny;
+      } else {
+        // Try opposite of preferred
+        var oppDir = (e.dir - turnDir + 4) % 4;
+        nx = e.x + DX[oppDir];
+        ny = e.y + DY[oppDir];
+        if (canEnemyMove(nx, ny)) {
+          e.dir = oppDir;
+          e.x = nx;
+          e.y = ny;
+        } else {
+          // Reverse
+          e.dir = (e.dir + 2) % 4;
+        }
+      }
+    }
+
+    // Check collision with player
+    if (e.x === playerX && e.y === playerY) {
+      killPlayer();
+    }
+  }
+}
+
+function canEnemyMove(x, y) {
+  if (x <= 0 || x >= COLS - 1 || y <= 0 || y >= ROWS - 1) return false;
+  return grid[y][x] === T_EMPTY;
+}
+
+// === EXPANDING WALLS ===
+function expandWalls() {
+  var expanded = false;
+  for (var y = 1; y < ROWS - 1; y++) {
+    for (var x = 1; x < COLS - 1; x++) {
+      if (grid[y][x] !== T_EXPAND_WALL) continue;
+      // Try grow left
+      if (x > 1 && grid[y][x - 1] === T_EMPTY) {
+        grid[y][x - 1] = T_EXPAND_WALL;
+        expanded = true;
+      }
+      // Try grow right
+      if (x < COLS - 2 && grid[y][x + 1] === T_EMPTY) {
+        grid[y][x + 1] = T_EXPAND_WALL;
+        expanded = true;
+      }
+    }
+  }
+  if (expanded) {
+    TAS.audio.playTone(100, 0.05, 'sawtooth', 0.03);
+  }
+}
+
+// === PLAYER ===
+function killPlayer() {
+  if (deathTimer > 0) return; // already dying
+  deathTimer = 1.5;
+  TAS.fx.shake(8, 0.9);
+  TAS.fx.flash('#ff0000', 0.4);
+  TAS.audio.playNoise(0.4, 0.15, 200);
+  TAS.particles.spawn(playerX * TILE + 8, playerY * TILE + 8, '#ff4444', 15, 3, { gravity: 0.1 });
+}
+
+function movePlayer(dx, dy) {
+  var nx = playerX + dx;
+  var ny = playerY + dy;
+
+  if (nx < 0 || nx >= COLS || ny < 0 || ny >= ROWS) return false;
+
+  var target = grid[ny][nx];
+
+  // Can't walk into walls, expanding walls, or magic walls
+  if (target === T_WALL || target === T_EXPAND_WALL || target === T_MAGIC_WALL) return false;
+
+  // Push boulders horizontally
+  if (target === T_BOULDER && dy === 0) {
+    var bx = nx + dx;
+    if (bx > 0 && bx < COLS - 1 && grid[ny][bx] === T_EMPTY && !isFalling(nx, ny)) {
+      grid[ny][bx] = T_BOULDER;
+      grid[ny][nx] = T_EMPTY;
+      TAS.audio.playTone(80, 0.08, 'triangle', 0.05);
+    } else {
+      return false;
+    }
+  } else if (target === T_BOULDER) {
+    return false;
+  }
+
+  // Collect gems
+  if (target === T_GEM) {
+    gemsCollected++;
+    score += 10;
+    TAS.audio.playTone(880, 0.1, 'sine', 0.08);
+    TAS.audio.playTone(1100, 0.1, 'sine', 0.06);
+    TAS.particles.spawn(nx * TILE + 8, ny * TILE + 8, '#44ddff', 6, 2);
+
+    if (gemsCollected >= gemsRequired && !exitOpen) {
+      openExit();
+    }
+  }
+
+  // Dig through dirt
+  if (target === T_DIRT) {
+    TAS.audio.playNoise(0.06, 0.04, 800);
+    TAS.particles.spawn(nx * TILE + 8, ny * TILE + 8, '#8B6914', 4, 1, { size: 1, sizeVar: 1 });
+  }
+
+  // Reach exit
+  if (target === T_EXIT && exitOpen) {
+    winLevel();
+    return true;
+  }
+
+  // Check for enemy collision
+  for (var i = 0; i < enemies.length; i++) {
+    if (enemies[i].x === nx && enemies[i].y === ny) {
+      killPlayer();
+      return false;
+    }
+  }
+
+  grid[ny][nx] = T_EMPTY;
+  playerX = nx;
+  playerY = ny;
+  return true;
+}
+
+function openExit() {
+  exitOpen = true;
+  grid[exitY][exitX] = T_EXIT;
+  TAS.audio.playMelody([[523, 0.12], [659, 0.12], [784, 0.12], [1047, 0.2]], 100);
+  TAS.fx.flash('#44ff88', 0.2);
+  TAS.particles.spawn(exitX * TILE + 8, exitY * TILE + 8, '#44ff88', 12, 3);
+}
+
+function winLevel() {
+  winTimer = 2.0;
+  var timeBonus = Math.floor(timeLeft) * 2;
+  score += timeBonus;
+  TAS.audio.playMelody([[523, 0.1], [659, 0.1], [784, 0.1], [1047, 0.1], [1318, 0.2]], 80);
+  TAS.fx.flash('#ffffff', 0.3);
+}
+
+// === GAME FLOW ===
+function startGame() {
+  state = 'playing';
+  score = 0;
+  lives = 3;
+  level = 1;
+  TAS.particles.clear();
+  generateLevel(level);
+}
+
+function nextLevel() {
+  level++;
+  if (level > 20) {
+    // Game complete
+    state = 'victory';
+    if (score > highScore) {
+      highScore = score;
+      TAS.score.save('boulderbaseling_hi', highScore);
+    }
+    return;
+  }
+  generateLevel(level);
+}
+
+function die() {
+  lives--;
+  if (lives <= 0) {
+    state = 'gameOver';
+    if (score > highScore) {
+      highScore = score;
+      TAS.score.save('boulderbaseling_hi', highScore);
+    }
+  } else {
+    generateLevel(level);
+  }
+}
+
+// === CAMERA ===
+function updateCamera() {
+  var targetX = playerX * TILE - (VIEW_COLS * TILE) / 2 + TILE / 2;
+  var targetY = playerY * TILE - (VIEW_ROWS * TILE) / 2 + TILE / 2;
+  targetX = TAS.math.clamp(targetX, 0, COLS * TILE - VIEW_COLS * TILE);
+  targetY = TAS.math.clamp(targetY, 0, ROWS * TILE - VIEW_ROWS * TILE);
+  camX = TAS.math.lerp(camX, targetX, 0.12);
+  camY = TAS.math.lerp(camY, targetY, 0.12);
+}
+
+// === UPDATE ===
+function update(dt) {
+  frame++;
+  TAS.particles.update(dt);
+  TAS.fx.updateEffects(dt);
+
+  if (state === 'title') {
+    if (Object.values(TAS.input.keys).some(Boolean) || TAS.input.touch.left || TAS.input.touch.right || TAS.input.touch.up || TAS.input.touch.down) {
+      startGame();
+    }
+    return;
+  }
+
+  if (state === 'gameOver' || state === 'victory') {
+    if (Object.values(TAS.input.keys).some(Boolean) || TAS.input.touch.left || TAS.input.touch.right || TAS.input.touch.up || TAS.input.touch.down) {
+      state = 'title';
+    }
+    return;
+  }
+
+  if (state !== 'playing') return;
+
+  // Win animation
+  if (winTimer > 0) {
+    winTimer -= dt;
+    if (winTimer <= 0) {
+      nextLevel();
+    }
+    return;
+  }
+
+  // Death animation
+  if (deathTimer > 0) {
+    deathTimer -= dt;
+    if (deathTimer <= 0) {
+      die();
+    }
+    return;
+  }
+
+  // Timer
+  timeLeft -= dt;
+  if (timeLeft <= 0) {
+    timeLeft = 0;
+    killPlayer();
+    return;
+  }
+  // Warning beep
+  if (timeLeft <= 10 && Math.floor(timeLeft * 2) % 2 === 0 && Math.floor((timeLeft + dt) * 2) % 2 !== 0) {
+    TAS.audio.playTone(440, 0.05, 'square', 0.04);
+  }
+
+  // Player movement
+  moveTimer -= dt;
+  var dx = 0, dy = 0;
+  var keys = TAS.input.keys;
+  var touch = TAS.input.touch;
+
+  if (keys['ArrowLeft'] || keys['KeyA'] || touch.left) dx = -1;
+  else if (keys['ArrowRight'] || keys['KeyD'] || touch.right) dx = 1;
+  else if (keys['ArrowUp'] || keys['KeyW'] || touch.up) dy = -1;
+  else if (keys['ArrowDown'] || keys['KeyS'] || touch.down) dy = 1;
+
+  if (dx !== 0 || dy !== 0) {
+    if (moveTimer <= 0) {
+      movePlayer(dx, dy);
+      moveTimer = MOVE_DELAY;
+    }
+  } else {
+    moveTimer = 0; // allow immediate response on new press
+  }
+
+  // Physics
+  physicsTimer += dt;
+  while (physicsTimer >= PHYSICS_RATE) {
+    physicsTimer -= PHYSICS_RATE;
+    physicsTick();
+  }
+
+  // Enemies
+  enemyPhysicsTimer += dt;
+  while (enemyPhysicsTimer >= ENEMY_RATE) {
+    enemyPhysicsTimer -= ENEMY_RATE;
+    moveEnemies();
+  }
+
+  // Expanding walls
+  expandTimer += dt;
+  if (expandTimer >= 1.5) {
+    expandTimer -= 1.5;
+    expandWalls();
+  }
+
+  // Magic wall timeout
+  if (magicWallActive) {
+    magicWallTimer -= dt;
+    if (magicWallTimer <= 0) magicWallActive = false;
+  }
+
+  // Camera
+  updateCamera();
+}
+
+// === DRAWING ===
+function drawTile(x, y, tile, screenX, screenY) {
+  var s = TILE;
+
+  switch (tile) {
+    case T_EMPTY:
+      ctx.fillStyle = '#0a0806';
+      ctx.fillRect(screenX, screenY, s, s);
+      break;
+
+    case T_DIRT:
+      // Textured dirt
+      var dirtSeed = (x * 31 + y * 17) % 4;
+      var colors = ['#7A5C10', '#6B4F0C', '#8B6914', '#5C4208'];
+      ctx.fillStyle = colors[dirtSeed];
+      ctx.fillRect(screenX, screenY, s, s);
+      // Specks
+      ctx.fillStyle = '#A07828';
+      var sx = ((x * 7 + y * 13) % 11);
+      var sy = ((x * 3 + y * 19) % 9);
+      ctx.fillRect(screenX + sx % s, screenY + sy % s, 2, 2);
+      ctx.fillRect(screenX + (sx + 7) % s, screenY + (sy + 5) % s, 1, 1);
+      break;
+
+    case T_WALL:
+      ctx.fillStyle = '#556';
+      ctx.fillRect(screenX, screenY, s, s);
+      ctx.fillStyle = '#778';
+      ctx.fillRect(screenX, screenY, s - 1, s - 1);
+      ctx.fillStyle = '#99a';
+      ctx.fillRect(screenX + 1, screenY + 1, 3, 3);
+      break;
+
+    case T_BOULDER:
+      ctx.fillStyle = '#0a0806';
+      ctx.fillRect(screenX, screenY, s, s);
+      // Round boulder
+      ctx.fillStyle = '#777';
+      ctx.beginPath();
+      ctx.arc(screenX + s / 2, screenY + s / 2, s / 2 - 1, 0, Math.PI * 2);
+      ctx.fill();
+      // Shading
+      ctx.fillStyle = '#999';
+      ctx.beginPath();
+      ctx.arc(screenX + s / 2 - 2, screenY + s / 2 - 2, s / 4, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = '#555';
+      ctx.beginPath();
+      ctx.arc(screenX + s / 2 + 2, screenY + s / 2 + 3, s / 3, 0, Math.PI * 2);
+      ctx.fill();
+      break;
+
+    case T_GEM:
+      ctx.fillStyle = '#0a0806';
+      ctx.fillRect(screenX, screenY, s, s);
+      // Sparkling gem
+      var sparkle = Math.sin(frame * 0.1 + x * 3 + y * 7) * 0.3 + 0.7;
+      ctx.globalAlpha = sparkle;
+      ctx.fillStyle = '#22ddff';
+      ctx.beginPath();
+      // Diamond shape
+      ctx.moveTo(screenX + s / 2, screenY + 2);
+      ctx.lineTo(screenX + s - 2, screenY + s / 2);
+      ctx.lineTo(screenX + s / 2, screenY + s - 2);
+      ctx.lineTo(screenX + 2, screenY + s / 2);
+      ctx.closePath();
+      ctx.fill();
+      ctx.fillStyle = '#aaeeff';
+      ctx.fillRect(screenX + s / 2 - 2, screenY + s / 2 - 2, 4, 4);
+      ctx.globalAlpha = 1;
+      break;
+
+    case T_EXIT:
+      ctx.fillStyle = '#0a0806';
+      ctx.fillRect(screenX, screenY, s, s);
+      if (exitOpen) {
+        var pulse = Math.sin(frame * 0.08) * 0.3 + 0.7;
+        ctx.fillStyle = '#44ff88';
+        ctx.globalAlpha = pulse;
+        ctx.fillRect(screenX + 2, screenY + 2, s - 4, s - 4);
+        ctx.fillStyle = '#88ffbb';
+        ctx.fillRect(screenX + 4, screenY + 4, s - 8, s - 8);
+        ctx.globalAlpha = 1;
+        // Arrow indicator
+        ctx.fillStyle = '#ffffff';
+        ctx.beginPath();
+        ctx.moveTo(screenX + s / 2, screenY + 3);
+        ctx.lineTo(screenX + s - 3, screenY + s / 2);
+        ctx.lineTo(screenX + s / 2, screenY + s - 3);
+        ctx.lineTo(screenX + 3, screenY + s / 2);
+        ctx.closePath();
+        ctx.fill();
+      }
+      break;
+
+    case T_MAGIC_WALL:
+      ctx.fillStyle = '#0a0806';
+      ctx.fillRect(screenX, screenY, s, s);
+      var magicPulse = magicWallActive ? (Math.sin(frame * 0.2) * 0.4 + 0.6) : 0.4;
+      ctx.fillStyle = magicWallActive ? '#cc44ff' : '#663388';
+      ctx.globalAlpha = magicPulse;
+      ctx.fillRect(screenX, screenY, s, s);
+      ctx.fillStyle = '#dd88ff';
+      ctx.fillRect(screenX + 2, screenY + 2, 3, 3);
+      ctx.fillRect(screenX + s - 5, screenY + s - 5, 3, 3);
+      ctx.globalAlpha = 1;
+      break;
+
+    case T_EXPAND_WALL:
+      ctx.fillStyle = '#884422';
+      ctx.fillRect(screenX, screenY, s, s);
+      ctx.fillStyle = '#aa6633';
+      ctx.fillRect(screenX + 1, screenY + 1, s - 2, s - 2);
+      // Pulsing edge to show danger
+      var ep = Math.sin(frame * 0.06 + x) * 0.2 + 0.3;
+      ctx.globalAlpha = ep;
+      ctx.fillStyle = '#ff8844';
+      ctx.fillRect(screenX, screenY, s, 2);
+      ctx.fillRect(screenX, screenY + s - 2, s, 2);
+      ctx.fillRect(screenX, screenY, 2, s);
+      ctx.fillRect(screenX + s - 2, screenY, 2, s);
+      ctx.globalAlpha = 1;
+      break;
+  }
+}
+
+function drawPlayer(screenX, screenY) {
+  var s = TILE;
+  // Baseling body (round green creature)
+  ctx.fillStyle = '#44dd88';
+  ctx.beginPath();
+  ctx.arc(screenX + s / 2, screenY + s / 2 + 1, s / 2 - 2, 0, Math.PI * 2);
+  ctx.fill();
+  // Eyes
+  ctx.fillStyle = '#ffffff';
+  ctx.beginPath();
+  ctx.arc(screenX + s / 2 - 3, screenY + s / 2 - 1, 3, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.arc(screenX + s / 2 + 3, screenY + s / 2 - 1, 3, 0, Math.PI * 2);
+  ctx.fill();
+  // Pupils
+  ctx.fillStyle = '#111';
+  ctx.beginPath();
+  ctx.arc(screenX + s / 2 - 3, screenY + s / 2, 1.5, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.arc(screenX + s / 2 + 3, screenY + s / 2, 1.5, 0, Math.PI * 2);
+  ctx.fill();
+  // Mouth
+  ctx.strokeStyle = '#116633';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.arc(screenX + s / 2, screenY + s / 2 + 3, 3, 0, Math.PI);
+  ctx.stroke();
+}
+
+function drawEnemy(e, screenX, screenY) {
+  var s = TILE;
+  var bob = Math.sin(frame * 0.12 + e.x * 5) * 1.5;
+
+  if (e.type === T_BUTTERFLY) {
+    // Cyan butterfly
+    ctx.fillStyle = '#22cccc';
+    // Wings
+    var wingAngle = Math.sin(frame * 0.2) * 0.4;
+    ctx.beginPath();
+    ctx.ellipse(screenX + s / 2 - 4, screenY + s / 2 + bob, 4, 6, wingAngle, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.beginPath();
+    ctx.ellipse(screenX + s / 2 + 4, screenY + s / 2 + bob, 4, 6, -wingAngle, 0, Math.PI * 2);
+    ctx.fill();
+    // Body
+    ctx.fillStyle = '#115555';
+    ctx.fillRect(screenX + s / 2 - 1, screenY + s / 2 - 3 + bob, 3, 7);
+    // Eyes
+    ctx.fillStyle = '#ff4444';
+    ctx.fillRect(screenX + s / 2 - 2, screenY + s / 2 - 3 + bob, 2, 2);
+    ctx.fillRect(screenX + s / 2 + 1, screenY + s / 2 - 3 + bob, 2, 2);
+  } else {
+    // Red firefly
+    var glow = Math.sin(frame * 0.15 + e.y * 3) * 0.3 + 0.7;
+    ctx.globalAlpha = glow;
+    ctx.fillStyle = '#ff4422';
+    ctx.beginPath();
+    ctx.arc(screenX + s / 2, screenY + s / 2 + bob, s / 2 - 2, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = '#ffaa44';
+    ctx.beginPath();
+    ctx.arc(screenX + s / 2, screenY + s / 2 + bob, s / 3 - 1, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.globalAlpha = 1;
+    // Eyes
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(screenX + s / 2 - 3, screenY + s / 2 - 2 + bob, 2, 2);
+    ctx.fillRect(screenX + s / 2 + 2, screenY + s / 2 - 2 + bob, 2, 2);
+  }
+}
+
+function draw(dt) {
+  ctx.fillStyle = '#0a0806';
+  ctx.fillRect(0, 0, GW, GH);
+
+  if (state === 'title') {
+    drawTitleScreen();
+    return;
+  }
+
+  if (state === 'gameOver') {
+    TAS.ui.drawGameOver(score, highScore, GW, GH, { frame: frame, extra: 'Level: ' + level });
+    return;
+  }
+
+  if (state === 'victory') {
+    drawVictoryScreen();
+    return;
+  }
+
+  // === GAME RENDERING ===
+  ctx.save();
+  TAS.fx.applyShake();
+
+  // Viewport offset (centered, with HUD space at top)
+  var hudH = 28;
+  var viewW = VIEW_COLS * TILE;
+  var viewH = VIEW_ROWS * TILE;
+  var offsetX = Math.floor((GW - viewW) / 2);
+  var offsetY = hudH + Math.floor((GH - hudH - viewH) / 2);
+
+  // Draw visible tiles
+  var startCol = Math.floor(camX / TILE);
+  var startRow = Math.floor(camY / TILE);
+  var subX = camX % TILE;
+  var subY = camY % TILE;
+
+  for (var vy = -1; vy <= VIEW_ROWS; vy++) {
+    for (var vx = -1; vx <= VIEW_COLS; vx++) {
+      var gx = startCol + vx;
+      var gy = startRow + vy;
+      if (gx < 0 || gx >= COLS || gy < 0 || gy >= ROWS) continue;
+
+      var screenX = offsetX + vx * TILE - subX;
+      var screenY = offsetY + vy * TILE - subY;
+
+      // Clip to viewport
+      if (screenX + TILE < offsetX || screenX > offsetX + viewW) continue;
+      if (screenY + TILE < offsetY || screenY > offsetY + viewH) continue;
+
+      drawTile(gx, gy, grid[gy][gx], screenX, screenY);
+    }
+  }
+
+  // Draw enemies
+  for (var i = 0; i < enemies.length; i++) {
+    var e = enemies[i];
+    var esx = offsetX + (e.x - startCol) * TILE - subX;
+    var esy = offsetY + (e.y - startRow) * TILE - subY;
+    if (esx + TILE < offsetX || esx > offsetX + viewW) continue;
+    if (esy + TILE < offsetY || esy > offsetY + viewH) continue;
+    // Draw empty behind enemy
+    ctx.fillStyle = '#0a0806';
+    ctx.fillRect(esx, esy, TILE, TILE);
+    drawEnemy(e, esx, esy);
+  }
+
+  // Draw player
+  if (deathTimer <= 0) {
+    var psx = offsetX + (playerX - startCol) * TILE - subX;
+    var psy = offsetY + (playerY - startRow) * TILE - subY;
+    drawPlayer(psx, psy);
+  }
+
+  // Draw particles with offset
+  ctx.save();
+  ctx.translate(offsetX - camX, offsetY - camY);
+  TAS.particles.draw();
+  ctx.restore();
+
+  ctx.restore();
+  TAS.fx.drawFlash(GW, GH);
+
+  // HUD
+  drawHUD();
+
+  // Touch controls
+  TAS.input.drawTouchControls(GW, GH);
+
+  // Win overlay
+  if (winTimer > 0) {
+    ctx.fillStyle = 'rgba(68, 255, 136, 0.2)';
+    ctx.fillRect(0, 0, GW, GH);
+    ctx.textAlign = 'center';
+    ctx.fillStyle = '#ffffff';
+    ctx.font = 'bold 20px monospace';
+    ctx.fillText('LEVEL COMPLETE!', GW / 2, GH / 2);
+    ctx.fillStyle = '#ffdd44';
+    ctx.font = '14px monospace';
+    ctx.fillText('Time bonus: +' + (Math.floor(timeLeft) * 2), GW / 2, GH / 2 + 24);
+  }
+}
+
+function drawHUD() {
+  var barH = 26;
+  ctx.fillStyle = 'rgba(10,5,20,0.85)';
+  ctx.fillRect(0, 0, GW, barH);
+
+  ctx.font = 'bold 11px monospace';
+
+  // Score
+  ctx.fillStyle = '#ffdd44';
+  ctx.textAlign = 'left';
+  ctx.fillText('SCORE:' + score, 4, 17);
+
+  // Level
+  ctx.fillStyle = '#88ccff';
+  ctx.textAlign = 'center';
+  ctx.fillText('LV' + level, GW / 2 - 50, 17);
+
+  // Gems
+  ctx.fillStyle = gemsCollected >= gemsRequired ? '#44ff88' : '#22ddff';
+  ctx.fillText('GEMS:' + gemsCollected + '/' + gemsRequired, GW / 2 + 30, 17);
+
+  // Timer
+  var timeColor = timeLeft <= 10 ? '#ff4444' : timeLeft <= 30 ? '#ffaa44' : '#44dd88';
+  ctx.fillStyle = timeColor;
+  ctx.textAlign = 'right';
+  ctx.fillText('TIME:' + Math.ceil(timeLeft), GW - 50, 17);
+
+  // Lives
+  ctx.fillStyle = '#44dd88';
+  for (var i = 0; i < lives; i++) {
+    ctx.beginPath();
+    ctx.arc(GW - 10 - i * 14, 13, 5, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  // Exit indicator
+  if (exitOpen) {
+    var pulse = Math.sin(frame * 0.1) * 0.3 + 0.7;
+    ctx.globalAlpha = pulse;
+    ctx.fillStyle = '#44ff88';
+    ctx.font = 'bold 10px monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText('EXIT OPEN!', GW / 2, GH - 10);
+    ctx.globalAlpha = 1;
+  }
+}
+
+function drawTitleScreen() {
+  // Cave background
+  for (var y = 0; y < GH; y += TILE) {
+    for (var x = 0; x < GW; x += TILE) {
+      var r = ((x * 7 + y * 13) % 100);
+      if (r < 30) {
+        ctx.fillStyle = '#2a1f0a';
+        ctx.fillRect(x, y, TILE, TILE);
+      } else if (r < 60) {
+        ctx.fillStyle = '#1a1408';
+        ctx.fillRect(x, y, TILE, TILE);
+      }
+    }
+  }
+
+  // Decorative gems
+  for (var i = 0; i < 8; i++) {
+    var gx = 50 + i * 55;
+    var gy = 260 + Math.sin(frame * 0.03 + i) * 10;
+    var sparkle = Math.sin(frame * 0.1 + i * 2) * 0.3 + 0.7;
+    ctx.globalAlpha = sparkle;
+    ctx.fillStyle = '#22ddff';
+    ctx.beginPath();
+    ctx.moveTo(gx, gy - 6);
+    ctx.lineTo(gx + 6, gy);
+    ctx.lineTo(gx, gy + 6);
+    ctx.lineTo(gx - 6, gy);
+    ctx.closePath();
+    ctx.fill();
+    ctx.globalAlpha = 1;
+  }
+
+  // Title
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#000';
+  ctx.font = 'bold 28px monospace';
+  ctx.fillText('BOULDER BASELING', GW / 2 + 2, 82);
+  ctx.fillStyle = '#44dd88';
+  ctx.fillText('BOULDER BASELING', GW / 2, 80);
+
+  // Subtitle
+  ctx.fillStyle = '#888';
+  ctx.font = '12px monospace';
+  ctx.fillText('A Tasern Arcade Dig', GW / 2, 105);
+
+  // Instructions
+  ctx.fillStyle = '#aaa';
+  ctx.font = '11px monospace';
+  ctx.fillText('Dig through dirt, collect MfT crystals', GW / 2, 145);
+  ctx.fillText('Avoid falling boulders and enemies', GW / 2, 162);
+  ctx.fillText('Collect enough gems to open the exit', GW / 2, 179);
+  ctx.fillText('Push boulders sideways to crush enemies', GW / 2, 196);
+
+  // Controls
+  ctx.fillStyle = '#ffdd44';
+  ctx.font = '10px monospace';
+  ctx.fillText('ARROWS / WASD / D-PAD to move', GW / 2, 225);
+
+  // High score
+  if (highScore > 0) {
+    ctx.fillStyle = '#88ccff';
+    ctx.font = '12px monospace';
+    ctx.fillText('HIGH SCORE: ' + highScore, GW / 2, 305);
+  }
+
+  // Start prompt
+  var pulse = Math.sin(frame * 0.05) * 0.3 + 0.7;
+  ctx.globalAlpha = pulse;
+  ctx.fillStyle = '#ffdd44';
+  ctx.font = 'bold 14px monospace';
+  ctx.fillText('PRESS ANY KEY TO START', GW / 2, 345);
+  ctx.globalAlpha = 1;
+
+  // Draw little baseling
+  var bx = GW / 2, by = 125;
+  ctx.fillStyle = '#44dd88';
+  ctx.beginPath();
+  ctx.arc(bx, by - 25, 10, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = '#fff';
+  ctx.beginPath();
+  ctx.arc(bx - 3, by - 27, 3, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.arc(bx + 3, by - 27, 3, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = '#111';
+  ctx.beginPath();
+  ctx.arc(bx - 3, by - 26, 1.5, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.arc(bx + 3, by - 26, 1.5, 0, Math.PI * 2);
+  ctx.fill();
+}
+
+function drawVictoryScreen() {
+  ctx.fillStyle = '#0a0806';
+  ctx.fillRect(0, 0, GW, GH);
+
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#44ff88';
+  ctx.font = 'bold 24px monospace';
+  ctx.fillText('CONGRATULATIONS!', GW / 2, 100);
+
+  ctx.fillStyle = '#ffffff';
+  ctx.font = 'bold 16px monospace';
+  ctx.fillText('All 20 levels complete!', GW / 2, 140);
+
+  ctx.fillStyle = '#ffdd44';
+  ctx.font = 'bold 18px monospace';
+  ctx.fillText('FINAL SCORE: ' + score, GW / 2, 190);
+
+  if (score >= highScore && score > 0) {
+    var pulse = Math.sin(frame * 0.06) * 0.3 + 0.7;
+    ctx.globalAlpha = pulse;
+    ctx.fillStyle = '#ffdd44';
+    ctx.font = 'bold 14px monospace';
+    ctx.fillText('NEW HIGH SCORE!', GW / 2, 220);
+    ctx.globalAlpha = 1;
+  }
+
+  // Gem shower decoration
+  for (var i = 0; i < 12; i++) {
+    var gx = 40 + i * 36;
+    var gy = 280 + Math.sin(frame * 0.04 + i * 1.5) * 15;
+    var sparkle = Math.sin(frame * 0.1 + i) * 0.3 + 0.7;
+    ctx.globalAlpha = sparkle;
+    ctx.fillStyle = '#22ddff';
+    ctx.beginPath();
+    ctx.moveTo(gx, gy - 5);
+    ctx.lineTo(gx + 5, gy);
+    ctx.lineTo(gx, gy + 5);
+    ctx.lineTo(gx - 5, gy);
+    ctx.closePath();
+    ctx.fill();
+    ctx.globalAlpha = 1;
+  }
+
+  var pulse2 = Math.sin(frame * 0.05) * 0.3 + 0.7;
+  ctx.globalAlpha = pulse2;
+  ctx.fillStyle = '#88ccff';
+  ctx.font = 'bold 14px monospace';
+  ctx.fillText('PRESS ANY KEY', GW / 2, 340);
+  ctx.globalAlpha = 1;
+}
+
+// === START ===
+TAS.loop.start(update, draw);
+
+})();
+</script>
+</body>
+</html>

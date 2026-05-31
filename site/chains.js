@@ -5,7 +5,7 @@ export const CHAINS = {
     rpc:          "https://mainnet.base.org",
     mft:          "0x8FB87d13B40B1A67B22ED1a17e2835fe7e3a9bA3",
     char:         "0x20b048fA035D5763685D695e66aDF62c5D9F5055",
-    mftStable:    "0x85C78B8104D874d17e698b8c5678e3B8072347B1",
+    mftStable:    "0xe3dd3881477c20C17Df080cEec0C1bD0C065A072",
     usdc:         "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
     v3Factory:    "0x33128a8fC17869897dcE68Ed026d694621f6FDfD",
     pm:           "0x03a520b32C04BF3bEEf7BEb72E919cf822Ed34f1",

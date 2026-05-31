@@ -1,0 +1,1577 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Little Nemo</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body { width: 100%; height: 100%; overflow: hidden; background: #111; touch-action: none; }
+canvas { display: block; margin: 0 auto; }
+#back-link { position: fixed; bottom: 8px; left: 50%; transform: translateX(-50%); color: #666; font-family: monospace; font-size: 12px; text-decoration: none; z-index: 10; }
+#back-link:hover { color: #aaa; }
+</style>
+</head>
+<body>
+<canvas id="gc"></canvas>
+<a id="back-link" href="/games">Back to Arcade</a>
+<script src="nft-loader.js"></script>
+<script>if(window.NftLoader)NftLoader.gate();</script>
+<script src="tasern-engine.js"></script>
+<script>
+(function(){
+"use strict";
+
+// === CONSTANTS ===
+var GW = 384, GH = 256;
+var TS = 16; // tile size
+var COLS = 48, ROWS = 16; // level size in tiles (scrolling)
+var GRAVITY = 600;
+var MAX_FALL = 350;
+var KEYS_PER_LEVEL = 6;
+var ctx = TAS.ctx;
+
+TAS.initCanvas(GW, GH);
+TAS.input.initTouch({ buttons: ['a', 'b'], labels: { a: 'JUMP', b: 'ACTION' } });
+
+// === GAME STATE ===
+var state = 'title';
+var frame = 0;
+var level = 0;
+var score = 0;
+var hp = 3;
+var maxHp = 3;
+var keysCollected = 0;
+var highScore = TAS.score.load('littlenemo_hi');
+var invincTimer = 0;
+var levelCompleteTimer = 0;
+var deathTimer = 0;
+var levelTransTimer = 0;
+var candyThrown = [];
+var shakeTimer = 0;
+
+// Camera
+var camX = 0, camY = 0;
+
+// Player
+var P = { x: 32, y: 200, vx: 0, vy: 0, w: 10, h: 14, onGround: false, facing: 1, animT: 0, riding: null, jumpHeld: false };
+
+// Animals in current level
+var animals = [];
+// Enemies in current level
+var enemies = [];
+// Keys in current level
+var keys = [];
+// Floating items (hearts)
+var items = [];
+// Level tile data
+var tiles = [];
+// Particles for decoration
+var floaters = [];
+// Door position
+var doorX = 0, doorY = 0;
+var doorOpen = false;
+
+// Animal types
+var ANIMAL = {
+  FROG: 0, MOLE: 1, BEE: 2, LIZARD: 3, FISH: 4, GORILLA: 5
+};
+var ANIMAL_NAMES = ['Frog', 'Mole', 'Bee', 'Lizard', 'Fish', 'Gorilla'];
+var ANIMAL_COLORS = ['#44cc44', '#8b5e3c', '#ffdd00', '#44bbaa', '#4488ff', '#884422'];
+
+// Level themes
+var LEVEL_NAMES = ['Mushroom Forest', 'Flower Garden', 'Underground', 'Night Sea', 'Cloud Tops', 'Toy Castle', 'Nightmare Realm'];
+var LEVEL_BG = ['#0a1a2a', '#1a0a2a', '#0a0a0f', '#050a1a', '#0a0a2a', '#1a0a1a', '#0f0505'];
+var LEVEL_FOCUS = [ANIMAL.FROG, ANIMAL.BEE, ANIMAL.MOLE, ANIMAL.FISH, ANIMAL.LIZARD, ANIMAL.GORILLA, -1];
+
+// Tile types
+var TILE = { AIR: 0, SOLID: 1, DIRT: 2, WATER: 3, PLATFORM: 4, LADDER: 5, SPIKE: 6 };
+
+// === LEVEL GENERATION ===
+function generateLevel(lvl) {
+  tiles = [];
+  animals = [];
+  enemies = [];
+  keys = [];
+  items = [];
+  candyThrown = [];
+  floaters = [];
+  keysCollected = 0;
+  doorOpen = false;
+
+  var w = COLS, h = ROWS;
+  // Init with air
+  for (var y = 0; y < h; y++) {
+    tiles[y] = [];
+    for (var x = 0; x < w; x++) {
+      tiles[y][x] = TILE.AIR;
+    }
+  }
+
+  // Ground floor
+  for (var x = 0; x < w; x++) {
+    tiles[h - 1][x] = TILE.SOLID;
+    tiles[h - 2][x] = TILE.SOLID;
+  }
+
+  // Generate terrain based on level theme
+  var seed = lvl * 137 + 42;
+  function rng() { seed = (seed * 1664525 + 1013904223) & 0x7fffffff; return (seed & 0xffff) / 0xffff; }
+
+  if (lvl === 0) { // Mushroom Forest - vertical, ponds
+    // Platforms and tall structures
+    for (var i = 0; i < 12; i++) {
+      var px = Math.floor(rng() * (w - 8)) + 4;
+      var py = Math.floor(rng() * 8) + 4;
+      var pw = Math.floor(rng() * 5) + 3;
+      for (var j = 0; j < pw; j++) {
+        if (px + j < w) tiles[py][px + j] = TILE.SOLID;
+      }
+    }
+    // Ponds
+    for (var i = 0; i < 3; i++) {
+      var px = Math.floor(rng() * 8) + i * 14 + 3;
+      for (var j = 0; j < 4; j++) {
+        if (px + j < w) { tiles[h - 2][px + j] = TILE.WATER; tiles[h - 3][px + j] = TILE.WATER; }
+      }
+    }
+    // Tall mushroom stems (ladders)
+    for (var i = 0; i < 5; i++) {
+      var lx = Math.floor(rng() * (w - 4)) + 2;
+      for (var ly = 4; ly < h - 3; ly++) tiles[ly][lx] = TILE.LADDER;
+    }
+  } else if (lvl === 1) { // Flower Garden - open sky, floating platforms
+    // Remove much of the ground
+    for (var x = 8; x < w - 8; x++) {
+      if (rng() > 0.4) { tiles[h - 2][x] = TILE.AIR; }
+    }
+    // Floating platforms scattered vertically
+    for (var i = 0; i < 20; i++) {
+      var px = Math.floor(rng() * (w - 6)) + 3;
+      var py = Math.floor(rng() * 10) + 3;
+      var pw = Math.floor(rng() * 4) + 2;
+      for (var j = 0; j < pw; j++) {
+        if (px + j < w && py < h) tiles[py][px + j] = TILE.PLATFORM;
+      }
+    }
+    // Some solid ground patches
+    for (var i = 0; i < 6; i++) {
+      var px = Math.floor(rng() * 6) + i * 7 + 2;
+      var pw = Math.floor(rng() * 3) + 2;
+      for (var j = 0; j < pw; j++) {
+        if (px + j < w) tiles[h - 2][px + j] = TILE.SOLID;
+      }
+    }
+  } else if (lvl === 2) { // Underground - diggable dirt
+    // Fill most with dirt
+    for (var y = 3; y < h - 2; y++) {
+      for (var x = 2; x < w - 2; x++) {
+        if (rng() > 0.35) tiles[y][x] = TILE.DIRT;
+        else if (rng() > 0.5) tiles[y][x] = TILE.SOLID;
+      }
+    }
+    // Carve some tunnels
+    for (var i = 0; i < 5; i++) {
+      var ty = Math.floor(rng() * 8) + 4;
+      var tx = Math.floor(rng() * 10) + 2;
+      for (var j = 0; j < 12; j++) {
+        if (tx + j < w) tiles[ty][tx + j] = TILE.AIR;
+        if (ty + 1 < h && tx + j < w) tiles[ty + 1][tx + j] = TILE.AIR;
+      }
+    }
+    // Open starting area
+    for (var y = 3; y < h - 2; y++) { tiles[y][1] = TILE.AIR; tiles[y][2] = TILE.AIR; tiles[y][3] = TILE.AIR; }
+  } else if (lvl === 3) { // Night Sea - lots of water
+    for (var y = 5; y < h - 2; y++) {
+      for (var x = 0; x < w; x++) {
+        tiles[y][x] = TILE.WATER;
+      }
+    }
+    // Islands on top
+    for (var i = 0; i < 8; i++) {
+      var px = Math.floor(rng() * 5) + i * 6;
+      var pw = Math.floor(rng() * 3) + 2;
+      for (var j = 0; j < pw; j++) {
+        if (px + j < w) { tiles[4][px + j] = TILE.SOLID; tiles[3][px + j] = TILE.AIR; }
+      }
+    }
+    // Air pockets underwater
+    for (var i = 0; i < 6; i++) {
+      var ax = Math.floor(rng() * (w - 4)) + 2;
+      var ay = Math.floor(rng() * 5) + 7;
+      for (var j = 0; j < 3; j++) { if (ax + j < w && ay < h) tiles[ay][ax + j] = TILE.AIR; }
+      if (ay - 1 >= 0) { for (var j = 0; j < 3; j++) { if (ax + j < w) tiles[ay - 1][ax + j] = TILE.AIR; } }
+    }
+  } else if (lvl === 4) { // Cloud Tops - walls and ceilings
+    // Scattered solid blocks (walls to climb)
+    for (var i = 0; i < 15; i++) {
+      var px = Math.floor(rng() * (w - 4)) + 2;
+      var py = Math.floor(rng() * 10) + 2;
+      var ph = Math.floor(rng() * 5) + 3;
+      for (var j = 0; j < ph; j++) {
+        if (py + j < h - 2) tiles[py + j][px] = TILE.SOLID;
+        if (px + 1 < w && py + j < h - 2) tiles[py + j][px + 1] = TILE.SOLID;
+      }
+    }
+    // Ceiling sections
+    for (var x = 4; x < w - 4; x++) {
+      if (rng() > 0.5) { tiles[1][x] = TILE.SOLID; tiles[2][x] = TILE.SOLID; }
+    }
+    // Platforms
+    for (var i = 0; i < 10; i++) {
+      var px = Math.floor(rng() * (w - 5)) + 2;
+      var py = Math.floor(rng() * 6) + 5;
+      for (var j = 0; j < 3; j++) { if (px + j < w) tiles[py][px + j] = TILE.PLATFORM; }
+    }
+  } else if (lvl === 5) { // Toy Castle - heavy blocks, ladders
+    // Castle walls
+    for (var y = 0; y < h; y++) {
+      for (var x = 0; x < w; x++) {
+        if (x % 10 === 0 && y > 1) tiles[y][x] = TILE.SOLID;
+      }
+    }
+    // Floors every 4 rows
+    for (var y = 4; y < h - 2; y += 4) {
+      for (var x = 0; x < w; x++) {
+        if (rng() > 0.3) tiles[y][x] = TILE.SOLID;
+      }
+    }
+    // Ladders between floors
+    for (var i = 0; i < 10; i++) {
+      var lx = Math.floor(rng() * (w - 4)) + 2;
+      for (var ly = 1; ly < h - 2; ly++) {
+        if (tiles[ly][lx] !== TILE.SOLID) tiles[ly][lx] = TILE.LADDER;
+      }
+    }
+    // Openings in floors
+    for (var y = 4; y < h - 2; y += 4) {
+      for (var i = 0; i < 5; i++) {
+        var gx = Math.floor(rng() * (w - 2)) + 1;
+        tiles[y][gx] = TILE.AIR;
+        if (gx + 1 < w) tiles[y][gx + 1] = TILE.AIR;
+      }
+    }
+  } else { // Nightmare Realm - mixed
+    for (var i = 0; i < 15; i++) {
+      var px = Math.floor(rng() * (w - 6)) + 3;
+      var py = Math.floor(rng() * 10) + 3;
+      var pw = Math.floor(rng() * 5) + 2;
+      for (var j = 0; j < pw; j++) { if (px + j < w) tiles[py][px + j] = TILE.SOLID; }
+    }
+    for (var i = 0; i < 5; i++) {
+      var px = Math.floor(rng() * (w - 4)) + 2;
+      for (var y = 3; y < h - 3; y++) tiles[y][px] = TILE.LADDER;
+    }
+    for (var i = 0; i < 4; i++) {
+      var px = Math.floor(rng() * 6) + i * 11 + 2;
+      for (var j = 0; j < 3; j++) { if (px + j < w) { tiles[h - 3][px + j] = TILE.WATER; tiles[h - 4][px + j] = TILE.WATER; } }
+    }
+    for (var i = 0; i < 8; i++) {
+      var px = Math.floor(rng() * (w - 4)) + 2;
+      var py = Math.floor(rng() * 6) + 4;
+      for (var j = 0; j < 3; j++) { if (px + j < w) tiles[py][px + j] = TILE.PLATFORM; }
+    }
+  }
+
+  // Ensure start area is clear
+  for (var y = h - 5; y < h - 2; y++) {
+    for (var x = 0; x < 4; x++) { tiles[y][x] = TILE.AIR; }
+  }
+  tiles[h - 3][0] = TILE.SOLID;
+  tiles[h - 3][1] = TILE.SOLID;
+
+  // Place player
+  P.x = 24; P.y = (h - 5) * TS; P.vx = 0; P.vy = 0; P.onGround = false; P.riding = null; P.jumpHeld = false;
+
+  // Place door at far end
+  doorX = (w - 3) * TS; doorY = findGround(w - 3) * TS - TS;
+
+  // Place keys
+  for (var i = 0; i < KEYS_PER_LEVEL; i++) {
+    var attempts = 0;
+    while (attempts < 100) {
+      var kx = Math.floor(rng() * (w - 6)) + 3;
+      var ky = Math.floor(rng() * (h - 5)) + 1;
+      if (getTile(kx, ky) === TILE.AIR || getTile(kx, ky) === TILE.WATER) {
+        keys.push({ x: kx * TS + 4, y: ky * TS + 4, w: 8, h: 8, collected: false, bobT: rng() * 6.28 });
+        break;
+      }
+      attempts++;
+    }
+  }
+
+  // Place animals (focused animal + 1-2 others in later levels)
+  var focusAnimal = LEVEL_FOCUS[lvl];
+  if (focusAnimal >= 0) {
+    placeAnimal(focusAnimal, rng);
+    placeAnimal(focusAnimal, rng);
+    if (lvl >= 3) { placeAnimal(Math.floor(rng() * 6), rng); }
+  } else {
+    // Nightmare realm - all animals
+    for (var a = 0; a < 6; a++) placeAnimal(a, rng);
+  }
+
+  // Place enemies
+  var enemyCount = 4 + lvl * 2;
+  for (var i = 0; i < enemyCount; i++) {
+    var attempts = 0;
+    while (attempts < 50) {
+      var ex = Math.floor(rng() * (w - 8)) + 4;
+      var ey = findGround(ex) - 1;
+      if (ey > 0 && ey < h - 1) {
+        enemies.push({ x: ex * TS, y: ey * TS, w: 12, h: 12, vx: (rng() > 0.5 ? 1 : -1) * (30 + rng() * 40), type: Math.floor(rng() * 3), animT: rng() * 6 });
+        break;
+      }
+      attempts++;
+    }
+  }
+
+  // Place hearts
+  for (var i = 0; i < 3; i++) {
+    var hx = Math.floor(rng() * (w - 6)) + 3;
+    var hy = Math.floor(rng() * (h - 5)) + 2;
+    if (getTile(hx, hy) === TILE.AIR) {
+      items.push({ x: hx * TS + 4, y: hy * TS + 4, w: 8, h: 8, type: 'heart' });
+    }
+  }
+
+  // Generate floating decoration particles
+  for (var i = 0; i < 20; i++) {
+    floaters.push({ x: rng() * w * TS, y: rng() * h * TS, speed: 0.2 + rng() * 0.5, size: 1 + rng() * 2, phase: rng() * 6.28 });
+  }
+
+  camX = 0; camY = 0;
+}
+
+function placeAnimal(type, rng) {
+  var w = COLS, h = ROWS;
+  var attempts = 0;
+  while (attempts < 80) {
+    var ax = Math.floor(rng() * (w - 8)) + 4;
+    var ay = findGround(ax) - 1;
+    if (type === ANIMAL.FISH) { // Place in water
+      for (var y = 5; y < h - 2; y++) {
+        if (getTile(ax, y) === TILE.WATER) { ay = y; break; }
+      }
+    }
+    if (ay > 0 && ay < h - 1) {
+      animals.push({ x: ax * TS, y: ay * TS, w: 14, h: 14, type: type, stunned: false, stunTimer: 0, ridden: false, facing: 1, animT: 0 });
+      return;
+    }
+    attempts++;
+  }
+}
+
+function findGround(col) {
+  for (var y = 0; y < ROWS; y++) {
+    if (tiles[y] && tiles[y][col] === TILE.SOLID) return y;
+  }
+  return ROWS - 2;
+}
+
+function getTile(col, row) {
+  if (row < 0 || row >= ROWS || col < 0 || col >= COLS) return TILE.SOLID;
+  return tiles[row][col];
+}
+
+function getTileAt(px, py) {
+  return getTile(Math.floor(px / TS), Math.floor(py / TS));
+}
+
+function isSolid(col, row) {
+  var t = getTile(col, row);
+  return t === TILE.SOLID || t === TILE.DIRT;
+}
+
+function isPlatform(col, row) {
+  return getTile(col, row) === TILE.PLATFORM;
+}
+
+// === INPUT HELPERS ===
+function btnLeft() { return TAS.input.keys['ArrowLeft'] || TAS.input.keys['KeyA'] || TAS.input.touch.left; }
+function btnRight() { return TAS.input.keys['ArrowRight'] || TAS.input.keys['KeyD'] || TAS.input.touch.right; }
+function btnUp() { return TAS.input.keys['ArrowUp'] || TAS.input.keys['KeyW'] || TAS.input.touch.up; }
+function btnDown() { return TAS.input.keys['ArrowDown'] || TAS.input.keys['KeyS'] || TAS.input.touch.down; }
+function btnJump() { return TAS.input.keys['KeyZ'] || TAS.input.keys['Space'] || TAS.input.touch.a; }
+function btnAction() { return TAS.input.keys['KeyX'] || TAS.input.keys['ShiftLeft'] || TAS.input.touch.b; }
+
+var prevJump = false, prevAction = false;
+function jumpPressed() { var b = btnJump(); var r = b && !prevJump; return r; }
+function actionPressed() { var b = btnAction(); var r = b && !prevAction; return r; }
+
+// === SOUND EFFECTS ===
+function sfxCandy() { TAS.audio.playTone(800, 0.08, 'sine', 0.1); TAS.audio.playTone(1200, 0.06, 'sine', 0.08); }
+function sfxMount() { TAS.audio.playMelody([[523, 0.08], [659, 0.08], [784, 0.12]], 80); }
+function sfxDismount() { TAS.audio.playNoise(0.15, 0.08, 800); TAS.audio.playTone(300, 0.1, 'square', 0.06); }
+function sfxKey() { TAS.audio.playMelody([[880, 0.06], [1100, 0.06], [1320, 0.1]], 60); }
+function sfxHit() { TAS.audio.playTone(200, 0.15, 'square', 0.12, 80); }
+function sfxEnemyHit() { TAS.audio.playTone(400, 0.08, 'square', 0.08, 200); }
+function sfxLevelClear() { TAS.audio.playMelody([[523, 0.15], [659, 0.15], [784, 0.15], [1047, 0.3]], 150); }
+function sfxDeath() { TAS.audio.playMelody([[400, 0.2], [300, 0.2], [200, 0.3]], 200); }
+
+// === CANDY THROW ===
+function throwCandy() {
+  if (candyThrown.length >= 3) return;
+  sfxCandy();
+  candyThrown.push({ x: P.x + (P.facing > 0 ? P.w : 0), y: P.y + 4, vx: P.facing * 200, vy: -80, life: 1.5 });
+}
+
+// === PLAYER PHYSICS ===
+function updatePlayer(dt) {
+  var speed = 100;
+  var jumpForce = -260;
+  var riding = P.riding;
+
+  if (riding) {
+    // Animal-specific movement
+    switch (riding.type) {
+      case ANIMAL.FROG:
+        speed = 110;
+        jumpForce = -380; // High jump
+        break;
+      case ANIMAL.MOLE:
+        speed = 80;
+        jumpForce = -220;
+        break;
+      case ANIMAL.BEE:
+        speed = 90;
+        // Flying
+        break;
+      case ANIMAL.LIZARD:
+        speed = 140; // Fast runner
+        jumpForce = -260;
+        break;
+      case ANIMAL.FISH:
+        speed = 100;
+        break;
+      case ANIMAL.GORILLA:
+        speed = 70;
+        jumpForce = -180; // Can't jump high
+        break;
+    }
+  }
+
+  // Horizontal movement
+  P.vx = 0;
+  if (btnLeft()) { P.vx = -speed; P.facing = -1; }
+  if (btnRight()) { P.vx = speed; P.facing = 1; }
+
+  // Special: Bee flying
+  if (riding && riding.type === ANIMAL.BEE) {
+    P.vy = 0;
+    if (btnUp()) P.vy = -120;
+    if (btnDown()) P.vy = 100;
+    if (!btnUp() && !btnDown()) P.vy = 20; // Gentle fall
+    P.x += P.vx * dt;
+    P.y += P.vy * dt;
+    P.animT += dt;
+  }
+  // Special: Fish swimming
+  else if (riding && riding.type === ANIMAL.FISH) {
+    var inWater = getTileAt(P.x + P.w / 2, P.y + P.h / 2) === TILE.WATER;
+    if (inWater) {
+      P.vy = 0;
+      if (btnUp()) P.vy = -120;
+      if (btnDown()) P.vy = 100;
+      if (!btnUp() && !btnDown()) P.vy = 10;
+      P.x += P.vx * dt;
+      P.y += P.vy * dt;
+    } else {
+      // Normal physics outside water
+      applyGravity(dt, jumpForce);
+      P.x += P.vx * dt;
+      P.y += P.vy * dt;
+    }
+    P.animT += dt;
+  }
+  // Special: Lizard wall cling
+  else if (riding && riding.type === ANIMAL.LIZARD) {
+    var onWall = false;
+    var wallDir = 0;
+    if (isSolid(Math.floor((P.x - 2) / TS), Math.floor((P.y + P.h / 2) / TS))) { onWall = true; wallDir = -1; }
+    if (isSolid(Math.floor((P.x + P.w + 2) / TS), Math.floor((P.y + P.h / 2) / TS))) { onWall = true; wallDir = 1; }
+
+    if (onWall && !P.onGround) {
+      P.vy = 20; // Slow slide
+      if (btnUp()) P.vy = -100;
+      if (btnDown()) P.vy = 60;
+      if (jumpPressed()) { P.vy = -280; P.vx = -wallDir * 120; }
+    } else {
+      applyGravity(dt, jumpForce);
+    }
+    P.x += P.vx * dt;
+    P.y += P.vy * dt;
+    P.animT += dt;
+  }
+  // Normal/Frog/Mole/Gorilla physics
+  else {
+    // Ladder climbing (any form)
+    var onLadder = getTileAt(P.x + P.w / 2, P.y + P.h / 2) === TILE.LADDER;
+    if (onLadder && (btnUp() || btnDown())) {
+      P.vy = 0;
+      if (btnUp()) P.vy = -80;
+      if (btnDown()) P.vy = 80;
+      P.onGround = true;
+    } else {
+      applyGravity(dt, jumpForce);
+    }
+
+    P.x += P.vx * dt;
+    P.y += P.vy * dt;
+    P.animT += dt;
+  }
+
+  // Mole dig
+  if (riding && riding.type === ANIMAL.MOLE && btnAction() && actionPressed()) {
+    var digX = Math.floor((P.x + P.w / 2 + P.facing * 12) / TS);
+    var digY = Math.floor((P.y + P.h / 2) / TS);
+    if (digX >= 0 && digX < COLS && digY >= 0 && digY < ROWS && tiles[digY][digX] === TILE.DIRT) {
+      tiles[digY][digX] = TILE.AIR;
+      TAS.particles.spawn(digX * TS + 8, digY * TS + 8, '#8b5e3c', 6, 2, { gravity: 1 });
+      TAS.audio.playNoise(0.1, 0.06, 400);
+    }
+  }
+
+  // Collide with level
+  resolveCollision();
+
+  // Water check (not on fish)
+  if (!riding || riding.type !== ANIMAL.FISH) {
+    var inWater = getTileAt(P.x + P.w / 2, P.y + P.h) === TILE.WATER;
+    if (inWater && (!riding || riding.type !== ANIMAL.BEE)) {
+      if (riding) { dismount(); }
+      // Slow in water
+      P.vy = Math.min(P.vy, 40);
+      if (btnUp()) P.vy = -60;
+    }
+  }
+
+  // Spike check
+  var spikeTile = getTileAt(P.x + P.w / 2, P.y + P.h);
+  if (spikeTile === TILE.SPIKE) takeDamage();
+
+  // Clamp to level bounds
+  if (P.x < 0) P.x = 0;
+  if (P.x > (COLS - 1) * TS - P.w) P.x = (COLS - 1) * TS - P.w;
+  if (P.y < 0) { P.y = 0; P.vy = 0; }
+  if (P.y > ROWS * TS) takeDamage(); // Fell off
+
+  // Update camera
+  var targetCamX = P.x - GW / 2 + P.w / 2;
+  var targetCamY = P.y - GH / 2 + P.h / 2;
+  camX += (targetCamX - camX) * 4 * dt;
+  camY += (targetCamY - camY) * 4 * dt;
+  camX = TAS.math.clamp(camX, 0, COLS * TS - GW);
+  camY = TAS.math.clamp(camY, 0, ROWS * TS - GH);
+}
+
+function applyGravity(dt, jumpForce) {
+  // Jumping
+  if (P.onGround && jumpPressed()) {
+    P.vy = jumpForce;
+    P.onGround = false;
+    P.jumpHeld = true;
+    TAS.audio.playTone(350, 0.06, 'square', 0.05, 500);
+  }
+  // Variable jump height
+  if (!btnJump()) P.jumpHeld = false;
+  if (P.jumpHeld && P.vy < 0) {
+    P.vy += GRAVITY * 0.5 * dt;
+  } else {
+    P.vy += GRAVITY * dt;
+  }
+  if (P.vy > MAX_FALL) P.vy = MAX_FALL;
+}
+
+function resolveCollision() {
+  P.onGround = false;
+  var left = Math.floor(P.x / TS);
+  var right = Math.floor((P.x + P.w - 1) / TS);
+  var top = Math.floor(P.y / TS);
+  var bottom = Math.floor((P.y + P.h - 1) / TS);
+
+  // Vertical
+  if (P.vy > 0) {
+    var footRow = Math.floor((P.y + P.h) / TS);
+    for (var col = left; col <= right; col++) {
+      if (isSolid(col, footRow) || (isPlatform(col, footRow) && P.y + P.h - P.vy * 0.017 <= footRow * TS)) {
+        P.y = footRow * TS - P.h;
+        P.vy = 0;
+        P.onGround = true;
+        break;
+      }
+    }
+  } else if (P.vy < 0) {
+    var headRow = Math.floor(P.y / TS);
+    for (var col = left; col <= right; col++) {
+      if (isSolid(col, headRow)) {
+        P.y = (headRow + 1) * TS;
+        P.vy = 0;
+        break;
+      }
+    }
+  }
+
+  // Horizontal
+  left = Math.floor(P.x / TS);
+  right = Math.floor((P.x + P.w - 1) / TS);
+  top = Math.floor(P.y / TS);
+  bottom = Math.floor((P.y + P.h - 1) / TS);
+
+  if (P.vx > 0) {
+    for (var row = top; row <= bottom; row++) {
+      if (isSolid(right, row)) {
+        P.x = right * TS - P.w;
+        break;
+      }
+    }
+  } else if (P.vx < 0) {
+    for (var row = top; row <= bottom; row++) {
+      if (isSolid(left, row)) {
+        P.x = (left + 1) * TS;
+        break;
+      }
+    }
+  }
+}
+
+// === MOUNTING / DISMOUNTING ===
+function mount(animal) {
+  P.riding = animal;
+  animal.ridden = true;
+  P.w = 14; P.h = 14;
+  sfxMount();
+  TAS.particles.spawn(P.x + P.w / 2, P.y + P.h / 2, ANIMAL_COLORS[animal.type], 8, 3);
+}
+
+function dismount() {
+  if (!P.riding) return;
+  P.riding.ridden = false;
+  P.riding.x = P.x;
+  P.riding.y = P.y;
+  P.riding = null;
+  P.w = 10; P.h = 14;
+  sfxDismount();
+  TAS.particles.spawn(P.x + P.w / 2, P.y + P.h / 2, '#fff', 6, 2);
+}
+
+// === DAMAGE ===
+function takeDamage() {
+  if (invincTimer > 0) return;
+  if (P.riding) {
+    dismount();
+    invincTimer = 1.5;
+    TAS.fx.shake(4, 0.85);
+    return;
+  }
+  hp--;
+  invincTimer = 2;
+  TAS.fx.shake(6, 0.8);
+  TAS.fx.flash('#ff0000', 0.4);
+  sfxHit();
+  if (hp <= 0) {
+    deathTimer = 2;
+    sfxDeath();
+  }
+}
+
+// === ATTACK (mounted) ===
+function doAttack() {
+  if (!P.riding) return;
+  var ax = P.x + (P.facing > 0 ? P.w : -16);
+  var ay = P.y - 2;
+  var aw = 16, ah = P.h + 4;
+  var hitSomething = false;
+
+  // Frog tongue - longer range
+  if (P.riding.type === ANIMAL.FROG) { aw = 32; ax = P.x + (P.facing > 0 ? P.w : -32); }
+  // Gorilla - wider
+  if (P.riding.type === ANIMAL.GORILLA) { aw = 20; ah = 18; }
+
+  for (var i = enemies.length - 1; i >= 0; i--) {
+    var e = enemies[i];
+    if (TAS.hit.rectOverlap(ax, ay, aw, ah, e.x, e.y, e.w, e.h)) {
+      TAS.particles.spawn(e.x + e.w / 2, e.y + e.h / 2, '#ffdd44', 8, 3, { gravity: 1 });
+      sfxEnemyHit();
+      enemies.splice(i, 1);
+      score += 100;
+      hitSomething = true;
+    }
+  }
+
+  // Visual feedback
+  if (P.riding.type === ANIMAL.FROG) {
+    // Tongue line effect
+    TAS.particles.spawn(ax + aw / 2, ay + ah / 2, '#ff4488', 3, 1);
+  } else {
+    TAS.particles.spawn(ax + aw / 2, ay + ah / 2, ANIMAL_COLORS[P.riding.type], 4, 2);
+  }
+}
+
+// === GAME START ===
+function startGame() {
+  state = 'playing';
+  score = 0;
+  hp = 3;
+  level = 0;
+  TAS.particles.clear();
+  generateLevel(level);
+  levelTransTimer = 1.5;
+}
+
+function nextLevel() {
+  level++;
+  if (level >= 7) {
+    // Won the game!
+    state = 'victory';
+    if (score > highScore) { highScore = score; TAS.score.save('littlenemo_hi', score); }
+    return;
+  }
+  generateLevel(level);
+  levelTransTimer = 1.5;
+}
+
+// === UPDATE ===
+function update(dt) {
+  frame++;
+  TAS.particles.update(dt);
+  TAS.fx.updateEffects(dt);
+
+  if (state === 'title') {
+    if (Object.values(TAS.input.keys).some(Boolean) || TAS.input.touch.a) {
+      TAS.audio.ensureAudio();
+      startGame();
+    }
+    return;
+  }
+
+  if (state === 'gameOver' || state === 'victory') {
+    if (frame > 60 && (Object.values(TAS.input.keys).some(Boolean) || TAS.input.touch.a)) {
+      state = 'title';
+      frame = 0;
+    }
+    return;
+  }
+
+  if (state !== 'playing') return;
+
+  // Level transition overlay
+  if (levelTransTimer > 0) { levelTransTimer -= dt; return; }
+
+  // Death
+  if (deathTimer > 0) {
+    deathTimer -= dt;
+    if (deathTimer <= 0) {
+      if (hp <= 0) {
+        state = 'gameOver';
+        if (score > highScore) { highScore = score; TAS.score.save('littlenemo_hi', score); }
+        frame = 0;
+      } else {
+        generateLevel(level);
+      }
+    }
+    return;
+  }
+
+  // Level complete
+  if (levelCompleteTimer > 0) {
+    levelCompleteTimer -= dt;
+    if (levelCompleteTimer <= 0) nextLevel();
+    return;
+  }
+
+  // Invincibility
+  if (invincTimer > 0) invincTimer -= dt;
+
+  // Player
+  updatePlayer(dt);
+
+  // Action button
+  var jp = jumpPressed();
+  var ap = actionPressed();
+
+  if (ap) {
+    if (P.riding) {
+      doAttack();
+    } else {
+      throwCandy();
+    }
+  }
+
+  // Dismount with down+action
+  if (P.riding && btnDown() && ap) {
+    dismount();
+  }
+
+  // Update candy
+  for (var i = candyThrown.length - 1; i >= 0; i--) {
+    var c = candyThrown[i];
+    c.x += c.vx * dt;
+    c.y += c.vy * dt;
+    c.vy += 300 * dt;
+    c.life -= dt;
+    if (c.life <= 0 || isSolid(Math.floor(c.x / TS), Math.floor(c.y / TS))) {
+      TAS.particles.spawn(c.x, c.y, '#ff88cc', 4, 2);
+      candyThrown.splice(i, 1);
+      continue;
+    }
+    // Check if candy hits an animal
+    for (var j = 0; j < animals.length; j++) {
+      var a = animals[j];
+      if (!a.ridden && !a.stunned && TAS.hit.rectOverlap(c.x - 3, c.y - 3, 6, 6, a.x, a.y, a.w, a.h)) {
+        a.stunned = true;
+        a.stunTimer = 4;
+        TAS.particles.spawn(a.x + a.w / 2, a.y + a.h / 2, '#ffaadd', 6, 2);
+        TAS.audio.playTone(600, 0.1, 'sine', 0.08);
+        candyThrown.splice(i, 1);
+        break;
+      }
+    }
+  }
+
+  // Update animals
+  for (var i = 0; i < animals.length; i++) {
+    var a = animals[i];
+    if (a.ridden) continue;
+    a.animT += dt;
+    if (a.stunned) {
+      a.stunTimer -= dt;
+      if (a.stunTimer <= 0) a.stunned = false;
+      // Player can mount stunned animal
+      if (TAS.hit.rectOverlap(P.x, P.y, P.w, P.h, a.x, a.y, a.w, a.h) && !P.riding) {
+        mount(a);
+      }
+    } else {
+      // Wander
+      a.x += Math.sin(a.animT * 1.5) * 0.3 * a.facing;
+    }
+  }
+
+  // Update enemies
+  for (var i = 0; i < enemies.length; i++) {
+    var e = enemies[i];
+    e.x += e.vx * dt;
+    e.animT += dt;
+    // Bounce off walls
+    var eCol = Math.floor((e.x + (e.vx > 0 ? e.w : 0)) / TS);
+    var eRow = Math.floor((e.y + e.h / 2) / TS);
+    if (isSolid(eCol, eRow) || e.x < 0 || e.x > (COLS - 1) * TS) {
+      e.vx = -e.vx;
+    }
+    // Check ground beneath
+    var belowRow = Math.floor((e.y + e.h + 2) / TS);
+    var belowCol = Math.floor((e.x + e.w / 2) / TS);
+    if (!isSolid(belowCol, belowRow) && getTile(belowCol, belowRow) !== TILE.PLATFORM) {
+      // Turn around at edges (some enemies)
+      if (e.type === 0) e.vx = -e.vx;
+    }
+
+    // Hit player
+    if (invincTimer <= 0 && TAS.hit.rectOverlap(P.x, P.y, P.w, P.h, e.x, e.y, e.w, e.h)) {
+      takeDamage();
+    }
+  }
+
+  // Collect keys
+  for (var i = 0; i < keys.length; i++) {
+    var k = keys[i];
+    if (k.collected) continue;
+    k.bobT += dt * 3;
+    if (TAS.hit.rectOverlap(P.x, P.y, P.w, P.h, k.x, k.y + Math.sin(k.bobT) * 2, k.w, k.h)) {
+      k.collected = true;
+      keysCollected++;
+      score += 500;
+      sfxKey();
+      TAS.particles.spawn(k.x + 4, k.y + 4, '#ffdd44', 12, 3, { gravity: -0.5 });
+      if (keysCollected >= KEYS_PER_LEVEL) {
+        doorOpen = true;
+        TAS.audio.playMelody([[440, 0.1], [550, 0.1], [660, 0.15]], 100);
+      }
+    }
+  }
+
+  // Collect hearts
+  for (var i = items.length - 1; i >= 0; i--) {
+    var it = items[i];
+    if (TAS.hit.rectOverlap(P.x, P.y, P.w, P.h, it.x, it.y, it.w, it.h)) {
+      if (it.type === 'heart' && hp < maxHp) {
+        hp++;
+        TAS.audio.playTone(880, 0.1, 'sine', 0.08);
+        TAS.particles.spawn(it.x + 4, it.y + 4, '#ff4466', 6, 2);
+        items.splice(i, 1);
+      }
+    }
+  }
+
+  // Check door
+  if (doorOpen && TAS.hit.rectOverlap(P.x, P.y, P.w, P.h, doorX, doorY, 16, 16)) {
+    levelCompleteTimer = 2;
+    score += 1000;
+    sfxLevelClear();
+    TAS.particles.spawn(doorX + 8, doorY + 8, '#ffdd44', 20, 4, { gravity: -1 });
+  }
+
+  // Update floaters
+  for (var i = 0; i < floaters.length; i++) {
+    var f = floaters[i];
+    f.y -= f.speed * dt * 20;
+    f.phase += dt;
+    if (f.y < -10) f.y = ROWS * TS + 10;
+  }
+
+  prevJump = btnJump();
+  prevAction = btnAction();
+}
+
+// === DRAW ===
+function draw(dt) {
+  var bgColor = LEVEL_BG[level] || '#0a0a1a';
+  ctx.fillStyle = bgColor;
+  ctx.fillRect(0, 0, GW, GH);
+
+  if (state === 'title') {
+    drawTitleScreen();
+    return;
+  }
+
+  if (state === 'gameOver') {
+    TAS.ui.drawGameOver(score, highScore, GW, GH, { frame: frame, extra: 'Level: ' + (level + 1) + ' - ' + LEVEL_NAMES[level] });
+    return;
+  }
+
+  if (state === 'victory') {
+    drawVictoryScreen();
+    return;
+  }
+
+  ctx.save();
+  TAS.fx.applyShake();
+  ctx.translate(-Math.floor(camX), -Math.floor(camY));
+
+  // Draw background floaters
+  drawFloaters();
+
+  // Draw tiles
+  drawTiles();
+
+  // Draw door
+  drawDoor();
+
+  // Draw items
+  drawItems();
+
+  // Draw keys
+  drawKeys();
+
+  // Draw animals
+  drawAnimals();
+
+  // Draw enemies
+  drawEnemies();
+
+  // Draw player
+  drawPlayer();
+
+  // Draw candy
+  drawCandy();
+
+  // Particles
+  ctx.translate(Math.floor(camX), Math.floor(camY));
+  TAS.particles.draw();
+  ctx.restore();
+
+  TAS.fx.drawFlash(GW, GH);
+
+  // HUD
+  drawHUD();
+
+  // Level transition overlay
+  if (levelTransTimer > 0) {
+    var alpha = levelTransTimer / 1.5;
+    ctx.fillStyle = 'rgba(0,0,0,' + alpha + ')';
+    ctx.fillRect(0, 0, GW, GH);
+    ctx.textAlign = 'center';
+    ctx.fillStyle = '#ffdd44';
+    ctx.font = 'bold 14px monospace';
+    ctx.fillText('Level ' + (level + 1), GW / 2, GH / 2 - 16);
+    ctx.fillStyle = '#88ccff';
+    ctx.font = '11px monospace';
+    ctx.fillText(LEVEL_NAMES[level], GW / 2, GH / 2 + 4);
+    if (LEVEL_FOCUS[level] >= 0) {
+      ctx.fillStyle = ANIMAL_COLORS[LEVEL_FOCUS[level]];
+      ctx.fillText('Ride the ' + ANIMAL_NAMES[LEVEL_FOCUS[level]] + '!', GW / 2, GH / 2 + 22);
+    } else {
+      ctx.fillStyle = '#ff88cc';
+      ctx.fillText('All animals available!', GW / 2, GH / 2 + 22);
+    }
+  }
+
+  // Level complete overlay
+  if (levelCompleteTimer > 0) {
+    ctx.fillStyle = 'rgba(255,255,200,0.15)';
+    ctx.fillRect(0, 0, GW, GH);
+    ctx.textAlign = 'center';
+    ctx.fillStyle = '#ffdd44';
+    ctx.font = 'bold 16px monospace';
+    ctx.fillText('DREAM CLEAR!', GW / 2, GH / 2 - 10);
+    ctx.fillStyle = '#fff';
+    ctx.font = '10px monospace';
+    ctx.fillText('+1000 points', GW / 2, GH / 2 + 10);
+  }
+
+  TAS.input.drawTouchControls(GW, GH);
+}
+
+// === DRAWING HELPERS ===
+function drawTitleScreen() {
+  // Dreamy background
+  var t = frame * 0.02;
+  for (var i = 0; i < 30; i++) {
+    var sx = (Math.sin(t + i * 0.7) * 0.5 + 0.5) * GW;
+    var sy = (Math.cos(t + i * 1.1) * 0.5 + 0.5) * GH;
+    ctx.globalAlpha = 0.15;
+    ctx.fillStyle = ['#4488ff', '#ff88cc', '#88ffaa', '#ffdd44', '#aa88ff'][i % 5];
+    ctx.beginPath();
+    ctx.arc(sx, sy, 3 + Math.sin(t + i) * 2, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+
+  // Title
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#000';
+  ctx.font = 'bold 20px monospace';
+  ctx.fillText('LITTLE NEMO', GW / 2 + 1, 50 + 1);
+  ctx.fillStyle = '#88ccff';
+  ctx.fillText('LITTLE NEMO', GW / 2, 50);
+
+  ctx.fillStyle = '#ffaadd';
+  ctx.font = '10px monospace';
+  ctx.fillText('Dream Master', GW / 2, 68);
+
+  // Instructions
+  ctx.fillStyle = '#aaa';
+  ctx.font = '9px monospace';
+  ctx.fillText('Ride animals to explore dreamland!', GW / 2, 100);
+  ctx.fillText('Throw candy to stun animals, then touch to mount', GW / 2, 114);
+  ctx.fillText('Collect all 6 keys to unlock the exit', GW / 2, 128);
+
+  // Animal list
+  ctx.font = '8px monospace';
+  var animalDesc = ['Frog: high jump, tongue', 'Bee: fly freely, stinger', 'Mole: dig dirt, claw', 'Fish: swim water, bubbles', 'Lizard: climb walls, fast', 'Gorilla: strong punch'];
+  for (var i = 0; i < 6; i++) {
+    ctx.fillStyle = ANIMAL_COLORS[i];
+    ctx.fillText(animalDesc[i], GW / 2, 152 + i * 12);
+  }
+
+  // Start prompt
+  var pulse = Math.sin(frame * 0.05) * 0.3 + 0.7;
+  ctx.globalAlpha = pulse;
+  ctx.fillStyle = '#ffdd44';
+  ctx.font = 'bold 10px monospace';
+  ctx.fillText('PRESS ANY KEY TO START', GW / 2, GH - 24);
+  ctx.globalAlpha = 1;
+
+  // High score
+  if (highScore > 0) {
+    ctx.fillStyle = '#666';
+    ctx.font = '8px monospace';
+    ctx.fillText('High Score: ' + highScore, GW / 2, GH - 10);
+  }
+}
+
+function drawVictoryScreen() {
+  var t = frame * 0.03;
+  ctx.fillStyle = '#0a0a2a';
+  ctx.fillRect(0, 0, GW, GH);
+
+  // Stars
+  for (var i = 0; i < 40; i++) {
+    var sx = (Math.sin(t + i * 0.5) * 0.5 + 0.5) * GW;
+    var sy = (Math.cos(t * 0.7 + i * 0.8) * 0.5 + 0.5) * GH;
+    ctx.globalAlpha = 0.4 + Math.sin(t + i) * 0.3;
+    ctx.fillStyle = '#ffdd44';
+    ctx.fillRect(sx, sy, 2, 2);
+  }
+  ctx.globalAlpha = 1;
+
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#ffdd44';
+  ctx.font = 'bold 18px monospace';
+  ctx.fillText('SWEET DREAMS!', GW / 2, 60);
+
+  ctx.fillStyle = '#88ccff';
+  ctx.font = '12px monospace';
+  ctx.fillText('You conquered all 7 dreams!', GW / 2, 90);
+
+  ctx.fillStyle = '#ffaadd';
+  ctx.font = 'bold 14px monospace';
+  ctx.fillText('Score: ' + score, GW / 2, 130);
+
+  if (score >= highScore) {
+    var p = Math.sin(frame * 0.06) * 0.3 + 0.7;
+    ctx.globalAlpha = p;
+    ctx.fillStyle = '#ffdd44';
+    ctx.font = '10px monospace';
+    ctx.fillText('NEW HIGH SCORE!', GW / 2, 150);
+    ctx.globalAlpha = 1;
+  }
+
+  var p2 = Math.sin(frame * 0.05) * 0.3 + 0.7;
+  ctx.globalAlpha = p2;
+  ctx.fillStyle = '#88ffaa';
+  ctx.font = '10px monospace';
+  ctx.fillText('PRESS ANY KEY', GW / 2, GH - 30);
+  ctx.globalAlpha = 1;
+}
+
+function drawTiles() {
+  var startCol = Math.floor(camX / TS);
+  var endCol = Math.ceil((camX + GW) / TS) + 1;
+  var startRow = Math.floor(camY / TS);
+  var endRow = Math.ceil((camY + GH) / TS) + 1;
+
+  for (var y = startRow; y < endRow && y < ROWS; y++) {
+    for (var x = startCol; x < endCol && x < COLS; x++) {
+      if (y < 0 || x < 0) continue;
+      var t = tiles[y][x];
+      var px = x * TS, py = y * TS;
+      switch (t) {
+        case TILE.SOLID:
+          ctx.fillStyle = getLevelTileColor(0);
+          ctx.fillRect(px, py, TS, TS);
+          // Slight border
+          ctx.fillStyle = getLevelTileColor(1);
+          ctx.fillRect(px, py, TS, 1);
+          ctx.fillRect(px, py, 1, TS);
+          break;
+        case TILE.DIRT:
+          ctx.fillStyle = '#6b4226';
+          ctx.fillRect(px, py, TS, TS);
+          ctx.fillStyle = '#8b5e3c';
+          ctx.fillRect(px + 2, py + 2, 3, 3);
+          ctx.fillRect(px + 9, py + 7, 4, 3);
+          ctx.fillRect(px + 4, py + 11, 3, 2);
+          break;
+        case TILE.WATER:
+          ctx.fillStyle = 'rgba(30,80,180,0.6)';
+          ctx.fillRect(px, py, TS, TS);
+          ctx.fillStyle = 'rgba(80,160,255,0.3)';
+          ctx.fillRect(px, py, TS, 2);
+          // Animated wave
+          var wave = Math.sin(frame * 0.08 + x * 0.5) * 2;
+          ctx.fillStyle = 'rgba(120,200,255,0.3)';
+          ctx.fillRect(px, py + wave + 4, TS, 1);
+          break;
+        case TILE.PLATFORM:
+          ctx.fillStyle = getLevelTileColor(2);
+          ctx.fillRect(px, py, TS, 4);
+          ctx.fillStyle = getLevelTileColor(3);
+          ctx.fillRect(px, py, TS, 1);
+          break;
+        case TILE.LADDER:
+          ctx.fillStyle = '#886633';
+          ctx.fillRect(px + 2, py, 2, TS);
+          ctx.fillRect(px + TS - 4, py, 2, TS);
+          ctx.fillRect(px + 2, py + 6, TS - 4, 2);
+          ctx.fillRect(px + 2, py + 12, TS - 4, 2);
+          break;
+        case TILE.SPIKE:
+          ctx.fillStyle = '#cc3333';
+          for (var s = 0; s < 4; s++) {
+            ctx.beginPath();
+            ctx.moveTo(px + s * 4, py + TS);
+            ctx.lineTo(px + s * 4 + 2, py + 6);
+            ctx.lineTo(px + s * 4 + 4, py + TS);
+            ctx.fill();
+          }
+          break;
+      }
+    }
+  }
+}
+
+function getLevelTileColor(variant) {
+  var colors = [
+    ['#2a5a2a', '#3a7a3a', '#225522', '#44aa44'], // Mushroom Forest
+    ['#5a2a5a', '#7a4a7a', '#442255', '#aa66aa'], // Flower Garden
+    ['#3a3a3a', '#555555', '#222222', '#666666'], // Underground
+    ['#1a3a5a', '#2a5a8a', '#112244', '#4488aa'], // Night Sea
+    ['#4a4a6a', '#6a6a9a', '#333355', '#8888bb'], // Cloud Tops
+    ['#5a3a3a', '#7a5a5a', '#442222', '#aa7777'], // Toy Castle
+    ['#3a1a2a', '#5a2a4a', '#220011', '#882255'], // Nightmare
+  ];
+  var l = TAS.math.clamp(level, 0, 6);
+  return colors[l][variant];
+}
+
+function drawDoor() {
+  var pulse = Math.sin(frame * 0.06) * 0.2 + 0.8;
+  if (doorOpen) {
+    ctx.fillStyle = '#ffdd44';
+    ctx.globalAlpha = pulse;
+    ctx.fillRect(doorX - 1, doorY - 1, 18, 18);
+    ctx.globalAlpha = 1;
+    ctx.fillStyle = '#ffaa00';
+  } else {
+    ctx.fillStyle = '#555555';
+  }
+  ctx.fillRect(doorX, doorY, 16, 16);
+  // Door details
+  ctx.fillStyle = doorOpen ? '#fff' : '#333';
+  ctx.fillRect(doorX + 3, doorY + 2, 10, 12);
+  ctx.fillStyle = doorOpen ? '#ffdd44' : '#666';
+  ctx.fillRect(doorX + 11, doorY + 7, 2, 2);
+  // Lock indicator
+  if (!doorOpen) {
+    ctx.fillStyle = '#886600';
+    ctx.fillRect(doorX + 5, doorY + 5, 6, 6);
+    ctx.fillStyle = '#443300';
+    ctx.fillRect(doorX + 7, doorY + 7, 2, 3);
+  }
+}
+
+function drawKeys() {
+  for (var i = 0; i < keys.length; i++) {
+    var k = keys[i];
+    if (k.collected) continue;
+    var bob = Math.sin(k.bobT) * 2;
+    var glow = Math.sin(frame * 0.08 + i) * 0.2 + 0.8;
+    ctx.globalAlpha = glow;
+    ctx.fillStyle = '#ffdd44';
+    // Key shape
+    ctx.fillRect(k.x + 1, k.y + bob, 6, 3);
+    ctx.fillRect(k.x, k.y + bob + 1, 2, 5);
+    ctx.fillRect(k.x + 4, k.y + bob + 3, 3, 2);
+    ctx.fillRect(k.x + 4, k.y + bob + 6, 3, 2);
+    ctx.globalAlpha = 1;
+  }
+}
+
+function drawItems() {
+  for (var i = 0; i < items.length; i++) {
+    var it = items[i];
+    var bob = Math.sin(frame * 0.05 + i * 2) * 2;
+    if (it.type === 'heart') {
+      ctx.fillStyle = '#ff4466';
+      // Heart shape
+      ctx.fillRect(it.x + 1, it.y + bob, 2, 2);
+      ctx.fillRect(it.x + 4, it.y + bob, 2, 2);
+      ctx.fillRect(it.x, it.y + bob + 2, 7, 3);
+      ctx.fillRect(it.x + 1, it.y + bob + 5, 5, 2);
+      ctx.fillRect(it.x + 2, it.y + bob + 7, 3, 1);
+    }
+  }
+}
+
+function drawAnimals() {
+  for (var i = 0; i < animals.length; i++) {
+    var a = animals[i];
+    if (a.ridden) continue;
+    var color = ANIMAL_COLORS[a.type];
+    var blink = a.stunned ? (Math.floor(frame * 0.2) % 2 === 0) : false;
+
+    if (blink) { ctx.globalAlpha = 0.5; }
+    ctx.fillStyle = color;
+
+    switch (a.type) {
+      case ANIMAL.FROG:
+        // Body
+        ctx.fillRect(a.x + 2, a.y + 4, 10, 8);
+        // Eyes
+        ctx.fillRect(a.x + 2, a.y + 1, 4, 4);
+        ctx.fillRect(a.x + 8, a.y + 1, 4, 4);
+        ctx.fillStyle = '#fff';
+        ctx.fillRect(a.x + 3, a.y + 2, 2, 2);
+        ctx.fillRect(a.x + 9, a.y + 2, 2, 2);
+        // Legs
+        ctx.fillStyle = color;
+        ctx.fillRect(a.x, a.y + 10, 4, 4);
+        ctx.fillRect(a.x + 10, a.y + 10, 4, 4);
+        break;
+      case ANIMAL.MOLE:
+        // Body
+        ctx.fillRect(a.x + 2, a.y + 3, 10, 10);
+        // Nose
+        ctx.fillStyle = '#ffaaaa';
+        ctx.fillRect(a.x + 6, a.y + 8, 3, 3);
+        // Eyes
+        ctx.fillStyle = '#111';
+        ctx.fillRect(a.x + 4, a.y + 5, 2, 2);
+        ctx.fillRect(a.x + 9, a.y + 5, 2, 2);
+        // Claws
+        ctx.fillStyle = '#ddd';
+        ctx.fillRect(a.x, a.y + 11, 3, 3);
+        ctx.fillRect(a.x + 11, a.y + 11, 3, 3);
+        break;
+      case ANIMAL.BEE:
+        // Body stripes
+        ctx.fillRect(a.x + 3, a.y + 4, 8, 8);
+        ctx.fillStyle = '#111';
+        ctx.fillRect(a.x + 3, a.y + 6, 8, 2);
+        ctx.fillRect(a.x + 3, a.y + 10, 8, 2);
+        // Wings
+        ctx.fillStyle = 'rgba(200,220,255,0.6)';
+        ctx.fillRect(a.x + 1, a.y + 1, 5, 4);
+        ctx.fillRect(a.x + 8, a.y + 1, 5, 4);
+        // Eyes
+        ctx.fillStyle = '#111';
+        ctx.fillRect(a.x + 5, a.y + 4, 2, 2);
+        ctx.fillRect(a.x + 8, a.y + 4, 2, 2);
+        break;
+      case ANIMAL.LIZARD:
+        // Body
+        ctx.fillRect(a.x + 1, a.y + 5, 12, 6);
+        // Head
+        ctx.fillRect(a.x + 10, a.y + 3, 4, 5);
+        // Tail
+        ctx.fillRect(a.x - 2, a.y + 7, 4, 3);
+        // Eyes
+        ctx.fillStyle = '#fff';
+        ctx.fillRect(a.x + 11, a.y + 4, 2, 2);
+        // Legs
+        ctx.fillStyle = color;
+        ctx.fillRect(a.x + 2, a.y + 11, 2, 3);
+        ctx.fillRect(a.x + 9, a.y + 11, 2, 3);
+        break;
+      case ANIMAL.FISH:
+        // Body
+        ctx.fillRect(a.x + 3, a.y + 4, 10, 7);
+        // Tail
+        ctx.fillRect(a.x, a.y + 5, 4, 5);
+        // Eye
+        ctx.fillStyle = '#fff';
+        ctx.fillRect(a.x + 10, a.y + 5, 3, 3);
+        ctx.fillStyle = '#111';
+        ctx.fillRect(a.x + 11, a.y + 6, 2, 2);
+        // Fin
+        ctx.fillStyle = color;
+        ctx.fillRect(a.x + 6, a.y + 2, 4, 3);
+        break;
+      case ANIMAL.GORILLA:
+        // Body (big)
+        ctx.fillRect(a.x + 2, a.y + 2, 10, 12);
+        // Arms
+        ctx.fillRect(a.x - 1, a.y + 5, 3, 8);
+        ctx.fillRect(a.x + 12, a.y + 5, 3, 8);
+        // Face
+        ctx.fillStyle = '#aa7744';
+        ctx.fillRect(a.x + 4, a.y + 3, 6, 5);
+        // Eyes
+        ctx.fillStyle = '#fff';
+        ctx.fillRect(a.x + 4, a.y + 4, 2, 2);
+        ctx.fillRect(a.x + 8, a.y + 4, 2, 2);
+        break;
+    }
+    ctx.globalAlpha = 1;
+
+    // Stunned indicator (stars)
+    if (a.stunned) {
+      ctx.fillStyle = '#ffdd44';
+      var starOffset = Math.sin(frame * 0.15) * 3;
+      ctx.fillRect(a.x + 3 + starOffset, a.y - 3, 2, 2);
+      ctx.fillRect(a.x + 9 - starOffset, a.y - 4, 2, 2);
+      ctx.fillRect(a.x + 6, a.y - 5 + Math.cos(frame * 0.1), 2, 2);
+    }
+  }
+}
+
+function drawEnemies() {
+  for (var i = 0; i < enemies.length; i++) {
+    var e = enemies[i];
+    var bounce = Math.sin(e.animT * 4) * 2;
+
+    switch (e.type) {
+      case 0: // Slime
+        ctx.fillStyle = '#aa44cc';
+        ctx.fillRect(e.x + 1, e.y + 4 + bounce, 10, 8);
+        ctx.fillRect(e.x + 3, e.y + 2 + bounce, 6, 4);
+        ctx.fillStyle = '#fff';
+        ctx.fillRect(e.x + 3, e.y + 5 + bounce, 2, 2);
+        ctx.fillRect(e.x + 7, e.y + 5 + bounce, 2, 2);
+        break;
+      case 1: // Ghost
+        ctx.globalAlpha = 0.7;
+        ctx.fillStyle = '#aaddff';
+        ctx.fillRect(e.x + 1, e.y + 2, 10, 8);
+        ctx.fillRect(e.x + 3, e.y, 6, 4);
+        ctx.fillRect(e.x + 1, e.y + 10, 3, 2);
+        ctx.fillRect(e.x + 5, e.y + 10, 3, 2);
+        ctx.fillRect(e.x + 9, e.y + 10, 3, 2);
+        ctx.fillStyle = '#224';
+        ctx.fillRect(e.x + 3, e.y + 4, 2, 3);
+        ctx.fillRect(e.x + 7, e.y + 4, 2, 3);
+        ctx.globalAlpha = 1;
+        break;
+      case 2: // Fire wisp
+        ctx.fillStyle = '#ff6622';
+        ctx.fillRect(e.x + 2, e.y + 3, 8, 8);
+        ctx.fillStyle = '#ffaa44';
+        ctx.fillRect(e.x + 4, e.y + 1, 4, 4);
+        ctx.fillStyle = '#ffdd88';
+        ctx.fillRect(e.x + 4, e.y + 5, 4, 3);
+        // Flicker
+        if (frame % 4 < 2) {
+          ctx.fillStyle = '#ff4400';
+          ctx.fillRect(e.x + 3, e.y - 1, 2, 3);
+          ctx.fillRect(e.x + 7, e.y - 2, 2, 4);
+        }
+        break;
+    }
+  }
+}
+
+function drawPlayer() {
+  if (deathTimer > 0) {
+    ctx.globalAlpha = Math.sin(frame * 0.3) * 0.5 + 0.5;
+  } else if (invincTimer > 0) {
+    if (Math.floor(frame * 0.2) % 2) ctx.globalAlpha = 0.4;
+  }
+
+  var px = Math.floor(P.x), py = Math.floor(P.y);
+
+  if (P.riding) {
+    // Draw riding animal (larger)
+    var color = ANIMAL_COLORS[P.riding.type];
+    ctx.fillStyle = color;
+    ctx.fillRect(px, py + 4, P.w, P.h - 4);
+
+    // Animal head
+    switch (P.riding.type) {
+      case ANIMAL.FROG:
+        ctx.fillRect(px + (P.facing > 0 ? 8 : -2), py + 1, 6, 5);
+        ctx.fillStyle = '#fff';
+        ctx.fillRect(px + (P.facing > 0 ? 10 : 0), py + 2, 2, 2);
+        break;
+      case ANIMAL.BEE:
+        ctx.fillStyle = '#111';
+        ctx.fillRect(px + 2, py + 7, P.w - 4, 2);
+        ctx.fillStyle = 'rgba(200,220,255,0.5)';
+        ctx.fillRect(px + 2, py - 2 + Math.sin(frame * 0.4) * 2, 5, 4);
+        ctx.fillRect(px + 7, py - 2 - Math.sin(frame * 0.4) * 2, 5, 4);
+        break;
+      case ANIMAL.GORILLA:
+        ctx.fillRect(px - 2, py + 6, 3, 8);
+        ctx.fillRect(px + P.w - 1, py + 6, 3, 8);
+        break;
+      default:
+        ctx.fillRect(px + (P.facing > 0 ? P.w - 3 : 0), py + 2, 4, 4);
+        break;
+    }
+
+    // Child riding on top
+    ctx.fillStyle = '#ffddbb';
+    ctx.fillRect(px + 3, py - 4, 5, 5);
+    // Pajama body
+    ctx.fillStyle = '#8888ff';
+    ctx.fillRect(px + 3, py + 1, 5, 3);
+    // Nightcap
+    ctx.fillStyle = '#8888ff';
+    ctx.fillRect(px + 4, py - 7, 4, 4);
+    ctx.fillStyle = '#fff';
+    ctx.fillRect(px + 7, py - 8, 2, 2);
+  } else {
+    // Small child in pajamas
+    // Head
+    ctx.fillStyle = '#ffddbb';
+    ctx.fillRect(px + 2, py, 6, 6);
+    // Hair
+    ctx.fillStyle = '#664422';
+    ctx.fillRect(px + 2, py, 6, 2);
+    // Eyes
+    ctx.fillStyle = '#222';
+    ctx.fillRect(px + (P.facing > 0 ? 6 : 3), py + 2, 1, 2);
+    // Pajama body
+    ctx.fillStyle = '#8888ff';
+    ctx.fillRect(px + 1, py + 6, 8, 6);
+    // Stripes on pajamas
+    ctx.fillStyle = '#6666cc';
+    ctx.fillRect(px + 1, py + 8, 8, 1);
+    ctx.fillRect(px + 1, py + 10, 8, 1);
+    // Feet
+    ctx.fillStyle = '#ffddbb';
+    ctx.fillRect(px + 1, py + 12, 3, 2);
+    ctx.fillRect(px + 6, py + 12, 3, 2);
+    // Nightcap
+    ctx.fillStyle = '#8888ff';
+    ctx.fillRect(px + 3, py - 4, 5, 5);
+    ctx.fillStyle = '#fff';
+    ctx.fillRect(px + 7, py - 5, 2, 2);
+  }
+
+  ctx.globalAlpha = 1;
+}
+
+function drawCandy() {
+  for (var i = 0; i < candyThrown.length; i++) {
+    var c = candyThrown[i];
+    ctx.fillStyle = '#ff88cc';
+    ctx.fillRect(c.x - 3, c.y - 3, 6, 6);
+    ctx.fillStyle = '#ffaadd';
+    ctx.fillRect(c.x - 2, c.y - 2, 3, 3);
+    // Wrapper
+    ctx.fillStyle = '#ffdd44';
+    ctx.fillRect(c.x - 4, c.y - 1, 2, 2);
+    ctx.fillRect(c.x + 3, c.y - 1, 2, 2);
+  }
+}
+
+function drawFloaters() {
+  ctx.globalAlpha = 0.3;
+  var colors = ['#ffdd44', '#88ccff', '#ff88cc', '#88ffaa', '#aa88ff'];
+  for (var i = 0; i < floaters.length; i++) {
+    var f = floaters[i];
+    var wobble = Math.sin(f.phase + frame * 0.02) * 4;
+    ctx.fillStyle = colors[i % 5];
+    ctx.fillRect(f.x + wobble, f.y, f.size, f.size);
+  }
+  ctx.globalAlpha = 1;
+}
+
+function drawHUD() {
+  // Background bar
+  ctx.fillStyle = 'rgba(10,5,20,0.75)';
+  ctx.fillRect(0, 0, GW, 22);
+
+  // Hearts
+  for (var i = 0; i < maxHp; i++) {
+    ctx.fillStyle = i < hp ? '#ff4466' : '#333';
+    ctx.fillRect(6 + i * 14, 5, 10, 10);
+    if (i < hp) {
+      ctx.fillStyle = '#ff8899';
+      ctx.fillRect(7 + i * 14, 6, 3, 3);
+    }
+  }
+
+  // Keys
+  ctx.fillStyle = '#ffdd44';
+  ctx.font = 'bold 9px monospace';
+  ctx.textAlign = 'left';
+  ctx.fillText('KEYS: ' + keysCollected + '/' + KEYS_PER_LEVEL, 56, 14);
+
+  // Score
+  ctx.fillStyle = '#fff';
+  ctx.textAlign = 'center';
+  ctx.fillText('' + score, GW / 2, 14);
+
+  // Level
+  ctx.fillStyle = '#88ccff';
+  ctx.textAlign = 'right';
+  ctx.fillText('Lv' + (level + 1), GW - 6, 14);
+
+  // Riding indicator
+  if (P.riding) {
+    ctx.fillStyle = ANIMAL_COLORS[P.riding.type];
+    ctx.textAlign = 'left';
+    ctx.font = '8px monospace';
+    ctx.fillText('Riding: ' + ANIMAL_NAMES[P.riding.type], 6, GH - 28);
+  }
+}
+
+// === START ===
+TAS.loop.start(update, draw);
+
+})();
+</script>
+</body>
+</html>

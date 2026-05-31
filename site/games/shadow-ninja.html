@@ -1,0 +1,1785 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Shadow Ninja</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body { width: 100%; height: 100%; overflow: hidden; background: #0a0810; touch-action: none; }
+canvas { display: block; margin: 0 auto; }
+#back-link {
+  position: fixed; bottom: 8px; left: 50%; transform: translateX(-50%);
+  color: #666; font-family: monospace; font-size: 12px; text-decoration: none; z-index: 10;
+}
+#back-link:hover { color: #aaa; }
+</style>
+</head>
+<body>
+<canvas id="gc"></canvas>
+<a id="back-link" href="/games">Back to Arcade</a>
+<script src="nft-loader.js"></script>
+<script>if(window.NftLoader)NftLoader.gate();</script>
+<script src="tasern-engine.js"></script>
+<script>
+(function() {
+"use strict";
+
+// === GAME CONSTANTS ===
+const GW = 480, GH = 320;
+const ctx = TAS.ctx;
+TAS.initCanvas(GW, GH);
+TAS.input.initTouch({ buttons: ['a', 'b'], labels: { a: 'JUMP', b: 'ATTACK' } });
+
+const TILE = 16;
+const GRAV = 980;
+const MAX_VX = 140;
+const JUMP_VY = -320;
+const WALL_SLIDE_VY = 40;
+const DASH_SPEED = 280;
+const DASH_DUR = 0.15;
+const IFRAME_DUR = 0.8;
+const LEVEL_W = 60; // tiles wide per stage
+const LEVEL_H = 20; // tiles tall
+
+// === COLORS ===
+const C = {
+  bg: ['#0a0e14','#0c1018','#0a1408','#12080a','#141008','#080c14','#100810','#0a0a10'],
+  accent: ['#2288aa','#aa8844','#33aa55','#cc4444','#ff8822','#4488ff','#aa44cc','#66ddff'],
+  wall: ['#1a2a3a','#2a2218','#1a3020','#3a1a1a','#2a2010','#1a2040','#2a1a30','#1a2030'],
+  floor: ['#223344','#443322','#224422','#442222','#443300','#223355','#332244','#224455']
+};
+
+// === STATE ===
+let state = 'title';
+let score = 0;
+let highScore = TAS.score.load('shadow_ninja_hi');
+let lives = 3;
+let stage = 0;
+let frame = 0;
+let camX = 0;
+let checkpoint = 0;
+let bossActive = false;
+let stageComplete = false;
+let completeTimer = 0;
+
+// === PLAYER ===
+let P = {};
+function resetPlayer(x, y) {
+  P = {
+    x: x || 32, y: y || 240,
+    vx: 0, vy: 0,
+    w: 12, h: 22,
+    dir: 1,
+    hp: 6, maxHp: 6,
+    grounded: false,
+    walling: 0, // -1 left wall, 1 right wall, 0 none
+    ceiling: false,
+    dashing: 0, dashDir: 0,
+    iframes: 0,
+    attackTimer: 0, attackDir: 0, attackUp: false,
+    weapon: 0, // 0=katana, 1=chain, 2=shuriken
+    weaponLevel: [0, 0, 0], // 0=base, 1=upgraded
+    shurikenAmmo: 15,
+    combo: 0, comboTimer: 0,
+    anim: 0, slashTrail: []
+  };
+}
+resetPlayer();
+
+// === LEVEL DATA ===
+let tiles = [];
+let enemies = [];
+let pickups = [];
+let projectiles = [];
+let boss = null;
+let bgParticles = [];
+
+// Stage themes define enemy types and hazards
+const STAGE_NAMES = ['Sewers','Warehouse','Garden','Barracks','Arsenal','Laboratory','Throne Hall','Rooftop'];
+const BOSS_STAGES = [1, 3, 5, 7]; // stages with bosses (0-indexed)
+
+// === LEVEL GENERATION ===
+function generateLevel(stg) {
+  tiles = [];
+  enemies = [];
+  pickups = [];
+  projectiles = [];
+  boss = null;
+  bgParticles = [];
+  bossActive = false;
+  stageComplete = false;
+  completeTimer = 0;
+
+  const w = LEVEL_W;
+  const h = LEVEL_H;
+
+  // Initialize empty
+  for (let y = 0; y < h; y++) {
+    tiles[y] = [];
+    for (let x = 0; x < w; x++) {
+      tiles[y][x] = 0;
+    }
+  }
+
+  // Floor
+  for (let x = 0; x < w; x++) {
+    tiles[h - 1][x] = 1;
+    tiles[h - 2][x] = 1;
+  }
+
+  // Ceiling
+  for (let x = 0; x < w; x++) {
+    tiles[0][x] = 1;
+    tiles[1][x] = 1;
+  }
+
+  // Walls at edges
+  for (let y = 0; y < h; y++) {
+    tiles[y][0] = 1;
+    tiles[y][1] = 1;
+    tiles[y][w - 1] = 1;
+    tiles[y][w - 2] = 1;
+  }
+
+  // Platforms based on stage
+  const seed = stg * 1337;
+  const rng = seedRng(seed);
+
+  // Generate platforms
+  const numPlats = 8 + stg * 2;
+  for (let i = 0; i < numPlats; i++) {
+    const px = 4 + Math.floor(rng() * (w - 10));
+    const py = 4 + Math.floor(rng() * (h - 7));
+    const pw = 2 + Math.floor(rng() * 4);
+    for (let dx = 0; dx < pw; dx++) {
+      if (px + dx < w - 2) tiles[py][px + dx] = 1;
+    }
+  }
+
+  // Walls for clinging
+  const numWalls = 3 + stg;
+  for (let i = 0; i < numWalls; i++) {
+    const wx = 4 + Math.floor(rng() * (w - 8));
+    const wy = 4 + Math.floor(rng() * (h - 8));
+    const wh = 3 + Math.floor(rng() * 4);
+    for (let dy = 0; dy < wh; dy++) {
+      if (wy + dy < h - 2) tiles[wy + dy][wx] = 1;
+    }
+  }
+
+  // Ceiling segments for hanging
+  for (let i = 0; i < 4; i++) {
+    const cx = 5 + Math.floor(rng() * (w - 12));
+    const cw = 3 + Math.floor(rng() * 5);
+    for (let dx = 0; dx < cw; dx++) {
+      if (cx + dx < w - 2) tiles[2][cx + dx] = 1;
+    }
+  }
+
+  // Hazard tiles (type 2) - water in sewers, electricity in lab, etc.
+  if (stg === 0 || stg === 5) {
+    for (let x = 3; x < w - 3; x++) {
+      if (rng() < 0.1) {
+        tiles[h - 3][x] = 2; // hazard
+      }
+    }
+  }
+
+  // Spawn enemies
+  const enemyCount = 5 + stg * 3;
+  for (let i = 0; i < enemyCount; i++) {
+    const ex = 80 + Math.floor(rng() * (w * TILE - 160));
+    const ey = findGround(ex / TILE | 0) * TILE - 20;
+    if (ey > 48) {
+      enemies.push(createEnemy(ex, ey, stg, rng));
+    }
+  }
+
+  // Spawn pickups
+  for (let i = 0; i < 4; i++) {
+    const px2 = 60 + Math.floor(rng() * (w * TILE - 120));
+    const py2 = findGround(px2 / TILE | 0) * TILE - 24;
+    if (py2 > 48) {
+      const type = rng() < 0.3 ? 'crystal' : (rng() < 0.5 ? 'ammo' : 'weapon');
+      pickups.push({ x: px2, y: py2, type, weapon: Math.floor(rng() * 3), alive: true, anim: 0 });
+    }
+  }
+
+  // Health pickup
+  pickups.push({
+    x: (w / 2) * TILE,
+    y: findGround(w / 2) * TILE - 24,
+    type: 'health', alive: true, anim: 0
+  });
+
+  // Boss at end of boss stages
+  if (BOSS_STAGES.includes(stg)) {
+    const bx = (w - 6) * TILE;
+    const by = findGround(w - 6) * TILE - 40;
+    boss = createBoss(stg, bx, by);
+  }
+
+  // Background particles
+  for (let i = 0; i < 20; i++) {
+    bgParticles.push({
+      x: rng() * w * TILE,
+      y: rng() * h * TILE,
+      vx: (rng() - 0.5) * 10,
+      vy: rng() * 5 + 2,
+      size: 1 + rng() * 2,
+      alpha: 0.1 + rng() * 0.3
+    });
+  }
+
+  resetPlayer(48, findGround(3) * TILE - 28);
+  camX = 0;
+  checkpoint = 48;
+}
+
+function findGround(tx) {
+  tx = Math.max(0, Math.min(LEVEL_W - 1, tx));
+  for (let y = 3; y < LEVEL_H; y++) {
+    if (tiles[y][tx] === 1) return y;
+  }
+  return LEVEL_H - 2;
+}
+
+function seedRng(s) {
+  return function() {
+    s = (s * 1103515245 + 12345) & 0x7fffffff;
+    return s / 0x7fffffff;
+  };
+}
+
+// === ENEMIES ===
+function createEnemy(x, y, stg, rng) {
+  const types = ['soldier', 'archer', 'shield', 'ninja', 'drone'];
+  let pool;
+  if (stg < 2) pool = ['soldier', 'soldier', 'archer'];
+  else if (stg < 4) pool = ['soldier', 'archer', 'shield', 'ninja'];
+  else if (stg < 6) pool = ['soldier', 'archer', 'shield', 'ninja', 'drone'];
+  else pool = ['ninja', 'shield', 'drone', 'ninja', 'archer'];
+
+  const type = pool[Math.floor(rng() * pool.length)];
+  const e = {
+    x, y, vx: 0, vy: 0,
+    w: 14, h: 20,
+    type,
+    hp: type === 'shield' ? 4 : (type === 'ninja' ? 3 : 2),
+    maxHp: type === 'shield' ? 4 : (type === 'ninja' ? 3 : 2),
+    dir: rng() < 0.5 ? -1 : 1,
+    alive: true,
+    anim: 0,
+    attackCd: 0,
+    patrolTimer: 0,
+    state: 'patrol',
+    stunTimer: 0,
+    flying: type === 'drone'
+  };
+  if (type === 'drone') { e.y = y - 40; e.h = 14; e.w = 16; }
+  return e;
+}
+
+function createBoss(stg, x, y) {
+  const names = ['Sewer Lord', 'Warden', 'Vine Queen', 'General Kron', '', 'Dr. Volt', '', 'Dark Emperor'];
+  const bossIdx = BOSS_STAGES.indexOf(stg);
+  return {
+    x, y, vx: 0, vy: 0,
+    w: 32, h: 40,
+    hp: 12 + bossIdx * 4,
+    maxHp: 12 + bossIdx * 4,
+    name: names[stg] || 'Boss',
+    phase: 0,
+    dir: -1,
+    anim: 0,
+    attackCd: 2,
+    pattern: 0,
+    alive: true,
+    stunTimer: 0,
+    flashTimer: 0,
+    stg: stg
+  };
+}
+
+// === UPDATE ===
+function update(dt) {
+  frame++;
+  TAS.particles.update(dt);
+  TAS.fx.updateEffects(dt);
+
+  if (state === 'title') {
+    if (Object.values(TAS.input.keys).some(Boolean) || TAS.input.touch.a) {
+      startGame();
+    }
+    return;
+  }
+
+  if (state === 'gameOver') {
+    if (frame % 2 === 0 && Object.values(TAS.input.keys).some(Boolean) || TAS.input.touch.a) {
+      state = 'title';
+    }
+    return;
+  }
+
+  if (state === 'stageIntro') {
+    completeTimer -= dt;
+    if (completeTimer <= 0) {
+      state = 'playing';
+    }
+    return;
+  }
+
+  if (state === 'stageClear') {
+    completeTimer -= dt;
+    if (completeTimer <= 0) {
+      stage++;
+      if (stage >= 8) {
+        // Game complete!
+        score += 5000;
+        if (score > highScore) { highScore = score; TAS.score.save('shadow_ninja_hi', highScore); }
+        state = 'victory';
+        completeTimer = 5;
+      } else {
+        generateLevel(stage);
+        state = 'stageIntro';
+        completeTimer = 2;
+      }
+    }
+    return;
+  }
+
+  if (state === 'victory') {
+    completeTimer -= dt;
+    if (completeTimer <= 0) state = 'title';
+    return;
+  }
+
+  if (state === 'playing') {
+    updatePlayer(dt);
+    updateEnemies(dt);
+    updateBoss(dt);
+    updateProjectiles(dt);
+    updatePickups(dt);
+    updateBgParticles(dt);
+    updateCamera(dt);
+
+    // Check stage complete
+    if (!bossActive && !boss && P.x > (LEVEL_W - 5) * TILE) {
+      stageComplete = true;
+      state = 'stageClear';
+      completeTimer = 2;
+      score += 1000;
+      TAS.audio.playTone(440, 0.15, 'square', 0.08);
+      TAS.audio.playTone(660, 0.15, 'square', 0.08);
+      setTimeout(function() { TAS.audio.playTone(880, 0.2, 'square', 0.08); }, 200);
+    }
+
+    // Boss trigger
+    if (boss && boss.alive && P.x > boss.x - 120 && !bossActive) {
+      bossActive = true;
+    }
+  }
+}
+
+// === PLAYER UPDATE ===
+function updatePlayer(dt) {
+  const K = TAS.input.keys;
+  const T = TAS.input.touch;
+
+  P.anim += dt;
+  if (P.iframes > 0) P.iframes -= dt;
+  if (P.attackTimer > 0) P.attackTimer -= dt;
+  if (P.comboTimer > 0) { P.comboTimer -= dt; if (P.comboTimer <= 0) P.combo = 0; }
+
+  // Dash update
+  if (P.dashing > 0) {
+    P.dashing -= dt;
+    P.vx = P.dashDir * DASH_SPEED;
+    P.vy = 0;
+    // Trail
+    if (frame % 2 === 0) {
+      P.slashTrail.push({ x: P.x, y: P.y, life: 0.3 });
+    }
+    applyMovement(dt);
+    updateTrail(dt);
+    return;
+  }
+
+  // Input
+  const left = K['ArrowLeft'] || K['KeyA'] || T.left;
+  const right = K['ArrowRight'] || K['KeyD'] || T.right;
+  const up = K['ArrowUp'] || K['KeyW'] || T.up;
+  const down = K['ArrowDown'] || K['KeyS'] || T.down;
+  const jump = K['KeyZ'] || K['Space'] || T.a;
+  const attack = K['KeyX'] || K['KeyC'] || T.b;
+
+  // Movement
+  if (P.ceiling) {
+    // On ceiling - move horizontally
+    if (left) { P.x -= 80 * dt; P.dir = -1; }
+    if (right) { P.x += 80 * dt; P.dir = 1; }
+    if (down || jump) {
+      P.ceiling = false;
+      P.vy = 50;
+      if (attack) {
+        // Drop attack
+        P.attackTimer = 0.3;
+        P.attackDir = P.dir;
+        P.vy = 250;
+      }
+    }
+    // Check still on ceiling
+    const tx = Math.floor(P.x / TILE);
+    const ty = Math.floor((P.y - P.h / 2 - 2) / TILE);
+    if (ty < 0 || ty >= LEVEL_H || tx < 0 || tx >= LEVEL_W || tiles[ty][tx] !== 1) {
+      P.ceiling = false;
+    }
+  } else if (P.walling !== 0) {
+    // Wall cling
+    P.vy = WALL_SLIDE_VY;
+    if (jump) {
+      // Wall jump
+      P.vx = -P.walling * 180;
+      P.vy = JUMP_VY * 0.85;
+      P.dir = -P.walling;
+      P.walling = 0;
+      TAS.audio.playTone(350, 0.08, 'square', 0.06);
+    }
+    if ((P.walling === -1 && right) || (P.walling === 1 && left)) {
+      P.walling = 0;
+    }
+    if (down) { P.walling = 0; P.vy = 100; }
+    applyMovement(dt);
+  } else {
+    // Normal movement
+    if (left) { P.vx = -MAX_VX; P.dir = -1; }
+    else if (right) { P.vx = MAX_VX; P.dir = 1; }
+    else { P.vx *= 0.8; if (Math.abs(P.vx) < 5) P.vx = 0; }
+
+    // Jump
+    if (jump && P.grounded) {
+      P.vy = JUMP_VY;
+      P.grounded = false;
+      TAS.audio.playTone(280, 0.08, 'triangle', 0.05);
+    }
+
+    // Gravity
+    if (!P.grounded) {
+      P.vy += GRAV * dt;
+      if (P.vy > 500) P.vy = 500;
+
+      // Check ceiling grab
+      if (P.vy < 0 && up) {
+        const tx = Math.floor(P.x / TILE);
+        const ty = Math.floor((P.y - P.h / 2 - 4) / TILE);
+        if (ty >= 0 && ty < LEVEL_H && tx >= 0 && tx < LEVEL_W && tiles[ty][tx] === 1) {
+          P.ceiling = true;
+          P.vy = 0;
+          P.y = (ty + 1) * TILE + P.h / 2 + 1;
+          TAS.audio.playTone(200, 0.05, 'square', 0.04);
+        }
+      }
+
+      // Wall cling check
+      if (!P.grounded && (left || right)) {
+        const side = left ? -1 : 1;
+        const tx = Math.floor((P.x + side * (P.w / 2 + 2)) / TILE);
+        const ty = Math.floor(P.y / TILE);
+        if (tx >= 0 && tx < LEVEL_W && ty >= 0 && ty < LEVEL_H && tiles[ty][tx] === 1) {
+          P.walling = side;
+          P.vy = 0;
+          TAS.audio.playTone(150, 0.04, 'square', 0.03);
+        }
+      }
+    }
+
+    applyMovement(dt);
+  }
+
+  // Dash (double-tap detection simplified: press dash while moving)
+  if ((K['ShiftLeft'] || K['ShiftRight']) && P.dashing <= 0 && P.grounded) {
+    P.dashing = DASH_DUR;
+    P.dashDir = P.dir;
+    P.iframes = DASH_DUR;
+    TAS.audio.playTone(180, 0.1, 'sawtooth', 0.06, 80);
+  }
+
+  // Attack
+  if (attack && P.attackTimer <= 0) {
+    performAttack(up);
+  }
+
+  // Hazard check
+  const tx = Math.floor(P.x / TILE);
+  const ty = Math.floor((P.y + P.h / 2) / TILE);
+  if (tx >= 0 && tx < LEVEL_W && ty >= 0 && ty < LEVEL_H && tiles[ty][tx] === 2) {
+    hurtPlayer(1);
+  }
+
+  updateTrail(dt);
+}
+
+function applyMovement(dt) {
+  // X movement
+  P.x += P.vx * dt;
+
+  // X collision
+  const hw = P.w / 2;
+  const hh = P.h / 2;
+
+  // Left wall
+  let tx = Math.floor((P.x - hw) / TILE);
+  let ty1 = Math.floor((P.y - hh + 2) / TILE);
+  let ty2 = Math.floor((P.y + hh - 2) / TILE);
+  for (let ty = ty1; ty <= ty2; ty++) {
+    if (tx >= 0 && tx < LEVEL_W && ty >= 0 && ty < LEVEL_H && tiles[ty][tx] === 1) {
+      P.x = (tx + 1) * TILE + hw;
+      P.vx = 0;
+      break;
+    }
+  }
+  // Right wall
+  tx = Math.floor((P.x + hw) / TILE);
+  for (let ty = ty1; ty <= ty2; ty++) {
+    if (tx >= 0 && tx < LEVEL_W && ty >= 0 && ty < LEVEL_H && tiles[ty][tx] === 1) {
+      P.x = tx * TILE - hw;
+      P.vx = 0;
+      break;
+    }
+  }
+
+  // Y movement
+  P.y += P.vy * dt;
+  P.grounded = false;
+
+  // Floor
+  const tx1 = Math.floor((P.x - hw + 2) / TILE);
+  const tx2 = Math.floor((P.x + hw - 2) / TILE);
+  let ty = Math.floor((P.y + hh) / TILE);
+  for (let txx = tx1; txx <= tx2; txx++) {
+    if (ty >= 0 && ty < LEVEL_H && txx >= 0 && txx < LEVEL_W && tiles[ty][txx] === 1) {
+      P.y = ty * TILE - hh;
+      P.vy = 0;
+      P.grounded = true;
+      break;
+    }
+  }
+
+  // Ceiling collision (when not grabbing)
+  if (!P.ceiling) {
+    ty = Math.floor((P.y - hh) / TILE);
+    for (let txx = tx1; txx <= tx2; txx++) {
+      if (ty >= 0 && ty < LEVEL_H && txx >= 0 && txx < LEVEL_W && tiles[ty][txx] === 1) {
+        P.y = (ty + 1) * TILE + hh;
+        P.vy = 0;
+        break;
+      }
+    }
+  }
+}
+
+function performAttack(upHeld) {
+  const wep = P.weapon;
+  const lvl = P.weaponLevel[wep];
+  P.attackUp = upHeld;
+  P.attackDir = P.dir;
+
+  if (wep === 0) {
+    // Katana - fast, short range
+    P.attackTimer = lvl ? 0.2 : 0.25;
+    TAS.audio.playTone(600, 0.06, 'sawtooth', 0.07, 1200);
+    slashHit(upHeld ? 0 : P.dir, lvl ? 32 : 24, lvl ? 3 : 2);
+  } else if (wep === 1) {
+    // Kusarigama - medium, hits above/below
+    P.attackTimer = lvl ? 0.28 : 0.35;
+    TAS.audio.playTone(200, 0.12, 'triangle', 0.06, 400);
+    chainHit(upHeld, lvl ? 48 : 36, lvl ? 3 : 2);
+  } else if (wep === 2) {
+    // Shuriken - ranged
+    if (P.shurikenAmmo > 0) {
+      P.attackTimer = lvl ? 0.12 : 0.18;
+      P.shurikenAmmo--;
+      const sx = P.x + P.dir * 10;
+      const sy = upHeld ? P.y - 12 : P.y;
+      const svx = upHeld ? P.dir * 150 : P.dir * 250;
+      const svy = upHeld ? -200 : 0;
+      projectiles.push({
+        x: sx, y: sy, vx: svx, vy: svy,
+        w: 6, h: 6, dmg: lvl ? 2 : 1,
+        owner: 'player', type: 'shuriken', life: 2, anim: 0
+      });
+      TAS.audio.playTone(800, 0.05, 'square', 0.05, 1200);
+    }
+  }
+
+  // Slash trail effect
+  P.slashTrail.push({ x: P.x + P.dir * 12, y: P.y - 4, life: 0.2 });
+}
+
+function slashHit(dir, range, dmg) {
+  const hx = dir === 0 ? P.x : P.x + dir * range / 2;
+  const hy = dir === 0 ? P.y - range / 2 : P.y;
+  const hw = dir === 0 ? P.w + 8 : range;
+  const hh = dir === 0 ? range : P.h + 4;
+
+  hitEnemiesInArea(hx - hw / 2, hy - hh / 2, hw, hh, dmg);
+}
+
+function chainHit(upward, range, dmg) {
+  // Chain hits a wider arc
+  const hx = P.x + P.dir * range / 3;
+  const hy = upward ? P.y - range / 2 : P.y;
+  const hw = range;
+  const hh = range * 0.7;
+
+  hitEnemiesInArea(hx - hw / 2, hy - hh / 2, hw, hh, dmg);
+}
+
+function hitEnemiesInArea(ax, ay, aw, ah, dmg) {
+  for (const e of enemies) {
+    if (!e.alive) continue;
+    if (TAS.hit.rectOverlap(ax, ay, aw, ah, e.x - e.w / 2, e.y - e.h / 2, e.w, e.h)) {
+      damageEnemy(e, dmg);
+    }
+  }
+  if (boss && boss.alive && bossActive) {
+    if (TAS.hit.rectOverlap(ax, ay, aw, ah, boss.x - boss.w / 2, boss.y - boss.h / 2, boss.w, boss.h)) {
+      damageBoss(dmg);
+    }
+  }
+}
+
+function damageEnemy(e, dmg) {
+  e.hp -= dmg;
+  e.stunTimer = 0.3;
+  TAS.fx.shake(3, 0.85);
+
+  if (e.hp <= 0) {
+    e.alive = false;
+    score += (e.type === 'ninja' ? 200 : e.type === 'shield' ? 150 : e.type === 'drone' ? 175 : 100);
+    P.combo++;
+    P.comboTimer = 2;
+    if (P.combo > 1) score += P.combo * 25;
+
+    TAS.particles.spawn(e.x, e.y, C.accent[stage], 8, 3, { gravity: 1.5 });
+    TAS.audio.playTone(300, 0.1, 'square', 0.08, 100);
+
+    // Ammo drop chance
+    if (Math.random() < 0.3) {
+      pickups.push({ x: e.x, y: e.y, type: 'ammo', alive: true, anim: 0 });
+    }
+  } else {
+    TAS.particles.spawn(e.x, e.y, '#ff8844', 4, 2);
+    TAS.audio.playTone(400, 0.05, 'square', 0.06);
+  }
+}
+
+function damageBoss(dmg) {
+  if (boss.stunTimer > 0) return;
+  boss.hp -= dmg;
+  boss.stunTimer = 0.2;
+  boss.flashTimer = 0.15;
+  TAS.fx.shake(4, 0.8);
+  TAS.particles.spawn(boss.x, boss.y, '#ffaa00', 6, 3);
+  TAS.audio.playTone(200, 0.1, 'sawtooth', 0.08, 80);
+
+  if (boss.hp <= 0) {
+    boss.alive = false;
+    bossActive = false;
+    score += 2000 + stage * 500;
+    TAS.fx.flash('#ff8800', 0.5);
+    TAS.fx.shake(8, 0.7);
+    TAS.particles.spawn(boss.x, boss.y, '#ffdd00', 20, 5, { gravity: 2 });
+    TAS.audio.playTone(200, 0.3, 'square', 0.1, 50);
+    setTimeout(function() { TAS.audio.playTone(400, 0.3, 'square', 0.08); }, 300);
+  }
+}
+
+function hurtPlayer(dmg) {
+  if (P.iframes > 0) return;
+  P.hp -= dmg;
+  P.iframes = IFRAME_DUR;
+  TAS.fx.flash('#ff0000', 0.3);
+  TAS.fx.shake(5, 0.8);
+  TAS.audio.playTone(100, 0.2, 'sawtooth', 0.1, 50);
+
+  if (P.hp <= 0) {
+    lives--;
+    if (lives <= 0) {
+      if (score > highScore) { highScore = score; TAS.score.save('shadow_ninja_hi', highScore); }
+      state = 'gameOver';
+    } else {
+      P.hp = P.maxHp;
+      P.x = checkpoint;
+      P.y = findGround(checkpoint / TILE | 0) * TILE - 28;
+      P.vx = 0; P.vy = 0;
+      P.iframes = 2;
+    }
+  }
+}
+
+function updateTrail(dt) {
+  for (let i = P.slashTrail.length - 1; i >= 0; i--) {
+    P.slashTrail[i].life -= dt;
+    if (P.slashTrail[i].life <= 0) P.slashTrail.splice(i, 1);
+  }
+}
+
+// === ENEMY AI ===
+function updateEnemies(dt) {
+  for (const e of enemies) {
+    if (!e.alive) continue;
+    e.anim += dt;
+    if (e.stunTimer > 0) { e.stunTimer -= dt; continue; }
+    if (e.attackCd > 0) e.attackCd -= dt;
+
+    const distToPlayer = Math.abs(e.x - P.x);
+    const inRange = distToPlayer < 200;
+
+    if (e.type === 'soldier') {
+      if (inRange) {
+        e.dir = P.x < e.x ? -1 : 1;
+        e.vx = e.dir * 60;
+        if (distToPlayer < 28 && e.attackCd <= 0) {
+          e.attackCd = 1.2;
+          // Melee hit
+          if (distToPlayer < 28) hurtPlayer(1);
+        }
+      } else {
+        e.patrolTimer += dt;
+        if (e.patrolTimer > 2) { e.dir *= -1; e.patrolTimer = 0; }
+        e.vx = e.dir * 30;
+      }
+    } else if (e.type === 'archer') {
+      if (inRange && e.attackCd <= 0) {
+        e.dir = P.x < e.x ? -1 : 1;
+        e.attackCd = 1.8;
+        projectiles.push({
+          x: e.x + e.dir * 10, y: e.y,
+          vx: e.dir * 160, vy: 0,
+          w: 8, h: 3, dmg: 1,
+          owner: 'enemy', type: 'arrow', life: 3, anim: 0
+        });
+        TAS.audio.playTone(500, 0.04, 'square', 0.03);
+      }
+      e.vx = 0;
+    } else if (e.type === 'shield') {
+      if (inRange) {
+        e.dir = P.x < e.x ? -1 : 1;
+        e.vx = e.dir * 35;
+        if (distToPlayer < 24 && e.attackCd <= 0) {
+          e.attackCd = 2.0;
+          hurtPlayer(1);
+        }
+      } else {
+        e.vx = 0;
+      }
+    } else if (e.type === 'ninja') {
+      if (inRange) {
+        e.dir = P.x < e.x ? -1 : 1;
+        e.vx = e.dir * 100;
+        if (distToPlayer < 22 && e.attackCd <= 0) {
+          e.attackCd = 0.8;
+          hurtPlayer(1);
+        }
+        // Ninja throws shuriken
+        if (distToPlayer > 60 && distToPlayer < 150 && e.attackCd <= 0) {
+          e.attackCd = 1.5;
+          projectiles.push({
+            x: e.x + e.dir * 8, y: e.y - 4,
+            vx: e.dir * 200, vy: 0,
+            w: 6, h: 6, dmg: 1,
+            owner: 'enemy', type: 'shuriken', life: 2, anim: 0
+          });
+        }
+      } else {
+        e.patrolTimer += dt;
+        if (e.patrolTimer > 1.5) { e.dir *= -1; e.patrolTimer = 0; }
+        e.vx = e.dir * 50;
+      }
+    } else if (e.type === 'drone') {
+      // Flying enemy
+      const dy = P.y - e.y;
+      const dx = P.x - e.x;
+      if (inRange) {
+        e.vx = (dx > 0 ? 1 : -1) * 70;
+        e.vy = (dy > 0 ? 1 : -1) * 50;
+        e.dir = dx > 0 ? 1 : -1;
+        if (distToPlayer < 30 && e.attackCd <= 0) {
+          e.attackCd = 1.5;
+          hurtPlayer(1);
+        }
+      } else {
+        e.vy = Math.sin(e.anim * 2) * 30;
+        e.vx = e.dir * 20;
+      }
+      e.x += e.vx * dt;
+      e.y += e.vy * dt;
+      continue; // skip ground physics
+    }
+
+    // Apply physics for ground enemies
+    if (!e.flying) {
+      e.x += e.vx * dt;
+      e.vy += GRAV * dt;
+      e.y += e.vy * dt;
+
+      // Ground collision
+      const ty = Math.floor((e.y + e.h / 2) / TILE);
+      const tx = Math.floor(e.x / TILE);
+      if (ty >= 0 && ty < LEVEL_H && tx >= 0 && tx < LEVEL_W && tiles[ty][tx] === 1) {
+        e.y = ty * TILE - e.h / 2;
+        e.vy = 0;
+      }
+
+      // Wall collision
+      const wtx = Math.floor((e.x + e.dir * e.w / 2) / TILE);
+      const wty = Math.floor(e.y / TILE);
+      if (wtx >= 0 && wtx < LEVEL_W && wty >= 0 && wty < LEVEL_H && tiles[wty][wtx] === 1) {
+        e.dir *= -1;
+        e.vx *= -1;
+      }
+    }
+
+    // Contact damage
+    if (TAS.hit.rectOverlap(P.x - P.w / 2, P.y - P.h / 2, P.w, P.h,
+        e.x - e.w / 2, e.y - e.h / 2, e.w, e.h)) {
+      hurtPlayer(1);
+    }
+  }
+}
+
+// === BOSS UPDATE ===
+function updateBoss(dt) {
+  if (!boss || !boss.alive || !bossActive) return;
+  boss.anim += dt;
+  if (boss.stunTimer > 0) { boss.stunTimer -= dt; return; }
+  if (boss.flashTimer > 0) boss.flashTimer -= dt;
+  if (boss.attackCd > 0) { boss.attackCd -= dt; return; }
+
+  const dx = P.x - boss.x;
+  boss.dir = dx < 0 ? -1 : 1;
+  const dist = Math.abs(dx);
+
+  // Phase change at half health
+  if (boss.hp < boss.maxHp / 2 && boss.phase === 0) {
+    boss.phase = 1;
+    TAS.fx.flash('#ff0000', 0.4);
+    TAS.audio.playTone(100, 0.3, 'sawtooth', 0.1, 200);
+  }
+
+  const speed = boss.phase === 0 ? 50 : 80;
+  const atkRate = boss.phase === 0 ? 2.0 : 1.2;
+
+  // Move toward player
+  if (dist > 60) {
+    boss.x += boss.dir * speed * dt;
+  }
+
+  // Boss attack pattern
+  boss.pattern = (boss.pattern + 1) % 3;
+
+  if (boss.pattern === 0) {
+    // Lunge attack
+    boss.attackCd = atkRate;
+    if (dist < 50) hurtPlayer(2);
+    TAS.audio.playTone(120, 0.15, 'sawtooth', 0.08);
+  } else if (boss.pattern === 1) {
+    // Projectile spray
+    boss.attackCd = atkRate;
+    const count = boss.phase === 0 ? 2 : 4;
+    for (let i = 0; i < count; i++) {
+      const angle = -0.4 + (0.8 * i / (count - 1));
+      projectiles.push({
+        x: boss.x + boss.dir * 20, y: boss.y - 8,
+        vx: boss.dir * 150 * Math.cos(angle),
+        vy: -100 * Math.sin(angle) - 30,
+        w: 8, h: 8, dmg: 1,
+        owner: 'enemy', type: 'energy', life: 3, anim: 0
+      });
+    }
+    TAS.audio.playTone(300, 0.1, 'square', 0.07, 600);
+  } else {
+    // Jump slam
+    boss.attackCd = atkRate * 1.5;
+    boss.vy = -300;
+    boss.vx = boss.dir * 100;
+    TAS.audio.playTone(150, 0.08, 'triangle', 0.06);
+  }
+
+  // Boss physics
+  boss.vy = (boss.vy || 0) + GRAV * dt;
+  boss.y += boss.vy * dt;
+  boss.x += (boss.vx || 0) * dt;
+  if (boss.vx) boss.vx *= 0.95;
+
+  // Ground
+  const ty = Math.floor((boss.y + boss.h / 2) / TILE);
+  if (ty >= 0 && ty < LEVEL_H) {
+    const tx = Math.floor(boss.x / TILE);
+    if (tx >= 0 && tx < LEVEL_W && tiles[ty][tx] === 1) {
+      boss.y = ty * TILE - boss.h / 2;
+      boss.vy = 0;
+    }
+  }
+
+  // Contact damage
+  if (TAS.hit.rectOverlap(P.x - P.w / 2, P.y - P.h / 2, P.w, P.h,
+      boss.x - boss.w / 2, boss.y - boss.h / 2, boss.w, boss.h)) {
+    hurtPlayer(1);
+  }
+}
+
+// === PROJECTILES ===
+function updateProjectiles(dt) {
+  for (let i = projectiles.length - 1; i >= 0; i--) {
+    const p = projectiles[i];
+    p.x += p.vx * dt;
+    p.y += p.vy * dt;
+    p.life -= dt;
+    p.anim += dt;
+
+    if (p.type !== 'shuriken' && p.type !== 'energy') {
+      p.vy += 100 * dt; // gravity on arrows
+    }
+
+    if (p.life <= 0) { projectiles.splice(i, 1); continue; }
+
+    // Tile collision
+    const tx = Math.floor(p.x / TILE);
+    const ty = Math.floor(p.y / TILE);
+    if (tx < 0 || tx >= LEVEL_W || ty < 0 || ty >= LEVEL_H || tiles[ty][tx] === 1) {
+      projectiles.splice(i, 1);
+      continue;
+    }
+
+    if (p.owner === 'enemy') {
+      if (TAS.hit.rectOverlap(p.x - p.w / 2, p.y - p.h / 2, p.w, p.h,
+          P.x - P.w / 2, P.y - P.h / 2, P.w, P.h)) {
+        hurtPlayer(p.dmg);
+        projectiles.splice(i, 1);
+      }
+    } else if (p.owner === 'player') {
+      let hit = false;
+      for (const e of enemies) {
+        if (!e.alive) continue;
+        if (TAS.hit.rectOverlap(p.x - p.w / 2, p.y - p.h / 2, p.w, p.h,
+            e.x - e.w / 2, e.y - e.h / 2, e.w, e.h)) {
+          damageEnemy(e, p.dmg);
+          hit = true;
+          break;
+        }
+      }
+      if (!hit && boss && boss.alive && bossActive) {
+        if (TAS.hit.rectOverlap(p.x - p.w / 2, p.y - p.h / 2, p.w, p.h,
+            boss.x - boss.w / 2, boss.y - boss.h / 2, boss.w, boss.h)) {
+          damageBoss(p.dmg);
+          hit = true;
+        }
+      }
+      if (hit) projectiles.splice(i, 1);
+    }
+  }
+}
+
+// === PICKUPS ===
+function updatePickups(dt) {
+  for (const pk of pickups) {
+    if (!pk.alive) continue;
+    pk.anim += dt;
+
+    if (TAS.hit.rectOverlap(P.x - P.w / 2, P.y - P.h / 2, P.w, P.h,
+        pk.x - 8, pk.y - 8, 16, 16)) {
+      pk.alive = false;
+      if (pk.type === 'weapon') {
+        P.weapon = pk.weapon;
+        TAS.audio.playTone(660, 0.1, 'square', 0.07);
+        TAS.audio.playTone(880, 0.1, 'square', 0.07);
+      } else if (pk.type === 'crystal') {
+        P.weaponLevel[P.weapon] = 1;
+        TAS.audio.playTone(440, 0.08, 'triangle', 0.07);
+        TAS.audio.playTone(880, 0.12, 'triangle', 0.08);
+        TAS.particles.spawn(P.x, P.y, '#ffdd00', 10, 3);
+      } else if (pk.type === 'ammo') {
+        P.shurikenAmmo = Math.min(P.shurikenAmmo + 5, 30);
+        TAS.audio.playTone(500, 0.06, 'square', 0.05);
+      } else if (pk.type === 'health') {
+        P.hp = Math.min(P.hp + 2, P.maxHp);
+        TAS.audio.playTone(440, 0.1, 'triangle', 0.06);
+        TAS.particles.spawn(P.x, P.y, '#44ff88', 6, 2);
+      }
+      score += 50;
+    }
+  }
+}
+
+// === CAMERA ===
+function updateCamera(dt) {
+  const target = P.x - GW / 3;
+  camX += (target - camX) * 4 * dt;
+  camX = TAS.math.clamp(camX, 0, LEVEL_W * TILE - GW);
+
+  // Update checkpoint
+  if (P.x > checkpoint + 200) {
+    checkpoint = P.x;
+  }
+}
+
+// === BACKGROUND PARTICLES ===
+function updateBgParticles(dt) {
+  for (const bp of bgParticles) {
+    bp.x += bp.vx * dt;
+    bp.y += bp.vy * dt;
+    if (bp.y > LEVEL_H * TILE) { bp.y = 0; bp.x = Math.random() * LEVEL_W * TILE; }
+    if (bp.x < 0) bp.x = LEVEL_W * TILE;
+    if (bp.x > LEVEL_W * TILE) bp.x = 0;
+  }
+}
+
+// === DRAW ===
+function draw(dt) {
+  ctx.fillStyle = C.bg[stage] || '#0a0e14';
+  ctx.fillRect(0, 0, GW, GH);
+
+  if (state === 'title') {
+    drawTitleScreen();
+    return;
+  }
+
+  if (state === 'gameOver') {
+    TAS.ui.drawGameOver(score, highScore, GW, GH, { frame, extra: 'Stage: ' + (stage + 1) + ' - ' + STAGE_NAMES[stage] });
+    return;
+  }
+
+  if (state === 'stageIntro') {
+    drawStageIntro();
+    return;
+  }
+
+  if (state === 'stageClear') {
+    drawStageClear();
+    return;
+  }
+
+  if (state === 'victory') {
+    drawVictory();
+    return;
+  }
+
+  // === GAME RENDERING ===
+  ctx.save();
+  TAS.fx.applyShake();
+  ctx.save();
+  ctx.translate(-camX, 0);
+
+  // Background particles
+  ctx.globalAlpha = 0.5;
+  for (const bp of bgParticles) {
+    ctx.fillStyle = C.accent[stage];
+    ctx.globalAlpha = bp.alpha;
+    ctx.fillRect(bp.x, bp.y, bp.size, bp.size);
+  }
+  ctx.globalAlpha = 1;
+
+  // Draw tiles
+  drawTiles();
+
+  // Draw pickups
+  drawPickups();
+
+  // Draw enemies
+  drawEnemies();
+
+  // Draw boss
+  drawBoss();
+
+  // Draw projectiles
+  drawProjectiles();
+
+  // Draw player
+  drawPlayer();
+
+  // Engine particles
+  TAS.particles.draw();
+
+  ctx.restore(); // camera
+  ctx.restore(); // shake
+
+  TAS.fx.drawFlash(GW, GH);
+
+  // HUD
+  drawHUD();
+  TAS.input.drawTouchControls(GW, GH);
+}
+
+// === DRAW TILES ===
+function drawTiles() {
+  const startX = Math.max(0, Math.floor(camX / TILE));
+  const endX = Math.min(LEVEL_W, startX + Math.ceil(GW / TILE) + 2);
+
+  for (let y = 0; y < LEVEL_H; y++) {
+    for (let x = startX; x < endX; x++) {
+      const t = tiles[y][x];
+      if (t === 1) {
+        // Solid wall/floor
+        const px = x * TILE;
+        const py = y * TILE;
+        ctx.fillStyle = C.wall[stage];
+        ctx.fillRect(px, py, TILE, TILE);
+        // Border detail
+        ctx.fillStyle = C.floor[stage];
+        ctx.fillRect(px, py, TILE, 2);
+        ctx.fillRect(px, py, 2, TILE);
+        // Occasional highlight
+        if ((x + y * 7) % 11 === 0) {
+          ctx.fillStyle = C.accent[stage];
+          ctx.globalAlpha = 0.15;
+          ctx.fillRect(px + 4, py + 4, 8, 8);
+          ctx.globalAlpha = 1;
+        }
+      } else if (t === 2) {
+        // Hazard
+        const px = x * TILE;
+        const py = y * TILE;
+        ctx.fillStyle = stage === 5 ? '#4488ff' : '#44aaaa';
+        ctx.globalAlpha = 0.5 + Math.sin(frame * 0.1 + x) * 0.3;
+        ctx.fillRect(px, py, TILE, TILE);
+        ctx.globalAlpha = 1;
+      }
+    }
+  }
+}
+
+// === DRAW PLAYER ===
+function drawPlayer() {
+  if (P.iframes > 0 && Math.floor(frame / 4) % 2 === 0) return;
+
+  const px = P.x;
+  const py = P.y;
+
+  // Slash trail
+  for (const tr of P.slashTrail) {
+    ctx.globalAlpha = tr.life * 2;
+    ctx.fillStyle = C.accent[stage];
+    ctx.beginPath();
+    ctx.arc(tr.x, tr.y, 6 * tr.life, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+
+  // Dash afterimage
+  if (P.dashing > 0) {
+    ctx.globalAlpha = 0.4;
+    ctx.fillStyle = C.accent[stage];
+    ctx.fillRect(px - P.w / 2 - P.dashDir * 8, py - P.h / 2, P.w, P.h);
+    ctx.globalAlpha = 1;
+  }
+
+  ctx.save();
+  ctx.translate(px, py);
+  if (P.dir === -1) ctx.scale(-1, 1);
+
+  // Body
+  ctx.fillStyle = '#1a1a2e';
+  ctx.fillRect(-5, -10, 10, 18);
+
+  // Head
+  ctx.fillStyle = '#222244';
+  ctx.fillRect(-4, -14, 8, 8);
+  // Eye
+  ctx.fillStyle = C.accent[stage];
+  ctx.fillRect(1, -12, 3, 2);
+  // Headband
+  ctx.fillStyle = '#cc2244';
+  ctx.fillRect(-5, -12, 10, 2);
+  // Headband tail
+  ctx.fillStyle = '#aa1133';
+  ctx.fillRect(-7, -12, 3, 1);
+  ctx.fillRect(-9, -11, 2, 1);
+
+  // Arms
+  ctx.fillStyle = '#1a1a2e';
+  if (P.attackTimer > 0) {
+    // Attack pose
+    if (P.attackUp) {
+      ctx.fillRect(-2, -20, 4, 10);
+      drawWeaponSprite(0, -24, true);
+    } else {
+      ctx.fillRect(4, -8, 12, 4);
+      drawWeaponSprite(14, -8, false);
+    }
+  } else {
+    ctx.fillRect(3, -6, 4, 8);
+    ctx.fillRect(-6, -4, 4, 6);
+  }
+
+  // Legs
+  ctx.fillStyle = '#14142a';
+  const legAnim = P.grounded ? Math.sin(P.anim * 8) * 2 : 3;
+  ctx.fillRect(-4, 6, 4, 6 + legAnim);
+  ctx.fillRect(1, 6, 4, 6 - legAnim);
+
+  // Wall cling indicator
+  if (P.walling !== 0) {
+    ctx.fillStyle = C.accent[stage];
+    ctx.globalAlpha = 0.6;
+    ctx.fillRect(-6, -14, 12, 2);
+    ctx.globalAlpha = 1;
+  }
+
+  // Ceiling hang indicator
+  if (P.ceiling) {
+    ctx.fillStyle = C.accent[stage];
+    ctx.fillRect(-4, -16, 8, 3);
+  }
+
+  ctx.restore();
+
+  // Weapon glow trail
+  if (P.attackTimer > 0) {
+    const glowColors = ['#ff4466', '#44aaff', '#ffdd44'];
+    ctx.strokeStyle = glowColors[P.weapon];
+    ctx.lineWidth = 2;
+    ctx.globalAlpha = P.attackTimer * 4;
+    ctx.beginPath();
+    if (P.attackUp) {
+      ctx.arc(px, py - 16, 18, -Math.PI * 0.8, -Math.PI * 0.2);
+    } else {
+      const sx = px + P.attackDir * 6;
+      const arcDir = P.attackDir > 0 ? 1 : -1;
+      ctx.arc(sx + arcDir * 10, py - 4, 16, -Math.PI * 0.5 * arcDir, Math.PI * 0.3 * arcDir);
+    }
+    ctx.stroke();
+    ctx.globalAlpha = 1;
+    ctx.lineWidth = 1;
+  }
+}
+
+function drawWeaponSprite(ox, oy, up) {
+  const wep = P.weapon;
+  if (wep === 0) {
+    // Katana
+    ctx.fillStyle = '#aabbcc';
+    if (up) {
+      ctx.fillRect(ox - 1, oy - 12, 2, 14);
+      ctx.fillStyle = '#ddeeff';
+      ctx.fillRect(ox - 1, oy - 12, 2, 3);
+    } else {
+      ctx.fillRect(ox, oy - 1, 14, 2);
+      ctx.fillStyle = '#ddeeff';
+      ctx.fillRect(ox + 10, oy - 1, 4, 2);
+    }
+  } else if (wep === 1) {
+    // Chain
+    ctx.fillStyle = '#888888';
+    for (let i = 0; i < 5; i++) {
+      const cx = up ? ox + Math.sin(i * 0.8) * 2 : ox + i * 3;
+      const cy = up ? oy - i * 3 : oy + Math.sin(i * 0.6) * 2;
+      ctx.fillRect(cx, cy, 2, 2);
+    }
+    ctx.fillStyle = '#aaaaaa';
+    const endX = up ? ox : ox + 14;
+    const endY = up ? oy - 14 : oy;
+    ctx.fillRect(endX - 2, endY - 2, 5, 5);
+  }
+}
+
+// === DRAW ENEMIES ===
+function drawEnemies() {
+  for (const e of enemies) {
+    if (!e.alive) continue;
+    const ex = e.x;
+    const ey = e.y;
+
+    // Skip if off screen
+    if (ex < camX - 20 || ex > camX + GW + 20) continue;
+
+    ctx.save();
+    ctx.translate(ex, ey);
+    if (e.dir === -1) ctx.scale(-1, 1);
+
+    if (e.stunTimer > 0) {
+      ctx.globalAlpha = 0.5 + Math.sin(frame * 0.5) * 0.3;
+    }
+
+    if (e.type === 'soldier') {
+      ctx.fillStyle = '#443322';
+      ctx.fillRect(-6, -8, 12, 16);
+      ctx.fillStyle = '#554433';
+      ctx.fillRect(-5, -12, 10, 6);
+      ctx.fillStyle = '#886644';
+      ctx.fillRect(-5, -13, 10, 2); // helmet
+      // Sword
+      ctx.fillStyle = '#aaa';
+      ctx.fillRect(5, -6, 8, 2);
+    } else if (e.type === 'archer') {
+      ctx.fillStyle = '#224422';
+      ctx.fillRect(-5, -8, 10, 16);
+      ctx.fillStyle = '#335533';
+      ctx.fillRect(-4, -12, 8, 6);
+      // Bow
+      ctx.strokeStyle = '#886644';
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.arc(6, -2, 8, -1.2, 1.2);
+      ctx.stroke();
+      ctx.lineWidth = 1;
+    } else if (e.type === 'shield') {
+      ctx.fillStyle = '#333355';
+      ctx.fillRect(-7, -9, 14, 18);
+      ctx.fillStyle = '#444477';
+      ctx.fillRect(-6, -13, 12, 7);
+      // Shield
+      ctx.fillStyle = '#666688';
+      ctx.fillRect(-8, -8, 4, 14);
+      ctx.fillStyle = '#7777aa';
+      ctx.fillRect(-7, -6, 2, 10);
+    } else if (e.type === 'ninja') {
+      ctx.fillStyle = '#1a1a1a';
+      ctx.fillRect(-5, -8, 10, 16);
+      ctx.fillStyle = '#222222';
+      ctx.fillRect(-4, -12, 8, 6);
+      // Red eyes
+      ctx.fillStyle = '#ff2244';
+      ctx.fillRect(0, -10, 3, 2);
+      // Blade
+      ctx.fillStyle = '#cccccc';
+      ctx.fillRect(4, -8, 10, 1.5);
+    } else if (e.type === 'drone') {
+      ctx.fillStyle = '#334455';
+      ctx.fillRect(-8, -6, 16, 10);
+      ctx.fillStyle = '#446688';
+      ctx.fillRect(-6, -8, 12, 4);
+      // Glow
+      ctx.fillStyle = '#ff4444';
+      ctx.globalAlpha = 0.5 + Math.sin(e.anim * 5) * 0.3;
+      ctx.fillRect(-2, 2, 4, 3);
+      ctx.globalAlpha = 1;
+      // Propellers
+      const propAnim = Math.sin(e.anim * 20) * 5;
+      ctx.fillStyle = '#666';
+      ctx.fillRect(-8 + propAnim, -9, 6, 2);
+      ctx.fillRect(2 - propAnim, -9, 6, 2);
+    }
+
+    ctx.globalAlpha = 1;
+    ctx.restore();
+
+    // HP bar for damaged enemies
+    if (e.hp < e.maxHp) {
+      ctx.fillStyle = '#222';
+      ctx.fillRect(ex - 8, ey - e.h / 2 - 6, 16, 3);
+      ctx.fillStyle = '#ff4444';
+      ctx.fillRect(ex - 8, ey - e.h / 2 - 6, 16 * (e.hp / e.maxHp), 3);
+    }
+  }
+}
+
+// === DRAW BOSS ===
+function drawBoss() {
+  if (!boss || !boss.alive || !bossActive) return;
+
+  const bx = boss.x;
+  const by = boss.y;
+
+  // Flash on hit
+  if (boss.flashTimer > 0 && Math.floor(frame / 2) % 2 === 0) {
+    ctx.globalAlpha = 0.7;
+  }
+
+  ctx.save();
+  ctx.translate(bx, by);
+  if (boss.dir === -1) ctx.scale(-1, 1);
+
+  // Body
+  ctx.fillStyle = '#2a1028';
+  ctx.fillRect(-14, -16, 28, 32);
+
+  // Armor
+  ctx.fillStyle = '#3a1838';
+  ctx.fillRect(-16, -12, 32, 24);
+
+  // Head
+  ctx.fillStyle = '#221030';
+  ctx.fillRect(-10, -22, 20, 12);
+
+  // Crown/helmet
+  ctx.fillStyle = '#aa4400';
+  ctx.fillRect(-12, -24, 24, 4);
+  ctx.fillRect(-8, -28, 4, 4);
+  ctx.fillRect(4, -28, 4, 4);
+
+  // Eyes
+  ctx.fillStyle = boss.phase === 1 ? '#ff2200' : '#ff8800';
+  ctx.fillRect(-6, -18, 4, 3);
+  ctx.fillRect(3, -18, 4, 3);
+
+  // Cape
+  ctx.fillStyle = '#440022';
+  ctx.globalAlpha = 0.8;
+  const capeWave = Math.sin(boss.anim * 3) * 3;
+  ctx.beginPath();
+  ctx.moveTo(-14, -8);
+  ctx.lineTo(-18 + capeWave, 18);
+  ctx.lineTo(18 - capeWave, 18);
+  ctx.lineTo(14, -8);
+  ctx.fill();
+  ctx.globalAlpha = 1;
+
+  // Weapon
+  ctx.fillStyle = '#888';
+  ctx.fillRect(12, -14, 4, 24);
+  ctx.fillStyle = C.accent[stage];
+  ctx.fillRect(12, -18, 4, 6);
+
+  // Phase 2 aura
+  if (boss.phase === 1) {
+    ctx.strokeStyle = C.accent[stage];
+    ctx.lineWidth = 2;
+    ctx.globalAlpha = 0.3 + Math.sin(boss.anim * 4) * 0.2;
+    ctx.beginPath();
+    ctx.arc(0, 0, 28, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.globalAlpha = 1;
+    ctx.lineWidth = 1;
+  }
+
+  ctx.restore();
+
+  // Boss HP bar
+  ctx.fillStyle = '#000';
+  ctx.fillRect(bx - 24, by - boss.h / 2 - 12, 48, 6);
+  ctx.fillStyle = boss.phase === 1 ? '#ff2244' : '#ff8844';
+  ctx.fillRect(bx - 23, by - boss.h / 2 - 11, 46 * (boss.hp / boss.maxHp), 4);
+
+  // Boss name
+  ctx.fillStyle = '#ff8844';
+  ctx.font = 'bold 8px monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText(boss.name, bx, by - boss.h / 2 - 16);
+  ctx.textAlign = 'left';
+
+  ctx.globalAlpha = 1;
+}
+
+// === DRAW PROJECTILES ===
+function drawProjectiles() {
+  for (const p of projectiles) {
+    if (p.x < camX - 20 || p.x > camX + GW + 20) continue;
+
+    if (p.type === 'arrow') {
+      ctx.fillStyle = '#886644';
+      ctx.save();
+      ctx.translate(p.x, p.y);
+      ctx.rotate(Math.atan2(p.vy, p.vx));
+      ctx.fillRect(-6, -1, 12, 2);
+      ctx.fillStyle = '#aaa';
+      ctx.fillRect(4, -2, 3, 4);
+      ctx.restore();
+    } else if (p.type === 'shuriken') {
+      ctx.save();
+      ctx.translate(p.x, p.y);
+      ctx.rotate(p.anim * 12);
+      ctx.fillStyle = p.owner === 'player' ? '#ddeeff' : '#ff8844';
+      ctx.fillRect(-4, -1, 8, 2);
+      ctx.fillRect(-1, -4, 2, 8);
+      ctx.restore();
+    } else if (p.type === 'energy') {
+      ctx.fillStyle = C.accent[stage];
+      ctx.globalAlpha = 0.7;
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, 4, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.globalAlpha = 0.4;
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, 6, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.globalAlpha = 1;
+    }
+  }
+}
+
+// === DRAW PICKUPS ===
+function drawPickups() {
+  for (const pk of pickups) {
+    if (!pk.alive) continue;
+    if (pk.x < camX - 20 || pk.x > camX + GW + 20) continue;
+
+    const bob = Math.sin(pk.anim * 3) * 3;
+    const px = pk.x;
+    const py = pk.y + bob;
+
+    if (pk.type === 'weapon') {
+      const cols = ['#ff4466', '#44aaff', '#ffdd44'];
+      ctx.fillStyle = cols[pk.weapon] || '#fff';
+      ctx.fillRect(px - 6, py - 4, 12, 8);
+      ctx.fillStyle = '#fff';
+      ctx.font = '6px monospace';
+      ctx.textAlign = 'center';
+      ctx.fillText(['K', 'C', 'S'][pk.weapon], px, py + 2);
+    } else if (pk.type === 'crystal') {
+      ctx.fillStyle = '#ffdd00';
+      ctx.globalAlpha = 0.7 + Math.sin(pk.anim * 5) * 0.3;
+      ctx.beginPath();
+      ctx.moveTo(px, py - 8);
+      ctx.lineTo(px + 5, py);
+      ctx.lineTo(px, py + 8);
+      ctx.lineTo(px - 5, py);
+      ctx.closePath();
+      ctx.fill();
+      ctx.globalAlpha = 1;
+    } else if (pk.type === 'ammo') {
+      ctx.fillStyle = '#aabbcc';
+      ctx.fillRect(px - 4, py - 4, 8, 8);
+      ctx.fillStyle = '#fff';
+      ctx.font = '6px monospace';
+      ctx.textAlign = 'center';
+      ctx.fillText('+', px, py + 2);
+    } else if (pk.type === 'health') {
+      ctx.fillStyle = '#44ff88';
+      ctx.fillRect(px - 3, py - 6, 6, 12);
+      ctx.fillRect(px - 6, py - 3, 12, 6);
+    }
+    ctx.textAlign = 'left';
+  }
+}
+
+// === HUD ===
+function drawHUD() {
+  // Top bar background
+  ctx.fillStyle = 'rgba(10,5,20,0.85)';
+  ctx.fillRect(0, 0, GW, 28);
+
+  // Score
+  ctx.fillStyle = '#ffdd44';
+  ctx.font = 'bold 10px monospace';
+  ctx.textAlign = 'left';
+  ctx.fillText('SCORE: ' + score, 6, 12);
+
+  // Stage
+  ctx.fillStyle = C.accent[stage];
+  ctx.textAlign = 'center';
+  ctx.fillText('STAGE ' + (stage + 1), GW / 2, 12);
+
+  // Lives
+  ctx.textAlign = 'right';
+  ctx.fillStyle = '#44dd88';
+  for (let i = 0; i < lives; i++) {
+    ctx.fillRect(GW - 12 - i * 14, 4, 10, 10);
+    ctx.fillStyle = '#222';
+    ctx.fillRect(GW - 10 - i * 14, 6, 6, 6);
+    ctx.fillStyle = '#44dd88';
+  }
+
+  // HP bar
+  ctx.fillStyle = '#222';
+  ctx.fillRect(6, 16, 62, 8);
+  const hpPct = P.hp / P.maxHp;
+  ctx.fillStyle = hpPct > 0.5 ? '#44cc66' : (hpPct > 0.25 ? '#ccaa44' : '#cc4444');
+  ctx.fillRect(7, 17, 60 * hpPct, 6);
+
+  // Weapon indicator
+  const wepNames = ['KATANA', 'CHAIN', 'SHURIKEN'];
+  const wepCols = ['#ff4466', '#44aaff', '#ffdd44'];
+  ctx.fillStyle = wepCols[P.weapon];
+  ctx.textAlign = 'left';
+  ctx.font = '8px monospace';
+  ctx.fillText(wepNames[P.weapon] + (P.weaponLevel[P.weapon] ? '+' : ''), 72, 22);
+
+  // Ammo (if shuriken)
+  if (P.weapon === 2) {
+    ctx.fillStyle = '#aaa';
+    ctx.fillText('x' + P.shurikenAmmo, 130, 22);
+  }
+
+  // Combo
+  if (P.combo > 1) {
+    ctx.fillStyle = '#ff8844';
+    ctx.font = 'bold 10px monospace';
+    ctx.textAlign = 'right';
+    ctx.fillText(P.combo + 'x COMBO', GW - 6, 24);
+  }
+
+  // Boss HP at bottom
+  if (boss && boss.alive && bossActive) {
+    ctx.fillStyle = 'rgba(10,5,20,0.8)';
+    ctx.fillRect(GW / 2 - 80, GH - 18, 160, 14);
+    ctx.fillStyle = '#333';
+    ctx.fillRect(GW / 2 - 78, GH - 16, 156, 10);
+    const bhp = boss.hp / boss.maxHp;
+    ctx.fillStyle = bhp > 0.5 ? '#ff8844' : '#ff2244';
+    ctx.fillRect(GW / 2 - 78, GH - 16, 156 * bhp, 10);
+    ctx.fillStyle = '#fff';
+    ctx.font = '8px monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText(boss.name, GW / 2, GH - 8);
+  }
+
+  ctx.textAlign = 'left';
+}
+
+// === TITLE SCREEN ===
+function drawTitleScreen() {
+  // Dark background with atmosphere
+  ctx.fillStyle = '#0a0810';
+  ctx.fillRect(0, 0, GW, GH);
+
+  // Tower silhouette
+  ctx.fillStyle = '#141020';
+  ctx.fillRect(GW / 2 - 30, 60, 60, GH - 60);
+  ctx.fillRect(GW / 2 - 40, 50, 80, 20);
+  ctx.fillRect(GW / 2 - 20, 30, 40, 30);
+  // Windows
+  for (let i = 0; i < 6; i++) {
+    ctx.fillStyle = '#ff880044';
+    ctx.globalAlpha = 0.3 + Math.sin(frame * 0.03 + i) * 0.2;
+    ctx.fillRect(GW / 2 - 10, 80 + i * 35, 8, 12);
+    ctx.fillRect(GW / 2 + 4, 80 + i * 35, 8, 12);
+  }
+  ctx.globalAlpha = 1;
+
+  // Lightning flash occasionally
+  if (frame % 180 < 3) {
+    ctx.fillStyle = '#ffffff';
+    ctx.globalAlpha = 0.1;
+    ctx.fillRect(0, 0, GW, GH);
+    ctx.globalAlpha = 1;
+  }
+
+  // Title
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#000';
+  ctx.font = 'bold 24px monospace';
+  ctx.fillText('SHADOW NINJA', GW / 2 + 2, 102);
+  ctx.fillStyle = '#cc2244';
+  ctx.fillText('SHADOW NINJA', GW / 2, 100);
+
+  // Subtitle
+  ctx.fillStyle = '#888';
+  ctx.font = '10px monospace';
+  ctx.fillText('A Tale of Tasern', GW / 2, 120);
+
+  // Ninja silhouettes
+  ctx.fillStyle = '#1a1a2e';
+  // Left ninja
+  ctx.fillRect(GW / 2 - 80, 180, 10, 22);
+  ctx.fillRect(GW / 2 - 78, 174, 8, 8);
+  ctx.fillStyle = '#cc2244';
+  ctx.fillRect(GW / 2 - 82, 176, 6, 2);
+  // Right ninja
+  ctx.fillStyle = '#1a1a2e';
+  ctx.fillRect(GW / 2 + 70, 180, 10, 22);
+  ctx.fillRect(GW / 2 + 72, 174, 8, 8);
+  ctx.fillStyle = '#4488ff';
+  ctx.fillRect(GW / 2 + 78, 176, 6, 2);
+
+  // Controls
+  ctx.fillStyle = '#666';
+  ctx.font = '8px monospace';
+  ctx.fillText('ARROWS: Move  |  Z: Jump  |  X: Attack  |  SHIFT: Dash', GW / 2, 240);
+  ctx.fillText('UP+JUMP: Ceiling Grab  |  WALL+JUMP: Wall Jump', GW / 2, 254);
+
+  // Start prompt
+  const pulse = Math.sin(frame * 0.05) * 0.3 + 0.7;
+  ctx.globalAlpha = pulse;
+  ctx.fillStyle = '#ffdd44';
+  ctx.font = 'bold 12px monospace';
+  ctx.fillText('PRESS ANY KEY TO START', GW / 2, GH - 40);
+  ctx.globalAlpha = 1;
+
+  // High score
+  if (highScore > 0) {
+    ctx.fillStyle = '#44dd88';
+    ctx.font = '9px monospace';
+    ctx.fillText('HIGH SCORE: ' + highScore, GW / 2, GH - 22);
+  }
+  ctx.textAlign = 'left';
+}
+
+// === STAGE INTRO ===
+function drawStageIntro() {
+  ctx.fillStyle = '#0a0810';
+  ctx.fillRect(0, 0, GW, GH);
+
+  ctx.textAlign = 'center';
+  ctx.fillStyle = C.accent[stage];
+  ctx.font = 'bold 14px monospace';
+  ctx.fillText('STAGE ' + (stage + 1), GW / 2, GH / 2 - 20);
+
+  ctx.fillStyle = '#fff';
+  ctx.font = 'bold 18px monospace';
+  ctx.fillText(STAGE_NAMES[stage], GW / 2, GH / 2 + 10);
+
+  if (BOSS_STAGES.includes(stage)) {
+    ctx.fillStyle = '#ff4444';
+    ctx.font = '10px monospace';
+    ctx.fillText('BOSS AHEAD', GW / 2, GH / 2 + 35);
+  }
+  ctx.textAlign = 'left';
+}
+
+// === STAGE CLEAR ===
+function drawStageClear() {
+  ctx.fillStyle = 'rgba(10,8,20,0.85)';
+  ctx.fillRect(0, 0, GW, GH);
+
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#44dd88';
+  ctx.font = 'bold 18px monospace';
+  ctx.fillText('STAGE CLEAR!', GW / 2, GH / 2 - 10);
+
+  ctx.fillStyle = '#ffdd44';
+  ctx.font = '12px monospace';
+  ctx.fillText('+1000 POINTS', GW / 2, GH / 2 + 20);
+  ctx.textAlign = 'left';
+}
+
+// === VICTORY ===
+function drawVictory() {
+  ctx.fillStyle = '#0a0810';
+  ctx.fillRect(0, 0, GW, GH);
+
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#ffdd44';
+  ctx.font = 'bold 20px monospace';
+  ctx.fillText('VICTORY!', GW / 2, GH / 2 - 30);
+
+  ctx.fillStyle = '#44dd88';
+  ctx.font = '12px monospace';
+  ctx.fillText('The Dark Emperor Falls!', GW / 2, GH / 2);
+
+  ctx.fillStyle = '#fff';
+  ctx.font = 'bold 14px monospace';
+  ctx.fillText('FINAL SCORE: ' + score, GW / 2, GH / 2 + 30);
+
+  if (score >= highScore) {
+    const pulse = Math.sin(frame * 0.06) * 0.3 + 0.7;
+    ctx.globalAlpha = pulse;
+    ctx.fillStyle = '#ffdd44';
+    ctx.font = '10px monospace';
+    ctx.fillText('NEW HIGH SCORE!', GW / 2, GH / 2 + 50);
+    ctx.globalAlpha = 1;
+  }
+  ctx.textAlign = 'left';
+}
+
+// === START GAME ===
+function startGame() {
+  state = 'stageIntro';
+  score = 0;
+  lives = 3;
+  stage = 0;
+  frame = 0;
+  completeTimer = 2;
+  TAS.particles.clear();
+  generateLevel(0);
+}
+
+// === START ===
+TAS.loop.start(update, draw);
+
+})();
+</script>
+</body>
+</html>

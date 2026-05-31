@@ -1,0 +1,1745 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Lolo Puzzle</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body { width: 100%; height: 100%; overflow: hidden; background: #111; touch-action: none; }
+canvas { display: block; margin: 0 auto; }
+#back-link { position: fixed; bottom: 8px; left: 50%; transform: translateX(-50%); color: #666; font-family: monospace; font-size: 12px; text-decoration: none; z-index: 10; }
+#back-link:hover { color: #aaa; }
+</style>
+</head>
+<body>
+<canvas id="gc"></canvas>
+<a id="back-link" href="/games">Back to Arcade</a>
+<script src="nft-loader.js"></script>
+<script>if(window.NftLoader)NftLoader.gate();</script>
+<script src="tasern-engine.js"></script>
+<script>
+(function(){
+"use strict";
+
+// === CONSTANTS ===
+var GW = 352, GH = 384; // 352 for grid + 32 for HUD
+var COLS = 11, ROWS = 11, TS = 32;
+var HUD_H = 32;
+var ctx = TAS.ctx;
+
+TAS.initCanvas(GW, GH);
+TAS.input.initTouch({ buttons: ['a', 'b'], labels: { a: 'SHOOT', b: 'RESET' } });
+
+// Tile types
+var T = {
+  FLOOR: 0, WALL: 1, EMERALD: 2, HEART: 3, CHEST: 4,
+  WATER: 5, ARROW_U: 6, ARROW_D: 7, ARROW_L: 8, ARROW_R: 9,
+  BUSH: 10, BRIDGE: 11, EXIT: 12
+};
+
+// Enemy types
+var E = { MEDUSA: 0, SKULL: 1, DRAGON: 2, ARMADILLO: 3, ROCKY: 4 };
+
+// Directions
+var DX = [0, 0, -1, 1]; // UP DOWN LEFT RIGHT
+var DY = [-1, 1, 0, 0];
+
+// === STATE ===
+var state = 'title';
+var frame = 0;
+var room = 0;
+var grid = [];
+var hearts = [];
+var enemies = [];
+var player = { x: 0, y: 0, dir: 3, shots: 0, moving: false, mx: 0, my: 0, mt: 0 };
+var chest = { x: 0, y: 0, open: false };
+var exitPos = { x: 0, y: 0 };
+var heartsTotal = 0;
+var heartsCollected = 0;
+var eggs = []; // { x, y, timer, enemy }
+var bullets = []; // { x, y, dx, dy }
+var fireballs = []; // { x, y, dx, dy, timer }
+var dead = false;
+var deadTimer = 0;
+var cleared = false;
+var clearedTimer = 0;
+var moveDelay = 0;
+var inputLock = false;
+var allHeartsGot = false;
+var progress = 0;
+
+// Load progress
+try { progress = parseInt(localStorage.getItem('lolopuzzle_progress') || '0', 10); } catch(e) { progress = 0; }
+
+// === ROOM DEFINITIONS ===
+// Legend: . floor, # wall, E emerald, H heart, C chest, ~ water, ^ v < > arrows, B bush
+// Enemies placed separately: M=medusa, S=skull, D=dragon(dir), A=armadillo, R=rocky
+// P = player start
+var ROOMS = [];
+
+function makeRoom(map, enemyList) {
+  return { map: map, enemies: enemyList || [] };
+}
+
+// Room 1: Simple intro - collect hearts, reach chest
+ROOMS.push(makeRoom([
+  '###########',
+  '#.........#',
+  '#.H.....H.#',
+  '#.........#',
+  '#....P....#',
+  '#.........#',
+  '#.........#',
+  '#.........#',
+  '#....C....#',
+  '#.........#',
+  '###########'
+], []));
+
+// Room 2: Introduce walls as obstacles
+ROOMS.push(makeRoom([
+  '###########',
+  '#P..#..H..#',
+  '#...#.....#',
+  '#...#.....#',
+  '#.........#',
+  '#.###.....#',
+  '#.........#',
+  '#.....#...#',
+  '#..H..#.C.#',
+  '#.....#...#',
+  '###########'
+], []));
+
+// Room 3: Introduce emerald blocks (pushable)
+ROOMS.push(makeRoom([
+  '###########',
+  '#P........#',
+  '#..E......#',
+  '#..#......#',
+  '#..#..H...#',
+  '#.........#',
+  '#...E.....#',
+  '#.....H...#',
+  '#.........#',
+  '#........C#',
+  '###########'
+], []));
+
+// Room 4: Introduce Medusa - line of sight danger
+ROOMS.push(makeRoom([
+  '###########',
+  '#P........#',
+  '#.........#',
+  '#....E....#',
+  '#....H....#',
+  '#.........#',
+  '#.........#',
+  '#...H.....#',
+  '#.........#',
+  '#........C#',
+  '###########'
+], [{ type: E.MEDUSA, x: 9, y: 4 }]));
+
+// Room 5: Use blocks to shield from Medusa
+ROOMS.push(makeRoom([
+  '###########',
+  '#P........#',
+  '#.........#',
+  '#..E..H...#',
+  '#.........#',
+  '#.........#',
+  '#...E.....#',
+  '#.........#',
+  '#.....H..C#',
+  '#.........#',
+  '###########'
+], [{ type: E.MEDUSA, x: 9, y: 3 }, { type: E.MEDUSA, x: 1, y: 8 }]));
+
+// Room 6: Introduce water + bridge mechanic
+ROOMS.push(makeRoom([
+  '###########',
+  '#P..H.....#',
+  '#.........#',
+  '#...~~~...#',
+  '#...~~~...#',
+  '#..E......#',
+  '#..E......#',
+  '#.........#',
+  '#....H...C#',
+  '#.........#',
+  '###########'
+], []));
+
+// Room 7: Introduce Skull (shoots fireballs)
+ROOMS.push(makeRoom([
+  '###########',
+  '#P........#',
+  '#.........#',
+  '#..H......#',
+  '#.........#',
+  '#....E....#',
+  '#.........#',
+  '#.........#',
+  '#.H......C#',
+  '#.........#',
+  '###########'
+], [{ type: E.SKULL, x: 9, y: 5 }]));
+
+// Room 8: Magic shot intro - 2 hearts = 1 shot, egg enemy
+ROOMS.push(makeRoom([
+  '###########',
+  '#P........#',
+  '#..H......#',
+  '#.........#',
+  '#.........#',
+  '#.........#',
+  '#.........#',
+  '#..H......#',
+  '#.........#',
+  '#........C#',
+  '###########'
+], [{ type: E.MEDUSA, x: 5, y: 5 }]));
+
+// Room 9: Arrow tiles
+ROOMS.push(makeRoom([
+  '###########',
+  '#P........#',
+  '#..>>>.H..#',
+  '#.........#',
+  '#..H......#',
+  '#....v....#',
+  '#....v....#',
+  '#....v....#',
+  '#........C#',
+  '#.........#',
+  '###########'
+], []));
+
+// Room 10: Bush cover
+ROOMS.push(makeRoom([
+  '###########',
+  '#P........#',
+  '#..B......#',
+  '#..B..H...#',
+  '#..B......#',
+  '#.........#',
+  '#.........#',
+  '#..H......#',
+  '#.........#',
+  '#........C#',
+  '###########'
+], [{ type: E.MEDUSA, x: 9, y: 3 }]));
+
+// Room 11: Dragon intro (breathes fire in one direction)
+ROOMS.push(makeRoom([
+  '###########',
+  '#P........#',
+  '#.........#',
+  '#..E..H...#',
+  '#.........#',
+  '#.........#',
+  '#.........#',
+  '#.........#',
+  '#...H....C#',
+  '#.........#',
+  '###########'
+], [{ type: E.DRAGON, x: 5, y: 1, dir: 1 }]));
+
+// Room 12: Multiple enemies, tighter space
+ROOMS.push(makeRoom([
+  '###########',
+  '#P.#......#',
+  '#..#..H...#',
+  '#..#......#',
+  '#.........#',
+  '#.....#...#',
+  '#.....#...#',
+  '#..H..#...#',
+  '#.....#..C#',
+  '#.........#',
+  '###########'
+], [{ type: E.MEDUSA, x: 9, y: 2 }, { type: E.SKULL, x: 1, y: 9 }]));
+
+// Room 13: Water maze with blocks
+ROOMS.push(makeRoom([
+  '###########',
+  '#P........#',
+  '#.~~~.....#',
+  '#.~~~.H...#',
+  '#.........#',
+  '#..EE.....#',
+  '#.........#',
+  '#.....H...#',
+  '#........C#',
+  '#.........#',
+  '###########'
+], [{ type: E.MEDUSA, x: 9, y: 7 }]));
+
+// Room 14: Armadillo intro (wakes when all hearts collected)
+ROOMS.push(makeRoom([
+  '###########',
+  '#P........#',
+  '#.........#',
+  '#..H......#',
+  '#.........#',
+  '#.........#',
+  '#.........#',
+  '#......H..#',
+  '#.........#',
+  '#........C#',
+  '###########'
+], [{ type: E.ARMADILLO, x: 5, y: 5 }]));
+
+// Room 15: Rocky intro (moves when you move after hearts done)
+ROOMS.push(makeRoom([
+  '###########',
+  '#P........#',
+  '#..H......#',
+  '#.........#',
+  '#.........#',
+  '#....E....#',
+  '#.........#',
+  '#........H#',
+  '#.........#',
+  '#........C#',
+  '###########'
+], [{ type: E.ROCKY, x: 5, y: 1 }]));
+
+// Room 16: Multi-medusa corridor
+ROOMS.push(makeRoom([
+  '###########',
+  '#P........#',
+  '#..E......#',
+  '#.........#',
+  '#.H.......#',
+  '#.........#',
+  '#.......H.#',
+  '#..E......#',
+  '#.........#',
+  '#........C#',
+  '###########'
+], [{ type: E.MEDUSA, x: 9, y: 4 }, { type: E.MEDUSA, x: 9, y: 6 }, { type: E.MEDUSA, x: 1, y: 6 }]));
+
+// Room 17: Dragon gauntlet
+ROOMS.push(makeRoom([
+  '###########',
+  '#P........#',
+  '#.........#',
+  '#....E....#',
+  '#..H......#',
+  '#.........#',
+  '#....E....#',
+  '#.........#',
+  '#......H.C#',
+  '#.........#',
+  '###########'
+], [{ type: E.DRAGON, x: 5, y: 1, dir: 1 }, { type: E.DRAGON, x: 7, y: 1, dir: 1 }]));
+
+// Room 18: Skull crossfire
+ROOMS.push(makeRoom([
+  '###########',
+  '#P........#',
+  '#.........#',
+  '#..E.H..E.#',
+  '#.........#',
+  '#.........#',
+  '#.........#',
+  '#..H......#',
+  '#.........#',
+  '#........C#',
+  '###########'
+], [{ type: E.SKULL, x: 1, y: 5 }, { type: E.SKULL, x: 9, y: 5 }]));
+
+// Room 19: Water + enemies combo
+ROOMS.push(makeRoom([
+  '###########',
+  '#P........#',
+  '#..~~~....#',
+  '#..~~~....#',
+  '#.........#',
+  '#.EE......#',
+  '#.........#',
+  '#..H...H..#',
+  '#.........#',
+  '#........C#',
+  '###########'
+], [{ type: E.MEDUSA, x: 9, y: 7 }, { type: E.SKULL, x: 9, y: 2 }]));
+
+// Room 20: Arrow maze
+ROOMS.push(makeRoom([
+  '###########',
+  '#P........#',
+  '#..>>>....#',
+  '#......v..#',
+  '#......v..#',
+  '#..<<<....#',
+  '#.........#',
+  '#.H.......#',
+  '#......H.C#',
+  '#.........#',
+  '###########'
+], [{ type: E.MEDUSA, x: 5, y: 4 }]));
+
+// Room 21: Complex block puzzle
+ROOMS.push(makeRoom([
+  '###########',
+  '#P..#.....#',
+  '#.E.#..H..#',
+  '#...#.....#',
+  '#...##....#',
+  '#....E....#',
+  '#...~~~...#',
+  '#...~~~...#',
+  '#.H......C#',
+  '#.........#',
+  '###########'
+], [{ type: E.MEDUSA, x: 9, y: 2 }, { type: E.SKULL, x: 1, y: 8 }]));
+
+// Room 22: Armadillo + tight exit
+ROOMS.push(makeRoom([
+  '###########',
+  '#P..E.....#',
+  '#.........#',
+  '#..H......#',
+  '#.........#',
+  '#....##...#',
+  '#....##...#',
+  '#.........#',
+  '#...H....C#',
+  '#.........#',
+  '###########'
+], [{ type: E.ARMADILLO, x: 8, y: 2 }, { type: E.MEDUSA, x: 9, y: 8 }]));
+
+// Room 23: Rocky + water
+ROOMS.push(makeRoom([
+  '###########',
+  '#P........#',
+  '#..E......#',
+  '#.........#',
+  '#..~~.H...#',
+  '#..~~.....#',
+  '#.........#',
+  '#.........#',
+  '#...H....C#',
+  '#.........#',
+  '###########'
+], [{ type: E.ROCKY, x: 9, y: 1 }, { type: E.ROCKY, x: 1, y: 9 }]));
+
+// Room 24: All enemy gauntlet
+ROOMS.push(makeRoom([
+  '###########',
+  '#P........#',
+  '#.E.......#',
+  '#.........#',
+  '#...H.....#',
+  '#.........#',
+  '#..E......#',
+  '#........H#',
+  '#.........#',
+  '#........C#',
+  '###########'
+], [{ type: E.MEDUSA, x: 9, y: 4 }, { type: E.SKULL, x: 1, y: 7 }, { type: E.DRAGON, x: 5, y: 1, dir: 1 }]));
+
+// Room 25: Bush + Medusa precision
+ROOMS.push(makeRoom([
+  '###########',
+  '#P........#',
+  '#.BBB.....#',
+  '#.........#',
+  '#..H..B...#',
+  '#.....B...#',
+  '#.....B...#',
+  '#..H......#',
+  '#.........#',
+  '#........C#',
+  '###########'
+], [{ type: E.MEDUSA, x: 9, y: 4 }, { type: E.MEDUSA, x: 9, y: 7 }, { type: E.MEDUSA, x: 1, y: 4 }]));
+
+// Room 26: Water bridge puzzle
+ROOMS.push(makeRoom([
+  '###########',
+  '#P........#',
+  '#.........#',
+  '#..EEE....#',
+  '#.........#',
+  '#.~~~~....#',
+  '#.~~~~..H.#',
+  '#.~~~~....#',
+  '#.........#',
+  '#..H.....C#',
+  '###########'
+], [{ type: E.SKULL, x: 9, y: 3 }, { type: E.MEDUSA, x: 9, y: 9 }]));
+
+// Room 27: Dragon corridor + blocks
+ROOMS.push(makeRoom([
+  '###########',
+  '#P........#',
+  '#.........#',
+  '#.EE......#',
+  '#.........#',
+  '#..H......#',
+  '#.........#',
+  '#.........#',
+  '#.....H..C#',
+  '#.........#',
+  '###########'
+], [{ type: E.DRAGON, x: 3, y: 1, dir: 1 }, { type: E.DRAGON, x: 5, y: 1, dir: 1 }, { type: E.DRAGON, x: 7, y: 1, dir: 1 }]));
+
+// Room 28: Full combo puzzle
+ROOMS.push(makeRoom([
+  '###########',
+  '#P.#......#',
+  '#..#...H..#',
+  '#..#......#',
+  '#..E.~~...#',
+  '#....~~...#',
+  '#.E.......#',
+  '#.........#',
+  '#.H......C#',
+  '#.........#',
+  '###########'
+], [{ type: E.MEDUSA, x: 9, y: 2 }, { type: E.ARMADILLO, x: 8, y: 8 }, { type: E.SKULL, x: 1, y: 5 }]));
+
+// Room 29: Extreme precision
+ROOMS.push(makeRoom([
+  '###########',
+  '#P..E.....#',
+  '#.........#',
+  '#.H..B....#',
+  '#.....B...#',
+  '#..E..B...#',
+  '#.........#',
+  '#.~~......#',
+  '#.~~..H..C#',
+  '#.........#',
+  '###########'
+], [{ type: E.MEDUSA, x: 9, y: 3 }, { type: E.MEDUSA, x: 9, y: 8 }, { type: E.SKULL, x: 1, y: 9 }, { type: E.ROCKY, x: 5, y: 1 }]));
+
+// Room 30: Final challenge
+ROOMS.push(makeRoom([
+  '###########',
+  '#P.#..E...#',
+  '#..#......#',
+  '#..#.H....#',
+  '#..E.~~...#',
+  '#....~~...#',
+  '#..E......#',
+  '#.BBB.....#',
+  '#....H...C#',
+  '#.........#',
+  '###########'
+], [{ type: E.MEDUSA, x: 9, y: 3 }, { type: E.MEDUSA, x: 9, y: 8 }, { type: E.DRAGON, x: 7, y: 1, dir: 1 }, { type: E.ARMADILLO, x: 1, y: 9 }, { type: E.SKULL, x: 1, y: 5 }]));
+
+// === LOAD ROOM ===
+function loadRoom(idx) {
+  if (idx >= ROOMS.length) idx = ROOMS.length - 1;
+  var r = ROOMS[idx];
+  grid = [];
+  hearts = [];
+  enemies = [];
+  eggs = [];
+  bullets = [];
+  fireballs = [];
+  heartsCollected = 0;
+  heartsTotal = 0;
+  dead = false;
+  cleared = false;
+  clearedTimer = 0;
+  deadTimer = 0;
+  allHeartsGot = false;
+  chest.open = false;
+  player.shots = 0;
+  player.moving = false;
+  player.dir = 3;
+  inputLock = false;
+
+  for (var row = 0; row < ROWS; row++) {
+    grid[row] = [];
+    var line = r.map[row];
+    for (var col = 0; col < COLS; col++) {
+      var ch = line[col];
+      switch (ch) {
+        case '#': grid[row][col] = T.WALL; break;
+        case 'E': grid[row][col] = T.EMERALD; break;
+        case 'H':
+          grid[row][col] = T.FLOOR;
+          hearts.push({ x: col, y: row, collected: false });
+          heartsTotal++;
+          break;
+        case 'C':
+          grid[row][col] = T.FLOOR;
+          chest.x = col; chest.y = row;
+          break;
+        case '~': grid[row][col] = T.WATER; break;
+        case '^': grid[row][col] = T.ARROW_U; break;
+        case 'v': grid[row][col] = T.ARROW_D; break;
+        case '<': grid[row][col] = T.ARROW_L; break;
+        case '>': grid[row][col] = T.ARROW_R; break;
+        case 'B': grid[row][col] = T.BUSH; break;
+        case 'P':
+          grid[row][col] = T.FLOOR;
+          player.x = col; player.y = row;
+          break;
+        default: grid[row][col] = T.FLOOR; break;
+      }
+    }
+  }
+
+  // Spawn enemies
+  for (var i = 0; i < r.enemies.length; i++) {
+    var e = r.enemies[i];
+    enemies.push({
+      type: e.type, x: e.x, y: e.y,
+      dir: e.dir !== undefined ? e.dir : 0,
+      awake: e.type !== E.ARMADILLO && e.type !== E.ROCKY,
+      fireTimer: 0, moveTimer: 0
+    });
+  }
+}
+
+// === HELPERS ===
+function isSolid(gx, gy) {
+  if (gx < 0 || gx >= COLS || gy < 0 || gy >= ROWS) return true;
+  var t = grid[gy][gx];
+  return t === T.WALL || t === T.EMERALD || t === T.WATER || t === T.BUSH;
+}
+
+function isWalkable(gx, gy) {
+  if (gx < 0 || gx >= COLS || gy < 0 || gy >= ROWS) return false;
+  var t = grid[gy][gx];
+  return t === T.FLOOR || t === T.BRIDGE || t === T.ARROW_U || t === T.ARROW_D || t === T.ARROW_L || t === T.ARROW_R;
+}
+
+function canPassArrow(gx, gy, dirIdx) {
+  var t = grid[gy][gx];
+  if (t === T.ARROW_U && dirIdx !== 0) return false;
+  if (t === T.ARROW_D && dirIdx !== 1) return false;
+  if (t === T.ARROW_L && dirIdx !== 2) return false;
+  if (t === T.ARROW_R && dirIdx !== 3) return false;
+  return true;
+}
+
+function blocksLineOfSight(gx, gy) {
+  if (gx < 0 || gx >= COLS || gy < 0 || gy >= ROWS) return true;
+  var t = grid[gy][gx];
+  return t === T.WALL || t === T.EMERALD;
+  // Bushes do NOT block enemy LOS
+}
+
+function blocksForEnemy(gx, gy) {
+  if (gx < 0 || gx >= COLS || gy < 0 || gy >= ROWS) return true;
+  var t = grid[gy][gx];
+  return t === T.WALL || t === T.EMERALD || t === T.WATER || t === T.BUSH;
+}
+
+function hasLineOfSight(x1, y1, x2, y2) {
+  // Only straight lines (horizontal or vertical)
+  if (x1 !== x2 && y1 !== y2) return false;
+  if (x1 === x2 && y1 === y2) return false;
+  var dx = x2 > x1 ? 1 : x2 < x1 ? -1 : 0;
+  var dy = y2 > y1 ? 1 : y2 < y1 ? -1 : 0;
+  var cx = x1 + dx, cy = y1 + dy;
+  while (cx !== x2 || cy !== y2) {
+    if (blocksLineOfSight(cx, cy)) return false;
+    // Check for eggs blocking
+    for (var i = 0; i < eggs.length; i++) {
+      if (eggs[i].x === cx && eggs[i].y === cy) return false;
+    }
+    cx += dx; cy += dy;
+  }
+  return true;
+}
+
+function heartAt(gx, gy) {
+  for (var i = 0; i < hearts.length; i++) {
+    if (hearts[i].x === gx && hearts[i].y === gy && !hearts[i].collected) return hearts[i];
+  }
+  return null;
+}
+
+function enemyAt(gx, gy) {
+  for (var i = 0; i < enemies.length; i++) {
+    if (enemies[i].x === gx && enemies[i].y === gy) return i;
+  }
+  return -1;
+}
+
+function eggAt(gx, gy) {
+  for (var i = 0; i < eggs.length; i++) {
+    if (eggs[i].x === gx && eggs[i].y === gy) return i;
+  }
+  return -1;
+}
+
+// === PLAYER MOVEMENT ===
+function tryMove(dirIdx) {
+  if (dead || cleared || inputLock) return;
+
+  player.dir = dirIdx;
+  var nx = player.x + DX[dirIdx];
+  var ny = player.y + DY[dirIdx];
+
+  // Check arrow at current position - can we leave in this direction?
+  var curTile = grid[player.y][player.x];
+  if (curTile === T.ARROW_U || curTile === T.ARROW_D || curTile === T.ARROW_L || curTile === T.ARROW_R) {
+    if (!canPassArrow(player.x, player.y, dirIdx)) return;
+  }
+
+  if (nx < 0 || nx >= COLS || ny < 0 || ny >= ROWS) return;
+
+  var target = grid[ny][nx];
+
+  // Push emerald block
+  if (target === T.EMERALD) {
+    var bx = nx + DX[dirIdx];
+    var by = ny + DY[dirIdx];
+    if (bx >= 0 && bx < COLS && by >= 0 && by < ROWS) {
+      var bt = grid[by][bx];
+      if (bt === T.WATER) {
+        // Bridge!
+        grid[ny][nx] = T.FLOOR;
+        grid[by][bx] = T.BRIDGE;
+        TAS.audio.playTone(200, 0.3, 'triangle', 0.08, 100);
+        TAS.particles.spawn(bx * TS + TS / 2, by * TS + TS / 2 + HUD_H, '#66ccff', 8, 2);
+      } else if (bt === T.FLOOR || bt === T.BRIDGE) {
+        // Check no enemy or egg there
+        if (enemyAt(bx, by) === -1 && eggAt(bx, by) === -1) {
+          grid[ny][nx] = T.FLOOR;
+          grid[by][bx] = T.EMERALD;
+          TAS.audio.playTone(150, 0.1, 'sawtooth', 0.06);
+        } else {
+          return;
+        }
+      } else {
+        return; // Can't push into wall/bush/etc
+      }
+    } else {
+      return; // Off screen
+    }
+    // After push, player moves into the now-empty space
+    player.x = nx;
+    player.y = ny;
+    TAS.audio.playTone(440, 0.05, 'sine', 0.04);
+    onPlayerMove();
+    return;
+  }
+
+  // Check for egg blocking
+  if (eggAt(nx, ny) !== -1) return;
+
+  // Normal walkable check
+  if (!isWalkable(nx, ny)) return;
+
+  // Arrow at destination: can we enter from this direction?
+  var destTile = grid[ny][nx];
+  if (destTile === T.ARROW_U || destTile === T.ARROW_D || destTile === T.ARROW_L || destTile === T.ARROW_R) {
+    // Can always enter arrow tiles, restriction is on LEAVING
+  }
+
+  player.x = nx;
+  player.y = ny;
+  TAS.audio.playTone(440, 0.05, 'sine', 0.04);
+  onPlayerMove();
+}
+
+function onPlayerMove() {
+  // Collect heart?
+  var h = heartAt(player.x, player.y);
+  if (h) {
+    h.collected = true;
+    heartsCollected++;
+    if (heartsCollected % 2 === 0) player.shots++;
+    TAS.audio.playMelody([[880, 0.08], [1100, 0.08], [1320, 0.12]], 80);
+    TAS.particles.spawn(player.x * TS + TS / 2, player.y * TS + TS / 2 + HUD_H, '#ff66aa', 10, 3);
+
+    if (heartsCollected >= heartsTotal) {
+      allHeartsGot = true;
+      chest.open = true;
+      TAS.audio.playMelody([[660, 0.1], [880, 0.1], [1100, 0.15]], 100);
+      // Wake armadillos and rockies
+      for (var i = 0; i < enemies.length; i++) {
+        if (enemies[i].type === E.ARMADILLO || enemies[i].type === E.ROCKY) {
+          enemies[i].awake = true;
+        }
+      }
+    }
+  }
+
+  // Reach chest?
+  if (player.x === chest.x && player.y === chest.y && chest.open) {
+    cleared = true;
+    clearedTimer = 120;
+    TAS.audio.playMelody([[523, 0.1], [659, 0.1], [784, 0.1], [1047, 0.2]], 120);
+    TAS.fx.flash('#ffdd44', 0.4);
+    if (room >= progress) {
+      progress = room + 1;
+      try { localStorage.setItem('lolopuzzle_progress', String(progress)); } catch(e) { console.warn('[lolo] save progress:', e.message || e); }
+    }
+  }
+
+  // Rocky moves when player moves (after hearts collected)
+  if (allHeartsGot) {
+    for (var i = 0; i < enemies.length; i++) {
+      var en = enemies[i];
+      if (en.type === E.ROCKY && en.awake) {
+        moveRockyToward(en);
+      }
+    }
+  }
+}
+
+function moveRockyToward(en) {
+  var dx = player.x - en.x;
+  var dy = player.y - en.y;
+  var mx = 0, my = 0;
+  if (Math.abs(dx) >= Math.abs(dy)) {
+    mx = dx > 0 ? 1 : -1;
+  } else {
+    my = dy > 0 ? 1 : -1;
+  }
+  var nx = en.x + mx;
+  var ny = en.y + my;
+  if (isWalkable(nx, ny) && enemyAt(nx, ny) === -1 && eggAt(nx, ny) === -1) {
+    en.x = nx; en.y = ny;
+  }
+}
+
+// === SHOOTING ===
+function shoot() {
+  if (dead || cleared || player.shots <= 0) return;
+  player.shots--;
+  var bx = player.x + DX[player.dir];
+  var by = player.y + DY[player.dir];
+  bullets.push({ x: player.x, y: player.y, dx: DX[player.dir], dy: DY[player.dir], timer: 0 });
+  TAS.audio.playTone(880, 0.1, 'square', 0.07, 440);
+}
+
+function updateBullets() {
+  for (var i = bullets.length - 1; i >= 0; i--) {
+    var b = bullets[i];
+    b.timer++;
+    if (b.timer % 3 === 0) {
+      b.x += b.dx;
+      b.y += b.dy;
+
+      // Off screen or hit wall
+      if (b.x < 0 || b.x >= COLS || b.y < 0 || b.y >= ROWS || blocksLineOfSight(b.x, b.y)) {
+        bullets.splice(i, 1);
+        continue;
+      }
+
+      // Hit enemy - turn to egg
+      var ei = enemyAt(b.x, b.y);
+      if (ei !== -1) {
+        var en = enemies[ei];
+        eggs.push({ x: en.x, y: en.y, timer: 300, enemyType: en.type, enemyDir: en.dir });
+        enemies.splice(ei, 1);
+        bullets.splice(i, 1);
+        TAS.audio.playTone(300, 0.2, 'triangle', 0.08, 600);
+        TAS.particles.spawn(en.x * TS + TS / 2, en.y * TS + TS / 2 + HUD_H, '#aaffaa', 8, 2);
+        continue;
+      }
+
+      // Hit egg - launch it off screen (destroy permanently)
+      var egi = eggAt(b.x, b.y);
+      if (egi !== -1) {
+        TAS.particles.spawn(eggs[egi].x * TS + TS / 2, eggs[egi].y * TS + TS / 2 + HUD_H, '#ffffff', 12, 3);
+        eggs.splice(egi, 1);
+        bullets.splice(i, 1);
+        TAS.audio.playTone(600, 0.15, 'sawtooth', 0.06, 100);
+        continue;
+      }
+    }
+  }
+}
+
+// === EGGS ===
+function updateEggs(dt) {
+  for (var i = eggs.length - 1; i >= 0; i--) {
+    eggs[i].timer--;
+    if (eggs[i].timer <= 0) {
+      // Respawn enemy
+      var eg = eggs[i];
+      enemies.push({
+        type: eg.enemyType, x: eg.x, y: eg.y,
+        dir: eg.enemyDir || 0,
+        awake: true, fireTimer: 0, moveTimer: 0
+      });
+      eggs.splice(i, 1);
+    }
+  }
+}
+
+// === ENEMIES ===
+function updateEnemies(dt) {
+  for (var i = 0; i < enemies.length; i++) {
+    var en = enemies[i];
+    if (!en.awake) continue;
+
+    switch (en.type) {
+      case E.MEDUSA:
+        // Kill on line of sight
+        if (hasLineOfSight(en.x, en.y, player.x, player.y)) {
+          killPlayer();
+        }
+        break;
+
+      case E.SKULL:
+        en.fireTimer++;
+        if (en.fireTimer >= 90) {
+          en.fireTimer = 0;
+          // Shoot at player if in line
+          if (en.x === player.x || en.y === player.y) {
+            var fdx = 0, fdy = 0;
+            if (player.x > en.x) fdx = 1;
+            else if (player.x < en.x) fdx = -1;
+            else if (player.y > en.y) fdy = 1;
+            else if (player.y < en.y) fdy = -1;
+            if (fdx !== 0 || fdy !== 0) {
+              fireballs.push({ x: en.x, y: en.y, dx: fdx, dy: fdy, timer: 0 });
+              TAS.audio.playTone(200, 0.15, 'sawtooth', 0.05, 100);
+            }
+          }
+        }
+        break;
+
+      case E.DRAGON:
+        // Continuous fire in one direction - check line
+        var ddx = DX[en.dir], ddy = DY[en.dir];
+        var cx = en.x + ddx, cy = en.y + ddy;
+        while (cx >= 0 && cx < COLS && cy >= 0 && cy < ROWS) {
+          if (blocksLineOfSight(cx, cy)) break;
+          if (cx === player.x && cy === player.y) {
+            killPlayer();
+            break;
+          }
+          cx += ddx; cy += ddy;
+        }
+        break;
+
+      case E.ARMADILLO:
+        en.moveTimer++;
+        if (en.moveTimer >= 30) {
+          en.moveTimer = 0;
+          // Chase player
+          var adx = player.x - en.x;
+          var ady = player.y - en.y;
+          var amx = 0, amy = 0;
+          if (Math.abs(adx) >= Math.abs(ady)) {
+            amx = adx > 0 ? 1 : -1;
+          } else {
+            amy = ady > 0 ? 1 : -1;
+          }
+          var anx = en.x + amx;
+          var any = en.y + amy;
+          if (isWalkable(anx, any) && enemyAt(anx, any) === -1 && eggAt(anx, any) === -1) {
+            en.x = anx; en.y = any;
+          }
+        }
+        // Touch kill
+        if (en.x === player.x && en.y === player.y) killPlayer();
+        break;
+
+      case E.ROCKY:
+        // Rocky only moves in onPlayerMove, but still kills on touch
+        if (en.x === player.x && en.y === player.y) killPlayer();
+        break;
+    }
+  }
+}
+
+// === FIREBALLS ===
+function updateFireballs() {
+  for (var i = fireballs.length - 1; i >= 0; i--) {
+    var f = fireballs[i];
+    f.timer++;
+    if (f.timer % 6 === 0) {
+      f.x += f.dx;
+      f.y += f.dy;
+      if (f.x < 0 || f.x >= COLS || f.y < 0 || f.y >= ROWS || blocksLineOfSight(f.x, f.y)) {
+        fireballs.splice(i, 1);
+        continue;
+      }
+      if (f.x === player.x && f.y === player.y) {
+        killPlayer();
+        fireballs.splice(i, 1);
+      }
+    }
+  }
+}
+
+// === PLAYER DEATH ===
+function killPlayer() {
+  if (dead || cleared) return;
+  dead = true;
+  deadTimer = 90;
+  TAS.audio.playTone(200, 0.4, 'sawtooth', 0.1, 50);
+  TAS.fx.shake(6, 0.85);
+  TAS.particles.spawn(player.x * TS + TS / 2, player.y * TS + TS / 2 + HUD_H, '#ff4444', 15, 3);
+}
+
+// === INPUT ===
+var keyHeld = { up: false, down: false, left: false, right: false };
+var moveRepeat = 0;
+var shootPressed = false;
+var prevShoot = false;
+
+function handleInput(dt) {
+  if (state !== 'playing') return;
+
+  var up = TAS.input.keys['ArrowUp'] || TAS.input.keys['KeyW'] || TAS.input.touch.up;
+  var down = TAS.input.keys['ArrowDown'] || TAS.input.keys['KeyS'] || TAS.input.touch.down;
+  var left = TAS.input.keys['ArrowLeft'] || TAS.input.keys['KeyA'] || TAS.input.touch.left;
+  var right = TAS.input.keys['ArrowRight'] || TAS.input.keys['KeyD'] || TAS.input.touch.right;
+  var shootBtn = TAS.input.keys['Space'] || TAS.input.keys[' '] || TAS.input.keys['KeyZ'] || TAS.input.touch.a;
+  var resetBtn = TAS.input.keys['KeyR'] || TAS.input.touch.b;
+
+  // Shoot (on press, not hold)
+  if (shootBtn && !prevShoot) {
+    shoot();
+  }
+  prevShoot = shootBtn;
+
+  // Reset room
+  if (resetBtn) {
+    loadRoom(room);
+    return;
+  }
+
+  // Movement with repeat delay
+  moveDelay -= dt;
+  if (moveDelay > 0) return;
+
+  var moved = false;
+  if (up) { tryMove(0); moved = true; }
+  else if (down) { tryMove(1); moved = true; }
+  else if (left) { tryMove(2); moved = true; }
+  else if (right) { tryMove(3); moved = true; }
+
+  if (moved) moveDelay = 0.12;
+}
+
+// === DRAWING ===
+var COLORS = {
+  floor: '#2a2a3a',
+  wall: '#555577',
+  wallTop: '#666688',
+  emerald: '#44cc77',
+  emeraldShine: '#88ffbb',
+  heart: '#ff66aa',
+  heartGlow: '#ffaacc',
+  chest: '#ccaa44',
+  chestOpen: '#ffdd66',
+  water: '#3366aa',
+  waterLight: '#4488cc',
+  bridge: '#886644',
+  bush: '#338844',
+  bushLight: '#44aa55',
+  arrow: '#888888'
+};
+
+function drawTile(col, row) {
+  var x = col * TS;
+  var y = row * TS + HUD_H;
+  var t = grid[row][col];
+
+  switch (t) {
+    case T.FLOOR:
+      ctx.fillStyle = COLORS.floor;
+      ctx.fillRect(x, y, TS, TS);
+      // Subtle grid lines
+      ctx.strokeStyle = 'rgba(255,255,255,0.03)';
+      ctx.strokeRect(x, y, TS, TS);
+      break;
+
+    case T.WALL:
+      ctx.fillStyle = COLORS.wall;
+      ctx.fillRect(x, y, TS, TS);
+      ctx.fillStyle = COLORS.wallTop;
+      ctx.fillRect(x + 2, y + 2, TS - 4, TS - 8);
+      ctx.fillStyle = 'rgba(0,0,0,0.3)';
+      ctx.fillRect(x, y + TS - 4, TS, 4);
+      break;
+
+    case T.EMERALD:
+      ctx.fillStyle = COLORS.floor;
+      ctx.fillRect(x, y, TS, TS);
+      ctx.fillStyle = COLORS.emerald;
+      ctx.fillRect(x + 3, y + 3, TS - 6, TS - 6);
+      ctx.fillStyle = COLORS.emeraldShine;
+      ctx.fillRect(x + 5, y + 5, 6, 6);
+      ctx.fillStyle = 'rgba(0,0,0,0.2)';
+      ctx.fillRect(x + 3, y + TS - 7, TS - 6, 4);
+      break;
+
+    case T.WATER:
+      ctx.fillStyle = COLORS.water;
+      ctx.fillRect(x, y, TS, TS);
+      var waveOff = Math.sin(frame * 0.05 + col * 0.8) * 2;
+      ctx.fillStyle = COLORS.waterLight;
+      ctx.fillRect(x + 4, y + 10 + waveOff, 8, 3);
+      ctx.fillRect(x + 18, y + 20 - waveOff, 6, 2);
+      break;
+
+    case T.BRIDGE:
+      ctx.fillStyle = COLORS.bridge;
+      ctx.fillRect(x, y, TS, TS);
+      ctx.fillStyle = 'rgba(0,0,0,0.2)';
+      ctx.fillRect(x + 4, y + 8, TS - 8, 3);
+      ctx.fillRect(x + 4, y + 20, TS - 8, 3);
+      break;
+
+    case T.ARROW_U:
+    case T.ARROW_D:
+    case T.ARROW_L:
+    case T.ARROW_R:
+      ctx.fillStyle = COLORS.floor;
+      ctx.fillRect(x, y, TS, TS);
+      ctx.fillStyle = COLORS.arrow;
+      ctx.globalAlpha = 0.4;
+      ctx.beginPath();
+      var cx = x + TS / 2, cy = y + TS / 2;
+      if (t === T.ARROW_U) {
+        ctx.moveTo(cx, cy - 10); ctx.lineTo(cx - 8, cy + 6); ctx.lineTo(cx + 8, cy + 6);
+      } else if (t === T.ARROW_D) {
+        ctx.moveTo(cx, cy + 10); ctx.lineTo(cx - 8, cy - 6); ctx.lineTo(cx + 8, cy - 6);
+      } else if (t === T.ARROW_L) {
+        ctx.moveTo(cx - 10, cy); ctx.lineTo(cx + 6, cy - 8); ctx.lineTo(cx + 6, cy + 8);
+      } else {
+        ctx.moveTo(cx + 10, cy); ctx.lineTo(cx - 6, cy - 8); ctx.lineTo(cx - 6, cy + 8);
+      }
+      ctx.fill();
+      ctx.globalAlpha = 1;
+      break;
+
+    case T.BUSH:
+      ctx.fillStyle = COLORS.floor;
+      ctx.fillRect(x, y, TS, TS);
+      ctx.fillStyle = COLORS.bush;
+      ctx.beginPath();
+      ctx.arc(x + TS / 2, y + TS / 2 + 2, 12, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = COLORS.bushLight;
+      ctx.beginPath();
+      ctx.arc(x + TS / 2 - 3, y + TS / 2 - 3, 5, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.beginPath();
+      ctx.arc(x + TS / 2 + 5, y + TS / 2, 4, 0, Math.PI * 2);
+      ctx.fill();
+      break;
+  }
+}
+
+function drawHeart(h) {
+  if (h.collected) return;
+  var x = h.x * TS + TS / 2;
+  var y = h.y * TS + TS / 2 + HUD_H;
+  var pulse = Math.sin(frame * 0.08 + h.x * 2) * 2;
+
+  ctx.fillStyle = COLORS.heart;
+  ctx.beginPath();
+  // Heart shape
+  var s = 8 + pulse * 0.5;
+  ctx.moveTo(x, y + s * 0.4);
+  ctx.bezierCurveTo(x, y - s * 0.4, x - s, y - s * 0.4, x - s, y + s * 0.1);
+  ctx.bezierCurveTo(x - s, y + s * 0.6, x, y + s * 0.9, x, y + s);
+  ctx.bezierCurveTo(x, y + s * 0.9, x + s, y + s * 0.6, x + s, y + s * 0.1);
+  ctx.bezierCurveTo(x + s, y - s * 0.4, x, y - s * 0.4, x, y + s * 0.4);
+  ctx.fill();
+
+  // Sparkle
+  if (frame % 20 < 5) {
+    ctx.fillStyle = '#ffffff';
+    ctx.globalAlpha = 0.7;
+    ctx.fillRect(x - 3, y - 5, 2, 2);
+    ctx.globalAlpha = 1;
+  }
+}
+
+function drawChest() {
+  var x = chest.x * TS;
+  var y = chest.y * TS + HUD_H;
+
+  if (chest.open) {
+    // Open chest - glowing
+    var glow = Math.sin(frame * 0.1) * 0.2 + 0.8;
+    ctx.fillStyle = COLORS.chestOpen;
+    ctx.globalAlpha = glow;
+    ctx.fillRect(x + 4, y + 4, TS - 8, TS - 8);
+    ctx.globalAlpha = 1;
+    ctx.fillStyle = COLORS.chest;
+    ctx.fillRect(x + 6, y + 14, TS - 12, TS - 18);
+    // Lid open
+    ctx.fillStyle = '#ddaa33';
+    ctx.fillRect(x + 4, y + 4, TS - 8, 10);
+    ctx.fillStyle = '#ffee88';
+    ctx.fillRect(x + 12, y + 6, 8, 6);
+  } else {
+    // Closed chest
+    ctx.fillStyle = COLORS.chest;
+    ctx.fillRect(x + 4, y + 8, TS - 8, TS - 12);
+    ctx.fillStyle = '#aa8833';
+    ctx.fillRect(x + 4, y + 8, TS - 8, 8);
+    ctx.fillStyle = '#ffdd88';
+    ctx.fillRect(x + 12, y + 10, 8, 4);
+  }
+}
+
+function drawPlayer() {
+  if (dead) {
+    if (deadTimer % 10 < 5) return; // blink
+  }
+  var x = player.x * TS + TS / 2;
+  var y = player.y * TS + TS / 2 + HUD_H;
+
+  // Body (cute round baseling)
+  ctx.fillStyle = '#6688ff';
+  ctx.beginPath();
+  ctx.arc(x, y + 2, 12, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Highlight
+  ctx.fillStyle = '#88aaff';
+  ctx.beginPath();
+  ctx.arc(x - 3, y - 2, 5, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Eyes
+  ctx.fillStyle = '#ffffff';
+  var eyeOffX = DX[player.dir] * 3;
+  var eyeOffY = DY[player.dir] * 2;
+  ctx.beginPath();
+  ctx.arc(x - 4 + eyeOffX, y - 1 + eyeOffY, 4, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.arc(x + 4 + eyeOffX, y - 1 + eyeOffY, 4, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Pupils
+  ctx.fillStyle = '#222244';
+  ctx.beginPath();
+  ctx.arc(x - 4 + eyeOffX * 1.3, y - 1 + eyeOffY * 1.3, 2, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.arc(x + 4 + eyeOffX * 1.3, y - 1 + eyeOffY * 1.3, 2, 0, Math.PI * 2);
+  ctx.fill();
+}
+
+function drawEnemy(en) {
+  var x = en.x * TS + TS / 2;
+  var y = en.y * TS + TS / 2 + HUD_H;
+
+  switch (en.type) {
+    case E.MEDUSA:
+      // Purple with snaky tendrils
+      ctx.fillStyle = '#aa44cc';
+      ctx.beginPath();
+      ctx.arc(x, y, 11, 0, Math.PI * 2);
+      ctx.fill();
+      // Eyes (angry)
+      ctx.fillStyle = '#ffff00';
+      ctx.beginPath();
+      ctx.arc(x - 4, y - 2, 3, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.beginPath();
+      ctx.arc(x + 4, y - 2, 3, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = '#ff0000';
+      ctx.beginPath();
+      ctx.arc(x - 4, y - 2, 1.5, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.beginPath();
+      ctx.arc(x + 4, y - 2, 1.5, 0, Math.PI * 2);
+      ctx.fill();
+      // Tendrils
+      ctx.strokeStyle = '#cc66ee';
+      ctx.lineWidth = 2;
+      for (var i = 0; i < 3; i++) {
+        var tx = x - 6 + i * 6;
+        var wiggle = Math.sin(frame * 0.1 + i) * 3;
+        ctx.beginPath();
+        ctx.moveTo(tx, y + 8);
+        ctx.lineTo(tx + wiggle, y + 14);
+        ctx.stroke();
+      }
+      ctx.lineWidth = 1;
+      // Line of sight indicator
+      if (!dead && hasLineOfSight(en.x, en.y, player.x, player.y)) {
+        ctx.strokeStyle = 'rgba(255,0,0,0.3)';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(x, y);
+        ctx.lineTo(player.x * TS + TS / 2, player.y * TS + TS / 2 + HUD_H);
+        ctx.stroke();
+        ctx.lineWidth = 1;
+      }
+      break;
+
+    case E.SKULL:
+      // White skull
+      ctx.fillStyle = '#dddddd';
+      ctx.beginPath();
+      ctx.arc(x, y, 11, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = '#111111';
+      // Eye sockets
+      ctx.beginPath();
+      ctx.arc(x - 4, y - 2, 3, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.beginPath();
+      ctx.arc(x + 4, y - 2, 3, 0, Math.PI * 2);
+      ctx.fill();
+      // Mouth
+      ctx.fillRect(x - 5, y + 5, 10, 3);
+      // Glow when about to fire
+      if (en.fireTimer > 70) {
+        ctx.fillStyle = 'rgba(255,100,0,' + ((en.fireTimer - 70) / 20 * 0.5) + ')';
+        ctx.beginPath();
+        ctx.arc(x, y, 13, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      break;
+
+    case E.DRAGON:
+      // Red dragon
+      ctx.fillStyle = '#cc3333';
+      ctx.beginPath();
+      ctx.arc(x, y, 11, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = '#ff6644';
+      ctx.beginPath();
+      ctx.arc(x - 2, y - 4, 4, 0, Math.PI * 2);
+      ctx.fill();
+      // Eyes
+      ctx.fillStyle = '#ffff00';
+      ctx.beginPath();
+      ctx.arc(x - 3, y - 1, 2, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.beginPath();
+      ctx.arc(x + 3, y - 1, 2, 0, Math.PI * 2);
+      ctx.fill();
+      // Fire breath indicator
+      ctx.strokeStyle = 'rgba(255,100,0,0.4)';
+      ctx.lineWidth = 3;
+      var fdx = DX[en.dir], fdy = DY[en.dir];
+      var fx = x + fdx * 14, fy = y + fdy * 14;
+      ctx.beginPath();
+      ctx.moveTo(x + fdx * 10, y + fdy * 10);
+      var fireDist = 0;
+      var fcx = en.x + fdx, fcy = en.y + fdy;
+      while (fcx >= 0 && fcx < COLS && fcy >= 0 && fcy < ROWS && !blocksLineOfSight(fcx, fcy)) {
+        fireDist++;
+        fcx += fdx; fcy += fdy;
+      }
+      if (fireDist > 0) {
+        ctx.lineTo(x + fdx * (10 + fireDist * TS), y + fdy * (10 + fireDist * TS));
+        ctx.stroke();
+      }
+      ctx.lineWidth = 1;
+      break;
+
+    case E.ARMADILLO:
+      // Brown armadillo
+      ctx.fillStyle = en.awake ? '#cc8844' : '#887755';
+      ctx.beginPath();
+      ctx.arc(x, y, 11, 0, Math.PI * 2);
+      ctx.fill();
+      // Shell pattern
+      ctx.strokeStyle = en.awake ? '#aa6633' : '#666655';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(x, y, 7, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.lineWidth = 1;
+      // Eyes
+      if (en.awake) {
+        ctx.fillStyle = '#ff4444';
+        ctx.beginPath();
+        ctx.arc(x - 3, y - 2, 2, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.beginPath();
+        ctx.arc(x + 3, y - 2, 2, 0, Math.PI * 2);
+        ctx.fill();
+      } else {
+        // Sleeping Z's
+        ctx.fillStyle = '#aaaaaa';
+        ctx.font = '8px monospace';
+        ctx.textAlign = 'center';
+        var zOff = Math.sin(frame * 0.05) * 2;
+        ctx.fillText('z', x + 8, y - 8 + zOff);
+      }
+      break;
+
+    case E.ROCKY:
+      // Gray rocky
+      ctx.fillStyle = en.awake ? '#888888' : '#666666';
+      ctx.beginPath();
+      // More angular shape
+      ctx.moveTo(x, y - 12);
+      ctx.lineTo(x + 10, y - 4);
+      ctx.lineTo(x + 10, y + 8);
+      ctx.lineTo(x - 10, y + 8);
+      ctx.lineTo(x - 10, y - 4);
+      ctx.closePath();
+      ctx.fill();
+      // Face
+      ctx.fillStyle = '#ffffff';
+      ctx.beginPath();
+      ctx.arc(x - 3, y - 1, 2, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.beginPath();
+      ctx.arc(x + 3, y - 1, 2, 0, Math.PI * 2);
+      ctx.fill();
+      if (!en.awake) {
+        ctx.fillStyle = '#aaaaaa';
+        ctx.font = '8px monospace';
+        ctx.textAlign = 'center';
+        ctx.fillText('z', x + 8, y - 10 + Math.sin(frame * 0.04) * 2);
+      }
+      break;
+  }
+}
+
+function drawEgg(eg) {
+  var x = eg.x * TS + TS / 2;
+  var y = eg.y * TS + TS / 2 + HUD_H;
+
+  // White egg shape
+  ctx.fillStyle = eg.timer < 60 ? '#ffaaaa' : '#ffffff'; // Flash red when about to hatch
+  ctx.beginPath();
+  ctx.ellipse(x, y, 9, 11, 0, 0, Math.PI * 2);
+  ctx.fill();
+  // Crack pattern
+  ctx.strokeStyle = '#aaaaaa';
+  ctx.beginPath();
+  ctx.moveTo(x - 3, y - 4);
+  ctx.lineTo(x, y - 1);
+  ctx.lineTo(x + 2, y - 5);
+  ctx.stroke();
+}
+
+function drawBullet(b) {
+  var x = b.x * TS + TS / 2;
+  var y = b.y * TS + TS / 2 + HUD_H;
+  ctx.fillStyle = '#ffff88';
+  ctx.beginPath();
+  ctx.arc(x, y, 4, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = '#ffffff';
+  ctx.beginPath();
+  ctx.arc(x, y, 2, 0, Math.PI * 2);
+  ctx.fill();
+}
+
+function drawFireball(f) {
+  var x = f.x * TS + TS / 2;
+  var y = f.y * TS + TS / 2 + HUD_H;
+  ctx.fillStyle = '#ff6600';
+  ctx.beginPath();
+  ctx.arc(x, y, 5 + Math.sin(frame * 0.3) * 2, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = '#ffcc00';
+  ctx.beginPath();
+  ctx.arc(x, y, 3, 0, Math.PI * 2);
+  ctx.fill();
+}
+
+function drawGameHUD() {
+  ctx.fillStyle = 'rgba(10,5,20,0.85)';
+  ctx.fillRect(0, 0, GW, HUD_H);
+
+  ctx.font = 'bold 12px monospace';
+  ctx.textAlign = 'left';
+  ctx.fillStyle = '#88ccff';
+  ctx.fillText('ROOM ' + (room + 1) + '/' + ROOMS.length, 6, 20);
+
+  // Hearts counter
+  ctx.fillStyle = '#ff66aa';
+  ctx.textAlign = 'center';
+  ctx.fillText('HEARTS: ' + heartsCollected + '/' + heartsTotal, GW / 2, 20);
+
+  // Shots
+  ctx.textAlign = 'right';
+  ctx.fillStyle = '#ffdd44';
+  ctx.fillText('SHOTS: ' + player.shots, GW - 6, 20);
+}
+
+// === MAIN UPDATE ===
+function update(dt) {
+  frame++;
+  TAS.particles.update(dt);
+  TAS.fx.updateEffects(dt);
+
+  if (state === 'title') {
+    if (Object.values(TAS.input.keys).some(Boolean) || TAS.input.touch.a) {
+      state = 'playing';
+      room = 0;
+      loadRoom(room);
+      TAS.audio.ensureAudio();
+    }
+    return;
+  }
+
+  if (state === 'complete') {
+    if (Object.values(TAS.input.keys).some(Boolean) || TAS.input.touch.a) {
+      state = 'title';
+    }
+    return;
+  }
+
+  if (state === 'playing') {
+    if (dead) {
+      deadTimer--;
+      if (deadTimer <= 0) {
+        loadRoom(room);
+      }
+      return;
+    }
+
+    if (cleared) {
+      clearedTimer--;
+      if (clearedTimer <= 0) {
+        room++;
+        if (room >= ROOMS.length) {
+          state = 'complete';
+        } else {
+          loadRoom(room);
+        }
+      }
+      return;
+    }
+
+    handleInput(dt);
+    updateBullets();
+    updateEggs(dt);
+    updateEnemies(dt);
+    updateFireballs();
+  }
+}
+
+// === MAIN DRAW ===
+function draw(dt) {
+  ctx.fillStyle = '#111';
+  ctx.fillRect(0, 0, GW, GH);
+
+  if (state === 'title') {
+    drawTitleScreen();
+    return;
+  }
+
+  if (state === 'complete') {
+    drawCompleteScreen();
+    return;
+  }
+
+  ctx.save();
+  TAS.fx.applyShake();
+
+  // Draw grid
+  for (var row = 0; row < ROWS; row++) {
+    for (var col = 0; col < COLS; col++) {
+      drawTile(col, row);
+    }
+  }
+
+  // Draw chest
+  drawChest();
+
+  // Draw hearts
+  for (var i = 0; i < hearts.length; i++) {
+    drawHeart(hearts[i]);
+  }
+
+  // Draw eggs
+  for (var i = 0; i < eggs.length; i++) {
+    drawEgg(eggs[i]);
+  }
+
+  // Draw enemies
+  for (var i = 0; i < enemies.length; i++) {
+    drawEnemy(enemies[i]);
+  }
+
+  // Draw bullets
+  for (var i = 0; i < bullets.length; i++) {
+    drawBullet(bullets[i]);
+  }
+
+  // Draw fireballs
+  for (var i = 0; i < fireballs.length; i++) {
+    drawFireball(fireballs[i]);
+  }
+
+  // Draw player
+  drawPlayer();
+
+  // Particles
+  TAS.particles.draw();
+  ctx.restore();
+
+  TAS.fx.drawFlash(GW, GH);
+
+  // HUD
+  drawGameHUD();
+
+  // Cleared overlay
+  if (cleared) {
+    ctx.fillStyle = 'rgba(0,0,0,0.3)';
+    ctx.fillRect(0, 0, GW, GH);
+    ctx.textAlign = 'center';
+    ctx.fillStyle = '#ffdd44';
+    ctx.font = 'bold 24px monospace';
+    ctx.fillText('ROOM CLEAR!', GW / 2, GH / 2);
+  }
+
+  // Dead overlay
+  if (dead) {
+    ctx.fillStyle = 'rgba(80,0,0,0.3)';
+    ctx.fillRect(0, 0, GW, GH);
+  }
+
+  // Touch controls
+  TAS.input.drawTouchControls(GW, GH);
+}
+
+function drawTitleScreen() {
+  // Background pattern
+  ctx.fillStyle = '#1a1a2e';
+  ctx.fillRect(0, 0, GW, GH);
+
+  // Decorative grid
+  ctx.strokeStyle = 'rgba(100,100,200,0.1)';
+  for (var i = 0; i < 12; i++) {
+    ctx.beginPath();
+    ctx.moveTo(i * 32, 0); ctx.lineTo(i * 32, GH);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(0, i * 32); ctx.lineTo(GW, i * 32);
+    ctx.stroke();
+  }
+
+  // Title
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#000';
+  ctx.font = 'bold 32px monospace';
+  ctx.fillText('LOLO PUZZLE', GW / 2 + 2, 80 + 2);
+  ctx.fillStyle = '#66aaff';
+  ctx.fillText('LOLO PUZZLE', GW / 2, 80);
+
+  ctx.fillStyle = '#888';
+  ctx.font = '12px monospace';
+  ctx.fillText('A Tasern Puzzle Adventure', GW / 2, 110);
+
+  // Mini baseling
+  ctx.fillStyle = '#6688ff';
+  ctx.beginPath();
+  ctx.arc(GW / 2, 160, 20, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = '#88aaff';
+  ctx.beginPath();
+  ctx.arc(GW / 2 - 5, 155, 8, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = '#ffffff';
+  ctx.beginPath();
+  ctx.arc(GW / 2 - 6, 157, 5, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.arc(GW / 2 + 6, 157, 5, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = '#222';
+  ctx.beginPath();
+  ctx.arc(GW / 2 - 5, 158, 2.5, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.arc(GW / 2 + 7, 158, 2.5, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Instructions
+  ctx.fillStyle = '#aaa';
+  ctx.font = '11px monospace';
+  ctx.fillText('Collect all hearts to open the chest', GW / 2, 210);
+  ctx.fillText('Push emerald blocks to solve puzzles', GW / 2, 228);
+  ctx.fillText('2 hearts = 1 magic shot', GW / 2, 246);
+  ctx.fillText('R to reset room', GW / 2, 264);
+
+  // Progress
+  if (progress > 0) {
+    ctx.fillStyle = '#88ff88';
+    ctx.font = '11px monospace';
+    ctx.fillText('Progress: Room ' + progress + '/' + ROOMS.length, GW / 2, 295);
+  }
+
+  // Start prompt
+  var pulse = Math.sin(frame * 0.05) * 0.3 + 0.7;
+  ctx.globalAlpha = pulse;
+  ctx.fillStyle = '#ffdd44';
+  ctx.font = 'bold 14px monospace';
+  ctx.fillText('PRESS ANY KEY TO START', GW / 2, 345);
+  ctx.globalAlpha = 1;
+
+  // Controls legend
+  ctx.fillStyle = '#555';
+  ctx.font = '10px monospace';
+  ctx.fillText('ARROWS: Move | SPACE/Z: Shoot | R: Reset', GW / 2, 370);
+}
+
+function drawCompleteScreen() {
+  ctx.fillStyle = '#1a1a2e';
+  ctx.fillRect(0, 0, GW, GH);
+
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#ffdd44';
+  ctx.font = 'bold 28px monospace';
+  ctx.fillText('ALL ROOMS', GW / 2, 100);
+  ctx.fillText('COMPLETE!', GW / 2, 135);
+
+  ctx.fillStyle = '#88ff88';
+  ctx.font = '14px monospace';
+  ctx.fillText('Congratulations!', GW / 2, 180);
+  ctx.fillText('You solved all ' + ROOMS.length + ' puzzles!', GW / 2, 205);
+
+  // Mini celebration baseling
+  var bounce = Math.sin(frame * 0.1) * 5;
+  ctx.fillStyle = '#6688ff';
+  ctx.beginPath();
+  ctx.arc(GW / 2, 260 + bounce, 18, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = '#ffffff';
+  ctx.beginPath();
+  ctx.arc(GW / 2 - 5, 256 + bounce, 4, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.arc(GW / 2 + 5, 256 + bounce, 4, 0, Math.PI * 2);
+  ctx.fill();
+  // Happy mouth
+  ctx.strokeStyle = '#ffffff';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.arc(GW / 2, 262 + bounce, 6, 0.1 * Math.PI, 0.9 * Math.PI);
+  ctx.stroke();
+  ctx.lineWidth = 1;
+
+  // Particles on complete screen
+  if (frame % 15 === 0) {
+    var px = TAS.math.randRange(50, GW - 50);
+    TAS.particles.spawn(px, 300, '#ffdd44', 3, 2);
+  }
+  TAS.particles.draw();
+
+  var pulse = Math.sin(frame * 0.05) * 0.3 + 0.7;
+  ctx.globalAlpha = pulse;
+  ctx.fillStyle = '#88ccff';
+  ctx.font = 'bold 13px monospace';
+  ctx.fillText('PRESS ANY KEY', GW / 2, 340);
+  ctx.globalAlpha = 1;
+}
+
+// === START ===
+TAS.loop.start(update, draw);
+
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,1509 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Rampart Siege</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body { width: 100%; height: 100%; overflow: hidden; background: #111; touch-action: none; }
+canvas { display: block; margin: 0 auto; cursor: crosshair; }
+#back-link {
+  position: fixed; bottom: 8px; left: 50%; transform: translateX(-50%);
+  color: #666; font-family: monospace; font-size: 12px; text-decoration: none; z-index: 10;
+}
+#back-link:hover { color: #aaa; }
+</style>
+</head>
+<body>
+<canvas id="gc"></canvas>
+<a id="back-link" href="/games">Back to Arcade</a>
+<script src="nft-loader.js"></script>
+<script>if(window.NftLoader)NftLoader.gate();</script>
+<script src="tasern-engine.js"></script>
+<script>
+(function() {
+"use strict";
+
+// === GAME CONSTANTS ===
+const GW = 480, GH = 320;
+const ctx = TAS.ctx;
+
+// Grid settings
+const GRID_SIZE = 8;
+const GRID_COLS = Math.floor(GW / GRID_SIZE); // 60
+const GRID_ROWS = Math.floor(GH / GRID_SIZE); // 40
+
+// Map zones (in grid coords)
+const WATER_END = 15;       // columns 0-14 are water
+const LAND_START = 15;      // columns 15+ are land
+const CASTLE_LEFT = 22;     // castle zone
+const CASTLE_RIGHT = 42;
+const CASTLE_TOP = 8;
+const CASTLE_BOTTOM = 35;
+
+// Phase timings (in seconds)
+const CANNON_TIME = 15;
+const BUILD_TIME = 20;
+const PLACE_TIME = 10;
+
+// === INIT ===
+TAS.initCanvas(GW, GH);
+TAS.input.initTouch({ buttons: ['a', 'b'], labels: { a: 'FIRE', b: 'ROTATE' } });
+
+// === MOUSE/TOUCH TRACKING ===
+let mouseX = GW / 2, mouseY = GH / 2;
+let mouseDown = false;
+let mouseClicked = false;
+
+function getCanvasPos(clientX, clientY) {
+  const rect = TAS.canvas.getBoundingClientRect();
+  const dpr = window.devicePixelRatio || 1;
+  const scaleX = (TAS.canvas.width / dpr) / rect.width;
+  const scaleY = (TAS.canvas.height / dpr) / rect.height;
+  return {
+    x: (clientX - rect.left) * scaleX,
+    y: (clientY - rect.top) * scaleY
+  };
+}
+
+TAS.canvas.addEventListener('mousemove', function(e) {
+  const p = getCanvasPos(e.clientX, e.clientY);
+  mouseX = p.x; mouseY = p.y;
+});
+TAS.canvas.addEventListener('mousedown', function(e) {
+  TAS.audio.ensureAudio();
+  const p = getCanvasPos(e.clientX, e.clientY);
+  mouseX = p.x; mouseY = p.y;
+  mouseDown = true;
+  mouseClicked = true;
+});
+TAS.canvas.addEventListener('mouseup', function() { mouseDown = false; });
+
+TAS.canvas.addEventListener('touchstart', function(e) {
+  if (e.touches.length > 0) {
+    const p = getCanvasPos(e.touches[0].clientX, e.touches[0].clientY);
+    mouseX = p.x; mouseY = p.y;
+    mouseDown = true;
+    mouseClicked = true;
+  }
+}, { passive: true });
+TAS.canvas.addEventListener('touchmove', function(e) {
+  if (e.touches.length > 0) {
+    const p = getCanvasPos(e.touches[0].clientX, e.touches[0].clientY);
+    mouseX = p.x; mouseY = p.y;
+  }
+}, { passive: true });
+TAS.canvas.addEventListener('touchend', function() { mouseDown = false; }, { passive: true });
+
+// === GAME STATE ===
+let state = 'title';
+let score = 0;
+let highScore = TAS.score.load('rampart_siege_hi');
+let round = 1;
+let frame = 0;
+let phase = 'cannon'; // 'cannon', 'build', 'place'
+let phaseTimer = 0;
+let phaseTransition = 0;  // countdown for transition message
+
+// Grid layers
+let wallGrid = [];      // 0=empty, 1=wall, 2=keep, 3=destroyed
+let terrainGrid = [];   // 0=water, 1=land
+
+// Game objects
+let cannons = [];       // {gx, gy, cooldown, active}
+let cannonballs = [];   // {x, y, vx, vy, target}
+let enemies = [];       // {x, y, type, hp, maxHp, vx, vy, ...}
+let explosions = [];    // {x, y, timer, size}
+let keeps = [];         // {gx, gy} - castle keeps
+
+// Build phase
+let currentPiece = null;
+let pieceRotation = 0;
+let cannonsToPlace = 0;
+let enclosedCells = []; // cells that are enclosed by walls
+
+// Tetris-like wall pieces (relative coordinates)
+const PIECE_SHAPES = [
+  // I piece
+  [[0,0],[1,0],[2,0],[3,0]],
+  // L piece
+  [[0,0],[1,0],[2,0],[2,1]],
+  // J piece
+  [[0,0],[1,0],[2,0],[0,1]],
+  // T piece
+  [[0,0],[1,0],[2,0],[1,1]],
+  // S piece
+  [[1,0],[2,0],[0,1],[1,1]],
+  // Z piece
+  [[0,0],[1,0],[1,1],[2,1]],
+  // O piece
+  [[0,0],[1,0],[0,1],[1,1]],
+  // Plus piece
+  [[1,0],[0,1],[1,1],[2,1],[1,2]],
+  // Small L
+  [[0,0],[1,0],[0,1]],
+  // Corner
+  [[0,0],[1,0],[1,1]],
+  // Line 2
+  [[0,0],[1,0]],
+  // Line 3
+  [[0,0],[1,0],[2,0]],
+];
+
+// Wave animation
+let waterOffset = 0;
+
+// === TERRAIN INITIALIZATION ===
+function initTerrain() {
+  terrainGrid = [];
+  for (let r = 0; r < GRID_ROWS; r++) {
+    terrainGrid[r] = [];
+    for (let c = 0; c < GRID_COLS; c++) {
+      if (c < WATER_END) {
+        terrainGrid[r][c] = 0; // water
+      } else {
+        terrainGrid[r][c] = 1; // land
+      }
+    }
+  }
+}
+
+// === WALL GRID ===
+function initWalls() {
+  wallGrid = [];
+  for (let r = 0; r < GRID_ROWS; r++) {
+    wallGrid[r] = [];
+    for (let c = 0; c < GRID_COLS; c++) {
+      wallGrid[r][c] = 0;
+    }
+  }
+}
+
+function placeInitialCastle() {
+  // Place a small starting castle with one keep
+  const cx = 32, cy = 20; // center of castle area
+
+  // Place keep
+  keeps = [{gx: cx, gy: cy}];
+  wallGrid[cy][cx] = 2;
+  wallGrid[cy][cx+1] = 2;
+  wallGrid[cy+1][cx] = 2;
+  wallGrid[cy+1][cx+1] = 2;
+
+  // Place surrounding walls (rectangle)
+  for (let c = cx - 3; c <= cx + 4; c++) {
+    wallGrid[cy - 3][c] = 1;
+    wallGrid[cy + 4][c] = 1;
+  }
+  for (let r = cy - 3; r <= cy + 4; r++) {
+    wallGrid[r][cx - 3] = 1;
+    wallGrid[r][cx + 4] = 1;
+  }
+
+  // Place starting cannons inside
+  cannons = [
+    {gx: cx - 1, gy: cy - 1, cooldown: 0, active: true},
+    {gx: cx + 2, gy: cy - 1, cooldown: 0, active: true},
+    {gx: cx, gy: cy + 3, cooldown: 0, active: true},
+  ];
+}
+
+// === FLOOD FILL TO FIND ENCLOSED AREAS ===
+function findEnclosedAreas() {
+  enclosedCells = [];
+  const visited = [];
+  for (let r = 0; r < GRID_ROWS; r++) {
+    visited[r] = [];
+    for (let c = 0; c < GRID_COLS; c++) {
+      visited[r][c] = false;
+    }
+  }
+
+  // Mark all wall/keep cells as visited
+  for (let r = 0; r < GRID_ROWS; r++) {
+    for (let c = 0; c < GRID_COLS; c++) {
+      if (wallGrid[r][c] === 1 || wallGrid[r][c] === 2) {
+        visited[r][c] = true;
+      }
+    }
+  }
+
+  // Flood fill from edges to find OUTSIDE cells
+  const outside = [];
+  for (let r = 0; r < GRID_ROWS; r++) {
+    outside[r] = [];
+    for (let c = 0; c < GRID_COLS; c++) {
+      outside[r][c] = false;
+    }
+  }
+
+  const queue = [];
+  // Add all edge cells that aren't walls
+  for (let c = 0; c < GRID_COLS; c++) {
+    if (!visited[0][c]) { queue.push([0, c]); outside[0][c] = true; visited[0][c] = true; }
+    if (!visited[GRID_ROWS-1][c]) { queue.push([GRID_ROWS-1, c]); outside[GRID_ROWS-1][c] = true; visited[GRID_ROWS-1][c] = true; }
+  }
+  for (let r = 0; r < GRID_ROWS; r++) {
+    if (!visited[r][0]) { queue.push([r, 0]); outside[r][0] = true; visited[r][0] = true; }
+    if (!visited[r][GRID_COLS-1]) { queue.push([r, GRID_COLS-1]); outside[r][GRID_COLS-1] = true; visited[r][GRID_COLS-1] = true; }
+  }
+
+  while (queue.length > 0) {
+    const [r, c] = queue.shift();
+    const dirs = [[0,1],[0,-1],[1,0],[-1,0]];
+    for (const [dr, dc] of dirs) {
+      const nr = r + dr, nc = c + dc;
+      if (nr >= 0 && nr < GRID_ROWS && nc >= 0 && nc < GRID_COLS && !visited[nr][nc]) {
+        visited[nr][nc] = true;
+        outside[nr][nc] = true;
+        queue.push([nr, nc]);
+      }
+    }
+  }
+
+  // Everything NOT outside and NOT wall is enclosed
+  for (let r = 0; r < GRID_ROWS; r++) {
+    for (let c = 0; c < GRID_COLS; c++) {
+      if (!outside[r][c] && wallGrid[r][c] === 0 && terrainGrid[r][c] === 1) {
+        enclosedCells.push({r, c});
+      }
+    }
+  }
+
+  // Update cannon active status
+  for (const cannon of cannons) {
+    cannon.active = isCellEnclosed(cannon.gx, cannon.gy);
+  }
+
+  return enclosedCells.length > 0;
+}
+
+function isCellEnclosed(gc, gr) {
+  for (const cell of enclosedCells) {
+    if (cell.r === gr && cell.c === gc) return true;
+  }
+  // Also check keeps
+  if (wallGrid[gr] && wallGrid[gr][gc] === 2) return true;
+  return false;
+}
+
+function hasEnclosedKeep() {
+  for (const keep of keeps) {
+    if (isCellEnclosed(keep.gx, keep.gy) || isCellEnclosed(keep.gx+1, keep.gy) ||
+        isCellEnclosed(keep.gx, keep.gy+1) || isCellEnclosed(keep.gx+1, keep.gy+1)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// === PIECE MANAGEMENT ===
+function getRandomPiece() {
+  const idx = TAS.math.randInt(0, PIECE_SHAPES.length - 1);
+  return PIECE_SHAPES[idx].map(function(p) { return [p[0], p[1]]; });
+}
+
+function rotatePiece(piece) {
+  // Rotate 90 degrees clockwise around center
+  const maxX = Math.max.apply(null, piece.map(function(p) { return p[0]; }));
+  const maxY = Math.max.apply(null, piece.map(function(p) { return p[1]; }));
+  return piece.map(function(p) { return [maxY - p[1], p[0]]; });
+}
+
+function getPieceAtGrid(piece, gx, gy) {
+  return piece.map(function(p) { return {c: gx + p[0], r: gy + p[1]}; });
+}
+
+function canPlacePiece(piece, gx, gy) {
+  const cells = getPieceAtGrid(piece, gx, gy);
+  for (const cell of cells) {
+    if (cell.c < LAND_START || cell.c >= GRID_COLS || cell.r < 0 || cell.r >= GRID_ROWS) return false;
+    if (wallGrid[cell.r][cell.c] !== 0 && wallGrid[cell.r][cell.c] !== 3) return false;
+  }
+  return true;
+}
+
+function placePiece(piece, gx, gy) {
+  const cells = getPieceAtGrid(piece, gx, gy);
+  for (const cell of cells) {
+    wallGrid[cell.r][cell.c] = 1;
+  }
+  TAS.audio.playTone(300, 0.1, 'square', 0.08);
+  TAS.audio.playTone(450, 0.08, 'square', 0.06);
+}
+
+// === ENEMY SPAWNING ===
+function spawnWave() {
+  const baseCount = 2 + round;
+  const shipCount = Math.min(Math.floor(baseCount * 0.6), 8);
+  const soldierCount = Math.min(Math.floor(baseCount * 0.5), 10);
+  const siegeCount = round >= 5 ? Math.floor(round / 5) : 0;
+
+  // Spawn ships from the left (water)
+  for (let i = 0; i < shipCount; i++) {
+    const y = TAS.math.randRange(30, GH - 30);
+    const type = (round >= 3 && Math.random() < 0.3) ? 'galleon' : 'boat';
+    enemies.push({
+      x: -20 - i * 40,
+      y: y,
+      type: type,
+      hp: type === 'galleon' ? 3 : 1,
+      maxHp: type === 'galleon' ? 3 : 1,
+      vx: 0.3 + round * 0.05,
+      vy: 0,
+      bobPhase: Math.random() * Math.PI * 2,
+      fireTimer: TAS.math.randInt(60, 180),
+      width: type === 'galleon' ? 24 : 14,
+      height: type === 'galleon' ? 12 : 8,
+    });
+  }
+
+  // Spawn soldiers from the right
+  for (let i = 0; i < soldierCount; i++) {
+    const y = TAS.math.randRange(CASTLE_TOP * GRID_SIZE, CASTLE_BOTTOM * GRID_SIZE);
+    enemies.push({
+      x: GW + 10 + i * 25,
+      y: y,
+      type: 'soldier',
+      hp: 1,
+      maxHp: 1,
+      vx: -(0.4 + round * 0.03),
+      vy: 0,
+      width: 6,
+      height: 8,
+      attackTimer: 0,
+    });
+  }
+
+  // Spawn siege engines
+  for (let i = 0; i < siegeCount; i++) {
+    const y = TAS.math.randRange(CASTLE_TOP * GRID_SIZE + 20, CASTLE_BOTTOM * GRID_SIZE - 20);
+    enemies.push({
+      x: GW + 30 + i * 50,
+      y: y,
+      type: 'siege',
+      hp: 3,
+      maxHp: 3,
+      vx: -(0.25 + round * 0.02),
+      vy: 0,
+      width: 16,
+      height: 12,
+      attackTimer: 0,
+    });
+  }
+
+  // Boss every 5 rounds
+  if (round % 5 === 0) {
+    enemies.push({
+      x: -60,
+      y: GH / 2,
+      type: 'kraken',
+      hp: 5 + round,
+      maxHp: 5 + round,
+      vx: 0.2,
+      vy: 0,
+      width: 40,
+      height: 40,
+      bobPhase: 0,
+      tentacleTimer: 120,
+      fireTimer: 60,
+    });
+  }
+}
+
+// === CANNONBALL FIRING ===
+function fireCannon(cannon, targetX, targetY) {
+  if (cannon.cooldown > 0 || !cannon.active) return;
+  cannon.cooldown = 45; // frames between shots
+
+  const sx = cannon.gx * GRID_SIZE + GRID_SIZE / 2;
+  const sy = cannon.gy * GRID_SIZE + GRID_SIZE / 2;
+  const a = TAS.math.angle(sx, sy, targetX, targetY);
+  const speed = 4;
+
+  cannonballs.push({
+    x: sx, y: sy,
+    vx: Math.cos(a) * speed,
+    vy: Math.sin(a) * speed,
+    life: 120,
+  });
+
+  TAS.audio.playNoise(0.15, 0.12, 800);
+  TAS.audio.playTone(120, 0.2, 'sawtooth', 0.08, 60);
+  TAS.particles.spawn(sx, sy, '#ffaa00', 5, 2, {size: 2, gravity: 0.1});
+}
+
+// === DAMAGE WALLS ===
+function damageWallAt(gx, gy, radius) {
+  radius = radius || 1;
+  let damaged = 0;
+  for (let dr = -radius; dr <= radius; dr++) {
+    for (let dc = -radius; dc <= radius; dc++) {
+      const r = gy + dr, c = gx + dc;
+      if (r >= 0 && r < GRID_ROWS && c >= 0 && c < GRID_COLS) {
+        if (wallGrid[r][c] === 1) {
+          wallGrid[r][c] = 3; // destroyed
+          damaged++;
+          TAS.particles.spawn(c * GRID_SIZE + 4, r * GRID_SIZE + 4, '#888', 3, 1.5, {size: 2, shape: 'rect'});
+        }
+      }
+    }
+  }
+  if (damaged > 0) {
+    TAS.fx.shake(2, 0.85);
+    TAS.audio.playNoise(0.1, 0.06, 400);
+  }
+  return damaged;
+}
+
+// === START GAME ===
+function startGame() {
+  state = 'playing';
+  score = 0;
+  round = 1;
+  phase = 'build';
+  phaseTimer = BUILD_TIME;
+  phaseTransition = 2;
+
+  initTerrain();
+  initWalls();
+  placeInitialCastle();
+  findEnclosedAreas();
+
+  enemies = [];
+  cannonballs = [];
+  explosions = [];
+  currentPiece = getRandomPiece();
+  pieceRotation = 0;
+  cannonsToPlace = 0;
+
+  TAS.particles.clear();
+}
+
+// === PHASE TRANSITIONS ===
+function startCannonPhase() {
+  phase = 'cannon';
+  phaseTimer = CANNON_TIME;
+  phaseTransition = 1.5;
+  spawnWave();
+  findEnclosedAreas();
+}
+
+function startBuildPhase() {
+  phase = 'build';
+  phaseTimer = BUILD_TIME;
+  phaseTransition = 1.5;
+  currentPiece = getRandomPiece();
+  pieceRotation = 0;
+
+  // Clear destroyed walls visual
+  for (let r = 0; r < GRID_ROWS; r++) {
+    for (let c = 0; c < GRID_COLS; c++) {
+      if (wallGrid[r][c] === 3) wallGrid[r][c] = 0;
+    }
+  }
+}
+
+function startPlacePhase() {
+  phase = 'place';
+  phaseTimer = PLACE_TIME;
+  phaseTransition = 1.5;
+  cannonsToPlace = 2 + Math.floor(round / 4);
+  findEnclosedAreas();
+
+  // Check if player still has an enclosed keep
+  if (!hasEnclosedKeep()) {
+    gameOver();
+    return;
+  }
+
+  // Area bonus
+  score += enclosedCells.length * 2;
+}
+
+function gameOver() {
+  state = 'gameOver';
+  if (score > highScore) {
+    highScore = score;
+    TAS.score.save('rampart_siege_hi', highScore);
+  }
+  TAS.fx.shake(8, 0.9);
+  TAS.audio.playTone(200, 0.4, 'sawtooth', 0.12, 50);
+  TAS.audio.playNoise(0.5, 0.1, 300);
+}
+
+// === UPDATE ===
+function update(dt) {
+  frame++;
+  TAS.particles.update(dt);
+  TAS.fx.updateEffects(dt);
+  waterOffset += dt * 15;
+
+  if (state === 'title') {
+    if (Object.values(TAS.input.keys).some(Boolean) || TAS.input.touch.a || mouseClicked) {
+      startGame();
+      mouseClicked = false;
+    }
+    return;
+  }
+
+  if (state === 'gameOver') {
+    if (frame % 10 === 0 && Math.random() < 0.3) {
+      TAS.particles.spawn(
+        TAS.math.randRange(50, GW - 50),
+        TAS.math.randRange(50, GH - 50),
+        '#ff4400', 8, 2, {size: 3, gravity: 0.2}
+      );
+    }
+    if ((Object.values(TAS.input.keys).some(Boolean) || TAS.input.touch.a || mouseClicked) && frame > 60) {
+      state = 'title';
+      frame = 0;
+      mouseClicked = false;
+    }
+    return;
+  }
+
+  if (state === 'playing') {
+    // Phase transition countdown
+    if (phaseTransition > 0) {
+      phaseTransition -= dt;
+      mouseClicked = false;
+      return;
+    }
+
+    // Phase timer
+    phaseTimer -= dt;
+
+    if (phase === 'cannon') {
+      updateCannonPhase(dt);
+    } else if (phase === 'build') {
+      updateBuildPhase(dt);
+    } else if (phase === 'place') {
+      updatePlacePhase(dt);
+    }
+  }
+
+  mouseClicked = false;
+}
+
+// === CANNON PHASE UPDATE ===
+function updateCannonPhase(dt) {
+  // Fire cannons on click
+  if (mouseClicked || TAS.input.touch.a) {
+    let fired = false;
+    for (const cannon of cannons) {
+      if (cannon.active && cannon.cooldown <= 0) {
+        fireCannon(cannon, mouseX, mouseY);
+        fired = true;
+        break; // fire one at a time
+      }
+    }
+    if (!fired) {
+      // Try to fire any available cannon
+      for (const cannon of cannons) {
+        if (cannon.active && cannon.cooldown <= 0) {
+          fireCannon(cannon, mouseX, mouseY);
+          break;
+        }
+      }
+    }
+  }
+
+  // Auto-fire on hold
+  if (mouseDown && frame % 12 === 0) {
+    for (const cannon of cannons) {
+      if (cannon.active && cannon.cooldown <= 0) {
+        fireCannon(cannon, mouseX, mouseY);
+        break;
+      }
+    }
+  }
+
+  // Update cannon cooldowns
+  for (const cannon of cannons) {
+    if (cannon.cooldown > 0) cannon.cooldown--;
+  }
+
+  // Update cannonballs
+  for (let i = cannonballs.length - 1; i >= 0; i--) {
+    const b = cannonballs[i];
+    b.x += b.vx;
+    b.y += b.vy;
+    b.vy += 0.02; // slight gravity arc
+    b.life--;
+
+    // Check hits against enemies
+    let hit = false;
+    for (let j = enemies.length - 1; j >= 0; j--) {
+      const e = enemies[j];
+      if (TAS.hit.rectOverlap(b.x - 3, b.y - 3, 6, 6, e.x - e.width/2, e.y - e.height/2, e.width, e.height)) {
+        e.hp--;
+        hit = true;
+        TAS.particles.spawn(b.x, b.y, '#ffdd00', 8, 3, {size: 2, gravity: 0.1});
+        TAS.fx.shake(2, 0.8);
+        TAS.audio.playTone(200, 0.1, 'square', 0.06);
+
+        if (e.hp <= 0) {
+          // Enemy destroyed
+          const points = e.type === 'boat' ? 10 : e.type === 'galleon' ? 30 :
+                         e.type === 'soldier' ? 15 : e.type === 'siege' ? 50 : 100;
+          score += points;
+          const color = e.type === 'kraken' ? '#88ff88' : '#ff8800';
+          TAS.particles.spawn(e.x, e.y, color, 15, 4, {size: 3, gravity: 0.15});
+          TAS.audio.playNoise(0.2, 0.1, 600);
+          TAS.audio.playTone(400, 0.15, 'square', 0.08, 100);
+          explosions.push({x: e.x, y: e.y, timer: 30, size: e.width});
+          enemies.splice(j, 1);
+        }
+        break;
+      }
+    }
+
+    if (hit || b.life <= 0 || b.x < -10 || b.x > GW + 10 || b.y > GH + 10) {
+      if (!hit && b.y > GH - 20) {
+        // Splash in water
+        TAS.particles.spawn(b.x, b.y, '#4488cc', 4, 2, {size: 1});
+      }
+      cannonballs.splice(i, 1);
+    }
+  }
+
+  // Update enemies
+  updateEnemies(dt);
+
+  // Update explosions
+  for (let i = explosions.length - 1; i >= 0; i--) {
+    explosions[i].timer--;
+    if (explosions[i].timer <= 0) explosions.splice(i, 1);
+  }
+
+  // End phase
+  if (phaseTimer <= 0 || enemies.length === 0) {
+    // Clear remaining enemies that didn't reach walls
+    enemies = [];
+    cannonballs = [];
+    startBuildPhase();
+  }
+}
+
+function updateEnemies(dt) {
+  for (let i = enemies.length - 1; i >= 0; i--) {
+    const e = enemies[i];
+    e.x += e.vx;
+    e.y += e.vy;
+
+    if (e.type === 'boat' || e.type === 'galleon') {
+      e.bobPhase += 0.03;
+      e.y += Math.sin(e.bobPhase) * 0.3;
+
+      // Ships fire at walls
+      if (e.fireTimer !== undefined) {
+        e.fireTimer--;
+        if (e.fireTimer <= 0 && e.x > 20 && e.x < WATER_END * GRID_SIZE + 30) {
+          // Fire at random wall
+          const targetC = TAS.math.randInt(CASTLE_LEFT, CASTLE_RIGHT);
+          const targetR = TAS.math.randInt(CASTLE_TOP, CASTLE_BOTTOM);
+          if (wallGrid[targetR] && wallGrid[targetR][targetC] === 1) {
+            damageWallAt(targetC, targetR, 0);
+            TAS.audio.playTone(150, 0.1, 'sawtooth', 0.04);
+          }
+          e.fireTimer = TAS.math.randInt(90, 200 - round * 5);
+        }
+      }
+
+      // Remove ships that pass the land
+      if (e.x > WATER_END * GRID_SIZE + 20) {
+        // Ship reached shore - damage walls
+        const gc = CASTLE_LEFT;
+        const gr = Math.floor(e.y / GRID_SIZE);
+        damageWallAt(gc, gr, 1);
+        enemies.splice(i, 1);
+        continue;
+      }
+    } else if (e.type === 'soldier') {
+      // Soldiers walk toward walls and destroy them
+      const gc = Math.floor(e.x / GRID_SIZE);
+      const gr = Math.floor(e.y / GRID_SIZE);
+      if (gc >= 0 && gc < GRID_COLS && gr >= 0 && gr < GRID_ROWS) {
+        if (wallGrid[gr] && (wallGrid[gr][gc] === 1 || wallGrid[gr][gc] === 2)) {
+          e.attackTimer++;
+          e.vx = 0;
+          if (e.attackTimer >= 60) {
+            damageWallAt(gc, gr, 0);
+            e.attackTimer = 0;
+          }
+        }
+      }
+      if (e.x < LAND_START * GRID_SIZE) {
+        enemies.splice(i, 1);
+        continue;
+      }
+    } else if (e.type === 'siege') {
+      const gc = Math.floor(e.x / GRID_SIZE);
+      const gr = Math.floor(e.y / GRID_SIZE);
+      if (gc >= 0 && gc < GRID_COLS && gr >= 0 && gr < GRID_ROWS) {
+        if (wallGrid[gr] && (wallGrid[gr][gc] === 1 || wallGrid[gr][gc] === 2)) {
+          e.attackTimer++;
+          e.vx = 0;
+          if (e.attackTimer >= 45) {
+            damageWallAt(gc, gr, 1); // radius 1 = hits 3x3
+            e.attackTimer = 0;
+            TAS.fx.shake(4, 0.85);
+          }
+        }
+      }
+      if (e.x < LAND_START * GRID_SIZE) {
+        enemies.splice(i, 1);
+        continue;
+      }
+    } else if (e.type === 'kraken') {
+      e.bobPhase += 0.02;
+      e.y = GH / 2 + Math.sin(e.bobPhase) * 40;
+
+      // Tentacle attacks
+      if (e.tentacleTimer !== undefined) {
+        e.tentacleTimer--;
+        if (e.tentacleTimer <= 0) {
+          // Tentacle smash random wall section
+          const targetC = TAS.math.randInt(CASTLE_LEFT, CASTLE_RIGHT);
+          const targetR = TAS.math.randInt(CASTLE_TOP, CASTLE_BOTTOM);
+          damageWallAt(targetC, targetR, 2); // big radius
+          TAS.fx.shake(6, 0.88);
+          TAS.audio.playNoise(0.3, 0.12, 200);
+          TAS.particles.spawn(targetC * GRID_SIZE, targetR * GRID_SIZE, '#44cc88', 12, 3, {size: 3});
+          e.tentacleTimer = TAS.math.randInt(80, 150);
+        }
+      }
+
+      // Stop at shore
+      if (e.x > WATER_END * GRID_SIZE - 20) {
+        e.vx = 0;
+        e.x = WATER_END * GRID_SIZE - 20;
+      }
+    }
+  }
+}
+
+// === BUILD PHASE UPDATE ===
+function updateBuildPhase(dt) {
+  // Rotate piece
+  if (TAS.input.keys['KeyR'] || TAS.input.keys['r'] || TAS.input.touch.b) {
+    if (frame % 10 === 0) {
+      currentPiece = rotatePiece(currentPiece);
+      TAS.audio.playTone(500, 0.05, 'square', 0.04);
+    }
+  }
+
+  // Place piece on click
+  if (mouseClicked) {
+    const gx = Math.floor(mouseX / GRID_SIZE);
+    const gy = Math.floor(mouseY / GRID_SIZE);
+    if (currentPiece && canPlacePiece(currentPiece, gx, gy)) {
+      placePiece(currentPiece, gx, gy);
+      currentPiece = getRandomPiece();
+      pieceRotation = 0;
+      // Particles at placement
+      const cells = getPieceAtGrid(currentPiece, gx, gy);
+      TAS.particles.spawn(gx * GRID_SIZE + 8, gy * GRID_SIZE + 8, '#aaaaaa', 4, 1.5, {size: 2, shape: 'rect'});
+    } else {
+      // Invalid placement sound
+      TAS.audio.playTone(100, 0.1, 'square', 0.05);
+    }
+  }
+
+  // Keyboard placement with arrows
+  if (TAS.input.keys['Space'] || TAS.input.keys[' ']) {
+    const gx = Math.floor(mouseX / GRID_SIZE);
+    const gy = Math.floor(mouseY / GRID_SIZE);
+    if (currentPiece && canPlacePiece(currentPiece, gx, gy)) {
+      placePiece(currentPiece, gx, gy);
+      currentPiece = getRandomPiece();
+      pieceRotation = 0;
+    }
+    TAS.input.keys['Space'] = false;
+    TAS.input.keys[' '] = false;
+  }
+
+  // End phase
+  if (phaseTimer <= 0) {
+    findEnclosedAreas();
+    startPlacePhase();
+  }
+}
+
+// === PLACE CANNONS PHASE UPDATE ===
+function updatePlacePhase(dt) {
+  if (cannonsToPlace <= 0 || phaseTimer <= 0) {
+    // Next round
+    round++;
+    if (round > 20) {
+      // Victory!
+      score += 1000;
+      gameOver(); // Win state (same screen, high score reflects victory)
+      return;
+    }
+    startCannonPhase();
+    return;
+  }
+
+  if (mouseClicked) {
+    const gx = Math.floor(mouseX / GRID_SIZE);
+    const gy = Math.floor(mouseY / GRID_SIZE);
+
+    // Check if cell is enclosed and empty
+    if (isCellEnclosed(gx, gy) && terrainGrid[gy] && terrainGrid[gy][gx] === 1) {
+      // Check no cannon already there
+      let occupied = false;
+      for (const c of cannons) {
+        if (c.gx === gx && c.gy === gy) { occupied = true; break; }
+      }
+      if (!occupied && wallGrid[gy][gx] === 0) {
+        cannons.push({gx: gx, gy: gy, cooldown: 0, active: true});
+        cannonsToPlace--;
+        TAS.audio.playTone(350, 0.1, 'triangle', 0.08);
+        TAS.audio.playTone(500, 0.08, 'triangle', 0.06);
+        TAS.particles.spawn(gx * GRID_SIZE + 4, gy * GRID_SIZE + 4, '#ffdd44', 6, 2, {size: 2});
+      }
+    } else {
+      TAS.audio.playTone(100, 0.1, 'square', 0.05);
+    }
+  }
+}
+
+// === DRAW ===
+function draw(dt) {
+  ctx.fillStyle = '#111';
+  ctx.fillRect(0, 0, GW, GH);
+
+  if (state === 'title') {
+    drawTitleScreen();
+    return;
+  }
+
+  if (state === 'gameOver') {
+    drawMap();
+    TAS.ui.drawGameOver(score, highScore, GW, GH, { frame, extra: 'Round: ' + round });
+    return;
+  }
+
+  // === GAME RENDERING ===
+  ctx.save();
+  TAS.fx.applyShake();
+
+  drawMap();
+  drawWalls();
+  drawCannons();
+  drawEnemies();
+  drawCannonballs();
+  drawExplosions();
+
+  // Build phase ghost piece
+  if (phase === 'build' && currentPiece && phaseTransition <= 0) {
+    drawGhostPiece();
+  }
+
+  // Place phase highlights
+  if (phase === 'place' && phaseTransition <= 0) {
+    drawPlaceHighlight();
+  }
+
+  // Crosshair in cannon phase
+  if (phase === 'cannon' && phaseTransition <= 0) {
+    drawCrosshair();
+  }
+
+  TAS.particles.draw();
+  ctx.restore();
+
+  TAS.fx.drawFlash(GW, GH);
+
+  // HUD
+  drawHUD();
+  drawPhaseIndicator();
+
+  // Phase transition overlay
+  if (phaseTransition > 0) {
+    drawPhaseTransition();
+  }
+
+  TAS.input.drawTouchControls(GW, GH);
+}
+
+// === DRAW MAP ===
+function drawMap() {
+  // Water
+  for (let r = 0; r < GRID_ROWS; r++) {
+    for (let c = 0; c < WATER_END; c++) {
+      const wave = Math.sin((c + r * 0.5 + waterOffset * 0.1) * 0.5) * 0.15;
+      const blue = Math.floor(80 + wave * 40 + Math.sin((c * 0.3 + waterOffset * 0.05)) * 15);
+      ctx.fillStyle = 'rgb(20,' + Math.floor(40 + wave * 20) + ',' + blue + ')';
+      ctx.fillRect(c * GRID_SIZE, r * GRID_SIZE, GRID_SIZE, GRID_SIZE);
+    }
+  }
+
+  // Shore line
+  ctx.fillStyle = '#886633';
+  ctx.fillRect(WATER_END * GRID_SIZE - 2, 0, 4, GH);
+
+  // Land
+  for (let r = 0; r < GRID_ROWS; r++) {
+    for (let c = LAND_START; c < GRID_COLS; c++) {
+      const green = 40 + ((c * 7 + r * 13) % 20);
+      ctx.fillStyle = 'rgb(' + Math.floor(20 + (c % 3) * 5) + ',' + green + ',' + Math.floor(15 + (r % 4) * 3) + ')';
+      ctx.fillRect(c * GRID_SIZE, r * GRID_SIZE, GRID_SIZE, GRID_SIZE);
+    }
+  }
+
+  // Draw enclosed area highlight
+  if (phase !== 'cannon') {
+    ctx.globalAlpha = 0.15;
+    ctx.fillStyle = '#44ff88';
+    for (const cell of enclosedCells) {
+      ctx.fillRect(cell.c * GRID_SIZE, cell.r * GRID_SIZE, GRID_SIZE, GRID_SIZE);
+    }
+    ctx.globalAlpha = 1;
+  }
+}
+
+// === DRAW WALLS ===
+function drawWalls() {
+  for (let r = 0; r < GRID_ROWS; r++) {
+    for (let c = 0; c < GRID_COLS; c++) {
+      const cell = wallGrid[r][c];
+      if (cell === 0) continue;
+
+      const x = c * GRID_SIZE, y = r * GRID_SIZE;
+
+      if (cell === 1) {
+        // Wall - stone blocks
+        ctx.fillStyle = '#778899';
+        ctx.fillRect(x, y, GRID_SIZE, GRID_SIZE);
+        ctx.fillStyle = '#667788';
+        ctx.fillRect(x, y, GRID_SIZE, 1);
+        ctx.fillRect(x, y, 1, GRID_SIZE);
+        ctx.fillStyle = '#556677';
+        ctx.fillRect(x + GRID_SIZE - 1, y, 1, GRID_SIZE);
+        ctx.fillRect(x, y + GRID_SIZE - 1, GRID_SIZE, 1);
+        // Mortar lines
+        ctx.fillStyle = '#445566';
+        if ((c + r) % 2 === 0) {
+          ctx.fillRect(x + 3, y + 3, 2, 1);
+        }
+      } else if (cell === 2) {
+        // Keep - darker stone with flag
+        ctx.fillStyle = '#5566aa';
+        ctx.fillRect(x, y, GRID_SIZE, GRID_SIZE);
+        ctx.fillStyle = '#4455aa';
+        ctx.fillRect(x + 1, y + 1, GRID_SIZE - 2, GRID_SIZE - 2);
+        // Flag
+        if (c % 2 === 0 && r % 2 === 0) {
+          ctx.fillStyle = '#ff4444';
+          ctx.fillRect(x + 3, y, 1, 4);
+          ctx.fillRect(x + 4, y, 3, 2);
+        }
+      } else if (cell === 3) {
+        // Destroyed wall - rubble
+        ctx.fillStyle = '#554433';
+        ctx.fillRect(x + 1, y + 2, 3, 3);
+        ctx.fillStyle = '#665544';
+        ctx.fillRect(x + 4, y + 4, 2, 2);
+        ctx.fillStyle = '#443322';
+        ctx.fillRect(x + 2, y + 5, 4, 2);
+      }
+    }
+  }
+}
+
+// === DRAW CANNONS ===
+function drawCannons() {
+  for (const cannon of cannons) {
+    const x = cannon.gx * GRID_SIZE + GRID_SIZE / 2;
+    const y = cannon.gy * GRID_SIZE + GRID_SIZE / 2;
+
+    // Base
+    ctx.fillStyle = cannon.active ? '#444444' : '#332222';
+    ctx.beginPath();
+    ctx.arc(x, y, 4, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Barrel - point toward mouse in cannon phase
+    if (phase === 'cannon' && cannon.active) {
+      const a = TAS.math.angle(x, y, mouseX, mouseY);
+      ctx.strokeStyle = '#666666';
+      ctx.lineWidth = 2.5;
+      ctx.beginPath();
+      ctx.moveTo(x, y);
+      ctx.lineTo(x + Math.cos(a) * 6, y + Math.sin(a) * 6);
+      ctx.stroke();
+      ctx.lineWidth = 1;
+
+      // Cooldown indicator
+      if (cannon.cooldown > 0) {
+        ctx.fillStyle = 'rgba(255,100,0,0.5)';
+        ctx.beginPath();
+        ctx.arc(x, y, 3, 0, Math.PI * 2 * (cannon.cooldown / 45));
+        ctx.fill();
+      }
+    } else {
+      // Static barrel pointing left
+      ctx.strokeStyle = cannon.active ? '#666666' : '#443333';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(x, y);
+      ctx.lineTo(x - 5, y);
+      ctx.stroke();
+      ctx.lineWidth = 1;
+    }
+
+    // Disabled X
+    if (!cannon.active) {
+      ctx.strokeStyle = '#ff0000';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(x - 3, y - 3); ctx.lineTo(x + 3, y + 3);
+      ctx.moveTo(x + 3, y - 3); ctx.lineTo(x - 3, y + 3);
+      ctx.stroke();
+    }
+  }
+}
+
+// === DRAW ENEMIES ===
+function drawEnemies() {
+  for (const e of enemies) {
+    const x = e.x, y = e.y;
+
+    if (e.type === 'boat') {
+      // Small boat
+      ctx.fillStyle = '#663300';
+      ctx.beginPath();
+      ctx.moveTo(x - 7, y);
+      ctx.lineTo(x - 5, y + 4);
+      ctx.lineTo(x + 5, y + 4);
+      ctx.lineTo(x + 7, y);
+      ctx.lineTo(x + 5, y - 2);
+      ctx.lineTo(x - 5, y - 2);
+      ctx.closePath();
+      ctx.fill();
+      // Sail
+      ctx.fillStyle = '#cc8844';
+      ctx.fillRect(x - 1, y - 6, 2, 6);
+      ctx.fillStyle = '#ddaa66';
+      ctx.beginPath();
+      ctx.moveTo(x + 1, y - 6);
+      ctx.lineTo(x + 1, y - 1);
+      ctx.lineTo(x + 5, y - 2);
+      ctx.closePath();
+      ctx.fill();
+    } else if (e.type === 'galleon') {
+      // War galleon
+      ctx.fillStyle = '#442200';
+      ctx.beginPath();
+      ctx.moveTo(x - 12, y + 2);
+      ctx.lineTo(x - 10, y + 6);
+      ctx.lineTo(x + 10, y + 6);
+      ctx.lineTo(x + 12, y + 2);
+      ctx.lineTo(x + 10, y - 3);
+      ctx.lineTo(x - 10, y - 3);
+      ctx.closePath();
+      ctx.fill();
+      // Masts
+      ctx.fillStyle = '#664400';
+      ctx.fillRect(x - 4, y - 10, 2, 12);
+      ctx.fillRect(x + 3, y - 8, 2, 10);
+      // Sails
+      ctx.fillStyle = '#aa3333';
+      ctx.fillRect(x - 8, y - 9, 8, 5);
+      ctx.fillRect(x + 1, y - 7, 6, 4);
+      // HP bar
+      if (e.hp < e.maxHp) {
+        ctx.fillStyle = '#333';
+        ctx.fillRect(x - 10, y - 14, 20, 3);
+        ctx.fillStyle = '#ff4444';
+        ctx.fillRect(x - 10, y - 14, 20 * (e.hp / e.maxHp), 3);
+      }
+    } else if (e.type === 'soldier') {
+      // Ground soldier (fungal invader)
+      ctx.fillStyle = '#558833';
+      ctx.fillRect(x - 3, y - 4, 6, 8);
+      // Mushroom cap head
+      ctx.fillStyle = '#88aa44';
+      ctx.beginPath();
+      ctx.arc(x, y - 5, 4, Math.PI, 0);
+      ctx.fill();
+      // Spots
+      ctx.fillStyle = '#aabb66';
+      ctx.fillRect(x - 2, y - 7, 2, 2);
+      ctx.fillRect(x + 1, y - 6, 1, 1);
+      // Weapon
+      ctx.fillStyle = '#886644';
+      ctx.fillRect(x + 3, y - 2, 1, 6);
+    } else if (e.type === 'siege') {
+      // Siege engine (fungal battering ram)
+      ctx.fillStyle = '#664422';
+      ctx.fillRect(x - 8, y - 5, 16, 10);
+      // Wheels
+      ctx.fillStyle = '#443311';
+      ctx.beginPath();
+      ctx.arc(x - 5, y + 6, 3, 0, Math.PI * 2);
+      ctx.arc(x + 5, y + 6, 3, 0, Math.PI * 2);
+      ctx.fill();
+      // Ram
+      ctx.fillStyle = '#555555';
+      ctx.fillRect(x - 12, y - 2, 6, 4);
+      // Fungal growth
+      ctx.fillStyle = '#77aa33';
+      ctx.beginPath();
+      ctx.arc(x, y - 6, 5, Math.PI, 0);
+      ctx.fill();
+      // HP bar
+      if (e.hp < e.maxHp) {
+        ctx.fillStyle = '#333';
+        ctx.fillRect(x - 8, y - 12, 16, 3);
+        ctx.fillStyle = '#ff4444';
+        ctx.fillRect(x - 8, y - 12, 16 * (e.hp / e.maxHp), 3);
+      }
+    } else if (e.type === 'kraken') {
+      // Boss kraken
+      const pulse = Math.sin(frame * 0.05) * 2;
+      // Body
+      ctx.fillStyle = '#227744';
+      ctx.beginPath();
+      ctx.arc(x, y, 18 + pulse, 0, Math.PI * 2);
+      ctx.fill();
+      // Eyes
+      ctx.fillStyle = '#ff4444';
+      ctx.beginPath();
+      ctx.arc(x - 6, y - 5, 4, 0, Math.PI * 2);
+      ctx.arc(x + 6, y - 5, 4, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = '#000';
+      ctx.beginPath();
+      ctx.arc(x - 6, y - 5, 2, 0, Math.PI * 2);
+      ctx.arc(x + 6, y - 5, 2, 0, Math.PI * 2);
+      ctx.fill();
+      // Tentacles
+      ctx.strokeStyle = '#33aa55';
+      ctx.lineWidth = 3;
+      for (let t = 0; t < 6; t++) {
+        const angle = (t / 6) * Math.PI * 2 + frame * 0.02;
+        const tx = x + Math.cos(angle) * (22 + pulse);
+        const ty = y + Math.sin(angle) * (22 + pulse);
+        const tx2 = x + Math.cos(angle + 0.3) * (32 + pulse);
+        const ty2 = y + Math.sin(angle + 0.3) * (32 + pulse);
+        ctx.beginPath();
+        ctx.moveTo(tx, ty);
+        ctx.quadraticCurveTo(tx + Math.sin(frame * 0.03 + t) * 8, ty + Math.cos(frame * 0.04 + t) * 8, tx2, ty2);
+        ctx.stroke();
+      }
+      ctx.lineWidth = 1;
+      // Mushroom spots
+      ctx.fillStyle = '#44cc66';
+      for (let s = 0; s < 5; s++) {
+        const sx = x + Math.cos(s * 1.2) * 10;
+        const sy = y + Math.sin(s * 1.2) * 8;
+        ctx.beginPath();
+        ctx.arc(sx, sy, 3, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      // HP bar
+      ctx.fillStyle = '#333';
+      ctx.fillRect(x - 20, y - 28, 40, 4);
+      ctx.fillStyle = '#44ff88';
+      ctx.fillRect(x - 20, y - 28, 40 * (e.hp / e.maxHp), 4);
+    }
+  }
+}
+
+// === DRAW CANNONBALLS ===
+function drawCannonballs() {
+  for (const b of cannonballs) {
+    ctx.fillStyle = '#222';
+    ctx.beginPath();
+    ctx.arc(b.x, b.y, 3, 0, Math.PI * 2);
+    ctx.fill();
+    // Trail
+    ctx.fillStyle = 'rgba(100,80,60,0.4)';
+    ctx.beginPath();
+    ctx.arc(b.x - b.vx * 2, b.y - b.vy * 2, 2, 0, Math.PI * 2);
+    ctx.fill();
+  }
+}
+
+// === DRAW EXPLOSIONS ===
+function drawExplosions() {
+  for (const ex of explosions) {
+    const progress = 1 - (ex.timer / 30);
+    const radius = ex.size * (0.5 + progress);
+    ctx.globalAlpha = 1 - progress;
+    ctx.fillStyle = '#ff8800';
+    ctx.beginPath();
+    ctx.arc(ex.x, ex.y, radius, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = '#ffdd00';
+    ctx.beginPath();
+    ctx.arc(ex.x, ex.y, radius * 0.5, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.globalAlpha = 1;
+  }
+}
+
+// === DRAW GHOST PIECE ===
+function drawGhostPiece() {
+  if (!currentPiece) return;
+  const gx = Math.floor(mouseX / GRID_SIZE);
+  const gy = Math.floor(mouseY / GRID_SIZE);
+  const canPlace = canPlacePiece(currentPiece, gx, gy);
+  const cells = getPieceAtGrid(currentPiece, gx, gy);
+
+  ctx.globalAlpha = 0.6;
+  for (const cell of cells) {
+    const x = cell.c * GRID_SIZE, y = cell.r * GRID_SIZE;
+    ctx.fillStyle = canPlace ? '#88ccaa' : '#cc4444';
+    ctx.fillRect(x, y, GRID_SIZE, GRID_SIZE);
+    ctx.strokeStyle = canPlace ? '#44ff88' : '#ff2222';
+    ctx.strokeRect(x + 0.5, y + 0.5, GRID_SIZE - 1, GRID_SIZE - 1);
+  }
+  ctx.globalAlpha = 1;
+}
+
+// === DRAW PLACE HIGHLIGHT ===
+function drawPlaceHighlight() {
+  const gx = Math.floor(mouseX / GRID_SIZE);
+  const gy = Math.floor(mouseY / GRID_SIZE);
+
+  // Highlight valid placement cells
+  ctx.globalAlpha = 0.2 + Math.sin(frame * 0.08) * 0.1;
+  ctx.fillStyle = '#ffdd44';
+  for (const cell of enclosedCells) {
+    let occupied = false;
+    for (const c of cannons) {
+      if (c.gx === cell.c && c.gy === cell.r) { occupied = true; break; }
+    }
+    if (!occupied && wallGrid[cell.r][cell.c] === 0) {
+      ctx.fillRect(cell.c * GRID_SIZE, cell.r * GRID_SIZE, GRID_SIZE, GRID_SIZE);
+    }
+  }
+  ctx.globalAlpha = 1;
+
+  // Cursor cannon preview
+  if (isCellEnclosed(gx, gy)) {
+    ctx.globalAlpha = 0.7;
+    ctx.fillStyle = '#ffaa00';
+    ctx.beginPath();
+    ctx.arc(gx * GRID_SIZE + GRID_SIZE / 2, gy * GRID_SIZE + GRID_SIZE / 2, 4, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.globalAlpha = 1;
+  }
+}
+
+// === DRAW CROSSHAIR ===
+function drawCrosshair() {
+  ctx.strokeStyle = '#ff4444';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(mouseX - 8, mouseY); ctx.lineTo(mouseX - 3, mouseY);
+  ctx.moveTo(mouseX + 3, mouseY); ctx.lineTo(mouseX + 8, mouseY);
+  ctx.moveTo(mouseX, mouseY - 8); ctx.lineTo(mouseX, mouseY - 3);
+  ctx.moveTo(mouseX, mouseY + 3); ctx.lineTo(mouseX, mouseY + 8);
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.arc(mouseX, mouseY, 6, 0, Math.PI * 2);
+  ctx.stroke();
+}
+
+// === DRAW HUD ===
+function drawHUD() {
+  // Top bar
+  ctx.fillStyle = 'rgba(10,5,20,0.8)';
+  ctx.fillRect(0, 0, GW, 22);
+
+  ctx.font = 'bold 11px monospace';
+
+  // Score
+  ctx.fillStyle = '#ffdd44';
+  ctx.textAlign = 'left';
+  ctx.fillText('SCORE: ' + score, 6, 15);
+
+  // Round
+  ctx.fillStyle = '#88ccff';
+  ctx.textAlign = 'center';
+  ctx.fillText('ROUND ' + round + '/20', GW / 2, 15);
+
+  // Cannons count
+  ctx.fillStyle = '#44dd88';
+  ctx.textAlign = 'right';
+  const activeCannons = cannons.filter(function(c) { return c.active; }).length;
+  ctx.fillText('CANNONS: ' + activeCannons, GW - 6, 15);
+}
+
+// === DRAW PHASE INDICATOR ===
+function drawPhaseIndicator() {
+  // Bottom bar - phase + timer
+  const barY = GH - 20;
+  ctx.fillStyle = 'rgba(10,5,20,0.8)';
+  ctx.fillRect(0, barY, GW, 20);
+
+  // Phase name
+  ctx.font = 'bold 11px monospace';
+  ctx.textAlign = 'left';
+  const phaseColors = {cannon: '#ff6644', build: '#44aaff', place: '#ffdd44'};
+  const phaseNames = {cannon: 'FIRE!', build: 'BUILD WALLS', place: 'PLACE CANNONS'};
+  ctx.fillStyle = phaseColors[phase] || '#fff';
+  ctx.fillText(phaseNames[phase] || '', 6, barY + 14);
+
+  // Timer bar
+  const maxTime = phase === 'cannon' ? CANNON_TIME : phase === 'build' ? BUILD_TIME : PLACE_TIME;
+  const timerPct = Math.max(0, phaseTimer / maxTime);
+  const barW = 180;
+  const barX = GW / 2 - barW / 2;
+  ctx.fillStyle = '#333';
+  ctx.fillRect(barX, barY + 5, barW, 10);
+  const timerColor = timerPct > 0.3 ? phaseColors[phase] : '#ff2222';
+  ctx.fillStyle = timerColor;
+  ctx.fillRect(barX, barY + 5, barW * timerPct, 10);
+  ctx.strokeStyle = '#555';
+  ctx.strokeRect(barX, barY + 5, barW, 10);
+
+  // Timer text
+  ctx.fillStyle = '#fff';
+  ctx.textAlign = 'center';
+  ctx.fillText(Math.ceil(Math.max(0, phaseTimer)) + 's', GW / 2, barY + 14);
+
+  // Extra info
+  ctx.textAlign = 'right';
+  ctx.fillStyle = '#aaa';
+  if (phase === 'build') {
+    ctx.fillText('R=Rotate  Click=Place', GW - 6, barY + 14);
+  } else if (phase === 'place') {
+    ctx.fillText('Cannons left: ' + cannonsToPlace, GW - 6, barY + 14);
+  } else if (phase === 'cannon') {
+    ctx.fillText('Enemies: ' + enemies.length, GW - 6, barY + 14);
+  }
+}
+
+// === DRAW PHASE TRANSITION ===
+function drawPhaseTransition() {
+  ctx.fillStyle = 'rgba(0,0,0,0.7)';
+  ctx.fillRect(0, GH / 2 - 30, GW, 60);
+
+  ctx.textAlign = 'center';
+  ctx.font = 'bold 20px monospace';
+
+  const phaseColors = {cannon: '#ff6644', build: '#44aaff', place: '#ffdd44'};
+  const phaseNames = {cannon: 'CANNON FIRE!', build: 'BUILD WALLS!', place: 'PLACE CANNONS!'};
+  const phaseSubs = {
+    cannon: 'Click to aim and destroy enemies!',
+    build: 'Enclose your keep with wall pieces!',
+    place: 'Put cannons inside walled areas!'
+  };
+
+  ctx.fillStyle = phaseColors[phase] || '#fff';
+  ctx.fillText(phaseNames[phase] || '', GW / 2, GH / 2 - 5);
+
+  ctx.font = '11px monospace';
+  ctx.fillStyle = '#ccc';
+  ctx.fillText(phaseSubs[phase] || '', GW / 2, GH / 2 + 18);
+}
+
+// === TITLE SCREEN ===
+function drawTitleScreen() {
+  // Background - draw a mini map preview
+  ctx.fillStyle = '#0a1020';
+  ctx.fillRect(0, 0, GW, GH);
+
+  // Animated water
+  for (let r = 0; r < GRID_ROWS; r++) {
+    for (let c = 0; c < WATER_END; c++) {
+      const wave = Math.sin((c + r * 0.5 + frame * 0.02) * 0.5) * 0.15;
+      const blue = Math.floor(50 + wave * 30);
+      ctx.fillStyle = 'rgb(10,' + Math.floor(25 + wave * 15) + ',' + blue + ')';
+      ctx.fillRect(c * GRID_SIZE, r * GRID_SIZE, GRID_SIZE, GRID_SIZE);
+    }
+  }
+
+  // Land
+  for (let r = 0; r < GRID_ROWS; r++) {
+    for (let c = LAND_START; c < GRID_COLS; c++) {
+      ctx.fillStyle = 'rgb(10,' + (25 + (c + r) % 10) + ',10)';
+      ctx.fillRect(c * GRID_SIZE, r * GRID_SIZE, GRID_SIZE, GRID_SIZE);
+    }
+  }
+
+  // Decorative castle silhouette
+  ctx.fillStyle = '#334455';
+  ctx.fillRect(200, 100, 80, 120);
+  ctx.fillRect(195, 95, 10, 125);
+  ctx.fillRect(275, 95, 10, 125);
+  ctx.fillRect(230, 80, 20, 140);
+  // Towers
+  ctx.fillRect(192, 80, 16, 20);
+  ctx.fillRect(272, 80, 16, 20);
+  ctx.fillRect(226, 65, 28, 20);
+  // Crenellations
+  for (let i = 0; i < 4; i++) {
+    ctx.fillRect(193 + i * 4, 76, 3, 6);
+    ctx.fillRect(273 + i * 4, 76, 3, 6);
+  }
+
+  // Title text
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#000';
+  ctx.font = 'bold 26px monospace';
+  ctx.fillText('RAMPART SIEGE', GW / 2 + 2, 48 + 2);
+  ctx.fillStyle = '#ff8844';
+  ctx.font = 'bold 26px monospace';
+  ctx.fillText('RAMPART SIEGE', GW / 2, 48);
+
+  ctx.fillStyle = '#88aacc';
+  ctx.font = '12px monospace';
+  ctx.fillText('A Tales of Tasern Battle', GW / 2, 68);
+
+  // Instructions
+  ctx.fillStyle = '#aaa';
+  ctx.font = '10px monospace';
+  ctx.fillText('Defend your baseling castle against fungal invaders!', GW / 2, GH - 80);
+  ctx.fillText('FIRE phase: Click to shoot cannons at enemies', GW / 2, GH - 65);
+  ctx.fillText('BUILD phase: Click to place wall pieces (R to rotate)', GW / 2, GH - 50);
+  ctx.fillText('PLACE phase: Click to position new cannons inside walls', GW / 2, GH - 35);
+
+  // High score
+  if (highScore > 0) {
+    ctx.fillStyle = '#ffdd44';
+    ctx.font = 'bold 11px monospace';
+    ctx.fillText('HIGH SCORE: ' + highScore, GW / 2, GH - 100);
+  }
+
+  // Start prompt
+  const pulse = Math.sin(frame * 0.05) * 0.3 + 0.7;
+  ctx.globalAlpha = pulse;
+  ctx.fillStyle = '#ffdd44';
+  ctx.font = 'bold 13px monospace';
+  ctx.fillText('CLICK OR PRESS ANY KEY TO START', GW / 2, GH - 10);
+  ctx.globalAlpha = 1;
+
+  // Animated ships on title
+  const shipX = ((frame * 0.5) % (GW + 60)) - 30;
+  ctx.fillStyle = '#663300';
+  ctx.beginPath();
+  ctx.moveTo(shipX - 7, 140);
+  ctx.lineTo(shipX - 5, 144);
+  ctx.lineTo(shipX + 5, 144);
+  ctx.lineTo(shipX + 7, 140);
+  ctx.lineTo(shipX + 5, 138);
+  ctx.lineTo(shipX - 5, 138);
+  ctx.closePath();
+  ctx.fill();
+  ctx.fillStyle = '#884400';
+  ctx.fillRect(shipX - 1, 132, 2, 8);
+  ctx.fillStyle = '#cc4444';
+  ctx.fillRect(shipX, 132, 5, 3);
+}
+
+// === START ===
+TAS.loop.start(update, draw);
+
+})();
+</script>
+</body>
+</html>

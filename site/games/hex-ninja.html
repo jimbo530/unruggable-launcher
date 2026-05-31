@@ -1,0 +1,1918 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Hex Ninja</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body { width: 100%; height: 100%; overflow: hidden; background: #111; touch-action: none; }
+canvas { display: block; margin: 0 auto; }
+#back-link { position: fixed; bottom: 8px; left: 50%; transform: translateX(-50%); color: #666; font-family: monospace; font-size: 12px; text-decoration: none; z-index: 10; }
+#back-link:hover { color: #aaa; }
+</style>
+</head>
+<body>
+<canvas id="gc"></canvas>
+<a id="back-link" href="/games">Back to Arcade</a>
+<script src="nft-loader.js"></script>
+<script>if(window.NftLoader)NftLoader.gate();</script>
+<script src="tasern-engine.js"></script>
+<script>
+(function(){
+"use strict";
+
+// === CONSTANTS ===
+const GW = 384, GH = 256;
+const ctx = TAS.ctx;
+TAS.initCanvas(GW, GH);
+TAS.input.initTouch({ buttons: ['a', 'b'], labels: { a: 'JUMP', b: 'SLASH' } });
+
+const GRAVITY = 680;
+const PLAYER_SPEED = 120;
+const JUMP_VEL = -240;
+const WALL_SLIDE_SPEED = 40;
+const WALL_JUMP_VX = 140;
+const WALL_JUMP_VY = -220;
+const TILE = 16;
+const SCREEN_W = 384;
+const SCREEN_H = 256;
+const HUD_H = 20;
+
+// === SOUND EFFECTS ===
+const SFX = {
+  slash()    { TAS.audio.playTone(800, 0.06, 'sawtooth', 0.08, 200); TAS.audio.playNoise(0.04, 0.06, 2000); },
+  shuriken() { TAS.audio.playTone(1200, 0.08, 'sine', 0.06, 2400); },
+  fireWheel(){ TAS.audio.playTone(300, 0.15, 'sawtooth', 0.07, 600); },
+  windSlash(){ TAS.audio.playNoise(0.2, 0.08, 1500); TAS.audio.playTone(600, 0.15, 'sine', 0.05, 200); },
+  wallCling(){ TAS.audio.playNoise(0.05, 0.04, 3000); },
+  jump()     { TAS.audio.playTone(300, 0.08, 'square', 0.05, 500); },
+  wallJump() { TAS.audio.playTone(400, 0.08, 'square', 0.06, 700); },
+  hit()      { TAS.audio.playNoise(0.06, 0.1, 600); TAS.audio.playTone(150, 0.08, 'square', 0.07, 80); },
+  enemyDie() { TAS.audio.playTone(200, 0.12, 'square', 0.08, 60); TAS.audio.playNoise(0.1, 0.06, 400); },
+  pickup()   { TAS.audio.playTone(880, 0.06, 'square', 0.06); setTimeout(function(){ TAS.audio.playTone(1100, 0.06, 'square', 0.06); }, 60); },
+  die()      { TAS.audio.playTone(400, 0.4, 'sawtooth', 0.1, 60); },
+  bossEnter(){ TAS.audio.playTone(80, 0.5, 'sawtooth', 0.1, 40); TAS.audio.playNoise(0.3, 0.08, 200); },
+  stageClear(){ [523, 659, 784, 1047].forEach(function(n, i){ setTimeout(function(){ TAS.audio.playTone(n, 0.12, 'square', 0.07); }, i * 100); }); },
+  clone()    { TAS.audio.playTone(600, 0.1, 'triangle', 0.05, 1200); }
+};
+
+// === SUB-WEAPON TYPES ===
+const SUB_WEAPONS = ['shuriken', 'fireWheel', 'windSlash', 'shadowClone'];
+const SUB_COST = { shuriken: 3, fireWheel: 5, windSlash: 8, shadowClone: 12 };
+const SUB_NAMES = { shuriken: 'SHURIKEN', fireWheel: 'FIRE WHEEL', windSlash: 'WIND SLASH', shadowClone: 'SHADOW CLONE' };
+
+// === LEVEL DATA ===
+// Each stage: array of screens. Each screen: 2D tile array (24 cols x 14 rows after HUD)
+// 0=air, 1=solid, 2=platform(one-way), 3=hazard(lava/spike), 4=lantern, 5=wall-only(invisible wall for clinging)
+// Plus enemy/boss spawn data per screen
+
+function generateStage(stageNum) {
+  const screens = [];
+  const numScreens = stageNum === 7 ? 5 : 4;
+  for (let s = 0; s < numScreens; s++) {
+    const tiles = [];
+    const rows = 14, cols = 24;
+    for (let r = 0; r < rows; r++) {
+      tiles[r] = [];
+      for (let c = 0; c < cols; c++) {
+        // Floor
+        if (r >= 13) { tiles[r][c] = 1; continue; }
+        // Ceiling
+        if (r === 0) { tiles[r][c] = 1; continue; }
+        // Walls
+        if (c === 0 && s === 0) { tiles[r][c] = 1; continue; }
+        if (c === 23 && s === numScreens - 1 && stageNum < 7) { tiles[r][c] = 1; continue; }
+        tiles[r][c] = 0;
+      }
+    }
+    // Stage-specific terrain generation
+    buildScreenTerrain(tiles, stageNum, s, numScreens, rows, cols);
+    screens.push({ tiles: tiles, enemies: [], lanterns: [], boss: null });
+    // Spawn enemies
+    spawnEnemiesForScreen(screens[s], stageNum, s, numScreens);
+  }
+  return screens;
+}
+
+function buildScreenTerrain(tiles, stage, screenIdx, numScreens, rows, cols) {
+  const seed = stage * 100 + screenIdx * 17;
+  function seededRand(i) { return ((seed * 1337 + i * 7919) % 9973) / 9973; }
+
+  // Always have ground
+  for (let c = 0; c < cols; c++) { tiles[rows - 1][c] = 1; }
+
+  switch(stage) {
+    case 1: // Hex City Streets - rooftops
+      // Platforms at varying heights
+      for (let i = 0; i < 4; i++) {
+        const px = Math.floor(3 + seededRand(i * 3) * 16);
+        const py = Math.floor(4 + seededRand(i * 3 + 1) * 6);
+        const pw = Math.floor(3 + seededRand(i * 3 + 2) * 4);
+        for (let c = px; c < Math.min(px + pw, cols - 1); c++) tiles[py][c] = 2;
+      }
+      // Some buildings (solid blocks)
+      if (screenIdx > 0) {
+        const bx = Math.floor(2 + seededRand(50) * 6);
+        const bh = Math.floor(3 + seededRand(51) * 3);
+        for (let r = rows - 1 - bh; r < rows - 1; r++)
+          for (let c = bx; c < bx + 4; c++) if (c < cols) tiles[r][c] = 1;
+      }
+      if (screenIdx > 1) {
+        const bx2 = Math.floor(14 + seededRand(52) * 6);
+        const bh2 = Math.floor(2 + seededRand(53) * 4);
+        for (let r = rows - 1 - bh2; r < rows - 1; r++)
+          for (let c = bx2; c < bx2 + 3; c++) if (c < cols) tiles[r][c] = 1;
+      }
+      break;
+
+    case 2: // Fungal Forest - vines, trees
+      // Tree trunks (vertical solids)
+      for (let i = 0; i < 3; i++) {
+        const tx = Math.floor(4 + seededRand(i * 5) * 16);
+        for (let r = 4; r < rows - 1; r++) tiles[r][tx] = 1;
+        // Branches
+        const br = Math.floor(4 + seededRand(i * 5 + 1) * 4);
+        const dir = seededRand(i * 5 + 2) > 0.5 ? 1 : -1;
+        for (let c = 0; c < 3; c++) {
+          const nc = tx + (c + 1) * dir;
+          if (nc >= 0 && nc < cols) tiles[br][nc] = 2;
+        }
+      }
+      // Vine platforms (thin, one-way)
+      for (let i = 0; i < 3; i++) {
+        const vx = Math.floor(1 + seededRand(i + 30) * 18);
+        const vy = Math.floor(5 + seededRand(i + 31) * 5);
+        for (let c = vx; c < Math.min(vx + 4, cols); c++) tiles[vy][c] = 2;
+      }
+      break;
+
+    case 3: // Mountain Cliffs - vertical wall-jump sections
+      // Narrow passages with walls
+      if (screenIdx % 2 === 0) {
+        // Left wall section
+        for (let r = 2; r < rows - 2; r++) { tiles[r][3] = 1; tiles[r][4] = 1; }
+        for (let r = 2; r < rows - 2; r++) { tiles[r][19] = 1; tiles[r][20] = 1; }
+        // Gaps to jump through
+        tiles[6][3] = 0; tiles[6][4] = 0; tiles[7][3] = 0; tiles[7][4] = 0;
+        tiles[10][19] = 0; tiles[10][20] = 0; tiles[11][19] = 0; tiles[11][20] = 0;
+      } else {
+        // Floating platforms in shaft
+        for (let i = 0; i < 5; i++) {
+          const px = Math.floor(3 + seededRand(i * 2) * 16);
+          const py = 2 + i * 2;
+          tiles[py][px] = 2; tiles[py][px + 1] = 2; tiles[py][px + 2] = 2;
+        }
+      }
+      break;
+
+    case 4: // Underground Tunnels - lava, dark
+      // Lava pits
+      for (let i = 0; i < 2; i++) {
+        const lx = Math.floor(5 + seededRand(i * 7) * 12);
+        const lw = Math.floor(2 + seededRand(i * 7 + 1) * 3);
+        for (let c = lx; c < Math.min(lx + lw, cols); c++) tiles[rows - 1][c] = 3;
+      }
+      // Low ceilings
+      for (let c = 6; c < 18; c++) {
+        if (seededRand(c) > 0.7) tiles[3][c] = 1;
+      }
+      // Platforms over lava
+      for (let i = 0; i < 3; i++) {
+        const px = Math.floor(4 + seededRand(i + 40) * 14);
+        tiles[rows - 3][px] = 2; tiles[rows - 3][px + 1] = 2;
+      }
+      break;
+
+    case 5: // Reactor Tower - moving platforms, electric barriers
+      // Tiered structure
+      for (let i = 0; i < 4; i++) {
+        const py = 3 + i * 3;
+        const px = (i % 2 === 0) ? 2 : 12;
+        for (let c = px; c < px + 8; c++) tiles[py][c] = 2;
+      }
+      // Hazard strips
+      if (screenIdx > 1) {
+        for (let c = 8; c < 16; c++) tiles[rows - 1][c] = 3;
+        tiles[rows - 3][8] = 2; tiles[rows - 3][9] = 2; tiles[rows - 3][10] = 2;
+      }
+      break;
+
+    case 6: // Sky Fortress - narrow platforms
+      // Remove most ground for sky level
+      for (let c = 0; c < cols; c++) {
+        if (seededRand(c + 60) > 0.4) tiles[rows - 1][c] = 3; // bottomless = hazard
+      }
+      // Floating platforms
+      for (let i = 0; i < 6; i++) {
+        const px = Math.floor(seededRand(i * 4) * 18);
+        const py = Math.floor(5 + seededRand(i * 4 + 1) * 6);
+        const pw = Math.floor(2 + seededRand(i * 4 + 2) * 3);
+        for (let c = px; c < Math.min(px + pw, cols); c++) tiles[py][c] = 2;
+      }
+      // Some solid islands
+      for (let i = 0; i < 2; i++) {
+        const ix = Math.floor(2 + seededRand(i + 80) * 16);
+        const iy = Math.floor(7 + seededRand(i + 81) * 4);
+        for (let r = iy; r < iy + 2; r++)
+          for (let c = ix; c < ix + 3; c++) if (c < cols && r < rows) tiles[r][c] = 1;
+      }
+      break;
+
+    case 7: // Dark Spore Lair - mix of everything
+      // Organic walls
+      for (let r = 2; r < rows - 2; r++) {
+        if (seededRand(r * 3) > 0.7) tiles[r][2] = 1;
+        if (seededRand(r * 3 + 1) > 0.7) tiles[r][21] = 1;
+      }
+      // Platforms
+      for (let i = 0; i < 4; i++) {
+        const px = Math.floor(3 + seededRand(i * 6) * 15);
+        const py = Math.floor(4 + seededRand(i * 6 + 1) * 7);
+        const pw = Math.floor(2 + seededRand(i * 6 + 2) * 3);
+        for (let c = px; c < Math.min(px + pw, cols); c++) tiles[py][c] = 2;
+      }
+      // Hazards
+      if (screenIdx >= 3) {
+        for (let c = 6; c < 10; c++) tiles[rows - 1][c] = 3;
+        for (let c = 14; c < 18; c++) tiles[rows - 1][c] = 3;
+      }
+      break;
+  }
+
+  // Add lanterns (breakable items)
+  for (let i = 0; i < 3; i++) {
+    const lc = Math.floor(3 + seededRand(i + 90) * 18);
+    const lr = findAirAboveSolid(tiles, lc, rows, cols);
+    if (lr > 1) tiles[lr - 2][lc] = 4;
+  }
+}
+
+function findAirAboveSolid(tiles, col, rows, cols) {
+  for (let r = rows - 2; r > 2; r--) {
+    if ((tiles[r][col] === 1 || tiles[r][col] === 2) && tiles[r - 1][col] === 0) return r;
+  }
+  return rows - 2;
+}
+
+function spawnEnemiesForScreen(screen, stage, screenIdx, numScreens) {
+  const seed = stage * 200 + screenIdx * 31;
+  function sr(i) { return ((seed + i * 4919) % 7919) / 7919; }
+
+  const isLastScreen = screenIdx === numScreens - 1;
+  if (isLastScreen) {
+    // Boss screen - spawn boss
+    screen.boss = createBoss(stage);
+    // Fewer regular enemies on boss screen
+    const count = 2;
+    for (let i = 0; i < count; i++) {
+      screen.enemies.push(createEnemy(stage, 60 + sr(i) * 260, 180));
+    }
+  } else {
+    // Regular enemies based on stage and screen
+    const count = 3 + Math.floor(sr(0) * 3) + Math.floor(stage * 0.5);
+    for (let i = 0; i < count; i++) {
+      const ex = 40 + sr(i + 1) * 280;
+      screen.enemies.push(createEnemy(stage, ex, 0));
+    }
+  }
+
+  // Lantern pickups
+  for (let i = 0; i < 3; i++) {
+    screen.lanterns.push({
+      x: 30 + sr(i + 50) * 300,
+      y: 60 + sr(i + 51) * 100,
+      alive: true,
+      content: pickLanternContent(sr(i + 52), stage)
+    });
+  }
+}
+
+function pickLanternContent(rand, stage) {
+  if (rand < 0.3) return { type: 'sp', amount: 5 + stage };
+  if (rand < 0.5) return { type: 'hp', amount: 2 };
+  if (rand < 0.55) return { type: '1up' };
+  return { type: 'subweapon', weapon: SUB_WEAPONS[Math.floor(rand * 4) % 4] };
+}
+
+function createEnemy(stage, x, y) {
+  const types = ['runner', 'jumper', 'bird', 'thrower', 'sniper', 'shield'];
+  let pool;
+  switch(stage) {
+    case 1: pool = ['runner', 'runner', 'runner', 'jumper']; break;
+    case 2: pool = ['runner', 'bird', 'bird', 'jumper']; break;
+    case 3: pool = ['runner', 'jumper', 'jumper', 'thrower']; break;
+    case 4: pool = ['runner', 'thrower', 'sniper', 'jumper']; break;
+    case 5: pool = ['sniper', 'thrower', 'shield', 'runner']; break;
+    case 6: pool = ['bird', 'bird', 'thrower', 'sniper']; break;
+    case 7: pool = ['shield', 'sniper', 'thrower', 'jumper', 'bird']; break;
+    default: pool = ['runner'];
+  }
+  const type = pool[Math.floor(Math.random() * pool.length)];
+  const hp = type === 'shield' ? 4 : (type === 'sniper' ? 2 : 3);
+  return {
+    type: type, x: x, y: y || 180, vx: 0, vy: 0,
+    hp: hp + Math.floor(stage * 0.5), maxHp: hp + Math.floor(stage * 0.5),
+    dir: Math.random() > 0.5 ? 1 : -1,
+    timer: 0, attackTimer: 0, state: 'patrol',
+    grounded: false, alive: true, flash: 0,
+    w: type === 'bird' ? 14 : 12, h: type === 'bird' ? 10 : 14
+  };
+}
+
+function createBoss(stage) {
+  const names = ['', 'SWORD MASTER', 'FUNGAL BEAST', 'CLIFF GOLEM', 'TUNNEL WORM', 'REACTOR CORE', 'SKY DRAGON', 'SPORE DEMON'];
+  const hp = 20 + stage * 10;
+  return {
+    name: names[stage] || 'BOSS',
+    x: 280, y: 150, vx: 0, vy: 0,
+    hp: hp, maxHp: hp,
+    phase: 0, timer: 0, attackTimer: 0,
+    state: 'idle', dir: -1,
+    w: 28, h: 32, alive: true, flash: 0,
+    stage: stage, pattern: 0
+  };
+}
+
+// === GAME STATE ===
+let state = 'title';
+let frame = 0;
+let score = 0;
+let highScore = TAS.score.load('hexninja_hi');
+let lives = 3;
+let currentStage = 1;
+let currentScreen = 0;
+let stageData = null;
+let player = {};
+let projectiles = [];
+let enemyProjectiles = [];
+let pickups = [];
+let cloneTrail = [];
+let cloneActive = 0;
+let iFrames = 0;
+let deathTimer = 0;
+let cinematicState = null;
+let cinematicTimer = 0;
+let scrollX = 0;
+let targetScrollX = 0;
+let bossDefeated = false;
+let screenTransition = 0;
+let movingPlatforms = [];
+
+// === CINEMATIC DATA ===
+const CINEMATICS = [
+  null, // padding for index alignment
+  ['In the neon depths of Hex City...', 'A lone ninja awakens to vengeance.', 'The Spore Clan has taken everything.'],
+  ['The forest writhes with fungal corruption.', 'Spores drift on a poisoned wind.', 'The path leads deeper still.'],
+  ['Ancient cliffs tower above.', 'Wind howls through vertical stone.', 'Only the nimble survive here.'],
+  ['Below the surface, darkness reigns.', 'Lava flows through forgotten tunnels.', 'Something stirs in the deep.'],
+  ['The Reactor Tower hums with stolen power.', 'The Spore Clan\'s war machines awaken.', 'Time to shut them down.'],
+  ['A fortress floats among the clouds.', 'No ground below. No mercy above.', 'One wrong step means oblivion.'],
+  ['The Dark Spore Lair.', 'Heart of the corruption.', 'This ends NOW.']
+];
+
+// === PLAYER INIT ===
+function initPlayer() {
+  player = {
+    x: 30, y: 180, vx: 0, vy: 0,
+    w: 10, h: 16,
+    dir: 1, grounded: false,
+    wallCling: 0, // -1 left wall, 1 right wall, 0 none
+    crouching: false,
+    hp: 16, maxHp: 16,
+    sp: 40, maxSp: 40,
+    subWeapon: 'shuriken',
+    slashing: 0, // timer for slash animation
+    slashDir: 1,
+    canDoubleJump: false,
+    jumpHeld: false,
+    dead: false
+  };
+}
+
+function startGame() {
+  state = 'cinematic';
+  score = 0;
+  lives = 3;
+  currentStage = 1;
+  currentScreen = 0;
+  initPlayer();
+  loadStage(1);
+  cinematicTimer = 0;
+  TAS.particles.clear();
+}
+
+function loadStage(stageNum) {
+  currentStage = stageNum;
+  currentScreen = 0;
+  stageData = generateStage(stageNum);
+  scrollX = 0;
+  targetScrollX = 0;
+  bossDefeated = false;
+  projectiles = [];
+  enemyProjectiles = [];
+  pickups = [];
+  cloneTrail = [];
+  cloneActive = 0;
+  player.x = 30;
+  player.y = 150;
+  player.vx = 0;
+  player.vy = 0;
+  player.wallCling = 0;
+  player.grounded = false;
+  generateMovingPlatforms(stageNum);
+}
+
+function generateMovingPlatforms(stage) {
+  movingPlatforms = [];
+  if (stage === 5 || stage === 6) {
+    for (let s = 0; s < 4; s++) {
+      movingPlatforms.push({
+        screen: s,
+        x: 100 + s * 40, y: 120 + (s % 2) * 40,
+        startX: 80 + s * 40, endX: 200 + s * 20,
+        w: 32, h: 6, speed: 30 + s * 10, dir: 1
+      });
+    }
+  }
+}
+
+// === TILE COLLISION ===
+function getTile(screenIdx, col, row) {
+  if (!stageData || screenIdx < 0 || screenIdx >= stageData.length) return 1;
+  const screen = stageData[screenIdx];
+  if (!screen || !screen.tiles) return 1;
+  if (row < 0 || row >= 14 || col < 0 || col >= 24) return 0;
+  return screen.tiles[row][col];
+}
+
+function worldToTile(wx, wy) {
+  const screenIdx = Math.floor(wx / SCREEN_W);
+  const localX = wx - screenIdx * SCREEN_W;
+  const localY = wy - HUD_H;
+  return { screen: screenIdx, col: Math.floor(localX / TILE), row: Math.floor(localY / TILE) };
+}
+
+function isSolid(wx, wy) {
+  const t = worldToTile(wx, wy);
+  const tile = getTile(t.screen, t.col, t.row);
+  return tile === 1;
+}
+
+function isPlatform(wx, wy) {
+  const t = worldToTile(wx, wy);
+  const tile = getTile(t.screen, t.col, t.row);
+  return tile === 2;
+}
+
+function isHazard(wx, wy) {
+  const t = worldToTile(wx, wy);
+  const tile = getTile(t.screen, t.col, t.row);
+  return tile === 3;
+}
+
+function isWall(wx, wy) {
+  return isSolid(wx, wy);
+}
+
+// === INPUT HELPERS ===
+let prevJump = false;
+let prevAttack = false;
+let prevUp = false;
+
+function inputLeft() { return TAS.input.keys['ArrowLeft'] || TAS.input.keys['KeyA'] || TAS.input.touch.left; }
+function inputRight() { return TAS.input.keys['ArrowRight'] || TAS.input.keys['KeyD'] || TAS.input.touch.right; }
+function inputUp() { return TAS.input.keys['ArrowUp'] || TAS.input.keys['KeyW'] || TAS.input.touch.up; }
+function inputDown() { return TAS.input.keys['ArrowDown'] || TAS.input.keys['KeyS'] || TAS.input.touch.down; }
+function inputJump() { return TAS.input.keys['Space'] || TAS.input.keys['KeyZ'] || TAS.input.touch.a; }
+function inputAttack() { return TAS.input.keys['KeyX'] || TAS.input.keys['Shift'] || TAS.input.touch.b; }
+function inputSub() { return TAS.input.keys['KeyC'] || (inputUp() && inputAttack()); }
+
+// === UPDATE ===
+function update(dt) {
+  frame++;
+  TAS.particles.update(dt);
+  TAS.fx.updateEffects(dt);
+
+  if (state === 'title') {
+    if (Object.values(TAS.input.keys).some(Boolean) || TAS.input.touch.a || TAS.input.touch.b) {
+      TAS.audio.ensureAudio();
+      startGame();
+    }
+    return;
+  }
+
+  if (state === 'gameOver') {
+    if (frame % 2 === 0) return;
+    if (Object.values(TAS.input.keys).some(Boolean) || TAS.input.touch.a) {
+      state = 'title';
+    }
+    return;
+  }
+
+  if (state === 'cinematic') {
+    cinematicTimer += dt;
+    if (cinematicTimer > 4 || inputJump() || inputAttack()) {
+      state = 'playing';
+      cinematicTimer = 0;
+    }
+    return;
+  }
+
+  if (state === 'stageClear') {
+    cinematicTimer += dt;
+    if (cinematicTimer > 2) {
+      currentStage++;
+      if (currentStage > 7) {
+        // Game complete!
+        score += 5000;
+        if (score > highScore) { highScore = score; TAS.score.save('hexninja_hi', score); }
+        state = 'victory';
+        cinematicTimer = 0;
+      } else {
+        loadStage(currentStage);
+        state = 'cinematic';
+        cinematicTimer = 0;
+      }
+    }
+    return;
+  }
+
+  if (state === 'victory') {
+    cinematicTimer += dt;
+    if (cinematicTimer > 5 || inputJump()) {
+      state = 'title';
+    }
+    return;
+  }
+
+  if (state === 'playing') {
+    if (screenTransition > 0) {
+      screenTransition -= dt * 3;
+      if (screenTransition <= 0) screenTransition = 0;
+      return;
+    }
+    updatePlayer(dt);
+    updateProjectiles(dt);
+    updateEnemies(dt);
+    updatePickups(dt);
+    updateMovingPlatforms(dt);
+    updateClone(dt);
+    if (iFrames > 0) iFrames -= dt;
+    if (deathTimer > 0) {
+      deathTimer -= dt;
+      if (deathTimer <= 0) respawnPlayer();
+    }
+    // Camera
+    const worldX = currentScreen * SCREEN_W + player.x;
+    targetScrollX = currentScreen * SCREEN_W;
+    scrollX = TAS.math.lerp(scrollX, targetScrollX, dt * 5);
+  }
+
+  prevJump = inputJump();
+  prevAttack = inputAttack();
+  prevUp = inputUp();
+}
+
+function updatePlayer(dt) {
+  if (player.dead) return;
+
+  const inp = {
+    left: inputLeft(), right: inputRight(),
+    up: inputUp(), down: inputDown(),
+    jump: inputJump(), attack: inputAttack(),
+    sub: inputSub()
+  };
+  const jumpPressed = inp.jump && !prevJump;
+  const attackPressed = inp.attack && !prevAttack;
+  const subPressed = inp.sub && !prevUp;
+
+  // Crouch
+  player.crouching = inp.down && player.grounded;
+
+  // Horizontal movement
+  if (!player.crouching) {
+    if (inp.left) { player.vx = -PLAYER_SPEED; player.dir = -1; }
+    else if (inp.right) { player.vx = PLAYER_SPEED; player.dir = 1; }
+    else { player.vx = 0; }
+  } else {
+    player.vx = 0;
+  }
+
+  // Wall cling logic
+  if (!player.grounded && player.wallCling === 0) {
+    if (inp.left && isWall(player.x - 2 + currentScreen * SCREEN_W, player.y + HUD_H + 4)) {
+      player.wallCling = -1;
+      player.vy = 0;
+      SFX.wallCling();
+    } else if (inp.right && isWall(player.x + player.w + 2 + currentScreen * SCREEN_W, player.y + HUD_H + 4)) {
+      player.wallCling = 1;
+      player.vy = 0;
+      SFX.wallCling();
+    }
+  }
+
+  // Wall cling state
+  if (player.wallCling !== 0) {
+    player.vy = WALL_SLIDE_SPEED; // slow slide
+    player.vx = 0;
+    // Release from wall
+    if (player.grounded) { player.wallCling = 0; }
+    if (player.wallCling === -1 && !inp.left) { player.wallCling = 0; }
+    if (player.wallCling === 1 && !inp.right) { player.wallCling = 0; }
+    // Wall jump
+    if (jumpPressed) {
+      player.vy = WALL_JUMP_VY;
+      player.vx = -player.wallCling * WALL_JUMP_VX;
+      player.dir = -player.wallCling;
+      player.wallCling = 0;
+      SFX.wallJump();
+      TAS.particles.spawn(player.x + player.w / 2, player.y + player.h / 2, '#88ccff', 4, 2);
+    }
+  }
+
+  // Jump
+  if (jumpPressed && player.grounded && player.wallCling === 0) {
+    player.vy = JUMP_VEL;
+    player.grounded = false;
+    SFX.jump();
+  }
+
+  // Gravity
+  if (!player.grounded && player.wallCling === 0) {
+    player.vy += GRAVITY * dt;
+    if (player.vy > 300) player.vy = 300;
+  }
+
+  // Move X
+  const newX = player.x + player.vx * dt;
+  const worldNewX = newX + currentScreen * SCREEN_W;
+  if (!isSolid(worldNewX, player.y + HUD_H + 2) && !isSolid(worldNewX + player.w, player.y + HUD_H + 2) &&
+      !isSolid(worldNewX, player.y + HUD_H + player.h - 2) && !isSolid(worldNewX + player.w, player.y + HUD_H + player.h - 2)) {
+    player.x = newX;
+  } else {
+    player.vx = 0;
+  }
+
+  // Move Y
+  const newY = player.y + player.vy * dt;
+  const worldPX = player.x + currentScreen * SCREEN_W;
+  player.grounded = false;
+
+  if (player.vy >= 0) {
+    // Falling - check ground/platform
+    if (isSolid(worldPX + 2, newY + HUD_H + player.h) || isSolid(worldPX + player.w - 2, newY + HUD_H + player.h)) {
+      // Land on solid
+      player.y = Math.floor((newY + HUD_H + player.h) / TILE) * TILE - player.h - HUD_H;
+      player.vy = 0;
+      player.grounded = true;
+      player.wallCling = 0;
+    } else if (isPlatform(worldPX + 2, newY + HUD_H + player.h) || isPlatform(worldPX + player.w - 2, newY + HUD_H + player.h)) {
+      // One-way platform (only if moving down and feet were above)
+      if (player.y + player.h + HUD_H <= Math.floor((newY + HUD_H + player.h) / TILE) * TILE) {
+        player.y = Math.floor((newY + HUD_H + player.h) / TILE) * TILE - player.h - HUD_H;
+        player.vy = 0;
+        player.grounded = true;
+        player.wallCling = 0;
+      } else {
+        player.y = newY;
+      }
+    } else {
+      player.y = newY;
+    }
+  } else {
+    // Rising - check ceiling
+    if (isSolid(worldPX + 2, newY + HUD_H) || isSolid(worldPX + player.w - 2, newY + HUD_H)) {
+      player.vy = 0;
+    } else {
+      player.y = newY;
+    }
+  }
+
+  // Moving platform check
+  for (const mp of movingPlatforms) {
+    if (mp.screen === currentScreen && player.vy >= 0) {
+      if (player.x + player.w > mp.x && player.x < mp.x + mp.w &&
+          player.y + player.h >= mp.y - 2 && player.y + player.h <= mp.y + 6) {
+        player.y = mp.y - player.h;
+        player.grounded = true;
+        player.vy = 0;
+        player.x += mp.dir * mp.speed * dt;
+      }
+    }
+  }
+
+  // Hazard check
+  if (isHazard(worldPX + player.w / 2, player.y + HUD_H + player.h) ||
+      isHazard(worldPX + player.w / 2, player.y + HUD_H + player.h - 4)) {
+    damagePlayer(4);
+  }
+
+  // Fall off screen
+  if (player.y > GH + 20) {
+    damagePlayer(16);
+  }
+
+  // Screen transitions
+  if (player.x > SCREEN_W - 4 && currentScreen < stageData.length - 1) {
+    currentScreen++;
+    player.x = 8;
+    screenTransition = 1;
+  }
+  if (player.x < 4 && currentScreen > 0) {
+    currentScreen--;
+    player.x = SCREEN_W - 16;
+    screenTransition = 1;
+  }
+
+  // Slash attack
+  if (player.slashing > 0) {
+    player.slashing -= dt;
+  }
+  if (attackPressed && player.slashing <= 0) {
+    player.slashing = 0.15;
+    player.slashDir = player.dir;
+    SFX.slash();
+    checkSlashHits();
+  }
+
+  // Sub-weapon
+  if (subPressed && player.sp >= SUB_COST[player.subWeapon]) {
+    useSubWeapon();
+  }
+
+  // Clone trail
+  if (cloneActive > 0) {
+    cloneTrail.push({ x: player.x, y: player.y, life: 0.3 });
+  }
+}
+
+function checkSlashHits() {
+  const sx = player.x + (player.slashDir > 0 ? player.w : -18);
+  const sy = player.y - 2;
+  const sw = 18, sh = player.h + 4;
+  const worldSX = sx + currentScreen * SCREEN_W;
+
+  // Hit enemies
+  const screen = stageData[currentScreen];
+  if (!screen) return;
+
+  for (const e of screen.enemies) {
+    if (!e.alive) continue;
+    if (TAS.hit.rectOverlap(sx, sy, sw, sh, e.x, e.y, e.w, e.h)) {
+      if (e.type === 'shield' && ((player.slashDir > 0 && player.x < e.x) || (player.slashDir < 0 && player.x > e.x + e.w))) {
+        // Blocked!
+        TAS.particles.spawn(e.x + e.w / 2, e.y + e.h / 2, '#ffff44', 3, 1);
+      } else {
+        hitEnemy(e, 2);
+      }
+    }
+  }
+
+  // Hit boss
+  if (screen.boss && screen.boss.alive) {
+    const b = screen.boss;
+    if (TAS.hit.rectOverlap(sx, sy, sw, sh, b.x, b.y, b.w, b.h)) {
+      hitBoss(b, 2);
+    }
+  }
+
+  // Hit lanterns
+  for (const l of screen.lanterns) {
+    if (!l.alive) continue;
+    if (TAS.hit.rectOverlap(sx, sy, sw, sh, l.x, l.y, 10, 12)) {
+      l.alive = false;
+      spawnPickup(l.x, l.y, l.content);
+      TAS.particles.spawn(l.x + 5, l.y + 6, '#ffaa00', 6, 2, { gravity: 2 });
+    }
+  }
+}
+
+function hitEnemy(e, dmg) {
+  e.hp -= dmg;
+  e.flash = 0.1;
+  TAS.fx.shake(2, 0.85);
+  SFX.hit();
+  if (e.hp <= 0) {
+    e.alive = false;
+    score += 100;
+    SFX.enemyDie();
+    TAS.particles.spawn(e.x + e.w / 2, e.y + e.h / 2, '#ff4444', 8, 3, { gravity: 3 });
+  }
+}
+
+function hitBoss(b, dmg) {
+  b.hp -= dmg;
+  b.flash = 0.12;
+  TAS.fx.shake(4, 0.8);
+  SFX.hit();
+  if (b.hp <= 0) {
+    b.alive = false;
+    bossDefeated = true;
+    score += 1000 + currentStage * 500;
+    SFX.stageClear();
+    TAS.particles.spawn(b.x + b.w / 2, b.y + b.h / 2, '#ffdd44', 20, 4, { gravity: 2 });
+    TAS.fx.flash('#fff', 0.5);
+    state = 'stageClear';
+    cinematicTimer = 0;
+    if (score > highScore) { highScore = score; TAS.score.save('hexninja_hi', score); }
+  }
+  // Phase transitions
+  if (b.hp < b.maxHp * 0.66 && b.phase === 0) { b.phase = 1; b.timer = 0; }
+  if (b.hp < b.maxHp * 0.33 && b.phase === 1) { b.phase = 2; b.timer = 0; }
+}
+
+function useSubWeapon() {
+  player.sp -= SUB_COST[player.subWeapon];
+  switch(player.subWeapon) {
+    case 'shuriken':
+      SFX.shuriken();
+      projectiles.push({ x: player.x + player.w / 2, y: player.y + 6, vx: player.dir * 250, vy: 0, type: 'shuriken', life: 2, dmg: 2, w: 6, h: 6 });
+      break;
+    case 'fireWheel':
+      SFX.fireWheel();
+      projectiles.push({ x: player.x + player.w / 2, y: player.y, vx: player.dir * 150, vy: -180, type: 'fireWheel', life: 1.5, dmg: 3, w: 8, h: 8, gravity: 200 });
+      break;
+    case 'windSlash':
+      SFX.windSlash();
+      projectiles.push({ x: player.x + player.w / 2, y: player.y + 4, vx: player.dir * 200, vy: 0, type: 'windSlash', life: 1, dmg: 4, w: 24, h: 12, pierce: true });
+      break;
+    case 'shadowClone':
+      SFX.clone();
+      cloneActive = 3; // 3 seconds
+      cloneTrail = [];
+      iFrames = 3;
+      break;
+  }
+}
+
+function damagePlayer(dmg) {
+  if (iFrames > 0 || player.dead) return;
+  player.hp -= dmg;
+  iFrames = 1.5;
+  TAS.fx.shake(5, 0.8);
+  TAS.fx.flash('#ff0000', 0.3);
+  SFX.hit();
+  TAS.particles.spawn(player.x + player.w / 2, player.y + player.h / 2, '#ff4444', 6, 2);
+  if (player.hp <= 0) {
+    player.dead = true;
+    player.hp = 0;
+    SFX.die();
+    deathTimer = 2;
+  }
+}
+
+function respawnPlayer() {
+  lives--;
+  if (lives < 0) {
+    if (score > highScore) { highScore = score; TAS.score.save('hexninja_hi', score); }
+    state = 'gameOver';
+    return;
+  }
+  player.dead = false;
+  player.hp = player.maxHp;
+  player.sp = Math.min(player.sp + 10, player.maxSp);
+  player.x = 30;
+  player.y = 150;
+  player.vx = 0;
+  player.vy = 0;
+  player.wallCling = 0;
+  currentScreen = 0;
+  iFrames = 2;
+  // Regenerate enemies for current stage
+  stageData = generateStage(currentStage);
+  generateMovingPlatforms(currentStage);
+}
+
+function spawnPickup(x, y, content) {
+  pickups.push({ x: x, y: y, vy: -80, content: content, life: 5, w: 8, h: 8 });
+}
+
+function updateProjectiles(dt) {
+  for (let i = projectiles.length - 1; i >= 0; i--) {
+    const p = projectiles[i];
+    p.x += p.vx * dt;
+    p.y += p.vy * dt;
+    if (p.gravity) p.vy += p.gravity * dt;
+    p.life -= dt;
+    if (p.life <= 0) { projectiles.splice(i, 1); continue; }
+
+    // Check enemy hits
+    const screen = stageData[currentScreen];
+    if (!screen) continue;
+    let hit = false;
+    for (const e of screen.enemies) {
+      if (!e.alive) continue;
+      if (TAS.hit.rectOverlap(p.x, p.y, p.w, p.h, e.x, e.y, e.w, e.h)) {
+        hitEnemy(e, p.dmg);
+        if (!p.pierce) { hit = true; break; }
+      }
+    }
+    if (screen.boss && screen.boss.alive) {
+      if (TAS.hit.rectOverlap(p.x, p.y, p.w, p.h, screen.boss.x, screen.boss.y, screen.boss.w, screen.boss.h)) {
+        hitBoss(screen.boss, p.dmg);
+        if (!p.pierce) hit = true;
+      }
+    }
+    if (hit) { projectiles.splice(i, 1); continue; }
+
+    // Wall collision
+    if (isSolid(p.x + currentScreen * SCREEN_W, p.y + HUD_H)) {
+      projectiles.splice(i, 1);
+    }
+  }
+
+  // Enemy projectiles
+  for (let i = enemyProjectiles.length - 1; i >= 0; i--) {
+    const p = enemyProjectiles[i];
+    p.x += p.vx * dt;
+    p.y += p.vy * dt;
+    if (p.gravity) p.vy += p.gravity * dt;
+    p.life -= dt;
+    if (p.life <= 0) { enemyProjectiles.splice(i, 1); continue; }
+    // Hit player
+    if (!player.dead && iFrames <= 0 && TAS.hit.rectOverlap(p.x, p.y, p.w || 6, p.h || 6, player.x, player.y, player.w, player.h)) {
+      damagePlayer(p.dmg || 2);
+      enemyProjectiles.splice(i, 1);
+    }
+  }
+}
+
+function updateEnemies(dt) {
+  const screen = stageData[currentScreen];
+  if (!screen) return;
+
+  for (const e of screen.enemies) {
+    if (!e.alive) continue;
+    if (e.flash > 0) e.flash -= dt;
+    e.timer += dt;
+
+    const distToPlayer = Math.abs(e.x - player.x);
+    const dirToPlayer = player.x > e.x ? 1 : -1;
+
+    switch(e.type) {
+      case 'runner':
+        e.vx = e.dir * 50;
+        e.x += e.vx * dt;
+        // Turn at edges or walls
+        if (e.x < 10 || e.x > SCREEN_W - 20) e.dir *= -1;
+        if (distToPlayer < 100) { e.dir = dirToPlayer; e.vx = e.dir * 70; }
+        break;
+
+      case 'jumper':
+        e.vx = e.dir * 40;
+        e.x += e.vx * dt;
+        if (e.x < 10 || e.x > SCREEN_W - 20) e.dir *= -1;
+        if (distToPlayer < 80 && e.grounded && e.timer > 1) {
+          e.vy = -200;
+          e.grounded = false;
+          e.timer = 0;
+          e.dir = dirToPlayer;
+        }
+        if (!e.grounded) { e.vy += GRAVITY * dt; e.y += e.vy * dt; }
+        if (e.y > 200) { e.y = 200; e.grounded = true; e.vy = 0; }
+        break;
+
+      case 'bird':
+        // Swoop pattern
+        e.x += Math.sin(e.timer * 3) * 60 * dt + e.dir * 30 * dt;
+        e.y += Math.cos(e.timer * 2) * 40 * dt;
+        if (distToPlayer < 120) {
+          e.x += dirToPlayer * 80 * dt;
+          e.y += (player.y > e.y ? 1 : -1) * 60 * dt;
+        }
+        if (e.x < 10 || e.x > SCREEN_W - 20) e.dir *= -1;
+        e.y = TAS.math.clamp(e.y, 30, 200);
+        break;
+
+      case 'thrower':
+        e.x += e.dir * 20 * dt;
+        if (e.x < 10 || e.x > SCREEN_W - 20) e.dir *= -1;
+        e.dir = dirToPlayer;
+        if (distToPlayer < 200 && e.attackTimer <= 0) {
+          e.attackTimer = 1.5;
+          enemyProjectiles.push({
+            x: e.x + e.w / 2, y: e.y,
+            vx: dirToPlayer * 100, vy: -120,
+            gravity: 250, life: 3, dmg: 2, w: 6, h: 6, type: 'rock'
+          });
+        }
+        if (e.attackTimer > 0) e.attackTimer -= dt;
+        break;
+
+      case 'sniper':
+        e.dir = dirToPlayer;
+        if (distToPlayer < 250 && e.attackTimer <= 0 && Math.abs(e.y - player.y) < 40) {
+          e.attackTimer = 2;
+          enemyProjectiles.push({
+            x: e.x + e.w / 2, y: e.y + e.h / 2,
+            vx: dirToPlayer * 200, vy: 0,
+            life: 2, dmg: 3, w: 8, h: 3, type: 'bullet'
+          });
+        }
+        if (e.attackTimer > 0) e.attackTimer -= dt;
+        break;
+
+      case 'shield':
+        e.vx = e.dir * 30;
+        e.x += e.vx * dt;
+        if (e.x < 10 || e.x > SCREEN_W - 20) e.dir *= -1;
+        if (distToPlayer < 60) e.dir = dirToPlayer;
+        break;
+    }
+
+    // Contact damage
+    if (!player.dead && iFrames <= 0 && TAS.hit.rectOverlap(player.x, player.y, player.w, player.h, e.x, e.y, e.w, e.h)) {
+      damagePlayer(2);
+    }
+  }
+
+  // Boss update
+  if (screen.boss && screen.boss.alive) {
+    updateBoss(screen.boss, dt);
+  }
+}
+
+function updateBoss(b, dt) {
+  if (b.flash > 0) b.flash -= dt;
+  b.timer += dt;
+  b.attackTimer -= dt;
+
+  const dirToPlayer = player.x > b.x ? 1 : -1;
+  b.dir = dirToPlayer;
+
+  switch(b.phase) {
+    case 0: // Basic pattern
+      b.x += Math.sin(b.timer * 1.5) * 40 * dt * dirToPlayer;
+      if (b.attackTimer <= 0) {
+        b.attackTimer = 1.8 - currentStage * 0.1;
+        // Lunge attack
+        enemyProjectiles.push({
+          x: b.x + b.w / 2, y: b.y + b.h / 2,
+          vx: dirToPlayer * 160, vy: 0,
+          life: 1, dmg: 3, w: 20, h: 6, type: 'slash'
+        });
+      }
+      break;
+
+    case 1: // Faster, adds projectiles
+      b.x += Math.sin(b.timer * 2.5) * 60 * dt;
+      b.y += Math.cos(b.timer * 2) * 30 * dt;
+      b.y = TAS.math.clamp(b.y, 60, 200);
+      if (b.attackTimer <= 0) {
+        b.attackTimer = 1.2 - currentStage * 0.05;
+        // Spread shot
+        for (let a = -1; a <= 1; a++) {
+          enemyProjectiles.push({
+            x: b.x + b.w / 2, y: b.y + b.h / 2,
+            vx: dirToPlayer * 130, vy: a * 60,
+            life: 2, dmg: 2, w: 6, h: 6, type: 'energy'
+          });
+        }
+      }
+      break;
+
+    case 2: // Rage mode
+      b.x += Math.sin(b.timer * 3) * 80 * dt;
+      b.y += Math.cos(b.timer * 2.5) * 50 * dt;
+      b.y = TAS.math.clamp(b.y, 50, 200);
+      if (b.attackTimer <= 0) {
+        b.attackTimer = 0.8;
+        b.pattern = (b.pattern + 1) % 3;
+        if (b.pattern === 0) {
+          // Dash
+          enemyProjectiles.push({ x: b.x, y: b.y, vx: dirToPlayer * 250, vy: 0, life: 0.8, dmg: 4, w: 28, h: 28, type: 'dash' });
+        } else if (b.pattern === 1) {
+          // Rain from above
+          for (let i = 0; i < 4; i++) {
+            enemyProjectiles.push({ x: 50 + i * 80, y: 30, vx: 0, vy: 150, life: 2, dmg: 2, w: 6, h: 10, type: 'rain' });
+          }
+        } else {
+          // Homing
+          enemyProjectiles.push({
+            x: b.x + b.w / 2, y: b.y + b.h / 2,
+            vx: dirToPlayer * 100, vy: (player.y - b.y) * 0.8,
+            life: 2.5, dmg: 3, w: 10, h: 10, type: 'homing'
+          });
+        }
+      }
+      break;
+  }
+
+  // Contact damage
+  if (!player.dead && iFrames <= 0 && TAS.hit.rectOverlap(player.x, player.y, player.w, player.h, b.x, b.y, b.w, b.h)) {
+    damagePlayer(3);
+  }
+}
+
+function updatePickups(dt) {
+  for (let i = pickups.length - 1; i >= 0; i--) {
+    const p = pickups[i];
+    p.vy += 300 * dt;
+    p.y += p.vy * dt;
+    if (p.y > 220) { p.y = 220; p.vy = 0; }
+    p.life -= dt;
+    if (p.life <= 0) { pickups.splice(i, 1); continue; }
+
+    if (TAS.hit.rectOverlap(player.x, player.y, player.w, player.h, p.x, p.y, p.w, p.h)) {
+      applyPickup(p.content);
+      pickups.splice(i, 1);
+      SFX.pickup();
+    }
+  }
+}
+
+function applyPickup(content) {
+  switch(content.type) {
+    case 'hp': player.hp = Math.min(player.hp + content.amount, player.maxHp); break;
+    case 'sp': player.sp = Math.min(player.sp + content.amount, player.maxSp); break;
+    case '1up': lives++; break;
+    case 'subweapon': player.subWeapon = content.weapon; break;
+  }
+}
+
+function updateMovingPlatforms(dt) {
+  for (const mp of movingPlatforms) {
+    mp.x += mp.dir * mp.speed * dt;
+    if (mp.x > mp.endX) { mp.x = mp.endX; mp.dir = -1; }
+    if (mp.x < mp.startX) { mp.x = mp.startX; mp.dir = 1; }
+  }
+}
+
+function updateClone(dt) {
+  if (cloneActive > 0) {
+    cloneActive -= dt;
+    for (let i = cloneTrail.length - 1; i >= 0; i--) {
+      cloneTrail[i].life -= dt;
+      if (cloneTrail[i].life <= 0) cloneTrail.splice(i, 1);
+    }
+  } else {
+    cloneTrail = [];
+  }
+}
+
+// === DRAW ===
+function draw(dt) {
+  ctx.fillStyle = '#0a0a12';
+  ctx.fillRect(0, 0, GW, GH);
+
+  if (state === 'title') {
+    drawTitle();
+    return;
+  }
+
+  if (state === 'gameOver') {
+    TAS.ui.drawGameOver(score, highScore, GW, GH, { frame: frame, extra: 'Stage ' + currentStage });
+    return;
+  }
+
+  if (state === 'cinematic') {
+    drawCinematic();
+    return;
+  }
+
+  if (state === 'victory') {
+    drawVictory();
+    return;
+  }
+
+  if (state === 'stageClear') {
+    drawStageClear();
+    return;
+  }
+
+  if (state === 'playing') {
+    ctx.save();
+    TAS.fx.applyShake();
+    drawBackground();
+    drawLevel();
+    drawMovingPlatforms();
+    drawPickups();
+    drawLanterns();
+    drawEnemies();
+    drawBoss();
+    drawProjectiles();
+    drawClone();
+    drawPlayer();
+    TAS.particles.draw();
+    ctx.restore();
+    TAS.fx.drawFlash(GW, GH);
+    drawHUD();
+    if (screenTransition > 0) {
+      ctx.fillStyle = 'rgba(0,0,0,' + screenTransition + ')';
+      ctx.fillRect(0, 0, GW, GH);
+    }
+    TAS.input.drawTouchControls(GW, GH);
+  }
+}
+
+function drawTitle() {
+  // Atmospheric background
+  ctx.fillStyle = '#080816';
+  ctx.fillRect(0, 0, GW, GH);
+
+  // City silhouette
+  for (let i = 0; i < 20; i++) {
+    const bx = i * 22;
+    const bh = 40 + Math.sin(i * 1.3) * 25;
+    ctx.fillStyle = '#151525';
+    ctx.fillRect(bx, GH - bh, 18, bh);
+    // Windows
+    ctx.fillStyle = (frame + i * 7) % 60 < 30 ? '#334466' : '#223344';
+    for (let wy = GH - bh + 5; wy < GH - 5; wy += 8) {
+      ctx.fillRect(bx + 3, wy, 3, 3);
+      ctx.fillRect(bx + 10, wy, 3, 3);
+    }
+  }
+
+  // Title
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#000';
+  ctx.font = 'bold 28px monospace';
+  ctx.fillText('HEX NINJA', GW / 2 + 2, 62);
+  ctx.fillStyle = '#ff4466';
+  ctx.fillText('HEX NINJA', GW / 2, 60);
+
+  // Ninja silhouette
+  const nx = GW / 2, ny = 120;
+  ctx.fillStyle = '#1a1a2e';
+  ctx.fillRect(nx - 5, ny, 10, 16); // body
+  ctx.fillRect(nx - 3, ny - 5, 6, 6); // head
+  ctx.fillStyle = '#cc3344';
+  ctx.fillRect(nx + 3, ny - 3, 8, 2); // headband tail
+  ctx.fillRect(nx + 5, ny - 4, 6, 2);
+  // Sword
+  ctx.fillStyle = '#aabbcc';
+  ctx.fillRect(nx + 5, ny + 2, 14, 2);
+  ctx.fillStyle = '#665533';
+  ctx.fillRect(nx + 4, ny + 1, 3, 4);
+
+  ctx.fillStyle = '#888';
+  ctx.font = '10px monospace';
+  ctx.fillText('A Tasern Tale', GW / 2, 150);
+
+  // Sub info
+  ctx.fillStyle = '#556677';
+  ctx.font = '9px monospace';
+  ctx.fillText('ARROWS/WASD: Move  |  Z/SPACE: Jump  |  X: Slash  |  C: Sub-weapon', GW / 2, 185);
+  ctx.fillText('Jump at walls to cling, jump again to wall-jump', GW / 2, 198);
+
+  // Start prompt
+  const pulse = Math.sin(frame * 0.05) * 0.3 + 0.7;
+  ctx.globalAlpha = pulse;
+  ctx.fillStyle = '#ffdd44';
+  ctx.font = 'bold 12px monospace';
+  ctx.fillText('PRESS ANY KEY TO START', GW / 2, GH - 30);
+  ctx.globalAlpha = 1;
+
+  // High score
+  if (highScore > 0) {
+    ctx.fillStyle = '#44aa88';
+    ctx.font = '10px monospace';
+    ctx.fillText('HIGH SCORE: ' + highScore, GW / 2, GH - 50);
+  }
+}
+
+function drawCinematic() {
+  ctx.fillStyle = '#050510';
+  ctx.fillRect(0, 0, GW, GH);
+
+  const lines = CINEMATICS[currentStage] || ['...'];
+  ctx.textAlign = 'center';
+  ctx.font = 'bold 12px monospace';
+  ctx.fillStyle = '#cc4455';
+  ctx.fillText('ACT ' + currentStage, GW / 2, 50);
+
+  ctx.font = '10px monospace';
+  for (let i = 0; i < lines.length; i++) {
+    const alpha = TAS.math.clamp((cinematicTimer - i * 0.8) * 2, 0, 1);
+    ctx.globalAlpha = alpha;
+    ctx.fillStyle = '#aabbcc';
+    ctx.fillText(lines[i], GW / 2, 90 + i * 20);
+  }
+  ctx.globalAlpha = 1;
+
+  // Skip hint
+  const pulse = Math.sin(frame * 0.06) * 0.3 + 0.5;
+  ctx.globalAlpha = pulse;
+  ctx.fillStyle = '#556';
+  ctx.font = '9px monospace';
+  ctx.fillText('Press any key to skip', GW / 2, GH - 20);
+  ctx.globalAlpha = 1;
+}
+
+function drawStageClear() {
+  ctx.fillStyle = '#080816';
+  ctx.fillRect(0, 0, GW, GH);
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#44ff88';
+  ctx.font = 'bold 16px monospace';
+  ctx.fillText('STAGE CLEAR!', GW / 2, GH / 2 - 20);
+  ctx.fillStyle = '#ffdd44';
+  ctx.font = '12px monospace';
+  ctx.fillText('Score: ' + score, GW / 2, GH / 2 + 10);
+  TAS.particles.draw();
+}
+
+function drawVictory() {
+  ctx.fillStyle = '#080816';
+  ctx.fillRect(0, 0, GW, GH);
+  ctx.textAlign = 'center';
+  const pulse = Math.sin(frame * 0.04) * 0.2 + 0.8;
+  ctx.globalAlpha = pulse;
+  ctx.fillStyle = '#ffdd44';
+  ctx.font = 'bold 18px monospace';
+  ctx.fillText('VICTORY!', GW / 2, 60);
+  ctx.globalAlpha = 1;
+  ctx.fillStyle = '#aabbcc';
+  ctx.font = '10px monospace';
+  ctx.fillText('The Spore Clan is defeated.', GW / 2, 100);
+  ctx.fillText('Hex City is free once more.', GW / 2, 118);
+  ctx.fillStyle = '#44ff88';
+  ctx.font = 'bold 14px monospace';
+  ctx.fillText('FINAL SCORE: ' + score, GW / 2, 160);
+  if (score >= highScore) {
+    ctx.fillStyle = '#ff44aa';
+    ctx.font = '11px monospace';
+    ctx.fillText('NEW HIGH SCORE!', GW / 2, 185);
+  }
+}
+
+function drawBackground() {
+  // Parallax layers based on stage
+  const colors = ['#0a0a18', '#0c1020', '#081810', '#120808', '#0a0a1a', '#080818', '#100810'];
+  ctx.fillStyle = colors[currentStage - 1] || '#0a0a12';
+  ctx.fillRect(0, 0, GW, GH);
+
+  // Parallax stars/particles
+  const parallax = (currentScreen * 20 + frame * 0.1) % GW;
+  ctx.fillStyle = '#223344';
+  for (let i = 0; i < 15; i++) {
+    const sx = (i * 47 + parallax * 0.3) % GW;
+    const sy = (i * 31 + 20) % (GH - 40);
+    ctx.fillRect(sx, sy, 1, 1);
+  }
+
+  // Stage-specific background elements
+  switch(currentStage) {
+    case 1: // City - distant buildings
+      for (let i = 0; i < 8; i++) {
+        const bx = (i * 55 - parallax * 0.2 + 500) % (GW + 50) - 25;
+        const bh = 50 + i * 12;
+        ctx.fillStyle = '#0f0f22';
+        ctx.fillRect(bx, GH - bh - 20, 30, bh);
+      }
+      break;
+    case 2: // Forest - tree silhouettes
+      for (let i = 0; i < 6; i++) {
+        const tx = (i * 75 - parallax * 0.15 + 400) % (GW + 60) - 30;
+        ctx.fillStyle = '#0a1a0a';
+        ctx.fillRect(tx + 8, GH - 80, 6, 60);
+        ctx.beginPath();
+        ctx.arc(tx + 11, GH - 80, 18, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      break;
+    case 4: // Underground - glow
+      ctx.fillStyle = 'rgba(80, 20, 0, 0.15)';
+      ctx.fillRect(0, GH - 30, GW, 30);
+      break;
+    case 6: // Sky - clouds
+      ctx.fillStyle = '#1a1a2e';
+      for (let i = 0; i < 5; i++) {
+        const cx = (i * 90 - frame * 0.3 + 500) % (GW + 60) - 30;
+        ctx.fillRect(cx, 30 + i * 20, 50, 8);
+      }
+      break;
+  }
+}
+
+function drawLevel() {
+  const screen = stageData[currentScreen];
+  if (!screen) return;
+  const tiles = screen.tiles;
+
+  for (let r = 0; r < 14; r++) {
+    for (let c = 0; c < 24; c++) {
+      const tile = tiles[r][c];
+      const tx = c * TILE;
+      const ty = r * TILE + HUD_H;
+
+      switch(tile) {
+        case 1: // Solid
+          ctx.fillStyle = getSolidColor(currentStage);
+          ctx.fillRect(tx, ty, TILE, TILE);
+          // Edge highlight
+          ctx.fillStyle = 'rgba(255,255,255,0.05)';
+          ctx.fillRect(tx, ty, TILE, 1);
+          ctx.fillRect(tx, ty, 1, TILE);
+          break;
+        case 2: // Platform
+          ctx.fillStyle = getPlatformColor(currentStage);
+          ctx.fillRect(tx, ty, TILE, 3);
+          ctx.fillStyle = 'rgba(255,255,255,0.1)';
+          ctx.fillRect(tx, ty, TILE, 1);
+          break;
+        case 3: // Hazard
+          ctx.fillStyle = getHazardColor(currentStage);
+          ctx.fillRect(tx, ty, TILE, TILE);
+          // Animated glow
+          if (frame % 10 < 5) {
+            ctx.fillStyle = 'rgba(255,100,0,0.3)';
+            ctx.fillRect(tx, ty, TILE, 2);
+          }
+          break;
+        case 4: // Lantern (drawn separately)
+          break;
+      }
+    }
+  }
+}
+
+function getSolidColor(stage) {
+  switch(stage) {
+    case 1: return '#2a2a44';
+    case 2: return '#1a3322';
+    case 3: return '#3a3028';
+    case 4: return '#2a1a1a';
+    case 5: return '#1a2a3a';
+    case 6: return '#2a2a3a';
+    case 7: return '#2a1a2a';
+    default: return '#2a2a2a';
+  }
+}
+
+function getPlatformColor(stage) {
+  switch(stage) {
+    case 1: return '#445566';
+    case 2: return '#336633';
+    case 3: return '#776644';
+    case 4: return '#664422';
+    case 5: return '#336688';
+    case 6: return '#445577';
+    case 7: return '#663366';
+    default: return '#444444';
+  }
+}
+
+function getHazardColor(stage) {
+  switch(stage) {
+    case 1: return '#442200';
+    case 4: return '#662200';
+    case 5: return '#004466';
+    case 6: return '#220033';
+    default: return '#441100';
+  }
+}
+
+function drawMovingPlatforms() {
+  for (const mp of movingPlatforms) {
+    if (mp.screen !== currentScreen) continue;
+    ctx.fillStyle = '#4488aa';
+    ctx.fillRect(mp.x, mp.y + HUD_H, mp.w, mp.h);
+    ctx.fillStyle = 'rgba(255,255,255,0.2)';
+    ctx.fillRect(mp.x, mp.y + HUD_H, mp.w, 1);
+  }
+}
+
+function drawLanterns() {
+  const screen = stageData[currentScreen];
+  if (!screen) return;
+  for (const l of screen.lanterns) {
+    if (!l.alive) continue;
+    // Lantern body
+    ctx.fillStyle = '#886633';
+    ctx.fillRect(l.x, l.y, 10, 12);
+    // Glow
+    ctx.fillStyle = '#ffaa33';
+    ctx.fillRect(l.x + 2, l.y + 2, 6, 6);
+    // Flicker
+    if (frame % 8 < 4) {
+      ctx.fillStyle = 'rgba(255,170,50,0.3)';
+      ctx.fillRect(l.x - 1, l.y - 1, 12, 14);
+    }
+  }
+}
+
+function drawPickups() {
+  for (const p of pickups) {
+    const blink = p.life < 2 && frame % 6 < 3;
+    if (blink) continue;
+    switch(p.content.type) {
+      case 'hp':
+        ctx.fillStyle = '#44ff44';
+        ctx.fillRect(p.x, p.y, 8, 8);
+        ctx.fillStyle = '#fff';
+        ctx.fillRect(p.x + 3, p.y + 1, 2, 6);
+        ctx.fillRect(p.x + 1, p.y + 3, 6, 2);
+        break;
+      case 'sp':
+        ctx.fillStyle = '#4488ff';
+        ctx.fillRect(p.x, p.y, 8, 8);
+        ctx.fillStyle = '#88ccff';
+        ctx.fillRect(p.x + 2, p.y + 2, 4, 4);
+        break;
+      case '1up':
+        ctx.fillStyle = '#ffdd44';
+        ctx.fillRect(p.x, p.y, 8, 8);
+        ctx.fillStyle = '#fff';
+        ctx.font = '7px monospace';
+        ctx.textAlign = 'center';
+        ctx.fillText('1', p.x + 4, p.y + 7);
+        break;
+      case 'subweapon':
+        ctx.fillStyle = '#ff44aa';
+        ctx.fillRect(p.x, p.y, 8, 8);
+        ctx.fillStyle = '#ffaadd';
+        ctx.fillRect(p.x + 2, p.y + 3, 4, 2);
+        break;
+    }
+  }
+}
+
+function drawEnemies() {
+  const screen = stageData[currentScreen];
+  if (!screen) return;
+
+  for (const e of screen.enemies) {
+    if (!e.alive) continue;
+    if (e.flash > 0 && frame % 4 < 2) continue;
+
+    switch(e.type) {
+      case 'runner':
+        // Body
+        ctx.fillStyle = '#cc4444';
+        ctx.fillRect(e.x, e.y, e.w, e.h);
+        // Head
+        ctx.fillStyle = '#aa3333';
+        ctx.fillRect(e.x + 2, e.y - 3, 8, 5);
+        // Legs animate
+        ctx.fillStyle = '#882222';
+        if (frame % 10 < 5) {
+          ctx.fillRect(e.x + 1, e.y + e.h, 3, 3);
+          ctx.fillRect(e.x + 7, e.y + e.h - 2, 3, 3);
+        } else {
+          ctx.fillRect(e.x + 1, e.y + e.h - 2, 3, 3);
+          ctx.fillRect(e.x + 7, e.y + e.h, 3, 3);
+        }
+        break;
+
+      case 'jumper':
+        ctx.fillStyle = '#44aa44';
+        ctx.fillRect(e.x, e.y, e.w, e.h);
+        ctx.fillStyle = '#228822';
+        ctx.fillRect(e.x + 1, e.y + e.h - 4, 4, 6);
+        ctx.fillRect(e.x + 7, e.y + e.h - 4, 4, 6);
+        break;
+
+      case 'bird':
+        ctx.fillStyle = '#8844cc';
+        // Body
+        ctx.fillRect(e.x + 2, e.y + 3, 10, 6);
+        // Wings
+        const wingOff = Math.sin(frame * 0.3) * 3;
+        ctx.fillRect(e.x, e.y + wingOff, 5, 4);
+        ctx.fillRect(e.x + 9, e.y + wingOff, 5, 4);
+        // Beak
+        ctx.fillStyle = '#ffaa00';
+        ctx.fillRect(e.x + (e.dir > 0 ? 12 : -2), e.y + 5, 3, 2);
+        break;
+
+      case 'thrower':
+        ctx.fillStyle = '#aa8844';
+        ctx.fillRect(e.x, e.y, e.w, e.h);
+        ctx.fillStyle = '#886633';
+        ctx.fillRect(e.x + 2, e.y - 2, 8, 4);
+        // Arm
+        ctx.fillStyle = '#775522';
+        ctx.fillRect(e.x + (e.dir > 0 ? e.w : -4), e.y + 3, 4, 3);
+        break;
+
+      case 'sniper':
+        ctx.fillStyle = '#4466aa';
+        ctx.fillRect(e.x, e.y, e.w, e.h);
+        // Scope/gun
+        ctx.fillStyle = '#334488';
+        ctx.fillRect(e.x + (e.dir > 0 ? e.w : -8), e.y + 5, 8, 2);
+        ctx.fillStyle = '#ff4444';
+        ctx.fillRect(e.x + (e.dir > 0 ? e.w + 6 : -8), e.y + 5, 2, 2);
+        break;
+
+      case 'shield':
+        ctx.fillStyle = '#666688';
+        ctx.fillRect(e.x, e.y, e.w, e.h);
+        // Shield (front facing)
+        ctx.fillStyle = '#8888aa';
+        const shieldX = e.dir > 0 ? e.x + e.w - 2 : e.x - 2;
+        ctx.fillRect(shieldX, e.y - 1, 4, e.h + 2);
+        ctx.fillStyle = '#aaaacc';
+        ctx.fillRect(shieldX + 1, e.y + 2, 2, e.h - 4);
+        break;
+    }
+  }
+}
+
+function drawBoss() {
+  const screen = stageData[currentScreen];
+  if (!screen || !screen.boss || !screen.boss.alive) return;
+  const b = screen.boss;
+
+  if (b.flash > 0 && frame % 3 < 2) return;
+
+  // Boss body - large and menacing
+  const pulseSize = Math.sin(frame * 0.05) * 2;
+  ctx.fillStyle = getBossColor(currentStage);
+  ctx.fillRect(b.x - pulseSize, b.y - pulseSize, b.w + pulseSize * 2, b.h + pulseSize * 2);
+
+  // Phase-based aura
+  if (b.phase >= 1) {
+    ctx.strokeStyle = b.phase >= 2 ? '#ff4444' : '#ffaa00';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(b.x - 3, b.y - 3, b.w + 6, b.h + 6);
+  }
+  if (b.phase >= 2) {
+    ctx.globalAlpha = 0.3 + Math.sin(frame * 0.1) * 0.1;
+    ctx.fillStyle = '#ff2200';
+    ctx.fillRect(b.x - 4, b.y - 4, b.w + 8, b.h + 8);
+    ctx.globalAlpha = 1;
+  }
+
+  // Eyes
+  ctx.fillStyle = '#ff0000';
+  ctx.fillRect(b.x + 6, b.y + 6, 4, 3);
+  ctx.fillRect(b.x + 16, b.y + 6, 4, 3);
+
+  // Mouth/teeth
+  ctx.fillStyle = '#440000';
+  ctx.fillRect(b.x + 6, b.y + 16, 16, 4);
+  ctx.fillStyle = '#fff';
+  for (let i = 0; i < 4; i++) {
+    ctx.fillRect(b.x + 7 + i * 4, b.y + 16, 2, 2);
+  }
+
+  // Boss HP bar
+  ctx.fillStyle = '#000';
+  ctx.fillRect(GW / 2 - 60, GH - 16, 120, 8);
+  ctx.fillStyle = '#cc2222';
+  ctx.fillRect(GW / 2 - 59, GH - 15, 118 * (b.hp / b.maxHp), 6);
+  ctx.fillStyle = '#fff';
+  ctx.font = '7px monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText(b.name, GW / 2, GH - 18);
+}
+
+function getBossColor(stage) {
+  switch(stage) {
+    case 1: return '#663344';
+    case 2: return '#225522';
+    case 3: return '#554433';
+    case 4: return '#442211';
+    case 5: return '#224466';
+    case 6: return '#332266';
+    case 7: return '#441144';
+    default: return '#444444';
+  }
+}
+
+function drawProjectiles() {
+  // Player projectiles
+  for (const p of projectiles) {
+    switch(p.type) {
+      case 'shuriken':
+        ctx.save();
+        ctx.translate(p.x + 3, p.y + 3);
+        ctx.rotate(frame * 0.4);
+        ctx.fillStyle = '#ccccff';
+        ctx.fillRect(-3, -1, 6, 2);
+        ctx.fillRect(-1, -3, 2, 6);
+        ctx.restore();
+        break;
+      case 'fireWheel':
+        ctx.fillStyle = '#ff6600';
+        ctx.beginPath();
+        ctx.arc(p.x + 4, p.y + 4, 4, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = '#ffcc00';
+        ctx.beginPath();
+        ctx.arc(p.x + 4, p.y + 4, 2, 0, Math.PI * 2);
+        ctx.fill();
+        break;
+      case 'windSlash':
+        ctx.globalAlpha = 0.7;
+        ctx.fillStyle = '#88ffcc';
+        ctx.fillRect(p.x, p.y, 24, 2);
+        ctx.fillRect(p.x + 2, p.y + 3, 20, 2);
+        ctx.fillRect(p.x + 4, p.y + 6, 16, 2);
+        ctx.fillRect(p.x + 2, p.y + 9, 20, 2);
+        ctx.globalAlpha = 1;
+        break;
+    }
+  }
+
+  // Enemy projectiles
+  for (const p of enemyProjectiles) {
+    switch(p.type) {
+      case 'rock':
+        ctx.fillStyle = '#776655';
+        ctx.fillRect(p.x, p.y, 6, 6);
+        break;
+      case 'bullet':
+        ctx.fillStyle = '#ff4444';
+        ctx.fillRect(p.x, p.y, 8, 3);
+        break;
+      case 'energy':
+        ctx.fillStyle = '#ff88ff';
+        ctx.beginPath();
+        ctx.arc(p.x + 3, p.y + 3, 3, 0, Math.PI * 2);
+        ctx.fill();
+        break;
+      case 'slash':
+        ctx.fillStyle = '#ffaaaa';
+        ctx.fillRect(p.x, p.y, 20, 3);
+        ctx.fillRect(p.x + 2, p.y + 3, 16, 2);
+        break;
+      case 'dash':
+        ctx.globalAlpha = 0.6;
+        ctx.fillStyle = '#ff4444';
+        ctx.fillRect(p.x, p.y, p.w, p.h);
+        ctx.globalAlpha = 1;
+        break;
+      case 'rain':
+        ctx.fillStyle = '#aa44ff';
+        ctx.fillRect(p.x, p.y, 4, 10);
+        break;
+      case 'homing':
+        ctx.fillStyle = '#ffaa00';
+        ctx.beginPath();
+        ctx.arc(p.x + 5, p.y + 5, 5, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = '#ff4400';
+        ctx.beginPath();
+        ctx.arc(p.x + 5, p.y + 5, 2, 0, Math.PI * 2);
+        ctx.fill();
+        break;
+      default:
+        ctx.fillStyle = '#ff6666';
+        ctx.fillRect(p.x, p.y, p.w || 6, p.h || 6);
+    }
+  }
+}
+
+function drawClone() {
+  if (cloneActive <= 0) return;
+  for (const c of cloneTrail) {
+    ctx.globalAlpha = c.life * 0.5;
+    ctx.fillStyle = '#44aaff';
+    ctx.fillRect(c.x + 1, c.y + 1, player.w - 2, player.h - 2);
+  }
+  ctx.globalAlpha = 1;
+}
+
+function drawPlayer() {
+  if (player.dead) {
+    // Death animation
+    ctx.globalAlpha = 0.5;
+    ctx.fillStyle = '#ff4444';
+    ctx.fillRect(player.x, player.y + 8, player.w, 8);
+    ctx.globalAlpha = 1;
+    return;
+  }
+
+  // I-frames blink
+  if (iFrames > 0 && frame % 6 < 3) return;
+
+  const px = player.x, py = player.y;
+  const dir = player.dir;
+
+  // Shadow
+  ctx.fillStyle = 'rgba(0,0,0,0.3)';
+  ctx.fillRect(px + 1, py + player.h - 1, player.w - 2, 2);
+
+  // Body
+  if (player.crouching) {
+    ctx.fillStyle = '#1a1a2e';
+    ctx.fillRect(px, py + 6, player.w, 10);
+    // Head
+    ctx.fillStyle = '#1a1a2e';
+    ctx.fillRect(px + 1, py + 3, 8, 5);
+  } else if (player.wallCling !== 0) {
+    // Clinging pose
+    ctx.fillStyle = '#1a1a2e';
+    ctx.fillRect(px, py, player.w, player.h);
+    // Arms reaching to wall
+    ctx.fillStyle = '#2a2a4e';
+    const armX = player.wallCling > 0 ? px + player.w : px - 3;
+    ctx.fillRect(armX, py + 3, 3, 4);
+    ctx.fillRect(armX, py + 9, 3, 4);
+  } else {
+    // Standing/running
+    ctx.fillStyle = '#1a1a2e';
+    ctx.fillRect(px, py, player.w, player.h);
+    // Legs animation when moving
+    if (player.vx !== 0 && player.grounded) {
+      ctx.fillStyle = '#15152a';
+      if (frame % 8 < 4) {
+        ctx.fillRect(px + 1, py + player.h, 3, 2);
+        ctx.fillRect(px + 6, py + player.h - 2, 3, 2);
+      } else {
+        ctx.fillRect(px + 1, py + player.h - 2, 3, 2);
+        ctx.fillRect(px + 6, py + player.h, 3, 2);
+      }
+    }
+  }
+
+  // Head
+  if (!player.crouching) {
+    ctx.fillStyle = '#1a1a2e';
+    ctx.fillRect(px + 2, py - 4, 6, 5);
+    // Headband
+    ctx.fillStyle = '#cc3344';
+    ctx.fillRect(px + 1, py - 2, 8, 2);
+    // Headband tail
+    ctx.fillStyle = '#aa2233';
+    const tailX = dir > 0 ? px - 2 : px + player.w;
+    ctx.fillRect(tailX, py - 3, 5, 2);
+    ctx.fillRect(tailX + (dir > 0 ? -2 : 2), py - 4, 3, 2);
+    // Eye
+    ctx.fillStyle = '#44ffaa';
+    ctx.fillRect(px + (dir > 0 ? 6 : 2), py - 3, 2, 1);
+  }
+
+  // Slash effect
+  if (player.slashing > 0) {
+    const slashProgress = 1 - (player.slashing / 0.15);
+    const slashArc = slashProgress * Math.PI;
+    ctx.strokeStyle = '#aaddff';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    const scx = px + player.w / 2 + player.slashDir * 8;
+    const scy = py + player.h / 2;
+    ctx.arc(scx, scy, 12, -Math.PI / 2 + slashArc * 0.5, Math.PI / 2 - slashArc * 0.5);
+    ctx.stroke();
+    ctx.lineWidth = 1;
+    // Blade
+    ctx.fillStyle = '#ccddff';
+    const bladeX = px + (player.slashDir > 0 ? player.w + 2 : -14);
+    const bladeRot = slashProgress * 0.8;
+    ctx.fillRect(bladeX, py + 2 + bladeRot * 4, 12, 2);
+  }
+}
+
+function drawHUD() {
+  // Background bar
+  ctx.fillStyle = 'rgba(5,5,15,0.85)';
+  ctx.fillRect(0, 0, GW, HUD_H);
+
+  // HP bar
+  ctx.fillStyle = '#222';
+  ctx.fillRect(4, 4, 64, 6);
+  const hpRatio = player.hp / player.maxHp;
+  ctx.fillStyle = hpRatio > 0.5 ? '#44cc44' : hpRatio > 0.25 ? '#ccaa22' : '#cc2222';
+  ctx.fillRect(4, 4, 64 * hpRatio, 6);
+  ctx.fillStyle = '#fff';
+  ctx.font = '7px monospace';
+  ctx.textAlign = 'left';
+  ctx.fillText('HP', 5, 16);
+
+  // SP bar
+  ctx.fillStyle = '#222';
+  ctx.fillRect(4, 12, 64, 4);
+  ctx.fillStyle = '#4488ff';
+  ctx.fillRect(4, 12, 64 * (player.sp / player.maxSp), 4);
+  ctx.fillText('SP', 5, 18);
+
+  // Sub-weapon icon
+  ctx.fillStyle = '#aaa';
+  ctx.font = '7px monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText(SUB_NAMES[player.subWeapon] || '', 150, 12);
+
+  // Score
+  ctx.fillStyle = '#ffdd44';
+  ctx.textAlign = 'center';
+  ctx.font = '8px monospace';
+  ctx.fillText('SCORE:' + score, GW / 2 + 40, 10);
+
+  // Stage/Screen
+  ctx.fillStyle = '#88ccff';
+  ctx.fillText('ACT ' + currentStage + '-' + (currentScreen + 1), GW / 2 + 40, 18);
+
+  // Lives
+  ctx.textAlign = 'right';
+  ctx.fillStyle = '#44dd88';
+  for (let i = 0; i < lives; i++) {
+    ctx.fillRect(GW - 8 - i * 10, 6, 6, 8);
+    // Mini ninja head
+    ctx.fillStyle = '#cc3344';
+    ctx.fillRect(GW - 8 - i * 10, 4, 6, 2);
+    ctx.fillStyle = '#44dd88';
+  }
+}
+
+// === START ===
+TAS.loop.start(update, draw);
+
+})();
+</script>
+</body>
+</html>

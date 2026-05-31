@@ -1,6 +1,6 @@
-# Unruggable Launcher — Agent Integrations
+# Unrugable Launcher — Agent Integrations
 
-Unruggable Launcher is a token factory on Base (chain 8453) where every launched token
+Unrugable Launcher is a token factory on Base (chain 8453) where every launched token
 has permanently locked liquidity, a deflationary reactor, and a CHAR carbon reactor
 that retires carbon credits from every trade.
 
@@ -21,16 +21,16 @@ Every launch creates floor pools paired against these tokens. More launches = mo
 1. User seeds USDC to launch a token
 2. 94% creates 3 floor pools (AZUSD/BB/EB) + 3 MfT sell walls — ALL supply locked
 3. 6% creates CHAR carbon reactor (3 pools: CHAR/BB, CHAR/EB, CHAR/MfT)
-4. 9 LP positions lock in 2 reactors. No withdraw function exists.
-5. Reactors burn tokens + compound liquidity from trade fees. Floors only go up.
-6. 5% of fees cascade upstream through CHAR to Reactor Prime, which pumps MfT
-7. MfT pump activates every TOKEN/MfT sell wall in the network
+4. 8 LP positions lock in 2 reactors. No withdraw function exists.
+5. Reactors burn tokens + compound liquidity from trade fees. Floor liquidity deepens with every burn cycle.
+6. 5% of fees cascade upstream through CHAR to Reactor Prime, which buys back MfT
+7. MfT buy-back activates every TOKEN/MfT sell wall in the network
 
 ## The Heartbeat
 
 Reactors fire bottom-up. Each one temporarily pushes MfT down as it sells through
 MfT-paired pools. At the top, Reactor Prime fires with accumulated fees from the
-entire network — the pump.
+entire network — the buy-back.
 
 More launches = longer call line = bigger aggregate push at Prime.
 
@@ -53,7 +53,7 @@ https://app.gardens.fund/gardens/8453/0x630dcb0eae7231c7afc8a6414c8c6732b25f8b84
 | `GET /factory` | Factory info + recent launches |
 | `GET /reactor/{address}` | Check if address is a reactor |
 
-Base URL: `https://tasern.quest/api/unruggable`
+Base URL: `https://tasern.quest/api/unrugable`
 
 ## Agent Discovery
 
@@ -67,7 +67,7 @@ Base URL: `https://tasern.quest/api/unruggable`
 
 | Contract | Address |
 |----------|---------|
-| Factory (V4.3) | `0x655e0Ca995D10912574a92a3a67AE9D466424925` |
+| Factory (V5.2) | `0xF0c1B3d6Bc0B4dEd2DDF81374feEA8a2c536bD51` |
 | Reactor Prime | `0xed3aE91b2bb22307c07438EEebA2500C18EABcFE` |
 | MycoPad Hub Reactor | `0xF5B9Fc40080aAcC262f078eCE374A2268dcdb045` |
 | SporeReactorV4 impl | `0xb9630280dc93c503aee06d1eca8e125fc19ab3c5` |
@@ -84,6 +84,6 @@ All contracts verified on BaseScan.
 
 ## Links
 
-- Launcher: https://tasern.quest/launcher/unruggable.html
+- Launcher: https://tasern.quest/launcher/unrugable.html
 - Network Map: https://tasern.quest/launcher/reactor-map.html
 - BaseScan: https://basescan.org/address/0x655e0Ca995D10912574a92a3a67AE9D466424925

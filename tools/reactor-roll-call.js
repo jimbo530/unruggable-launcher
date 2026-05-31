@@ -63,6 +63,7 @@ const STATIC_NETWORK = [
   // --- Main chain (Row 4 → Row 1) ---
   { name: 'TGN',          addr: '0xc3f09dAEF814177E52B4C04ec2872B564a36989D' },
   { name: 'AZUSD',        addr: '0xD8AFb7caD1f8A3Ddc4E16c1516a94949eb119281' },
+  { name: 'AZUSD 2',      addr: '0x6888ef2f92e3073a378f7153548e9c7691c90d23' },
   { name: 'BURGERS',      addr: '0xc858026Ec5D30280137032BC6EA86F46ea23C2CA' },
   { name: 'CHAR',         addr: '0xc2eBe90fB9bC7897f06DC00666951Fa9a49A397A' },
   { name: 'EGP',          addr: '0x10A710fced92eB096F796F43BCCFb60884c13819' },
@@ -158,7 +159,7 @@ async function checkCooldown(contract, name) {
     if (remaining > 0n) {
       return { ready: false, remaining: Number(remaining) };
     }
-  } catch (_) {}
+  } catch (e) { console.warn('checkCooldown: failed to read timeUntilExecute:', e.message || e); }
   return { ready: true };
 }
 

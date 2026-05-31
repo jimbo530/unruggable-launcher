@@ -1,0 +1,2042 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Blades of Poop</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body { width: 100%; height: 100%; overflow: hidden; background: #111; touch-action: none; }
+canvas { display: block; margin: 0 auto; }
+#back-link {
+  position: fixed; bottom: 8px; left: 50%; transform: translateX(-50%);
+  color: #666; font-family: monospace; font-size: 12px; text-decoration: none; z-index: 10;
+}
+#back-link:hover { color: #aaa; }
+</style>
+</head>
+<body>
+<canvas id="gc"></canvas>
+<a id="back-link" href="/games">Back to Arcade</a>
+<script src="nft-loader.js"></script>
+<script>if(window.NftLoader)NftLoader.gate();</script>
+<script src="tasern-engine.js"></script>
+<script>
+(function() {
+"use strict";
+
+// === GAME CONSTANTS ===
+const GW = 480, GH = 320;
+const ctx = TAS.ctx;
+
+// Rink dimensions (vertical orientation - top to bottom)
+const RINK_X = 40, RINK_Y = 0;
+const RINK_W = 400, RINK_H = 800;
+const GOAL_W = 60, GOAL_H = 12;
+const CENTER_Y = RINK_H / 2;
+const BLUE_LINE_TOP = RINK_H * 0.33;
+const BLUE_LINE_BOT = RINK_H * 0.67;
+
+// Camera scroll
+const CAM_SPEED = 8;
+let camY = 0;
+const CAM_MIN = 0;
+const CAM_MAX = RINK_H - GH;
+
+// Player physics
+const SKATE_SPEED = 180;
+const SKATE_ACCEL = 600;
+const FRICTION = 0.92;
+const PUCK_SPEED = 320;
+const PASS_SPEED = 250;
+const SHOT_POWER_MAX = 450;
+const SHOT_CHARGE_RATE = 600;
+const CHECK_SPEED = 280;
+const CHECK_RANGE = 22;
+const CHECK_COOLDOWN = 0.5;
+const PLAYER_RADIUS = 8;
+const PUCK_RADIUS = 4;
+const GOALIE_SPEED = 120;
+
+// Timing
+const PERIOD_LENGTH = 120; // 2 minutes per period
+const PENALTY_TIME = 60;   // 1 minute penalty
+const FACEOFF_DELAY = 1.5;
+const FIGHT_HP = 100;
+
+// === INIT ===
+TAS.initCanvas(GW, GH);
+TAS.input.initTouch({ buttons: ['a', 'b'], labels: { a: 'SHOOT', b: 'CHECK' } });
+
+// === TEAMS ===
+const TEAMS = [
+  { name: 'Spore Slashers',   abbr: 'SPR', color1: '#44dd88', color2: '#226644', speed: 8, shot: 7, fight: 6, goalie: 7 },
+  { name: 'Fungal Flames',    abbr: 'FNG', color1: '#ff6644', color2: '#882211', speed: 7, shot: 8, fight: 7, goalie: 6 },
+  { name: 'Reactor Rockets',  abbr: 'RKT', color1: '#44aaff', color2: '#1144aa', speed: 9, shot: 6, fight: 5, goalie: 7 },
+  { name: 'Crystal Blades',   abbr: 'CRY', color1: '#cc88ff', color2: '#5522aa', speed: 6, shot: 9, fight: 6, goalie: 8 },
+  { name: 'Poop Panthers',    abbr: 'POO', color1: '#aa8844', color2: '#554422', speed: 7, shot: 7, fight: 9, goalie: 6 },
+  { name: 'Token Tigers',     abbr: 'TKN', color1: '#ffcc44', color2: '#886611', speed: 8, shot: 8, fight: 5, goalie: 6 },
+  { name: 'Hex Hounds',       abbr: 'HEX', color1: '#ff44aa', color2: '#881155', speed: 9, shot: 5, fight: 8, goalie: 7 },
+  { name: 'Dark Destroyers',  abbr: 'DRK', color1: '#8888aa', color2: '#333355', speed: 6, shot: 7, fight: 8, goalie: 9 }
+];
+
+// === GAME STATE ===
+let state = 'title';
+let frame = 0;
+let highScore = TAS.score.load('blades_poop_hi');
+
+// Tournament state
+let tournament = null;
+let playerTeamIdx = 0;
+let currentMatch = null;
+
+// Match state
+let homeTeam = null, awayTeam = null;
+let homePlayers = [], awayPlayers = [];
+let homeGoalie = null, awayGoalie = null;
+let puck = null;
+let homeScore = 0, awayScore = 0;
+let period = 1, periodTimer = PERIOD_LENGTH;
+let controlledPlayer = null;
+let shotCharging = false, shotPower = 0;
+let faceoffTimer = 0;
+let penaltyBox = []; // { team, timer }
+let checkCounts = {}; // track checks between player pairs
+let overtime = false;
+
+// Fight state
+let fightState = null; // { player1, player2, hp1, hp2, timer, p1Action, p2Action, hitTimer1, hitTimer2 }
+
+// === HELPER FUNCTIONS ===
+function lerp(a, b, t) { return a + (b - a) * t; }
+function clamp(v, min, max) { return v < min ? min : v > max ? max : v; }
+function dist(x1, y1, x2, y2) { const dx = x2 - x1, dy = y2 - y1; return Math.sqrt(dx * dx + dy * dy); }
+function angle(x1, y1, x2, y2) { return Math.atan2(y2 - y1, x2 - x1); }
+function randRange(a, b) { return a + Math.random() * (b - a); }
+
+// === PLAYER FACTORY ===
+function createPlayer(team, idx, x, y, isHome) {
+  return {
+    team, idx, x, y,
+    vx: 0, vy: 0,
+    hasPuck: false,
+    checkCooldown: 0,
+    isHome,
+    stunTimer: 0,
+    penalized: false,
+    fightAggro: 0 // tracks checks received
+  };
+}
+
+function createGoalie(team, x, y, isHome) {
+  return {
+    team, x, y, baseX: x, baseY: y,
+    vx: 0, vy: 0,
+    isHome,
+    hasPuck: false,
+    saveTimer: 0
+  };
+}
+
+function createPuck(x, y) {
+  return { x, y, vx: 0, vy: 0, owner: null, loose: true, speed: 0 };
+}
+
+// === MATCH SETUP ===
+function setupMatch(home, away) {
+  homeTeam = home;
+  awayTeam = away;
+  homeScore = 0;
+  awayScore = 0;
+  period = 1;
+  periodTimer = PERIOD_LENGTH;
+  overtime = false;
+  penaltyBox = [];
+  checkCounts = {};
+  setupPeriod();
+}
+
+function setupPeriod() {
+  // Home attacks downward (toward high Y), away attacks upward (toward low Y)
+  homePlayers = [];
+  awayPlayers = [];
+
+  // Home team positions (bottom half defenders, top half when attacking)
+  const homeActive = 3 - penaltyBox.filter(p => p.team === 'home').length;
+  const awayActive = 3 - penaltyBox.filter(p => p.team === 'away').length;
+
+  for (let i = 0; i < 3; i++) {
+    const penalized = i >= homeActive;
+    const p = createPlayer(homeTeam, i,
+      RINK_X + RINK_W * 0.3 + i * (RINK_W * 0.2),
+      CENTER_Y - 40 - i * 20,
+      true);
+    p.penalized = penalized;
+    homePlayers.push(p);
+  }
+
+  for (let i = 0; i < 3; i++) {
+    const penalized = i >= awayActive;
+    const p = createPlayer(awayTeam, i,
+      RINK_X + RINK_W * 0.3 + i * (RINK_W * 0.2),
+      CENTER_Y + 40 + i * 20,
+      false);
+    p.penalized = penalized;
+    awayPlayers.push(p);
+  }
+
+  // Goalies
+  homeGoalie = createGoalie(homeTeam, RINK_X + RINK_W / 2, RINK_Y + 30, true);
+  awayGoalie = createGoalie(awayTeam, RINK_X + RINK_W / 2, RINK_Y + RINK_H - 30, false);
+
+  // Puck at center
+  puck = createPuck(RINK_X + RINK_W / 2, CENTER_Y);
+  controlledPlayer = homePlayers[0];
+  shotCharging = false;
+  shotPower = 0;
+  faceoffTimer = FACEOFF_DELAY;
+}
+
+function faceoff(x, y) {
+  puck.x = x;
+  puck.y = y;
+  puck.vx = 0;
+  puck.vy = 0;
+  puck.owner = null;
+  puck.loose = true;
+  faceoffTimer = FACEOFF_DELAY;
+  shotCharging = false;
+  shotPower = 0;
+
+  // Reset player positions around faceoff
+  const cx = x, cy = y;
+  for (let i = 0; i < homePlayers.length; i++) {
+    if (!homePlayers[i].penalized) {
+      homePlayers[i].x = cx - 30 + i * 30;
+      homePlayers[i].y = cy - 25;
+      homePlayers[i].vx = 0;
+      homePlayers[i].vy = 0;
+    }
+  }
+  for (let i = 0; i < awayPlayers.length; i++) {
+    if (!awayPlayers[i].penalized) {
+      awayPlayers[i].x = cx - 30 + i * 30;
+      awayPlayers[i].y = cy + 25;
+      awayPlayers[i].vx = 0;
+      awayPlayers[i].vy = 0;
+    }
+  }
+  controlledPlayer = homePlayers.find(p => !p.penalized) || homePlayers[0];
+}
+
+// === INPUT ===
+function inputLeft() { return TAS.input.keys['ArrowLeft'] || TAS.input.keys['KeyA'] || TAS.input.touch.left; }
+function inputRight() { return TAS.input.keys['ArrowRight'] || TAS.input.keys['KeyD'] || TAS.input.touch.right; }
+function inputUp() { return TAS.input.keys['ArrowUp'] || TAS.input.keys['KeyW'] || TAS.input.touch.up; }
+function inputDown() { return TAS.input.keys['ArrowDown'] || TAS.input.keys['KeyS'] || TAS.input.touch.down; }
+function inputA() { return TAS.input.keys['KeyZ'] || TAS.input.keys['Space'] || TAS.input.touch.a; }
+function inputB() { return TAS.input.keys['KeyX'] || TAS.input.keys['ShiftLeft'] || TAS.input.touch.b; }
+
+let prevA = false, prevB = false;
+function inputAPressed() { const v = inputA() && !prevA; return v; }
+function inputBPressed() { const v = inputB() && !prevB; return v; }
+
+// === TOURNAMENT ===
+function initTournament(teamIdx) {
+  playerTeamIdx = teamIdx;
+  const order = [0, 1, 2, 3, 4, 5, 6, 7];
+  // Shuffle but keep player's team in
+  for (let i = order.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [order[i], order[j]] = [order[j], order[i]];
+  }
+  tournament = {
+    bracket: order,
+    round: 0, // 0=quarterfinal, 1=semi, 2=final
+    matchIdx: 0,
+    results: []
+  };
+  startNextMatch();
+}
+
+function startNextMatch() {
+  const round = tournament.round;
+  const teams = tournament.bracket;
+  const matchIdx = tournament.matchIdx;
+  const idx1 = matchIdx * 2;
+  const idx2 = matchIdx * 2 + 1;
+
+  if (idx2 >= teams.length) {
+    // Tournament complete
+    state = 'tournamentWin';
+    const totalGoals = tournament.results.reduce((s, r) => s + r.playerGoals, 0);
+    if (totalGoals > highScore) {
+      highScore = totalGoals;
+      TAS.score.save('blades_poop_hi', highScore);
+    }
+    return;
+  }
+
+  const home = TEAMS[teams[idx1]];
+  const away = TEAMS[teams[idx2]];
+
+  // Player always plays as home in their matches
+  const playerInMatch = teams[idx1] === playerTeamIdx || teams[idx2] === playerTeamIdx;
+
+  if (playerInMatch) {
+    if (teams[idx1] === playerTeamIdx) {
+      setupMatch(home, away);
+    } else {
+      setupMatch(away, home);
+      // Swap so player is always "home" in code
+      [homeTeam, awayTeam] = [awayTeam, homeTeam];
+      setupMatch(TEAMS[playerTeamIdx], teams[idx1] === playerTeamIdx ? away : home);
+    }
+    state = 'playing';
+  } else {
+    // Simulate match
+    const winner = Math.random() < 0.5 ? teams[idx1] : teams[idx2];
+    tournament.results.push({ winner, playerGoals: 0 });
+    advanceTournament(winner);
+  }
+}
+
+function advanceTournament(winnerIdx) {
+  const nextBracket = [];
+  // Build next round bracket from current results
+  if (tournament.matchIdx >= Math.floor(tournament.bracket.length / 2) - 1) {
+    // All matches in this round done
+    const winners = [];
+    for (let i = 0; i < tournament.bracket.length; i += 2) {
+      const res = tournament.results[tournament.round * 4 + i / 2];
+      if (res) winners.push(res.winner);
+      else winners.push(winnerIdx);
+    }
+    // Last winner
+    if (winners.length === 0) winners.push(winnerIdx);
+
+    tournament.bracket = winners.length > 1 ? winners : [winnerIdx];
+    tournament.round++;
+    tournament.matchIdx = 0;
+
+    if (tournament.bracket.length <= 1) {
+      // Tournament over
+      if (tournament.bracket[0] === playerTeamIdx) {
+        state = 'tournamentWin';
+      } else {
+        state = 'tournamentLoss';
+      }
+      return;
+    }
+    startNextMatch();
+  } else {
+    tournament.matchIdx++;
+    startNextMatch();
+  }
+}
+
+// === SIMPLIFIED TOURNAMENT ===
+// Let me redo this more cleanly
+function resetTournament(teamIdx) {
+  playerTeamIdx = teamIdx;
+  // Create seeded bracket
+  const seeds = [];
+  for (let i = 0; i < 8; i++) seeds.push(i);
+  // Shuffle
+  for (let i = 7; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [seeds[i], seeds[j]] = [seeds[j], seeds[i]];
+  }
+  tournament = {
+    rounds: [seeds, [], []], // QF seeds, SF seeds, Final seeds
+    currentRound: 0,
+    currentGame: 0,
+    playerAlive: true
+  };
+  playNextTournamentGame();
+}
+
+function playNextTournamentGame() {
+  const round = tournament.rounds[tournament.currentRound];
+  const gi = tournament.currentGame * 2;
+
+  if (gi + 1 >= round.length) {
+    // Round complete, advance
+    tournament.currentRound++;
+    tournament.currentGame = 0;
+    if (tournament.currentRound >= 3 || tournament.rounds[tournament.currentRound].length < 2) {
+      // Tournament over
+      if (tournament.playerAlive) {
+        state = 'tournamentWin';
+        const totalGoals = homeScore;
+        if (totalGoals > highScore) {
+          highScore = totalGoals;
+          TAS.score.save('blades_poop_hi', highScore);
+        }
+      } else {
+        state = 'tournamentLoss';
+      }
+      return;
+    }
+    playNextTournamentGame();
+    return;
+  }
+
+  const t1 = round[gi];
+  const t2 = round[gi + 1];
+  const playerInvolved = (t1 === playerTeamIdx || t2 === playerTeamIdx);
+
+  if (playerInvolved && tournament.playerAlive) {
+    const oppIdx = t1 === playerTeamIdx ? t2 : t1;
+    setupMatch(TEAMS[playerTeamIdx], TEAMS[oppIdx]);
+    state = 'matchIntro';
+  } else {
+    // Simulate - higher combined stats more likely to win
+    const s1 = TEAMS[t1].speed + TEAMS[t1].shot + TEAMS[t1].goalie;
+    const s2 = TEAMS[t2].speed + TEAMS[t2].shot + TEAMS[t2].goalie;
+    const winner = Math.random() < s1 / (s1 + s2) ? t1 : t2;
+    if (!tournament.rounds[tournament.currentRound + 1]) tournament.rounds.push([]);
+    tournament.rounds[tournament.currentRound + 1].push(winner);
+    if ((t1 === playerTeamIdx || t2 === playerTeamIdx) && winner !== playerTeamIdx) {
+      tournament.playerAlive = false;
+    }
+    tournament.currentGame++;
+    playNextTournamentGame();
+  }
+}
+
+// === AI LOGIC ===
+function updateAI(player, allTeammates, opponents, dt) {
+  if (player === controlledPlayer || player.penalized || player.stunTimer > 0) return;
+
+  const speed = (player.isHome ? homeTeam.speed : awayTeam.speed) * 18;
+
+  if (player.hasPuck) {
+    // Offensive AI - move toward opponent goal and shoot
+    const goalY = player.isHome ? RINK_Y + RINK_H - 40 : RINK_Y + 40;
+    const goalX = RINK_X + RINK_W / 2;
+    const distToGoal = dist(player.x, player.y, goalX, goalY);
+
+    if (distToGoal < 150) {
+      // Shoot!
+      const shotSpd = PUCK_SPEED * ((player.isHome ? homeTeam.shot : awayTeam.shot) / 10);
+      const ang = angle(player.x, player.y, goalX + randRange(-20, 20), goalY);
+      shootPuck(player, ang, shotSpd);
+    } else {
+      // Skate toward goal with some randomness
+      const ang = angle(player.x, player.y, goalX + randRange(-40, 40), goalY);
+      player.vx += Math.cos(ang) * speed * dt;
+      player.vy += Math.sin(ang) * speed * dt;
+    }
+  } else if (puck.loose) {
+    // Chase loose puck
+    const ang = angle(player.x, player.y, puck.x, puck.y);
+    player.vx += Math.cos(ang) * speed * dt;
+    player.vy += Math.sin(ang) * speed * dt;
+  } else {
+    // Position defensively or support
+    const teamHasPuck = allTeammates.some(p => p.hasPuck);
+    if (teamHasPuck) {
+      // Support offense - spread out
+      const targetX = RINK_X + RINK_W * (0.25 + player.idx * 0.25);
+      const targetY = player.isHome ?
+        CENTER_Y + 50 + player.idx * 40 :
+        CENTER_Y - 50 - player.idx * 40;
+      const ang = angle(player.x, player.y, targetX, targetY);
+      const d = dist(player.x, player.y, targetX, targetY);
+      if (d > 20) {
+        player.vx += Math.cos(ang) * speed * 0.7 * dt;
+        player.vy += Math.sin(ang) * speed * 0.7 * dt;
+      }
+    } else {
+      // Defense - chase puck carrier or get between puck and goal
+      const carrier = opponents.find(p => p.hasPuck);
+      if (carrier) {
+        const myGoalY = player.isHome ? RINK_Y + 30 : RINK_Y + RINK_H - 30;
+        const targetX = (carrier.x + RINK_X + RINK_W / 2) / 2;
+        const targetY = (carrier.y + myGoalY) / 2;
+        const ang = angle(player.x, player.y, targetX, targetY);
+        player.vx += Math.cos(ang) * speed * dt;
+        player.vy += Math.sin(ang) * speed * dt;
+
+        // Try to check if close
+        if (dist(player.x, player.y, carrier.x, carrier.y) < CHECK_RANGE && player.checkCooldown <= 0) {
+          performCheck(player, carrier);
+        }
+      }
+    }
+  }
+}
+
+// === GOALIE AI ===
+function updateGoalie(goalie, team, dt) {
+  const goalY = goalie.baseY;
+  const goalX = goalie.baseX;
+  const rating = (goalie.isHome ? homeTeam.goalie : awayTeam.goalie) / 10;
+
+  // Track puck X position
+  let targetX = puck.x;
+  let targetY = goalY;
+
+  // If puck is coming toward goal, move to intercept
+  const puckMovingToward = goalie.isHome ?
+    (puck.vy < -50) : (puck.vy > 50);
+
+  if (puckMovingToward) {
+    // Predict where puck will be at goal Y
+    const timeToGoal = Math.abs(goalY - puck.y) / Math.abs(puck.vy);
+    targetX = puck.x + puck.vx * timeToGoal * rating;
+  }
+
+  targetX = clamp(targetX, goalX - GOAL_W / 2 + 10, goalX + GOAL_W / 2 - 10);
+
+  const gdx = targetX - goalie.x;
+  const gdy = targetY - goalie.y;
+  const gspd = GOALIE_SPEED * rating;
+
+  if (Math.abs(gdx) > 2) goalie.x += Math.sign(gdx) * gspd * dt;
+  if (Math.abs(gdy) > 2) goalie.y += Math.sign(gdy) * gspd * dt;
+
+  goalie.x = clamp(goalie.x, goalX - GOAL_W, goalX + GOAL_W);
+
+  // Save attempt - if puck very close
+  if (goalie.saveTimer <= 0) {
+    const d = dist(goalie.x, goalie.y, puck.x, puck.y);
+    if (d < 18 && puck.loose && puck.speed > 100) {
+      // Save!
+      goalie.saveTimer = 0.5;
+      goalie.hasPuck = true;
+      puck.owner = goalie;
+      puck.loose = false;
+      puck.vx = 0;
+      puck.vy = 0;
+      TAS.audio.playTone(200, 0.1, 'square', 0.08);
+      // Clear puck after delay
+      setTimeout(function() {
+        if (goalie.hasPuck) {
+          goalie.hasPuck = false;
+          puck.loose = true;
+          puck.vx = (Math.random() - 0.5) * 100;
+          puck.vy = goalie.isHome ? 80 : -80;
+          puck.owner = null;
+        }
+      }, 800);
+    }
+  } else {
+    goalie.saveTimer -= dt;
+  }
+}
+
+// === SHOOTING ===
+function shootPuck(player, ang, speed) {
+  player.hasPuck = false;
+  puck.owner = null;
+  puck.loose = true;
+  puck.vx = Math.cos(ang) * speed;
+  puck.vy = Math.sin(ang) * speed;
+  puck.speed = speed;
+  TAS.audio.playTone(400, 0.15, 'sawtooth', 0.1, 200);
+  TAS.particles.spawn(puck.x, puck.y, '#88ccff', 5, 3);
+}
+
+function passPuck(player) {
+  // Find nearest teammate
+  const teammates = player.isHome ? homePlayers : awayPlayers;
+  let nearest = null, nearDist = Infinity;
+  for (const t of teammates) {
+    if (t === player || t.penalized) continue;
+    const d = dist(player.x, player.y, t.x, t.y);
+    if (d < nearDist) { nearDist = d; nearest = t; }
+  }
+  if (nearest) {
+    const ang = angle(player.x, player.y, nearest.x, nearest.y);
+    player.hasPuck = false;
+    puck.owner = null;
+    puck.loose = true;
+    puck.vx = Math.cos(ang) * PASS_SPEED;
+    puck.vy = Math.sin(ang) * PASS_SPEED;
+    puck.speed = PASS_SPEED;
+    TAS.audio.playTone(300, 0.08, 'square', 0.06);
+  }
+}
+
+// === BODY CHECK ===
+function performCheck(checker, target) {
+  if (checker.checkCooldown > 0) return;
+  checker.checkCooldown = CHECK_COOLDOWN;
+
+  const d = dist(checker.x, checker.y, target.x, target.y);
+  if (d > CHECK_RANGE * 1.5) return;
+
+  const ang = angle(checker.x, checker.y, target.x, target.y);
+  target.vx += Math.cos(ang) * CHECK_SPEED;
+  target.vy += Math.sin(ang) * CHECK_SPEED;
+  target.stunTimer = 0.3;
+
+  // Knock puck loose
+  if (target.hasPuck) {
+    target.hasPuck = false;
+    puck.owner = null;
+    puck.loose = true;
+    puck.vx = (Math.random() - 0.5) * 100;
+    puck.vy = (Math.random() - 0.5) * 100;
+    puck.speed = 80;
+  }
+
+  // Screen shake and effects
+  TAS.fx.shake(4, 0.85);
+  TAS.audio.playNoise(0.12, 0.15, 800);
+  TAS.audio.playTone(150, 0.1, 'square', 0.08);
+  TAS.particles.spawn(target.x, target.y - camY, '#fff', 8, 4);
+
+  // Track aggro for fights
+  const key = checker.isHome + '_' + checker.idx + '_' + target.idx;
+  checkCounts[key] = (checkCounts[key] || 0) + 1;
+  target.fightAggro++;
+
+  // Trigger fight after 3+ checks
+  if (checkCounts[key] >= 3) {
+    startFight(checker, target);
+    checkCounts[key] = 0;
+  }
+}
+
+// === FIGHT SYSTEM ===
+function startFight(p1, p2) {
+  fightState = {
+    player1: p1, player2: p2,
+    hp1: FIGHT_HP, hp2: FIGHT_HP,
+    timer: 10,
+    p1Action: 'idle', p2Action: 'idle',
+    hitTimer1: 0, hitTimer2: 0,
+    p1Block: false, p2Block: false,
+    aiTimer: 0
+  };
+  state = 'fighting';
+  TAS.audio.playTone(100, 0.3, 'sawtooth', 0.1, 50);
+}
+
+function updateFight(dt) {
+  if (!fightState) return;
+  fightState.timer -= dt;
+  fightState.hitTimer1 = Math.max(0, fightState.hitTimer1 - dt);
+  fightState.hitTimer2 = Math.max(0, fightState.hitTimer2 - dt);
+  fightState.aiTimer -= dt;
+
+  // Player controls (player1)
+  fightState.p1Block = inputB();
+  if (!fightState.p1Block && fightState.hitTimer1 <= 0) {
+    if (inputUp() && inputAPressed()) {
+      // High punch
+      fightState.p1Action = 'highPunch';
+      fightState.hitTimer1 = 0.4;
+      if (!fightState.p2Block) {
+        const dmg = 12 + Math.floor(Math.random() * 8);
+        fightState.hp2 -= dmg;
+        TAS.audio.playTone(200, 0.1, 'square', 0.12);
+        TAS.fx.shake(3, 0.9);
+        TAS.particles.spawn(GW * 0.65, GH * 0.45, '#ff4444', 4, 3);
+      } else {
+        TAS.audio.playTone(100, 0.05, 'square', 0.05);
+      }
+    } else if (inputDown() && inputAPressed()) {
+      // Low punch
+      fightState.p1Action = 'lowPunch';
+      fightState.hitTimer1 = 0.35;
+      if (!fightState.p2Block) {
+        const dmg = 8 + Math.floor(Math.random() * 6);
+        fightState.hp2 -= dmg;
+        TAS.audio.playTone(250, 0.08, 'square', 0.1);
+        TAS.fx.shake(2, 0.9);
+        TAS.particles.spawn(GW * 0.65, GH * 0.55, '#ff4444', 3, 2);
+      } else {
+        TAS.audio.playTone(100, 0.05, 'square', 0.05);
+      }
+    } else if (inputAPressed()) {
+      // Mid punch
+      fightState.p1Action = 'midPunch';
+      fightState.hitTimer1 = 0.35;
+      if (!fightState.p2Block) {
+        const dmg = 10 + Math.floor(Math.random() * 5);
+        fightState.hp2 -= dmg;
+        TAS.audio.playTone(220, 0.09, 'square', 0.11);
+        TAS.fx.shake(2, 0.9);
+        TAS.particles.spawn(GW * 0.65, GH * 0.5, '#ff4444', 3, 2);
+      } else {
+        TAS.audio.playTone(100, 0.05, 'square', 0.05);
+      }
+    }
+  }
+
+  // AI controls (player2)
+  if (fightState.aiTimer <= 0 && fightState.hitTimer2 <= 0) {
+    const fightSkill = (fightState.player2.isHome ? homeTeam.fight : awayTeam.fight) / 10;
+    const action = Math.random();
+
+    if (action < 0.3 * fightSkill) {
+      // Attack
+      fightState.p2Action = Math.random() < 0.5 ? 'highPunch' : 'lowPunch';
+      fightState.hitTimer2 = 0.4;
+      if (!fightState.p1Block) {
+        const dmg = Math.floor((8 + Math.random() * 10) * fightSkill);
+        fightState.hp1 -= dmg;
+        TAS.audio.playTone(180, 0.1, 'square', 0.1);
+        TAS.fx.shake(2, 0.9);
+        TAS.particles.spawn(GW * 0.35, GH * 0.5, '#ff4444', 3, 2);
+      }
+      fightState.aiTimer = 0.3 + Math.random() * 0.4;
+    } else if (action < 0.5) {
+      fightState.p2Block = true;
+      fightState.aiTimer = 0.3 + Math.random() * 0.5;
+    } else {
+      fightState.p2Block = false;
+      fightState.aiTimer = 0.2 + Math.random() * 0.3;
+    }
+  }
+
+  // Check fight end
+  if (fightState.hp1 <= 0 || fightState.hp2 <= 0 || fightState.timer <= 0) {
+    endFight();
+  }
+}
+
+function endFight() {
+  const loser = fightState.hp1 <= fightState.hp2 ? fightState.player1 : fightState.player2;
+  loser.penalized = true;
+  penaltyBox.push({ team: loser.isHome ? 'home' : 'away', timer: PENALTY_TIME, player: loser });
+
+  TAS.audio.playMelody([[200, 0.15], [150, 0.15], [100, 0.3]], 180);
+
+  fightState = null;
+  state = 'playing';
+  faceoff(RINK_X + RINK_W / 2, CENTER_Y);
+}
+
+// === GOAL DETECTION ===
+function checkGoals() {
+  // Home goal (top of rink - away scores here)
+  const homeGoalX = RINK_X + RINK_W / 2;
+  const homeGoalY = RINK_Y + 10;
+  if (puck.y < homeGoalY + GOAL_H && puck.y > homeGoalY - 5 &&
+      Math.abs(puck.x - homeGoalX) < GOAL_W / 2 && puck.loose) {
+    awayScore++;
+    goalScored(false);
+    return true;
+  }
+
+  // Away goal (bottom of rink - home scores here)
+  const awayGoalY = RINK_Y + RINK_H - 10;
+  if (puck.y > awayGoalY - GOAL_H && puck.y < awayGoalY + 5 &&
+      Math.abs(puck.x - homeGoalX) < GOAL_W / 2 && puck.loose) {
+    homeScore++;
+    goalScored(true);
+    return true;
+  }
+  return false;
+}
+
+function goalScored(homeScored) {
+  TAS.fx.flash('#fff', 0.5);
+  TAS.fx.shake(8, 0.9);
+  // Goal horn
+  TAS.audio.playTone(220, 0.8, 'sawtooth', 0.12);
+  TAS.audio.playTone(277, 0.8, 'sawtooth', 0.08);
+  TAS.audio.playTone(330, 0.8, 'sawtooth', 0.06);
+  // Crowd roar
+  TAS.audio.playNoise(1.5, 0.1, 2000);
+
+  TAS.particles.spawn(puck.x, puck.y - camY, '#ffdd44', 30, 5, { size: 3, sizeVar: 3 });
+  TAS.particles.spawn(puck.x, puck.y - camY, '#ff4444', 20, 4, { size: 2 });
+
+  // Release penalties on goal against
+  if (homeScored) {
+    penaltyBox = penaltyBox.filter(p => {
+      if (p.team === 'away') { p.player.penalized = false; return false; }
+      return true;
+    });
+  } else {
+    penaltyBox = penaltyBox.filter(p => {
+      if (p.team === 'home') { p.player.penalized = false; return false; }
+      return true;
+    });
+  }
+
+  if (overtime) {
+    // Sudden death - game over
+    endMatch();
+  } else {
+    // Faceoff at center
+    setTimeout(function() {
+      faceoff(RINK_X + RINK_W / 2, CENTER_Y);
+    }, 1500);
+  }
+}
+
+// === ICING ===
+function checkIcing() {
+  if (!puck.loose) return false;
+  // Simple icing: puck crosses far goal line from behind center without anyone touching
+  // We'll just do a basic version
+  return false; // Simplified out for fun
+}
+
+// === PUCK PHYSICS ===
+function updatePuck(dt) {
+  if (puck.owner) {
+    puck.x = puck.owner.x;
+    puck.y = puck.owner.y + (puck.owner.isHome === undefined ? 0 : (puck.owner.isHome ? 8 : -8));
+    puck.vx = 0;
+    puck.vy = 0;
+    return;
+  }
+
+  puck.x += puck.vx * dt;
+  puck.y += puck.vy * dt;
+
+  // Friction on ice
+  puck.vx *= 0.995;
+  puck.vy *= 0.995;
+  puck.speed = Math.sqrt(puck.vx * puck.vx + puck.vy * puck.vy);
+
+  // Bounce off rink walls
+  if (puck.x < RINK_X + PUCK_RADIUS) { puck.x = RINK_X + PUCK_RADIUS; puck.vx = Math.abs(puck.vx) * 0.7; }
+  if (puck.x > RINK_X + RINK_W - PUCK_RADIUS) { puck.x = RINK_X + RINK_W - PUCK_RADIUS; puck.vx = -Math.abs(puck.vx) * 0.7; }
+
+  // Bounce off end boards (but not goal area)
+  const goalX = RINK_X + RINK_W / 2;
+  if (puck.y < RINK_Y + PUCK_RADIUS) {
+    if (Math.abs(puck.x - goalX) > GOAL_W / 2) {
+      puck.y = RINK_Y + PUCK_RADIUS;
+      puck.vy = Math.abs(puck.vy) * 0.7;
+    }
+  }
+  if (puck.y > RINK_Y + RINK_H - PUCK_RADIUS) {
+    if (Math.abs(puck.x - goalX) > GOAL_W / 2) {
+      puck.y = RINK_Y + RINK_H - PUCK_RADIUS;
+      puck.vy = -Math.abs(puck.vy) * 0.7;
+    }
+  }
+
+  // Pickup detection
+  if (puck.loose && faceoffTimer <= 0) {
+    const allPlayers = [...homePlayers, ...awayPlayers];
+    for (const p of allPlayers) {
+      if (p.penalized || p.stunTimer > 0) continue;
+      if (dist(p.x, p.y, puck.x, puck.y) < PLAYER_RADIUS + PUCK_RADIUS + 4) {
+        p.hasPuck = true;
+        puck.owner = p;
+        puck.loose = false;
+        puck.vx = 0;
+        puck.vy = 0;
+        if (p === controlledPlayer || p.isHome) {
+          TAS.audio.playTone(500, 0.05, 'square', 0.04);
+        }
+        break;
+      }
+    }
+  }
+}
+
+// === PLAYER PHYSICS ===
+function updatePlayer(player, dt) {
+  if (player.penalized) return;
+  if (player.stunTimer > 0) {
+    player.stunTimer -= dt;
+  }
+  player.checkCooldown = Math.max(0, player.checkCooldown - dt);
+
+  // Apply friction
+  player.vx *= FRICTION;
+  player.vy *= FRICTION;
+
+  // Move
+  player.x += player.vx * dt;
+  player.y += player.vy * dt;
+
+  // Clamp to rink bounds
+  player.x = clamp(player.x, RINK_X + PLAYER_RADIUS, RINK_X + RINK_W - PLAYER_RADIUS);
+  player.y = clamp(player.y, RINK_Y + PLAYER_RADIUS + 15, RINK_Y + RINK_H - PLAYER_RADIUS - 15);
+}
+
+// === CONTROLLED PLAYER ===
+function updateControlled(dt) {
+  if (!controlledPlayer || controlledPlayer.penalized) {
+    // Switch to nearest available player
+    controlledPlayer = homePlayers.find(p => !p.penalized) || homePlayers[0];
+  }
+
+  if (controlledPlayer.stunTimer > 0) return;
+
+  const speed = SKATE_ACCEL * (homeTeam.speed / 8);
+
+  if (inputLeft()) controlledPlayer.vx -= speed * dt;
+  if (inputRight()) controlledPlayer.vx += speed * dt;
+  if (inputUp()) controlledPlayer.vy -= speed * dt;
+  if (inputDown()) controlledPlayer.vy += speed * dt;
+
+  // Clamp speed
+  const spd = Math.sqrt(controlledPlayer.vx * controlledPlayer.vx + controlledPlayer.vy * controlledPlayer.vy);
+  const maxSpd = SKATE_SPEED * (homeTeam.speed / 8);
+  if (spd > maxSpd) {
+    controlledPlayer.vx = (controlledPlayer.vx / spd) * maxSpd;
+    controlledPlayer.vy = (controlledPlayer.vy / spd) * maxSpd;
+  }
+
+  // Shooting / Passing
+  if (controlledPlayer.hasPuck) {
+    if (inputA()) {
+      if (!shotCharging) {
+        shotCharging = true;
+        shotPower = 0;
+      }
+      shotPower = Math.min(shotPower + SHOT_CHARGE_RATE * dt, SHOT_POWER_MAX);
+    } else if (shotCharging) {
+      // Release shot
+      const ang = controlledPlayer.isHome ? Math.PI / 2 : -Math.PI / 2; // Shoot toward opponent goal
+      // Add some aim based on movement
+      const aimOff = controlledPlayer.vx * 0.003;
+      shootPuck(controlledPlayer, ang + aimOff, shotPower * (homeTeam.shot / 8));
+      shotCharging = false;
+      shotPower = 0;
+    }
+
+    // Pass on quick tap (no charge)
+    // Actually let's use: tap A = pass, hold A = shot
+    // We handle this by: if released with power < 80, it's a pass
+    if (!inputA() && shotCharging && shotPower < 80) {
+      shotCharging = false;
+      shotPower = 0;
+      passPuck(controlledPlayer);
+    }
+  } else {
+    shotCharging = false;
+    shotPower = 0;
+
+    // Auto-switch to nearest player to puck on defense
+    if (puck.loose || (puck.owner && !puck.owner.isHome)) {
+      let nearestDist = dist(controlledPlayer.x, controlledPlayer.y, puck.x, puck.y);
+      for (const p of homePlayers) {
+        if (p.penalized) continue;
+        const d = dist(p.x, p.y, puck.x, puck.y);
+        if (d < nearestDist - 30) {
+          nearestDist = d;
+          controlledPlayer = p;
+        }
+      }
+    }
+  }
+
+  // Body check
+  if (inputB() && controlledPlayer.checkCooldown <= 0) {
+    // Check nearest opponent
+    let nearest = null, nearDist = Infinity;
+    for (const p of awayPlayers) {
+      if (p.penalized) continue;
+      const d = dist(controlledPlayer.x, controlledPlayer.y, p.x, p.y);
+      if (d < nearDist) { nearDist = d; nearest = p; }
+    }
+    if (nearest && nearDist < CHECK_RANGE * 1.5) {
+      performCheck(controlledPlayer, nearest);
+    }
+  }
+}
+
+// === CAMERA ===
+function updateCamera(dt) {
+  // Follow puck
+  const targetY = puck.y - GH / 2;
+  camY = lerp(camY, clamp(targetY, CAM_MIN, CAM_MAX), CAM_SPEED * dt);
+}
+
+// === MATCH END ===
+function endMatch() {
+  state = 'matchEnd';
+  if (homeScore > awayScore) {
+    // Player won
+    if (tournament) {
+      if (!tournament.rounds[tournament.currentRound + 1]) tournament.rounds.push([]);
+      tournament.rounds[tournament.currentRound + 1].push(playerTeamIdx);
+    }
+  } else {
+    // Player lost
+    if (tournament) {
+      tournament.playerAlive = false;
+      const oppIdx = TEAMS.indexOf(awayTeam);
+      if (!tournament.rounds[tournament.currentRound + 1]) tournament.rounds.push([]);
+      tournament.rounds[tournament.currentRound + 1].push(oppIdx);
+    }
+  }
+}
+
+// === UPDATE ===
+function update(dt) {
+  frame++;
+  TAS.particles.update(dt);
+  TAS.fx.updateEffects(dt);
+
+  if (state === 'title') {
+    if (Object.values(TAS.input.keys).some(Boolean) || TAS.input.touch.a) {
+      state = 'teamSelect';
+    }
+    return;
+  }
+
+  if (state === 'teamSelect') {
+    // Handle in draw, transitions handled by key
+    return;
+  }
+
+  if (state === 'matchIntro') {
+    if (Object.values(TAS.input.keys).some(Boolean) || TAS.input.touch.a) {
+      state = 'playing';
+    }
+    return;
+  }
+
+  if (state === 'matchEnd') {
+    if (Object.values(TAS.input.keys).some(Boolean) || TAS.input.touch.a) {
+      if (tournament && tournament.playerAlive) {
+        tournament.currentGame++;
+        playNextTournamentGame();
+      } else if (tournament && !tournament.playerAlive) {
+        state = 'tournamentLoss';
+      } else {
+        state = 'title';
+      }
+    }
+    return;
+  }
+
+  if (state === 'tournamentWin' || state === 'tournamentLoss') {
+    if (Object.values(TAS.input.keys).some(Boolean) || TAS.input.touch.a) {
+      state = 'title';
+    }
+    return;
+  }
+
+  if (state === 'fighting') {
+    updateFight(dt);
+    prevA = inputA();
+    prevB = inputB();
+    return;
+  }
+
+  if (state === 'playing') {
+    // Faceoff countdown
+    if (faceoffTimer > 0) {
+      faceoffTimer -= dt;
+      prevA = inputA();
+      prevB = inputB();
+      return;
+    }
+
+    // Period timer
+    periodTimer -= dt;
+    if (periodTimer <= 0) {
+      period++;
+      if (period > 3) {
+        if (homeScore === awayScore) {
+          // Overtime!
+          overtime = true;
+          period = 4;
+          periodTimer = PERIOD_LENGTH;
+          faceoff(RINK_X + RINK_W / 2, CENTER_Y);
+        } else {
+          endMatch();
+          return;
+        }
+      } else {
+        periodTimer = PERIOD_LENGTH;
+        faceoff(RINK_X + RINK_W / 2, CENTER_Y);
+      }
+    }
+
+    // Penalty timers
+    for (let i = penaltyBox.length - 1; i >= 0; i--) {
+      penaltyBox[i].timer -= dt;
+      if (penaltyBox[i].timer <= 0) {
+        penaltyBox[i].player.penalized = false;
+        penaltyBox.splice(i, 1);
+      }
+    }
+
+    // Update controlled player
+    updateControlled(dt);
+
+    // Update AI teammates
+    for (const p of homePlayers) {
+      if (p !== controlledPlayer) {
+        updateAI(p, homePlayers, awayPlayers, dt);
+      }
+      updatePlayer(p, dt);
+    }
+
+    // Update AI opponents
+    for (const p of awayPlayers) {
+      updateAI(p, awayPlayers, homePlayers, dt);
+      updatePlayer(p, dt);
+    }
+
+    // Update goalies
+    updateGoalie(homeGoalie, homeTeam, dt);
+    updateGoalie(awayGoalie, awayTeam, dt);
+
+    // Update puck
+    updatePuck(dt);
+
+    // Check goals
+    checkGoals();
+
+    // Update camera
+    updateCamera(dt);
+
+    // Ice spray particles on fast turns
+    if (controlledPlayer && Math.abs(controlledPlayer.vx) + Math.abs(controlledPlayer.vy) > 100) {
+      if (frame % 4 === 0) {
+        TAS.particles.spawn(
+          controlledPlayer.x, controlledPlayer.y - camY,
+          'rgba(200,220,255,0.5)', 1, 1, { size: 1, sizeVar: 1, gravity: 0 }
+        );
+      }
+    }
+  }
+
+  prevA = inputA();
+  prevB = inputB();
+}
+
+// === DRAWING ===
+let teamSelectIdx = 0;
+let teamSelectCooldown = 0;
+
+function draw(dt) {
+  ctx.fillStyle = '#0a0a1a';
+  ctx.fillRect(0, 0, GW, GH);
+
+  if (state === 'title') {
+    drawTitle();
+    TAS.input.drawTouchControls(GW, GH);
+    return;
+  }
+
+  if (state === 'teamSelect') {
+    drawTeamSelect(dt);
+    TAS.input.drawTouchControls(GW, GH);
+    return;
+  }
+
+  if (state === 'matchIntro') {
+    drawMatchIntro();
+    TAS.input.drawTouchControls(GW, GH);
+    return;
+  }
+
+  if (state === 'matchEnd') {
+    drawMatchEnd();
+    TAS.input.drawTouchControls(GW, GH);
+    return;
+  }
+
+  if (state === 'tournamentWin') {
+    drawTournamentWin();
+    TAS.input.drawTouchControls(GW, GH);
+    return;
+  }
+
+  if (state === 'tournamentLoss') {
+    drawTournamentLoss();
+    TAS.input.drawTouchControls(GW, GH);
+    return;
+  }
+
+  if (state === 'fighting') {
+    drawFight();
+    TAS.input.drawTouchControls(GW, GH);
+    return;
+  }
+
+  // === GAME RENDERING ===
+  ctx.save();
+  TAS.fx.applyShake();
+
+  drawRink();
+  drawPlayers();
+  drawPuck();
+  drawShotMeter();
+
+  TAS.particles.draw();
+  ctx.restore();
+
+  TAS.fx.drawFlash(GW, GH);
+  drawHUD();
+  drawFaceoffOverlay();
+  TAS.input.drawTouchControls(GW, GH);
+}
+
+// === DRAW: TITLE ===
+function drawTitle() {
+  // Ice background
+  ctx.fillStyle = '#d8e8f0';
+  ctx.fillRect(30, 30, GW - 60, GH - 60);
+  ctx.strokeStyle = '#4488cc';
+  ctx.lineWidth = 3;
+  ctx.strokeRect(30, 30, GW - 60, GH - 60);
+
+  // Center circle
+  ctx.beginPath();
+  ctx.arc(GW / 2, GH / 2, 40, 0, Math.PI * 2);
+  ctx.strokeStyle = '#cc2222';
+  ctx.lineWidth = 2;
+  ctx.stroke();
+
+  ctx.textAlign = 'center';
+
+  // Title
+  ctx.fillStyle = '#1a1a3a';
+  ctx.font = 'bold 32px monospace';
+  ctx.fillText('BLADES OF POOP', GW / 2 + 2, 82);
+  ctx.fillStyle = '#cc2222';
+  ctx.fillText('BLADES OF POOP', GW / 2, 80);
+
+  // Subtitle
+  ctx.fillStyle = '#336';
+  ctx.font = '12px monospace';
+  ctx.fillText('Tasern Ice Hockey', GW / 2, 100);
+
+  // Puck
+  const bobY = Math.sin(frame * 0.05) * 3;
+  ctx.fillStyle = '#111';
+  ctx.beginPath();
+  ctx.ellipse(GW / 2, GH / 2 + bobY, 10, 7, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Teams preview
+  ctx.font = '10px monospace';
+  ctx.fillStyle = '#444';
+  for (let i = 0; i < 4; i++) {
+    const t = TEAMS[i];
+    ctx.fillStyle = t.color1;
+    ctx.fillText(t.abbr, GW * 0.2 + i * 45, GH * 0.7);
+  }
+  for (let i = 4; i < 8; i++) {
+    const t = TEAMS[i];
+    ctx.fillStyle = t.color1;
+    ctx.fillText(t.abbr, GW * 0.2 + (i - 4) * 45, GH * 0.77);
+  }
+
+  // Start prompt
+  const pulse = Math.sin(frame * 0.05) * 0.3 + 0.7;
+  ctx.globalAlpha = pulse;
+  ctx.fillStyle = '#cc2222';
+  ctx.font = 'bold 14px monospace';
+  ctx.fillText('PRESS ANY KEY TO START', GW / 2, GH * 0.9);
+  ctx.globalAlpha = 1;
+
+  // High score
+  if (highScore > 0) {
+    ctx.fillStyle = '#446';
+    ctx.font = '10px monospace';
+    ctx.fillText('Best Tournament Goals: ' + highScore, GW / 2, GH - 40);
+  }
+}
+
+// === DRAW: TEAM SELECT ===
+function drawTeamSelect(dt) {
+  teamSelectCooldown = Math.max(0, teamSelectCooldown - dt);
+
+  if (teamSelectCooldown <= 0) {
+    if (inputLeft() || inputUp()) { teamSelectIdx = (teamSelectIdx + 7) % 8; teamSelectCooldown = 0.2; }
+    if (inputRight() || inputDown()) { teamSelectIdx = (teamSelectIdx + 1) % 8; teamSelectCooldown = 0.2; }
+    if (inputA() || inputAPressed()) {
+      resetTournament(teamSelectIdx);
+      teamSelectCooldown = 0.3;
+      return;
+    }
+  }
+
+  ctx.fillStyle = '#0a0a2a';
+  ctx.fillRect(0, 0, GW, GH);
+
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#88aacc';
+  ctx.font = 'bold 18px monospace';
+  ctx.fillText('SELECT YOUR TEAM', GW / 2, 30);
+
+  for (let i = 0; i < 8; i++) {
+    const t = TEAMS[i];
+    const col = i % 4;
+    const row = Math.floor(i / 4);
+    const bx = 60 + col * 100;
+    const by = 55 + row * 120;
+    const selected = i === teamSelectIdx;
+
+    // Card background
+    ctx.fillStyle = selected ? '#223355' : '#111122';
+    ctx.strokeStyle = selected ? t.color1 : '#333';
+    ctx.lineWidth = selected ? 3 : 1;
+    ctx.fillRect(bx - 40, by - 10, 80, 100);
+    ctx.strokeRect(bx - 40, by - 10, 80, 100);
+
+    // Jersey
+    ctx.fillStyle = t.color1;
+    ctx.fillRect(bx - 12, by + 5, 24, 30);
+    ctx.fillStyle = t.color2;
+    ctx.fillRect(bx - 12, by + 5, 24, 8);
+
+    // Name
+    ctx.fillStyle = selected ? '#fff' : '#888';
+    ctx.font = 'bold 9px monospace';
+    ctx.fillText(t.abbr, bx, by + 55);
+    ctx.font = '8px monospace';
+    ctx.fillText('SPD:' + t.speed + ' SHT:' + t.shot, bx, by + 68);
+    ctx.fillText('FGT:' + t.fight + ' GK:' + t.goalie, bx, by + 78);
+  }
+
+  const pulse = Math.sin(frame * 0.06) * 0.3 + 0.7;
+  ctx.globalAlpha = pulse;
+  ctx.fillStyle = '#ffdd44';
+  ctx.font = 'bold 12px monospace';
+  ctx.fillText('PRESS SHOOT TO SELECT', GW / 2, GH - 15);
+  ctx.globalAlpha = 1;
+}
+
+// === DRAW: MATCH INTRO ===
+function drawMatchIntro() {
+  ctx.fillStyle = '#0a0a2a';
+  ctx.fillRect(0, 0, GW, GH);
+
+  ctx.textAlign = 'center';
+
+  const roundNames = ['QUARTER-FINAL', 'SEMI-FINAL', 'CHAMPIONSHIP FINAL'];
+  ctx.fillStyle = '#ffdd44';
+  ctx.font = 'bold 16px monospace';
+  ctx.fillText(roundNames[tournament.currentRound] || 'MATCH', GW / 2, 50);
+
+  // Home team
+  ctx.fillStyle = homeTeam.color1;
+  ctx.font = 'bold 20px monospace';
+  ctx.fillText(homeTeam.name, GW / 2, 110);
+  // Jersey
+  ctx.fillStyle = homeTeam.color1;
+  ctx.fillRect(GW / 2 - 15, 120, 30, 40);
+  ctx.fillStyle = homeTeam.color2;
+  ctx.fillRect(GW / 2 - 15, 120, 30, 10);
+
+  ctx.fillStyle = '#fff';
+  ctx.font = 'bold 16px monospace';
+  ctx.fillText('VS', GW / 2, 190);
+
+  // Away team
+  ctx.fillStyle = awayTeam.color1;
+  ctx.font = 'bold 20px monospace';
+  ctx.fillText(awayTeam.name, GW / 2, 230);
+  ctx.fillStyle = awayTeam.color1;
+  ctx.fillRect(GW / 2 - 15, 240, 30, 40);
+  ctx.fillStyle = awayTeam.color2;
+  ctx.fillRect(GW / 2 - 15, 240, 30, 10);
+
+  const pulse = Math.sin(frame * 0.05) * 0.3 + 0.7;
+  ctx.globalAlpha = pulse;
+  ctx.fillStyle = '#88ccff';
+  ctx.font = 'bold 12px monospace';
+  ctx.fillText('PRESS ANY KEY', GW / 2, GH - 20);
+  ctx.globalAlpha = 1;
+}
+
+// === DRAW: RINK ===
+function drawRink() {
+  const oy = -camY; // offset for camera
+
+  // Ice surface
+  ctx.fillStyle = '#e0eef8';
+  ctx.fillRect(RINK_X, RINK_Y + oy, RINK_W, RINK_H);
+
+  // Boards
+  ctx.strokeStyle = '#2244aa';
+  ctx.lineWidth = 4;
+  ctx.strokeRect(RINK_X, RINK_Y + oy, RINK_W, RINK_H);
+
+  // Rounded corners (visual only)
+  ctx.fillStyle = '#2244aa';
+  const cr = 20;
+  // Top-left
+  ctx.fillRect(RINK_X, RINK_Y + oy, cr, cr);
+  ctx.fillStyle = '#e0eef8';
+  ctx.beginPath();
+  ctx.arc(RINK_X + cr, RINK_Y + cr + oy, cr, 0, Math.PI * 2);
+  ctx.fill();
+  // Top-right
+  ctx.fillStyle = '#2244aa';
+  ctx.fillRect(RINK_X + RINK_W - cr, RINK_Y + oy, cr, cr);
+  ctx.fillStyle = '#e0eef8';
+  ctx.beginPath();
+  ctx.arc(RINK_X + RINK_W - cr, RINK_Y + cr + oy, cr, 0, Math.PI * 2);
+  ctx.fill();
+  // Bottom-left
+  ctx.fillStyle = '#2244aa';
+  ctx.fillRect(RINK_X, RINK_Y + RINK_H - cr + oy, cr, cr);
+  ctx.fillStyle = '#e0eef8';
+  ctx.beginPath();
+  ctx.arc(RINK_X + cr, RINK_Y + RINK_H - cr + oy, cr, 0, Math.PI * 2);
+  ctx.fill();
+  // Bottom-right
+  ctx.fillStyle = '#2244aa';
+  ctx.fillRect(RINK_X + RINK_W - cr, RINK_Y + RINK_H - cr + oy, cr, cr);
+  ctx.fillStyle = '#e0eef8';
+  ctx.beginPath();
+  ctx.arc(RINK_X + RINK_W - cr, RINK_Y + RINK_H - cr + oy, cr, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Center line (red)
+  ctx.strokeStyle = '#cc2222';
+  ctx.lineWidth = 2;
+  ctx.setLineDash([8, 4]);
+  ctx.beginPath();
+  ctx.moveTo(RINK_X, CENTER_Y + oy);
+  ctx.lineTo(RINK_X + RINK_W, CENTER_Y + oy);
+  ctx.stroke();
+  ctx.setLineDash([]);
+
+  // Center circle
+  ctx.beginPath();
+  ctx.arc(RINK_X + RINK_W / 2, CENTER_Y + oy, 35, 0, Math.PI * 2);
+  ctx.strokeStyle = '#cc2222';
+  ctx.lineWidth = 2;
+  ctx.stroke();
+
+  // Center dot
+  ctx.fillStyle = '#cc2222';
+  ctx.beginPath();
+  ctx.arc(RINK_X + RINK_W / 2, CENTER_Y + oy, 4, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Blue lines
+  ctx.strokeStyle = '#2244cc';
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.moveTo(RINK_X, BLUE_LINE_TOP + oy);
+  ctx.lineTo(RINK_X + RINK_W, BLUE_LINE_TOP + oy);
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.moveTo(RINK_X, BLUE_LINE_BOT + oy);
+  ctx.lineTo(RINK_X + RINK_W, BLUE_LINE_BOT + oy);
+  ctx.stroke();
+
+  // Goal creases
+  const goalX = RINK_X + RINK_W / 2;
+
+  // Top goal (home defends)
+  ctx.fillStyle = 'rgba(100,150,255,0.2)';
+  ctx.fillRect(goalX - GOAL_W / 2, RINK_Y + oy, GOAL_W, GOAL_H + 8);
+  ctx.strokeStyle = '#cc2222';
+  ctx.lineWidth = 2;
+  ctx.strokeRect(goalX - GOAL_W / 2, RINK_Y + oy - 2, GOAL_W, GOAL_H);
+  // Goal net visual
+  ctx.fillStyle = '#fff';
+  ctx.fillRect(goalX - GOAL_W / 2 + 2, RINK_Y + oy - 1, GOAL_W - 4, GOAL_H - 2);
+  ctx.strokeStyle = '#888';
+  ctx.lineWidth = 0.5;
+  for (let i = 0; i < GOAL_W; i += 6) {
+    ctx.beginPath();
+    ctx.moveTo(goalX - GOAL_W / 2 + i, RINK_Y + oy);
+    ctx.lineTo(goalX - GOAL_W / 2 + i, RINK_Y + oy + GOAL_H - 2);
+    ctx.stroke();
+  }
+
+  // Bottom goal (away defends)
+  ctx.fillStyle = 'rgba(100,150,255,0.2)';
+  ctx.fillRect(goalX - GOAL_W / 2, RINK_Y + RINK_H - GOAL_H - 8 + oy, GOAL_W, GOAL_H + 8);
+  ctx.strokeStyle = '#cc2222';
+  ctx.lineWidth = 2;
+  ctx.strokeRect(goalX - GOAL_W / 2, RINK_Y + RINK_H - GOAL_H + 2 + oy, GOAL_W, GOAL_H);
+  ctx.fillStyle = '#fff';
+  ctx.fillRect(goalX - GOAL_W / 2 + 2, RINK_Y + RINK_H - GOAL_H + 3 + oy, GOAL_W - 4, GOAL_H - 2);
+  ctx.strokeStyle = '#888';
+  ctx.lineWidth = 0.5;
+  for (let i = 0; i < GOAL_W; i += 6) {
+    ctx.beginPath();
+    ctx.moveTo(goalX - GOAL_W / 2 + i, RINK_Y + RINK_H - GOAL_H + 3 + oy);
+    ctx.lineTo(goalX - GOAL_W / 2 + i, RINK_Y + RINK_H + oy);
+    ctx.stroke();
+  }
+
+  // Faceoff circles in zones
+  const faceoffSpots = [
+    { x: RINK_X + RINK_W * 0.25, y: RINK_H * 0.2 },
+    { x: RINK_X + RINK_W * 0.75, y: RINK_H * 0.2 },
+    { x: RINK_X + RINK_W * 0.25, y: RINK_H * 0.8 },
+    { x: RINK_X + RINK_W * 0.75, y: RINK_H * 0.8 }
+  ];
+  for (const spot of faceoffSpots) {
+    ctx.beginPath();
+    ctx.arc(spot.x, spot.y + oy, 20, 0, Math.PI * 2);
+    ctx.strokeStyle = '#cc2222';
+    ctx.lineWidth = 1;
+    ctx.stroke();
+    ctx.fillStyle = '#cc2222';
+    ctx.beginPath();
+    ctx.arc(spot.x, spot.y + oy, 3, 0, Math.PI * 2);
+    ctx.fill();
+  }
+}
+
+// === DRAW: PLAYERS ===
+function drawPlayers() {
+  const oy = -camY;
+
+  // Draw home players
+  for (const p of homePlayers) {
+    if (p.penalized) continue;
+    drawSkater(p, homeTeam, oy, p === controlledPlayer);
+  }
+
+  // Draw away players
+  for (const p of awayPlayers) {
+    if (p.penalized) continue;
+    drawSkater(p, awayTeam, oy, false);
+  }
+
+  // Draw goalies
+  drawGoalieSprite(homeGoalie, homeTeam, oy);
+  drawGoalieSprite(awayGoalie, awayTeam, oy);
+}
+
+function drawSkater(p, team, oy, isControlled) {
+  const sx = p.x, sy = p.y + oy;
+
+  // Skip if off screen
+  if (sy < -20 || sy > GH + 20) return;
+
+  // Shadow
+  ctx.fillStyle = 'rgba(0,0,0,0.2)';
+  ctx.beginPath();
+  ctx.ellipse(sx, sy + 6, 7, 3, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Body
+  ctx.fillStyle = team.color1;
+  ctx.beginPath();
+  ctx.arc(sx, sy, PLAYER_RADIUS, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Jersey stripe
+  ctx.fillStyle = team.color2;
+  ctx.fillRect(sx - 5, sy - 2, 10, 4);
+
+  // Helmet
+  ctx.fillStyle = team.color2;
+  ctx.beginPath();
+  ctx.arc(sx, sy - 4, 4, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Stick
+  ctx.strokeStyle = '#8B4513';
+  ctx.lineWidth = 2;
+  const stickDir = p.vy > 0 ? 1 : -1;
+  ctx.beginPath();
+  ctx.moveTo(sx + 6, sy);
+  ctx.lineTo(sx + 12, sy + 8 * stickDir);
+  ctx.stroke();
+  // Blade
+  ctx.strokeStyle = '#333';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(sx + 12, sy + 8 * stickDir);
+  ctx.lineTo(sx + 16, sy + 8 * stickDir);
+  ctx.stroke();
+
+  // Selection indicator
+  if (isControlled) {
+    ctx.strokeStyle = '#ffdd44';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.arc(sx, sy, PLAYER_RADIUS + 4, 0, Math.PI * 2);
+    ctx.stroke();
+
+    // Arrow above
+    const bob = Math.sin(frame * 0.1) * 2;
+    ctx.fillStyle = '#ffdd44';
+    ctx.beginPath();
+    ctx.moveTo(sx, sy - 18 + bob);
+    ctx.lineTo(sx - 4, sy - 14 + bob);
+    ctx.lineTo(sx + 4, sy - 14 + bob);
+    ctx.closePath();
+    ctx.fill();
+  }
+
+  // Stun effect
+  if (p.stunTimer > 0) {
+    ctx.strokeStyle = '#ffff00';
+    ctx.lineWidth = 1;
+    const starAngle = frame * 0.2;
+    for (let i = 0; i < 3; i++) {
+      const a = starAngle + i * (Math.PI * 2 / 3);
+      ctx.beginPath();
+      ctx.arc(sx + Math.cos(a) * 10, sy - 8 + Math.sin(a) * 4, 2, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+  }
+}
+
+function drawGoalieSprite(g, team, oy) {
+  const sx = g.x, sy = g.y + oy;
+  if (sy < -20 || sy > GH + 20) return;
+
+  // Larger body for goalie
+  ctx.fillStyle = team.color1;
+  ctx.fillRect(sx - 10, sy - 8, 20, 16);
+  ctx.fillStyle = team.color2;
+  ctx.fillRect(sx - 10, sy - 8, 20, 5);
+
+  // Mask
+  ctx.fillStyle = '#fff';
+  ctx.fillRect(sx - 4, sy - 10, 8, 6);
+
+  // Pads
+  ctx.fillStyle = '#ddd';
+  ctx.fillRect(sx - 12, sy + 2, 6, 10);
+  ctx.fillRect(sx + 6, sy + 2, 6, 10);
+
+  // Glove
+  ctx.fillStyle = team.color1;
+  ctx.beginPath();
+  ctx.arc(sx - 14, sy, 4, 0, Math.PI * 2);
+  ctx.fill();
+  // Blocker
+  ctx.fillRect(sx + 10, sy - 4, 5, 10);
+}
+
+// === DRAW: PUCK ===
+function drawPuck() {
+  const oy = -camY;
+  const px = puck.x, py = puck.y + oy;
+
+  if (py < -10 || py > GH + 10) return;
+
+  // Puck trail when moving fast
+  if (puck.speed > 150) {
+    ctx.fillStyle = 'rgba(0,0,0,0.3)';
+    const trail = Math.min(puck.speed / 50, 8);
+    for (let i = 1; i <= 3; i++) {
+      ctx.beginPath();
+      ctx.ellipse(
+        px - (puck.vx / puck.speed) * i * trail,
+        py - (puck.vy / puck.speed) * i * trail,
+        PUCK_RADIUS - i * 0.5, PUCK_RADIUS - i * 0.8, 0, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+
+  // Puck
+  ctx.fillStyle = '#111';
+  ctx.beginPath();
+  ctx.ellipse(px, py, PUCK_RADIUS + 1, PUCK_RADIUS, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.strokeStyle = '#333';
+  ctx.lineWidth = 1;
+  ctx.stroke();
+}
+
+// === DRAW: SHOT METER ===
+function drawShotMeter() {
+  if (!shotCharging || shotPower <= 0) return;
+
+  const px = controlledPlayer.x;
+  const py = controlledPlayer.y - camY - 20;
+  const w = 30, h = 5;
+  const fill = shotPower / SHOT_POWER_MAX;
+
+  ctx.fillStyle = '#333';
+  ctx.fillRect(px - w / 2, py, w, h);
+  ctx.fillStyle = fill < 0.5 ? '#44cc44' : fill < 0.8 ? '#ffcc44' : '#ff4444';
+  ctx.fillRect(px - w / 2, py, w * fill, h);
+  ctx.strokeStyle = '#fff';
+  ctx.lineWidth = 1;
+  ctx.strokeRect(px - w / 2, py, w, h);
+}
+
+// === DRAW: HUD ===
+function drawHUD() {
+  // Scoreboard background
+  ctx.fillStyle = 'rgba(10,5,30,0.85)';
+  ctx.fillRect(0, 0, GW, 28);
+
+  ctx.font = 'bold 12px monospace';
+  ctx.textAlign = 'left';
+
+  // Home team
+  ctx.fillStyle = homeTeam.color1;
+  ctx.fillText(homeTeam.abbr, 8, 18);
+  ctx.fillStyle = '#fff';
+  ctx.fillText(String(homeScore), 50, 18);
+
+  // Dash
+  ctx.fillStyle = '#666';
+  ctx.fillText('-', 62, 18);
+
+  // Away team
+  ctx.fillStyle = '#fff';
+  ctx.fillText(String(awayScore), 72, 18);
+  ctx.fillStyle = awayTeam.color1;
+  ctx.fillText(awayTeam.abbr, 85, 18);
+
+  // Period and time
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#88aacc';
+  const mins = Math.floor(periodTimer / 60);
+  const secs = Math.floor(periodTimer % 60);
+  const timeStr = mins + ':' + (secs < 10 ? '0' : '') + secs;
+  const perStr = overtime ? 'OT' : 'P' + period;
+  ctx.fillText(perStr + ' ' + timeStr, GW / 2, 18);
+
+  // Power play indicator
+  const homePen = penaltyBox.filter(p => p.team === 'home').length;
+  const awayPen = penaltyBox.filter(p => p.team === 'away').length;
+  if (awayPen > homePen) {
+    ctx.fillStyle = '#ffdd44';
+    ctx.font = 'bold 10px monospace';
+    ctx.textAlign = 'right';
+    ctx.fillText('POWER PLAY!', GW - 8, 18);
+  } else if (homePen > awayPen) {
+    ctx.fillStyle = '#ff4444';
+    ctx.font = 'bold 10px monospace';
+    ctx.textAlign = 'right';
+    ctx.fillText('SHORT HANDED', GW - 8, 18);
+  }
+
+  // Penalty box display
+  if (penaltyBox.length > 0) {
+    ctx.font = '9px monospace';
+    ctx.textAlign = 'right';
+    let penY = 38;
+    for (const p of penaltyBox) {
+      const team = p.team === 'home' ? homeTeam : awayTeam;
+      ctx.fillStyle = team.color1;
+      const penTime = Math.ceil(p.timer);
+      ctx.fillText(team.abbr + ' #' + (p.player.idx + 1) + ' ' + penTime + 's', GW - 8, penY);
+      penY += 11;
+    }
+  }
+}
+
+// === DRAW: FACEOFF OVERLAY ===
+function drawFaceoffOverlay() {
+  if (faceoffTimer <= 0) return;
+
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#fff';
+  ctx.font = 'bold 24px monospace';
+  const num = Math.ceil(faceoffTimer);
+  ctx.fillText(num > 0 ? String(num) : 'GO!', GW / 2, GH / 2);
+}
+
+// === DRAW: FIGHT ===
+function drawFight() {
+  // Dark arena background
+  ctx.fillStyle = '#1a0a0a';
+  ctx.fillRect(0, 0, GW, GH);
+
+  // Ring floor
+  ctx.fillStyle = '#e0eef8';
+  ctx.fillRect(40, GH * 0.6, GW - 80, GH * 0.35);
+
+  // Ropes
+  ctx.strokeStyle = '#cc2222';
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.moveTo(40, GH * 0.4);
+  ctx.lineTo(GW - 40, GH * 0.4);
+  ctx.stroke();
+
+  // FIGHT text
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#ff4444';
+  ctx.font = 'bold 20px monospace';
+  ctx.fillText('FIGHT!', GW / 2, 30);
+
+  // Timer
+  ctx.fillStyle = '#fff';
+  ctx.font = '12px monospace';
+  ctx.fillText(Math.ceil(fightState.timer) + 's', GW / 2, 50);
+
+  // Player 1 (left) - home team player
+  const p1x = GW * 0.3, p1y = GH * 0.55;
+  drawFighter(p1x, p1y, homeTeam, fightState.p1Action, fightState.hitTimer1, fightState.p1Block, true);
+
+  // Player 2 (right) - away team player
+  const p2x = GW * 0.7, p2y = GH * 0.55;
+  drawFighter(p2x, p2y, awayTeam, fightState.p2Action, fightState.hitTimer2, fightState.p2Block, false);
+
+  // Health bars
+  // P1
+  ctx.fillStyle = '#333';
+  ctx.fillRect(40, GH * 0.15, 160, 16);
+  ctx.fillStyle = fightState.hp1 > 30 ? '#44cc44' : '#ff4444';
+  ctx.fillRect(40, GH * 0.15, 160 * (fightState.hp1 / FIGHT_HP), 16);
+  ctx.strokeStyle = '#fff';
+  ctx.lineWidth = 1;
+  ctx.strokeRect(40, GH * 0.15, 160, 16);
+  ctx.fillStyle = '#fff';
+  ctx.font = 'bold 10px monospace';
+  ctx.textAlign = 'left';
+  ctx.fillText(homeTeam.abbr, 45, GH * 0.15 + 12);
+
+  // P2
+  ctx.fillStyle = '#333';
+  ctx.fillRect(GW - 200, GH * 0.15, 160, 16);
+  ctx.fillStyle = fightState.hp2 > 30 ? '#44cc44' : '#ff4444';
+  ctx.fillRect(GW - 200, GH * 0.15, 160 * (fightState.hp2 / FIGHT_HP), 16);
+  ctx.strokeStyle = '#fff';
+  ctx.strokeRect(GW - 200, GH * 0.15, 160, 16);
+  ctx.fillStyle = '#fff';
+  ctx.textAlign = 'right';
+  ctx.fillText(awayTeam.abbr, GW - 45, GH * 0.15 + 12);
+
+  // Controls hint
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#666';
+  ctx.font = '9px monospace';
+  ctx.fillText('UP+A: High | DOWN+A: Low | A: Mid | B: Block', GW / 2, GH - 10);
+}
+
+function drawFighter(x, y, team, action, hitTimer, blocking, facingRight) {
+  const dir = facingRight ? 1 : -1;
+
+  // Body
+  ctx.fillStyle = team.color1;
+  ctx.fillRect(x - 12, y - 10, 24, 35);
+
+  // Jersey detail
+  ctx.fillStyle = team.color2;
+  ctx.fillRect(x - 12, y - 10, 24, 8);
+
+  // Head
+  ctx.fillStyle = '#ffcc99';
+  ctx.beginPath();
+  ctx.arc(x, y - 18, 10, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = team.color2;
+  ctx.beginPath();
+  ctx.arc(x, y - 20, 8, Math.PI, 0);
+  ctx.fill();
+
+  // Arms based on action
+  ctx.strokeStyle = '#ffcc99';
+  ctx.lineWidth = 4;
+
+  if (blocking) {
+    // Block pose - arms crossed in front
+    ctx.beginPath();
+    ctx.moveTo(x - 8 * dir, y - 5);
+    ctx.lineTo(x + 15 * dir, y - 8);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(x - 8 * dir, y + 5);
+    ctx.lineTo(x + 15 * dir, y - 2);
+    ctx.stroke();
+    // Gloves
+    ctx.fillStyle = team.color1;
+    ctx.beginPath();
+    ctx.arc(x + 15 * dir, y - 5, 5, 0, Math.PI * 2);
+    ctx.fill();
+  } else if (hitTimer > 0) {
+    // Punching
+    const extend = (1 - hitTimer / 0.4) * 20;
+    if (action === 'highPunch') {
+      ctx.beginPath();
+      ctx.moveTo(x, y - 5);
+      ctx.lineTo(x + (20 + extend) * dir, y - 15);
+      ctx.stroke();
+      ctx.fillStyle = team.color1;
+      ctx.beginPath();
+      ctx.arc(x + (20 + extend) * dir, y - 15, 5, 0, Math.PI * 2);
+      ctx.fill();
+    } else if (action === 'lowPunch') {
+      ctx.beginPath();
+      ctx.moveTo(x, y + 5);
+      ctx.lineTo(x + (20 + extend) * dir, y + 10);
+      ctx.stroke();
+      ctx.fillStyle = team.color1;
+      ctx.beginPath();
+      ctx.arc(x + (20 + extend) * dir, y + 10, 5, 0, Math.PI * 2);
+      ctx.fill();
+    } else {
+      ctx.beginPath();
+      ctx.moveTo(x, y);
+      ctx.lineTo(x + (20 + extend) * dir, y - 2);
+      ctx.stroke();
+      ctx.fillStyle = team.color1;
+      ctx.beginPath();
+      ctx.arc(x + (20 + extend) * dir, y - 2, 5, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  } else {
+    // Idle stance
+    ctx.beginPath();
+    ctx.moveTo(x, y - 3);
+    ctx.lineTo(x + 12 * dir, y - 8);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(x, y + 3);
+    ctx.lineTo(x + 10 * dir, y + 8);
+    ctx.stroke();
+    ctx.fillStyle = team.color1;
+    ctx.beginPath();
+    ctx.arc(x + 12 * dir, y - 8, 4, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.beginPath();
+    ctx.arc(x + 10 * dir, y + 8, 4, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  // Legs
+  ctx.strokeStyle = team.color2;
+  ctx.lineWidth = 5;
+  ctx.beginPath();
+  ctx.moveTo(x - 5, y + 25);
+  ctx.lineTo(x - 5, y + 40);
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.moveTo(x + 5, y + 25);
+  ctx.lineTo(x + 5, y + 40);
+  ctx.stroke();
+
+  // Skates
+  ctx.fillStyle = '#222';
+  ctx.fillRect(x - 8, y + 38, 8, 5);
+  ctx.fillRect(x + 2, y + 38, 8, 5);
+}
+
+// === DRAW: MATCH END ===
+function drawMatchEnd() {
+  ctx.fillStyle = 'rgba(0,0,0,0.8)';
+  ctx.fillRect(0, 0, GW, GH);
+
+  ctx.textAlign = 'center';
+
+  const won = homeScore > awayScore;
+  ctx.fillStyle = won ? '#44dd88' : '#ff4444';
+  ctx.font = 'bold 24px monospace';
+  ctx.fillText(won ? 'YOU WIN!' : 'YOU LOSE!', GW / 2, GH * 0.3);
+
+  ctx.fillStyle = '#fff';
+  ctx.font = 'bold 18px monospace';
+  ctx.fillText(homeTeam.abbr + ' ' + homeScore + ' - ' + awayScore + ' ' + awayTeam.abbr, GW / 2, GH * 0.5);
+
+  if (tournament && tournament.playerAlive && won) {
+    const roundNames = ['Quarter-Final', 'Semi-Final', 'Final'];
+    ctx.fillStyle = '#88aacc';
+    ctx.font = '12px monospace';
+    ctx.fillText(roundNames[tournament.currentRound] + ' Complete!', GW / 2, GH * 0.65);
+  }
+
+  const pulse = Math.sin(frame * 0.05) * 0.3 + 0.7;
+  ctx.globalAlpha = pulse;
+  ctx.fillStyle = '#88ccff';
+  ctx.font = 'bold 12px monospace';
+  ctx.fillText('PRESS ANY KEY', GW / 2, GH * 0.85);
+  ctx.globalAlpha = 1;
+}
+
+// === DRAW: TOURNAMENT WIN ===
+function drawTournamentWin() {
+  ctx.fillStyle = '#0a0a2a';
+  ctx.fillRect(0, 0, GW, GH);
+
+  // Confetti
+  for (let i = 0; i < 30; i++) {
+    const cx = (frame * (i + 1) * 1.3 + i * 50) % GW;
+    const cy = (frame * (i + 1) * 0.7 + i * 30) % GH;
+    ctx.fillStyle = ['#ff4444', '#44dd88', '#ffdd44', '#44aaff', '#ff88cc'][i % 5];
+    ctx.fillRect(cx, cy, 4, 4);
+  }
+
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#ffdd44';
+  ctx.font = 'bold 28px monospace';
+  ctx.fillText('CHAMPIONS!', GW / 2, GH * 0.25);
+
+  ctx.fillStyle = homeTeam ? homeTeam.color1 : '#fff';
+  ctx.font = 'bold 20px monospace';
+  ctx.fillText(TEAMS[playerTeamIdx].name, GW / 2, GH * 0.4);
+
+  // Trophy
+  ctx.fillStyle = '#ffdd44';
+  ctx.fillRect(GW / 2 - 15, GH * 0.5, 30, 40);
+  ctx.fillRect(GW / 2 - 25, GH * 0.48, 50, 10);
+  ctx.fillRect(GW / 2 - 10, GH * 0.5 + 40, 20, 10);
+  ctx.fillRect(GW / 2 - 20, GH * 0.5 + 50, 40, 6);
+
+  // Handles
+  ctx.strokeStyle = '#ffdd44';
+  ctx.lineWidth = 4;
+  ctx.beginPath();
+  ctx.arc(GW / 2 - 25, GH * 0.55, 10, -Math.PI / 2, Math.PI / 2);
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.arc(GW / 2 + 25, GH * 0.55, 10, Math.PI / 2, -Math.PI / 2);
+  ctx.stroke();
+
+  ctx.fillStyle = '#88aacc';
+  ctx.font = '12px monospace';
+  ctx.fillText('Tournament Goals Record: ' + highScore, GW / 2, GH * 0.82);
+
+  const pulse = Math.sin(frame * 0.05) * 0.3 + 0.7;
+  ctx.globalAlpha = pulse;
+  ctx.fillStyle = '#88ccff';
+  ctx.font = 'bold 12px monospace';
+  ctx.fillText('PRESS ANY KEY', GW / 2, GH * 0.92);
+  ctx.globalAlpha = 1;
+}
+
+// === DRAW: TOURNAMENT LOSS ===
+function drawTournamentLoss() {
+  ctx.fillStyle = 'rgba(0,0,0,0.9)';
+  ctx.fillRect(0, 0, GW, GH);
+
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#ff4444';
+  ctx.font = 'bold 24px monospace';
+  ctx.fillText('ELIMINATED', GW / 2, GH * 0.3);
+
+  ctx.fillStyle = '#888';
+  ctx.font = '14px monospace';
+  const roundNames = ['Quarter-Finals', 'Semi-Finals', 'Final'];
+  ctx.fillText('Knocked out in the ' + (roundNames[tournament.currentRound] || 'Tournament'), GW / 2, GH * 0.5);
+
+  ctx.fillStyle = '#ffdd44';
+  ctx.font = '12px monospace';
+  ctx.fillText('Final Score: ' + homeScore + ' - ' + awayScore, GW / 2, GH * 0.6);
+
+  const pulse = Math.sin(frame * 0.05) * 0.3 + 0.7;
+  ctx.globalAlpha = pulse;
+  ctx.fillStyle = '#88ccff';
+  ctx.font = 'bold 12px monospace';
+  ctx.fillText('PRESS ANY KEY', GW / 2, GH * 0.85);
+  ctx.globalAlpha = 1;
+}
+
+// === SAVE/LOAD TOURNAMENT ===
+function saveTournament() {
+  try {
+    localStorage.setItem('blades_poop_tournament', JSON.stringify({
+      tournament, playerTeamIdx, homeScore, awayScore
+    }));
+  } catch(e) { console.warn('Save failed:', e); }
+}
+
+function loadTournament() {
+  try {
+    const data = localStorage.getItem('blades_poop_tournament');
+    if (data) return JSON.parse(data);
+  } catch(e) { console.warn('Load failed:', e); }
+  return null;
+}
+
+// === START ===
+TAS.loop.start(update, draw);
+
+})();
+</script>
+</body>
+</html>

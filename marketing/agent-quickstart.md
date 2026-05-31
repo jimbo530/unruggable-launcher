@@ -1,4 +1,4 @@
-# Agent Quick Start — MfT Unruggable Network
+# Agent Quick Start — MfT Unrugable Network
 
 Get your AI agent interacting with DeFi on Base in under 5 minutes.
 
@@ -14,7 +14,7 @@ npm install -g baselings-mcp
 npx baselings-mcp
 ```
 
-The MCP server exposes 40 tools over stdin/stdout JSON-RPC. Connect it to any MCP-compatible agent:
+The MCP server exposes 49 tools over stdin/stdout JSON-RPC. Connect it to any MCP-compatible agent:
 
 **Claude Desktop / Claude Code:**
 Add to your MCP config:
@@ -36,7 +36,7 @@ Add to your MCP config:
 - `reactor_*` — Read reactor state, fire execute(), check cooldowns
 - `pool_*` — Query LP positions, fees, token balances
 - `baseling_*` — Buy eggs, feed pets, claim POOP, assign jobs
-- `mycopad_*` — Launch tokens, check recent launches, generate invite links
+- `unrugable_*` — Launch tokens, check recent launches, generate invite links
 - `economy_*` — Get build phase, feeding guide, economy rules
 
 ---
@@ -48,10 +48,10 @@ No authentication required. All endpoints return JSON.
 ### Read the network state
 ```bash
 # Full tokenomics (reactors, burns, launches, MfT price)
-curl https://tasern.quest/api/unruggable/tokenomics
+curl https://tasern.quest/api/unrugable/tokenomics
 
 # All launched tokens
-curl https://tasern.quest/api/unruggable/all
+curl https://tasern.quest/api/unrugable/all
 
 # Baseling economy rules
 curl https://tasern.quest/api/baseling/agent/economy/rules
@@ -65,7 +65,7 @@ curl https://tasern.quest/api/baseling/agent/economy/feeding
 
 ### Example: Parse reactor data (JavaScript)
 ```javascript
-const res = await fetch('https://tasern.quest/api/unruggable/tokenomics');
+const res = await fetch('https://tasern.quest/api/unrugable/tokenomics');
 const data = await res.json();
 
 console.log(`Reactors: ${data.reactors.length}`);
@@ -105,7 +105,8 @@ console.log('Fired:', tx.hash);
 ```
 MfT Token:        0x8FB87d13B40B1A67B22ED1a17e2835fe7e3a9bA3
 V1 Prime Reactor: 0xed3aE91b2bb22307c07438EEebA2500C18EABcFE
-MycoPad Factory:  0xF0c1B3d6Bc0B4dEd2DDF81374feEA8a2c536bD51
+Unrugable Factory V5.4: 0xb1fE (active)
+Unrugable Factory V5.3: 0x65F8 (BRUH/NZ)
 Burn Address:     0xfd780B0aE569e15e514B819ecFDF46f804953a4B
 CHAR Token:       0x20b048fA035D5763685D695e66aDF62c5D9F5055
 
@@ -118,7 +119,7 @@ Chain: Base (8453)
 ## What Agents Can Earn
 
 ### Reactor Arbitrage
-Every 2 hours, 37 reactors fire bottom-up. Each firing creates price dislocations across 180+ pools. Your agent can:
+Every 2 hours, the reactor network fires bottom-up. Each firing creates price dislocations across hundreds of pools. Your agent can:
 1. Monitor reactor cooldown timers
 2. Position before reactor fires
 3. Arb MfT price across pools after firing
@@ -132,9 +133,9 @@ Every 2 hours, 37 reactors fire bottom-up. Each firing creates price dislocation
 - POOP deposits into gardens generate LP yield
 
 ### Token Launching
-- Launch tokens via MycoPad ($200 USDC seed)
-- Each launch creates 9+ permanent LP positions + reactor
-- Reactor generates ongoing buy pressure for your token
+- Launch tokens via Unrugable ($5 USDC seed)
+- Each launch creates 8 permanent LP positions + 2 reactors
+- Reactor connects your token to trading routes across the network
 - 6% of seed funds CHAR carbon reactor
 
 ---
@@ -157,4 +158,4 @@ Your agent framework can auto-discover our capabilities:
 
 - Farcaster: @jamesmagee
 - Email: mftstudio@proton.me
-- Full API docs: https://tasern.quest/api/unruggable/tokenomics (self-documenting response)
+- Full API docs: https://tasern.quest/api/unrugable/tokenomics (self-documenting response)

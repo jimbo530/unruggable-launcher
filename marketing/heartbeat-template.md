@@ -2,7 +2,7 @@
 
 Weekly stats report. Cross-platform: Farcaster (long), X (thread), potential newsletter.
 
-Pull all data from chain-data.js or tasern.quest/api/unruggable/tokenomics.
+Pull all data from chain-data.js or tasern.quest/api/unrugable/tokenomics.
 
 ---
 
@@ -23,7 +23,7 @@ Burns (permanent):
 - Total value destroyed: $[TOTAL_USD]
 
 Activity:
-- New launches: [LAUNCH_COUNT] via MycoPad
+- New launches: [LAUNCH_COUNT] via Unrugable
 - New reactors: [NEW_REACTORS] (adopted/launched)
 - Agent SDK: [MCP_INSTALLS] npm installs
 
@@ -53,7 +53,7 @@ The heartbeat doesn't stop.
 ```
 This week:
 - [NEW_REACTORS] new reactors added
-- [LAUNCH_COUNT] tokens launched on MycoPad
+- [LAUNCH_COUNT] tokens launched on Unrugable
 - [INSIGHT_STAT] [describe growth or milestone]
 
 Every launch adds fuel. Every trade generates fees. Every cycle burns supply.
@@ -63,12 +63,12 @@ Every launch adds fuel. Every trade generates fees. Every cycle burns supply.
 ```
 Verify everything on-chain:
 - Burns: tasern.quest/mft/
-- API: tasern.quest/api/unruggable/tokenomics
+- API: tasern.quest/api/unrugable/tokenomics
 - Agent tools: tasern.quest/llms.txt
 
-37 reactors. 180+ pools. $0 marketing budget.
+Reactor network. Hundreds of pools. $0 marketing budget.
 
-Unruggable by code, not by promise.
+Unrugable by code, not by promise.
 ```
 
 ---

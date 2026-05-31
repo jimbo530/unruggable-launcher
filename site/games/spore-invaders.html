@@ -1,0 +1,1358 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Spore Invaders</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body { width: 100%; height: 100%; overflow: hidden; background: #000; touch-action: none; }
+canvas { display: block; margin: 0 auto; }
+#back-link {
+  position: fixed; bottom: 8px; left: 50%; transform: translateX(-50%);
+  color: #666; font-family: monospace; font-size: 12px; text-decoration: none; z-index: 10;
+}
+#back-link:hover { color: #aaa; }
+</style>
+</head>
+<body>
+<canvas id="gc"></canvas>
+<a id="back-link" href="/games">Back to Arcade</a>
+<script src="nft-loader.js"></script>
+<script>if(window.NftLoader)NftLoader.gate();</script>
+<script src="tasern-engine.js"></script>
+<script>
+(function() {
+"use strict";
+
+// ============================================================
+// CONSTANTS
+// ============================================================
+const GW = 480, GH = 320;
+const ctx = TAS.ctx;
+
+const COLS = 11;
+const ROWS = 5;
+const ALIEN_W = 16, ALIEN_H = 12;
+const ALIEN_HGAP = 28, ALIEN_VGAP = 22;
+const GRID_TOP = 48;
+const GRID_LEFT_BASE = 40;
+
+const PLAYER_W = 20, PLAYER_H = 10;
+const PLAYER_Y = GH - 30;
+const PLAYER_SPEED = 3;
+
+const BULLET_SPEED = 5;
+const ALIEN_BULLET_SPEED = 2.2;
+
+const BUNKER_COUNT = 4;
+const BUNKER_W = 36, BUNKER_H = 20;
+const BUNKER_Y = GH - 60;
+
+// Row scoring: bottom row = 10, top row = 40
+const ROW_SCORES = [40, 30, 20, 20, 10];
+
+// Mystery ship
+const MYSTERY_SCORES = [50, 100, 150, 200, 300];
+
+// ============================================================
+// INIT
+// ============================================================
+TAS.initCanvas(GW, GH);
+TAS.input.initTouch({ buttons: ['a'], labels: { a: 'FIRE' } });
+
+// ============================================================
+// AUDIO
+// ============================================================
+const SFX = {
+  shoot() { TAS.audio.playTone(880, 0.06, 'square', 0.06, 440); },
+  alienDie() { TAS.audio.playTone(200, 0.12, 'sawtooth', 0.08, 60); },
+  playerDie() { TAS.audio.playTone(400, 0.5, 'sawtooth', 0.12, 40); TAS.audio.playNoise(0.3, 0.15); },
+  alienShoot() { TAS.audio.playTone(120, 0.08, 'triangle', 0.04, 200); },
+  mystery() { TAS.audio.playTone(300, 0.08, 'sine', 0.05, 320); },
+  mysteryHit() { TAS.audio.playTone(600, 0.15, 'square', 0.08, 200); TAS.audio.playNoise(0.15, 0.1); },
+  bunkerHit() { TAS.audio.playNoise(0.06, 0.04, 800); },
+  bossHit() { TAS.audio.playTone(150, 0.08, 'sawtooth', 0.06, 80); },
+  bossAppear() { TAS.audio.playTone(80, 0.4, 'square', 0.1, 40); TAS.audio.playNoise(0.2, 0.08); },
+  bossDie() {
+    [200,300,400,500,600].forEach(function(n, i) {
+      setTimeout(function() { TAS.audio.playTone(n, 0.15, 'sawtooth', 0.1, n/2); TAS.audio.playNoise(0.15, 0.12); }, i * 120);
+    });
+  },
+  levelUp() {
+    TAS.audio.playMelody([[523,0.1],[659,0.1],[784,0.1],[1047,0.15]], 100);
+  },
+  gameOver() {
+    TAS.audio.playMelody([[440,0.2,'sawtooth',0.1],[349,0.2,'sawtooth',0.1],[293,0.2,'sawtooth',0.1],[220,0.3,'sawtooth',0.12]], 200);
+  },
+  march(pitch) { TAS.audio.playTone(pitch, 0.04, 'square', 0.03); }
+};
+
+// March rhythm: 4 tones cycling
+const MARCH_NOTES = [80, 100, 80, 60];
+
+// ============================================================
+// GAME STATE
+// ============================================================
+let state = 'title';
+let score = 0;
+let highScore = TAS.score.load('sporeinvaders_hi');
+let lives = 3;
+let level = 1;
+let frame = 0;
+
+// Player
+let player = { x: GW / 2, dead: false, respawnTimer: 0 };
+
+// Alien grid
+let aliens = [];
+let alienDir = 1; // 1 = right, -1 = left
+let alienMoveTimer = 0;
+let alienMoveInterval = 40; // frames between steps
+let alienStepSize = 3;
+let alienDropAmount = 8;
+let alienNeedDrop = false;
+let alienBullets = [];
+let alienFireRate = 120; // frames between alien shots
+let alienFireTimer = 0;
+let aliensAlive = 0;
+let marchIdx = 0;
+
+// Player bullet (only 1 at a time, classic style)
+let bullet = null;
+
+// Bunkers
+let bunkers = [];
+
+// Mystery ship
+let mystery = null;
+let mysteryTimer = 0;
+let mysteryScoreDisplay = null; // { x, y, score, timer }
+
+// Boss
+let boss = null;
+let bossActive = false;
+let bossWarning = 0;
+
+// Starfield
+let starfield = TAS.bg.createStarfield(60, GW, GH);
+
+// ============================================================
+// BUNKER PIXEL DATA
+// Each bunker is a 2D boolean array (pixel grid)
+// ============================================================
+function createBunkerPixels() {
+  const pw = BUNKER_W;
+  const ph = BUNKER_H;
+  const pixels = [];
+  for (let y = 0; y < ph; y++) {
+    pixels[y] = [];
+    for (let x = 0; x < pw; x++) {
+      // Classic bunker shape: arch with cutout underneath
+      const cx = pw / 2;
+      const inBody = y >= 4;
+      const inArch = y < 8 && Math.abs(x - cx) <= (pw / 2 - y * 0.5);
+      const inCutout = y >= ph - 7 && Math.abs(x - cx) < 6 - (ph - 1 - y) * 0.4;
+      pixels[y][x] = (inBody || inArch) && !inCutout;
+    }
+  }
+  return pixels;
+}
+
+function initBunkers() {
+  bunkers = [];
+  const spacing = GW / (BUNKER_COUNT + 1);
+  for (let i = 0; i < BUNKER_COUNT; i++) {
+    bunkers.push({
+      x: Math.floor(spacing * (i + 1) - BUNKER_W / 2),
+      y: BUNKER_Y,
+      pixels: createBunkerPixels()
+    });
+  }
+}
+
+function drawBunker(b) {
+  for (let y = 0; y < BUNKER_H; y++) {
+    for (let x = 0; x < BUNKER_W; x++) {
+      if (b.pixels[y][x]) {
+        // Slight color variation for organic look
+        const shade = 40 + ((x * 3 + y * 7) % 30);
+        ctx.fillStyle = 'rgb(' + shade + ',' + (100 + shade) + ',' + (shade + 20) + ')';
+        ctx.fillRect(b.x + x, b.y + y, 1, 1);
+      }
+    }
+  }
+}
+
+function damageBunker(b, hitX, hitY, radius) {
+  const lx = Math.floor(hitX - b.x);
+  const ly = Math.floor(hitY - b.y);
+  let damaged = false;
+  for (let dy = -radius; dy <= radius; dy++) {
+    for (let dx = -radius; dx <= radius; dx++) {
+      if (dx * dx + dy * dy <= radius * radius) {
+        const px = lx + dx;
+        const py = ly + dy;
+        if (px >= 0 && px < BUNKER_W && py >= 0 && py < BUNKER_H) {
+          if (b.pixels[py][px]) {
+            b.pixels[py][px] = false;
+            damaged = true;
+          }
+        }
+      }
+    }
+  }
+  return damaged;
+}
+
+function bunkerPixelAt(b, wx, wy) {
+  const lx = Math.floor(wx - b.x);
+  const ly = Math.floor(wy - b.y);
+  if (lx < 0 || lx >= BUNKER_W || ly < 0 || ly >= BUNKER_H) return false;
+  return b.pixels[ly][lx];
+}
+
+// ============================================================
+// ALIEN GRID
+// ============================================================
+function initAliens() {
+  aliens = [];
+  const extraDrop = Math.min(level - 1, 8) * (ALIEN_VGAP * 0.4);
+  for (let row = 0; row < ROWS; row++) {
+    for (let col = 0; col < COLS; col++) {
+      aliens.push({
+        row: row,
+        col: col,
+        x: GRID_LEFT_BASE + col * ALIEN_HGAP,
+        y: GRID_TOP + row * ALIEN_VGAP + extraDrop,
+        alive: true,
+        type: row, // 0=top (40pts), 4=bottom (10pts)
+        frame: 0   // animation frame
+      });
+    }
+  }
+  aliensAlive = ROWS * COLS;
+  alienDir = 1;
+  alienMoveTimer = 0;
+  alienNeedDrop = false;
+  marchIdx = 0;
+
+  // Speed scales with level
+  alienMoveInterval = Math.max(8, 40 - (level - 1) * 3);
+  alienFireRate = Math.max(30, 120 - (level - 1) * 10);
+  alienFireTimer = alienFireRate;
+}
+
+// Procedural alien drawing per type
+function drawAlien(a) {
+  const x = a.x, y = a.y;
+  const f = a.frame;
+
+  ctx.save();
+  ctx.translate(x, y);
+
+  switch (a.type) {
+    case 0: // Top row: small spore cap (40pts) - compact mushroom
+      ctx.fillStyle = '#ff4466';
+      // Cap
+      ctx.beginPath();
+      ctx.ellipse(0, -2, 5, 4, 0, Math.PI, 0);
+      ctx.fill();
+      // Stem
+      ctx.fillStyle = '#cc2244';
+      ctx.fillRect(-2, -2, 4, 5);
+      // Eyes
+      ctx.fillStyle = '#fff';
+      ctx.fillRect(-3, 0, 2, 2);
+      ctx.fillRect(1, 0, 2, 2);
+      // Legs (animated)
+      ctx.fillStyle = '#ff4466';
+      if (f) {
+        ctx.fillRect(-5, 3, 2, 2);
+        ctx.fillRect(3, 3, 2, 2);
+      } else {
+        ctx.fillRect(-4, 4, 2, 2);
+        ctx.fillRect(2, 4, 2, 2);
+      }
+      break;
+
+    case 1: // Row 2: spore with tendrils (30pts)
+      ctx.fillStyle = '#aa44ff';
+      // Body
+      ctx.beginPath();
+      ctx.arc(0, 0, 6, 0, Math.PI * 2);
+      ctx.fill();
+      // Inner spots
+      ctx.fillStyle = '#cc88ff';
+      ctx.fillRect(-2, -3, 2, 2);
+      ctx.fillRect(1, -1, 2, 2);
+      // Eyes
+      ctx.fillStyle = '#fff';
+      ctx.fillRect(-4, -2, 2, 2);
+      ctx.fillRect(2, -2, 2, 2);
+      // Tendrils (animated)
+      ctx.fillStyle = '#8822cc';
+      if (f) {
+        ctx.fillRect(-7, 2, 2, 3);
+        ctx.fillRect(5, 2, 2, 3);
+        ctx.fillRect(-2, 5, 2, 2);
+        ctx.fillRect(1, 5, 2, 2);
+      } else {
+        ctx.fillRect(-6, 3, 2, 3);
+        ctx.fillRect(4, 3, 2, 3);
+        ctx.fillRect(-3, 5, 2, 2);
+        ctx.fillRect(2, 5, 2, 2);
+      }
+      break;
+
+    case 2: // Row 3: fat spore blob (20pts)
+      ctx.fillStyle = '#44cc88';
+      // Body
+      ctx.fillRect(-6, -4, 12, 8);
+      ctx.fillRect(-7, -2, 14, 4);
+      // Bumps
+      ctx.fillStyle = '#66eebb';
+      ctx.fillRect(-4, -5, 3, 2);
+      ctx.fillRect(2, -5, 3, 2);
+      // Eyes
+      ctx.fillStyle = '#fff';
+      ctx.fillRect(-4, -2, 2, 2);
+      ctx.fillRect(3, -2, 2, 2);
+      ctx.fillStyle = '#000';
+      ctx.fillRect(-3, -1, 1, 1);
+      ctx.fillRect(4, -1, 1, 1);
+      // Feet (animated)
+      ctx.fillStyle = '#33aa66';
+      if (f) {
+        ctx.fillRect(-7, 4, 3, 2);
+        ctx.fillRect(5, 4, 3, 2);
+      } else {
+        ctx.fillRect(-5, 4, 3, 2);
+        ctx.fillRect(3, 4, 3, 2);
+      }
+      break;
+
+    case 3: // Row 4: round puffball (20pts)
+      ctx.fillStyle = '#cc8844';
+      ctx.beginPath();
+      ctx.arc(0, 0, 6, 0, Math.PI * 2);
+      ctx.fill();
+      // Texture dots
+      ctx.fillStyle = '#eebb66';
+      ctx.fillRect(-3, -3, 2, 2);
+      ctx.fillRect(2, 0, 2, 2);
+      ctx.fillRect(-1, 2, 2, 2);
+      // Eyes
+      ctx.fillStyle = '#fff';
+      ctx.fillRect(-3, -1, 2, 2);
+      ctx.fillRect(2, -1, 2, 2);
+      // Arms (animated)
+      ctx.fillStyle = '#aa6622';
+      if (f) {
+        ctx.fillRect(-8, -1, 2, 3);
+        ctx.fillRect(6, -1, 2, 3);
+      } else {
+        ctx.fillRect(-8, 1, 2, 3);
+        ctx.fillRect(6, 1, 2, 3);
+      }
+      break;
+
+    case 4: // Bottom row: simple spore grunt (10pts)
+      ctx.fillStyle = '#88aacc';
+      // Blocky body
+      ctx.fillRect(-5, -4, 10, 8);
+      ctx.fillRect(-6, -2, 12, 4);
+      // Eyes
+      ctx.fillStyle = '#fff';
+      ctx.fillRect(-3, -2, 2, 2);
+      ctx.fillRect(2, -2, 2, 2);
+      ctx.fillStyle = '#000';
+      ctx.fillRect(-2, -1, 1, 1);
+      ctx.fillRect(3, -1, 1, 1);
+      // Legs (animated)
+      ctx.fillStyle = '#6688aa';
+      if (f) {
+        ctx.fillRect(-5, 4, 2, 2);
+        ctx.fillRect(4, 4, 2, 2);
+      } else {
+        ctx.fillRect(-3, 4, 2, 2);
+        ctx.fillRect(2, 4, 2, 2);
+      }
+      break;
+  }
+
+  ctx.restore();
+}
+
+// ============================================================
+// PLAYER CANNON
+// ============================================================
+function drawPlayer() {
+  if (player.dead) return;
+
+  const x = player.x, y = PLAYER_Y;
+
+  // Base
+  ctx.fillStyle = '#22aa66';
+  ctx.fillRect(x - 10, y, 20, 6);
+  // Mid body
+  ctx.fillStyle = '#33cc88';
+  ctx.fillRect(x - 6, y - 4, 12, 5);
+  // Barrel
+  ctx.fillStyle = '#44eebb';
+  ctx.fillRect(x - 1, y - 10, 3, 7);
+  // Barrel tip glow
+  ctx.fillStyle = '#88ffdd';
+  ctx.fillRect(x - 1, y - 11, 3, 2);
+  // Details
+  ctx.fillStyle = '#116644';
+  ctx.fillRect(x - 8, y + 1, 4, 2);
+  ctx.fillRect(x + 4, y + 1, 4, 2);
+}
+
+// ============================================================
+// MYSTERY SHIP
+// ============================================================
+function spawnMystery() {
+  const goRight = Math.random() > 0.5;
+  mystery = {
+    x: goRight ? -20 : GW + 20,
+    y: 20,
+    dir: goRight ? 1 : -1,
+    speed: 1.5,
+    score: MYSTERY_SCORES[TAS.math.randInt(0, MYSTERY_SCORES.length - 1)]
+  };
+}
+
+function drawMystery() {
+  if (!mystery) return;
+  const x = mystery.x, y = mystery.y;
+
+  // Pulsing saucer body
+  const pulse = Math.sin(frame * 0.15) * 0.15 + 0.85;
+  ctx.globalAlpha = pulse;
+
+  // Dome
+  ctx.fillStyle = '#ff2266';
+  ctx.beginPath();
+  ctx.ellipse(x, y - 3, 8, 5, 0, Math.PI, 0);
+  ctx.fill();
+
+  // Saucer body
+  ctx.fillStyle = '#cc1144';
+  ctx.beginPath();
+  ctx.ellipse(x, y, 14, 5, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Windows
+  ctx.fillStyle = '#ffaa44';
+  for (let i = -2; i <= 2; i++) {
+    ctx.fillRect(x + i * 4 - 1, y - 2, 2, 2);
+  }
+
+  // Underside lights
+  ctx.fillStyle = '#ff6688';
+  const blink = Math.floor(frame / 6) % 3;
+  ctx.fillRect(x - 8 + blink * 6, y + 3, 2, 2);
+
+  ctx.globalAlpha = 1;
+}
+
+// ============================================================
+// BOSS (every 5 levels)
+// ============================================================
+function isBossLevel() {
+  return level % 5 === 0;
+}
+
+function initBoss() {
+  const hp = 20 + level * 5;
+  boss = {
+    x: GW / 2,
+    y: -40,
+    w: 60, h: 40,
+    hp: hp,
+    maxHp: hp,
+    phase: 0,
+    timer: 0,
+    fireTimer: 0,
+    entering: true,
+    dead: false
+  };
+  bossActive = true;
+  bossWarning = 0;
+  SFX.bossAppear();
+}
+
+function updateBoss(dt) {
+  if (!boss || boss.dead) return;
+
+  boss.timer++;
+
+  if (boss.entering) {
+    boss.y += 1;
+    if (boss.y >= 50) {
+      boss.entering = false;
+    }
+    return;
+  }
+
+  // Movement
+  const phase = Math.floor(boss.timer / 200) % 3;
+  switch (phase) {
+    case 0: // Sway left-right
+      boss.x += Math.cos(boss.timer * 0.03) * 2;
+      break;
+    case 1: // Faster sway
+      boss.x += Math.cos(boss.timer * 0.05) * 3;
+      break;
+    case 2: // Dive lower then back up
+      boss.y = 50 + Math.sin(boss.timer * 0.02) * 25;
+      boss.x += Math.cos(boss.timer * 0.04) * 2;
+      break;
+  }
+
+  // Keep in bounds
+  boss.x = TAS.math.clamp(boss.x, 40, GW - 40);
+  boss.y = TAS.math.clamp(boss.y, 30, 120);
+
+  // Firing
+  boss.fireTimer--;
+  if (boss.fireTimer <= 0) {
+    boss.fireTimer = Math.max(15, 50 - level);
+    const pattern = Math.floor(boss.timer / 100) % 4;
+
+    switch (pattern) {
+      case 0: // Aimed at player
+        {
+          const dx = player.x - boss.x;
+          const dy = PLAYER_Y - (boss.y + boss.h / 2);
+          const d = Math.sqrt(dx * dx + dy * dy);
+          if (d > 0) {
+            alienBullets.push({ x: boss.x, y: boss.y + boss.h / 2, vx: dx / d * 3, vy: dy / d * 3 });
+          }
+        }
+        break;
+      case 1: // Spread 3
+        for (let i = -1; i <= 1; i++) {
+          alienBullets.push({
+            x: boss.x + i * 15,
+            y: boss.y + boss.h / 2,
+            vx: i * 0.8,
+            vy: 2.5
+          });
+        }
+        break;
+      case 2: // Double aimed
+        {
+          const dx = player.x - boss.x;
+          const dy = PLAYER_Y - (boss.y + boss.h / 2);
+          const d = Math.sqrt(dx * dx + dy * dy);
+          if (d > 0) {
+            alienBullets.push({ x: boss.x - 15, y: boss.y + boss.h / 2, vx: dx / d * 2.5, vy: dy / d * 2.5 });
+            alienBullets.push({ x: boss.x + 15, y: boss.y + boss.h / 2, vx: dx / d * 2.5, vy: dy / d * 2.5 });
+          }
+        }
+        break;
+      case 3: // Rain
+        for (let i = -2; i <= 2; i++) {
+          alienBullets.push({ x: boss.x + i * 10, y: boss.y + boss.h / 2, vx: 0, vy: 2 + Math.random() });
+        }
+        boss.fireTimer = 40;
+        break;
+    }
+    SFX.alienShoot();
+  }
+}
+
+function drawBoss() {
+  if (!boss || boss.dead) return;
+  const x = boss.x, y = boss.y;
+
+  // Giant mushroom mother body
+  ctx.fillStyle = '#661144';
+  // Cap
+  ctx.beginPath();
+  ctx.ellipse(x, y - 5, 30, 18, 0, Math.PI, 0);
+  ctx.fill();
+
+  // Cap highlights
+  ctx.fillStyle = '#882266';
+  ctx.beginPath();
+  ctx.ellipse(x, y - 8, 22, 12, 0, Math.PI, 0);
+  ctx.fill();
+
+  // Spots on cap
+  ctx.fillStyle = '#ff44aa';
+  const spotPhase = frame * 0.02;
+  ctx.beginPath(); ctx.arc(x - 12, y - 14, 4, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath(); ctx.arc(x + 8, y - 16, 3, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath(); ctx.arc(x - 3, y - 18, 3, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath(); ctx.arc(x + 16, y - 10, 2.5, 0, Math.PI * 2); ctx.fill();
+
+  // Stem/body
+  ctx.fillStyle = '#551133';
+  ctx.fillRect(x - 18, y - 5, 36, 20);
+  ctx.fillRect(x - 12, y + 15, 24, 6);
+
+  // Eyes
+  ctx.fillStyle = '#ff0066';
+  const eyePulse = Math.sin(frame * 0.1) * 2;
+  ctx.beginPath();
+  ctx.arc(x - 8, y + 2, 4 + eyePulse * 0.3, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.arc(x + 8, y + 2, 4 + eyePulse * 0.3, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Pupils
+  ctx.fillStyle = '#fff';
+  ctx.beginPath(); ctx.arc(x - 8, y + 2, 2, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath(); ctx.arc(x + 8, y + 2, 2, 0, Math.PI * 2); ctx.fill();
+
+  // Mouth
+  ctx.fillStyle = '#220011';
+  ctx.beginPath();
+  ctx.ellipse(x, y + 10, 8, 3 + Math.sin(frame * 0.08) * 1.5, 0, 0, Math.PI);
+  ctx.fill();
+
+  // Tendrils hanging down (animated)
+  ctx.fillStyle = '#441133';
+  for (let i = -2; i <= 2; i++) {
+    const tx = x + i * 8;
+    const sway = Math.sin(frame * 0.04 + i) * 3;
+    ctx.fillRect(tx + sway - 1, y + 18, 3, 5 + Math.abs(i));
+  }
+
+  // HP bar
+  const barW = 50;
+  const barX = x - barW / 2;
+  const barY = y - 28;
+  ctx.fillStyle = '#333';
+  ctx.fillRect(barX, barY, barW, 4);
+  const hpRatio = boss.hp / boss.maxHp;
+  ctx.fillStyle = hpRatio > 0.3 ? '#ff3366' : '#ff0000';
+  ctx.fillRect(barX, barY, barW * hpRatio, 4);
+
+  // Name
+  ctx.fillStyle = '#ff88aa';
+  ctx.font = '7px monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText('SPORE MOTHER LV' + level, x, barY - 3);
+}
+
+// ============================================================
+// GAME INIT
+// ============================================================
+function startGame() {
+  state = 'playing';
+  score = 0;
+  lives = 3;
+  level = 1;
+  frame = 0;
+  player = { x: GW / 2, dead: false, respawnTimer: 0 };
+  bullet = null;
+  alienBullets = [];
+  mystery = null;
+  mysteryTimer = 600 + Math.floor(Math.random() * 400);
+  mysteryScoreDisplay = null;
+  boss = null;
+  bossActive = false;
+  bossWarning = 0;
+  TAS.particles.clear();
+
+  if (window.NftLoader && window.NftLoader.selectedCharacter) {
+    var bonuses = window.NftLoader.getBonuses();
+    lives += bonuses.lives;
+  }
+
+  initBunkers();
+  initAliens();
+}
+
+function startLevel() {
+  bullet = null;
+  alienBullets = [];
+  mystery = null;
+  mysteryTimer = 600 + Math.floor(Math.random() * 400);
+  mysteryScoreDisplay = null;
+  player.dead = false;
+  player.respawnTimer = 0;
+  boss = null;
+  bossActive = false;
+  bossWarning = 0;
+  TAS.particles.clear();
+
+  if (isBossLevel()) {
+    // Boss level: no alien grid, just boss
+    aliens = [];
+    aliensAlive = 0;
+    initBunkers();
+    // Show warning first, then spawn boss
+    bossWarning = 180;
+  } else {
+    initAliens();
+    initBunkers();
+  }
+}
+
+// ============================================================
+// UPDATE
+// ============================================================
+function update(dt) {
+  frame++;
+  TAS.particles.update(dt);
+  TAS.fx.updateEffects(dt);
+
+  // Starfield scrolls slowly downward for space feel
+  for (const s of starfield.stars) {
+    s.y += s.speed * 0.3;
+    if (s.y > GH) { s.y = 0; s.x = Math.random() * GW; }
+  }
+
+  if (state === 'title') {
+    if (Object.values(TAS.input.keys).some(Boolean) || TAS.input.touch.a || TAS.input.touch.left || TAS.input.touch.right) {
+      startGame();
+    }
+    return;
+  }
+
+  if (state === 'gameOver') {
+    if (frame > 60 && (Object.values(TAS.input.keys).some(Boolean) || TAS.input.touch.a)) {
+      state = 'title';
+      frame = 0;
+    }
+    return;
+  }
+
+  if (state === 'levelClear') {
+    if (frame > 120) {
+      level++;
+      startLevel();
+      state = 'playing';
+    }
+    return;
+  }
+
+  if (state === 'dying') {
+    player.respawnTimer--;
+    if (player.respawnTimer <= 0) {
+      if (lives <= 0) {
+        state = 'gameOver';
+        frame = 0;
+        if (score > highScore) {
+          highScore = score;
+          TAS.score.save('sporeinvaders_hi', highScore);
+        }
+        SFX.gameOver();
+      } else {
+        player.dead = false;
+        player.x = GW / 2;
+        alienBullets = [];
+        state = 'playing';
+      }
+    }
+    return;
+  }
+
+  if (state !== 'playing') return;
+
+  // --- Boss warning countdown ---
+  if (bossWarning > 0) {
+    bossWarning--;
+    if (bossWarning <= 0 && isBossLevel() && !bossActive) {
+      initBoss();
+    }
+    return;
+  }
+
+  // --- Player movement ---
+  if (!player.dead) {
+    const left = TAS.input.keys['ArrowLeft'] || TAS.input.keys['KeyA'] || TAS.input.touch.left;
+    const right = TAS.input.keys['ArrowRight'] || TAS.input.keys['KeyD'] || TAS.input.touch.right;
+
+    if (left) player.x -= PLAYER_SPEED;
+    if (right) player.x += PLAYER_SPEED;
+
+    player.x = TAS.math.clamp(player.x, 14, GW - 14);
+
+    // Fire (one bullet at a time)
+    const fire = TAS.input.keys['Space'] || TAS.input.keys['ArrowUp'] || TAS.input.keys['KeyW'] || TAS.input.touch.a || TAS.input.touch.up;
+    if (fire && !bullet) {
+      bullet = { x: player.x, y: PLAYER_Y - 11 };
+      SFX.shoot();
+    }
+  }
+
+  // --- Player bullet ---
+  if (bullet) {
+    bullet.y -= BULLET_SPEED;
+    if (bullet.y < 0) {
+      bullet = null;
+    } else {
+      // Check bullet vs aliens
+      for (let i = 0; i < aliens.length; i++) {
+        const a = aliens[i];
+        if (!a.alive) continue;
+        if (TAS.hit.rectOverlap(bullet.x - 1, bullet.y - 3, 3, 6, a.x - ALIEN_W / 2, a.y - ALIEN_H / 2, ALIEN_W, ALIEN_H)) {
+          // Kill alien
+          a.alive = false;
+          aliensAlive--;
+          score += ROW_SCORES[a.row];
+          TAS.particles.spawn(a.x, a.y, getAlienColor(a.type), 10, 2, { shape: 'rect', size: 1, sizeVar: 2 });
+          TAS.fx.shake(2, 0.9);
+          SFX.alienDie();
+          bullet = null;
+
+          // Speed up remaining aliens
+          recalcAlienSpeed();
+
+          // Check level clear
+          if (aliensAlive <= 0 && !bossActive) {
+            state = 'levelClear';
+            frame = 0;
+            SFX.levelUp();
+          }
+          break;
+        }
+      }
+
+      // Check bullet vs bunkers
+      if (bullet) {
+        for (const b of bunkers) {
+          if (bullet.x >= b.x && bullet.x < b.x + BUNKER_W && bullet.y >= b.y && bullet.y < b.y + BUNKER_H) {
+            if (bunkerPixelAt(b, bullet.x, bullet.y)) {
+              damageBunker(b, bullet.x, bullet.y, 3);
+              TAS.particles.spawn(bullet.x, bullet.y, '#55aa77', 4, 1, { shape: 'rect', size: 1 });
+              SFX.bunkerHit();
+              bullet = null;
+              break;
+            }
+          }
+        }
+      }
+
+      // Check bullet vs mystery ship
+      if (bullet && mystery) {
+        if (TAS.hit.rectOverlap(bullet.x - 1, bullet.y - 3, 3, 6, mystery.x - 14, mystery.y - 5, 28, 10)) {
+          score += mystery.score;
+          mysteryScoreDisplay = { x: mystery.x, y: mystery.y, score: mystery.score, timer: 60 };
+          TAS.particles.spawn(mystery.x, mystery.y, '#ff2266', 15, 3, { shape: 'rect' });
+          TAS.fx.shake(3, 0.85);
+          SFX.mysteryHit();
+          mystery = null;
+          bullet = null;
+        }
+      }
+
+      // Check bullet vs boss
+      if (bullet && boss && !boss.dead && !boss.entering) {
+        if (TAS.hit.rectOverlap(bullet.x - 1, bullet.y - 3, 3, 6, boss.x - boss.w / 2, boss.y - boss.h / 2, boss.w, boss.h)) {
+          boss.hp--;
+          TAS.particles.spawn(bullet.x, bullet.y, '#ff44aa', 5, 2);
+          SFX.bossHit();
+          bullet = null;
+
+          if (boss.hp <= 0) {
+            // Boss defeated
+            boss.dead = true;
+            bossActive = false;
+            score += 500 + level * 100;
+            TAS.particles.spawn(boss.x, boss.y, '#ff2266', 30, 4, { size: 2, sizeVar: 3 });
+            TAS.particles.spawn(boss.x, boss.y, '#ffaa44', 20, 3);
+            TAS.fx.shake(8, 0.85);
+            TAS.fx.flash('#ff2266', 0.4);
+            SFX.bossDie();
+            // Level clear after boss
+            setTimeout(function() {
+              if (state === 'playing') {
+                state = 'levelClear';
+                frame = 0;
+                SFX.levelUp();
+              }
+            }, 1000);
+          }
+        }
+      }
+    }
+  }
+
+  // --- Alien movement ---
+  if (aliensAlive > 0) {
+    alienMoveTimer++;
+    if (alienMoveTimer >= alienMoveInterval) {
+      alienMoveTimer = 0;
+
+      // Toggle animation frame
+      for (const a of aliens) {
+        if (a.alive) a.frame = a.frame ? 0 : 1;
+      }
+
+      // March sound
+      SFX.march(MARCH_NOTES[marchIdx % MARCH_NOTES.length]);
+      marchIdx++;
+
+      if (alienNeedDrop) {
+        // Drop all aliens down
+        for (const a of aliens) {
+          if (a.alive) a.y += alienDropAmount;
+        }
+        alienDir = -alienDir;
+        alienNeedDrop = false;
+
+        // Check if aliens reached player level
+        for (const a of aliens) {
+          if (a.alive && a.y + ALIEN_H / 2 >= PLAYER_Y - 5) {
+            // Game over -- aliens invaded
+            killPlayer();
+            lives = 0; // instant game over
+            return;
+          }
+        }
+      } else {
+        // Move horizontally
+        let hitEdge = false;
+        for (const a of aliens) {
+          if (a.alive) {
+            a.x += alienStepSize * alienDir;
+            if (a.x + ALIEN_W / 2 >= GW - 8 || a.x - ALIEN_W / 2 <= 8) {
+              hitEdge = true;
+            }
+          }
+        }
+        if (hitEdge) {
+          alienNeedDrop = true;
+        }
+      }
+    }
+
+    // --- Alien firing ---
+    alienFireTimer--;
+    if (alienFireTimer <= 0) {
+      alienFireTimer = Math.max(15, alienFireRate - Math.floor((ROWS * COLS - aliensAlive) * 0.8));
+      fireAlienBullet();
+    }
+  }
+
+  // --- Alien bullets ---
+  for (let i = alienBullets.length - 1; i >= 0; i--) {
+    const ab = alienBullets[i];
+    ab.x += ab.vx || 0;
+    ab.y += ab.vy || ALIEN_BULLET_SPEED;
+    if (ab.y > GH + 10 || ab.y < -10 || ab.x < -10 || ab.x > GW + 10) {
+      alienBullets.splice(i, 1);
+      continue;
+    }
+
+    // Hit bunker
+    let hitBunker = false;
+    for (const b of bunkers) {
+      if (ab.x >= b.x && ab.x < b.x + BUNKER_W && ab.y >= b.y && ab.y < b.y + BUNKER_H) {
+        if (bunkerPixelAt(b, ab.x, ab.y)) {
+          damageBunker(b, ab.x, ab.y, 3);
+          TAS.particles.spawn(ab.x, ab.y, '#55aa77', 3, 1, { shape: 'rect', size: 1 });
+          SFX.bunkerHit();
+          alienBullets.splice(i, 1);
+          hitBunker = true;
+          break;
+        }
+      }
+    }
+    if (hitBunker) continue;
+
+    // Hit player
+    if (!player.dead && TAS.hit.rectOverlap(ab.x - 2, ab.y - 2, 4, 4, player.x - 10, PLAYER_Y - 4, 20, 10)) {
+      alienBullets.splice(i, 1);
+      killPlayer();
+      return;
+    }
+  }
+
+  // --- Aliens collide with bunkers (eat them away) ---
+  for (const a of aliens) {
+    if (!a.alive) continue;
+    for (const b of bunkers) {
+      if (TAS.hit.rectOverlap(a.x - ALIEN_W / 2, a.y - ALIEN_H / 2, ALIEN_W, ALIEN_H, b.x, b.y, BUNKER_W, BUNKER_H)) {
+        // Destroy bunker pixels under alien
+        for (let dy = 0; dy < BUNKER_H; dy++) {
+          for (let dx = 0; dx < BUNKER_W; dx++) {
+            const wx = b.x + dx;
+            const wy = b.y + dy;
+            if (TAS.hit.pointInRect(wx, wy, a.x - ALIEN_W / 2, a.y - ALIEN_H / 2, ALIEN_W, ALIEN_H)) {
+              b.pixels[dy][dx] = false;
+            }
+          }
+        }
+      }
+    }
+  }
+
+  // --- Mystery ship ---
+  if (mystery) {
+    mystery.x += mystery.dir * mystery.speed;
+    if ((mystery.dir > 0 && mystery.x > GW + 30) || (mystery.dir < 0 && mystery.x < -30)) {
+      mystery = null;
+    }
+  } else if (!bossActive) {
+    mysteryTimer--;
+    if (mysteryTimer <= 0) {
+      spawnMystery();
+      mysteryTimer = 600 + Math.floor(Math.random() * 600);
+    }
+  }
+
+  // Mystery sound loop
+  if (mystery && frame % 8 === 0) {
+    SFX.mystery();
+  }
+
+  // Mystery score display timer
+  if (mysteryScoreDisplay) {
+    mysteryScoreDisplay.timer--;
+    if (mysteryScoreDisplay.timer <= 0) mysteryScoreDisplay = null;
+  }
+
+  // --- Boss update ---
+  if (bossActive && boss && !boss.dead) {
+    updateBoss(dt);
+  }
+}
+
+function fireAlienBullet() {
+  // Pick a random alive alien from the bottom-most of each column
+  const bottomAliens = [];
+  for (let col = 0; col < COLS; col++) {
+    let lowest = null;
+    for (const a of aliens) {
+      if (a.alive && a.col === col) {
+        if (!lowest || a.row > lowest.row) lowest = a;
+      }
+    }
+    if (lowest) bottomAliens.push(lowest);
+  }
+  if (bottomAliens.length === 0) return;
+
+  const shooter = bottomAliens[TAS.math.randInt(0, bottomAliens.length - 1)];
+  alienBullets.push({ x: shooter.x, y: shooter.y + ALIEN_H / 2, vx: 0, vy: ALIEN_BULLET_SPEED + (level - 1) * 0.15 });
+  SFX.alienShoot();
+}
+
+function recalcAlienSpeed() {
+  // Classic behavior: fewer aliens = faster
+  if (aliensAlive <= 1) {
+    alienMoveInterval = 2;
+  } else if (aliensAlive <= 5) {
+    alienMoveInterval = 4;
+  } else if (aliensAlive <= 10) {
+    alienMoveInterval = 8;
+  } else if (aliensAlive <= 20) {
+    alienMoveInterval = 14;
+  } else if (aliensAlive <= 30) {
+    alienMoveInterval = 20;
+  } else {
+    alienMoveInterval = Math.max(8, 40 - (level - 1) * 3);
+  }
+}
+
+function getAlienColor(type) {
+  var colors = ['#ff4466', '#aa44ff', '#44cc88', '#cc8844', '#88aacc'];
+  return colors[type] || '#ffffff';
+}
+
+function killPlayer() {
+  if (player.dead) return;
+  player.dead = true;
+  lives--;
+  TAS.particles.spawn(player.x, PLAYER_Y, '#44eebb', 20, 3, { shape: 'rect', size: 1, sizeVar: 3 });
+  TAS.particles.spawn(player.x, PLAYER_Y, '#ffcc00', 10, 2);
+  TAS.fx.shake(6, 0.85);
+  TAS.fx.flash('#ff4444', 0.3);
+  SFX.playerDie();
+  bullet = null;
+  state = 'dying';
+  player.respawnTimer = 90;
+}
+
+// ============================================================
+// DRAW
+// ============================================================
+function draw(dt) {
+  ctx.fillStyle = '#05050f';
+  ctx.fillRect(0, 0, GW, GH);
+
+  if (state === 'title') {
+    drawTitleScreen();
+    return;
+  }
+
+  // Starfield
+  starfield.draw();
+
+  if (state === 'gameOver') {
+    drawGameOverScreen();
+    return;
+  }
+
+  ctx.save();
+  TAS.fx.applyShake();
+
+  // Bunkers
+  for (const b of bunkers) drawBunker(b);
+
+  // Aliens
+  for (const a of aliens) {
+    if (a.alive) drawAlien(a);
+  }
+
+  // Mystery ship
+  drawMystery();
+
+  // Mystery score popup
+  if (mysteryScoreDisplay) {
+    ctx.fillStyle = '#ffcc00';
+    ctx.font = 'bold 10px monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText(mysteryScoreDisplay.score.toString(), mysteryScoreDisplay.x, mysteryScoreDisplay.y);
+  }
+
+  // Boss
+  if (bossActive) drawBoss();
+
+  // Player bullet
+  if (bullet) {
+    ctx.fillStyle = '#88ffdd';
+    ctx.fillRect(bullet.x - 1, bullet.y - 3, 2, 6);
+    // Glow
+    ctx.fillStyle = 'rgba(100, 255, 200, 0.3)';
+    ctx.fillRect(bullet.x - 2, bullet.y - 5, 4, 10);
+  }
+
+  // Alien bullets
+  for (const ab of alienBullets) {
+    // Zigzag bolt shape
+    ctx.fillStyle = '#ff4488';
+    ctx.fillRect(ab.x - 1, ab.y - 3, 3, 6);
+    ctx.fillStyle = '#ff88aa';
+    ctx.fillRect(ab.x, ab.y - 1, 1, 3);
+  }
+
+  // Player
+  drawPlayer();
+
+  // Particles
+  TAS.particles.draw();
+
+  ctx.restore();
+
+  TAS.fx.drawFlash(GW, GH);
+
+  // Boss warning overlay
+  if (bossWarning > 0) {
+    if (Math.floor(frame / 10) % 2) {
+      ctx.fillStyle = '#ff2266';
+      ctx.font = 'bold 16px monospace';
+      ctx.textAlign = 'center';
+      ctx.fillText('WARNING', GW / 2, GH / 2 - 10);
+      ctx.font = '10px monospace';
+      ctx.fillText('SPORE MOTHER APPROACHING', GW / 2, GH / 2 + 10);
+    }
+  }
+
+  // Level clear overlay
+  if (state === 'levelClear') {
+    ctx.fillStyle = 'rgba(0,0,0,0.5)';
+    ctx.fillRect(0, 0, GW, GH);
+    ctx.fillStyle = '#44eebb';
+    ctx.font = 'bold 18px monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText('LEVEL ' + level + ' CLEAR', GW / 2, GH / 2 - 15);
+    ctx.fillStyle = '#ffcc00';
+    ctx.font = '10px monospace';
+    ctx.fillText('BONUS: ' + (level * 500), GW / 2, GH / 2 + 10);
+    score += level > 0 && frame === 1 ? level * 500 : 0; // add bonus once
+    ctx.fillStyle = '#fff';
+    ctx.fillText('SCORE: ' + score, GW / 2, GH / 2 + 28);
+  }
+
+  // HUD
+  drawHUD();
+
+  // Touch controls
+  TAS.input.drawTouchControls(GW, GH);
+}
+
+// ============================================================
+// HUD
+// ============================================================
+function drawHUD() {
+  const barH = 16;
+  ctx.fillStyle = 'rgba(0,0,0,0.6)';
+  ctx.fillRect(0, 0, GW, barH);
+
+  ctx.font = 'bold 9px monospace';
+
+  // Score
+  ctx.fillStyle = '#ffdd44';
+  ctx.textAlign = 'left';
+  ctx.fillText('SCORE: ' + score, 4, barH - 4);
+
+  // Level
+  ctx.fillStyle = '#88ccff';
+  ctx.textAlign = 'center';
+  ctx.fillText('LV ' + level, GW / 2, barH - 4);
+
+  // High score
+  ctx.fillStyle = '#888';
+  ctx.textAlign = 'center';
+  ctx.fillText('HI: ' + highScore, GW / 2 + 70, barH - 4);
+
+  // Lives
+  ctx.textAlign = 'right';
+  ctx.fillStyle = '#44dd88';
+  for (let i = 0; i < lives; i++) {
+    const lx = GW - 8 - i * 14;
+    const ly = barH / 2;
+    // Mini cannon icon
+    ctx.fillStyle = '#33cc88';
+    ctx.fillRect(lx - 4, ly, 8, 3);
+    ctx.fillRect(lx - 1, ly - 3, 2, 3);
+  }
+
+  // Ground line
+  ctx.fillStyle = '#22aa55';
+  ctx.fillRect(0, GH - 6, GW, 1);
+  ctx.fillStyle = '#115522';
+  ctx.fillRect(0, GH - 5, GW, 5);
+}
+
+// ============================================================
+// TITLE SCREEN
+// ============================================================
+function drawTitleScreen() {
+  starfield.draw();
+
+  // Decorative aliens floating
+  ctx.save();
+  for (let i = 0; i < 5; i++) {
+    const ax = 80 + i * 80;
+    const ay = 60 + Math.sin(frame * 0.03 + i * 1.2) * 15;
+    const fakeAlien = { x: ax, y: ay, type: i, frame: Math.floor(frame / 30) % 2 };
+    drawAlien(fakeAlien);
+  }
+  ctx.restore();
+
+  ctx.textAlign = 'center';
+
+  // Title shadow
+  ctx.fillStyle = '#002211';
+  ctx.font = 'bold 26px monospace';
+  ctx.fillText('SPORE', GW / 2 + 2, 112);
+  ctx.fillText('INVADERS', GW / 2 + 2, 142);
+
+  // Title
+  ctx.fillStyle = '#44eebb';
+  ctx.fillText('SPORE', GW / 2, 110);
+  ctx.fillStyle = '#88ffdd';
+  ctx.fillText('INVADERS', GW / 2, 140);
+
+  // Subtitle
+  ctx.fillStyle = '#668877';
+  ctx.font = '9px monospace';
+  ctx.fillText('A Tasern Tale', GW / 2, 158);
+
+  // Score table
+  ctx.font = '8px monospace';
+  ctx.fillStyle = '#aaa';
+  const tableY = 178;
+  ctx.fillText('--- SCORE TABLE ---', GW / 2, tableY);
+
+  ctx.fillStyle = '#ff2266';
+  ctx.fillText('? MYSTERY = 50-300 PTS', GW / 2, tableY + 14);
+  ctx.fillStyle = '#ff4466';
+  ctx.fillText('SPORE CAP = 40 PTS', GW / 2, tableY + 26);
+  ctx.fillStyle = '#aa44ff';
+  ctx.fillText('TENDRIL = 30 PTS', GW / 2, tableY + 38);
+  ctx.fillStyle = '#44cc88';
+  ctx.fillText('BLOB = 20 PTS', GW / 2, tableY + 50);
+  ctx.fillStyle = '#88aacc';
+  ctx.fillText('GRUNT = 10 PTS', GW / 2, tableY + 62);
+
+  // Controls
+  ctx.fillStyle = '#888';
+  ctx.font = '7px monospace';
+  ctx.fillText('ARROWS/WASD - MOVE    SPACE - FIRE', GW / 2, tableY + 82);
+
+  // High score
+  if (highScore > 0) {
+    ctx.fillStyle = '#ffcc00';
+    ctx.font = '9px monospace';
+    ctx.fillText('HIGH SCORE: ' + highScore, GW / 2, tableY + 98);
+  }
+
+  // NFT character
+  if (window.NftLoader && window.NftLoader.selectedCharacter) {
+    ctx.fillStyle = window.NftLoader.selectedCharacter.color;
+    ctx.font = '8px monospace';
+    ctx.fillText('Playing as: ' + window.NftLoader.selectedCharacter.name, GW / 2, tableY + 112);
+  }
+
+  // Start prompt
+  const pulse = Math.sin(frame * 0.06) * 0.3 + 0.7;
+  ctx.globalAlpha = pulse;
+  ctx.fillStyle = '#ffdd44';
+  ctx.font = 'bold 10px monospace';
+  ctx.fillText('PRESS ANY KEY TO START', GW / 2, GH - 20);
+  ctx.globalAlpha = 1;
+}
+
+// ============================================================
+// GAME OVER SCREEN
+// ============================================================
+function drawGameOverScreen() {
+  ctx.fillStyle = 'rgba(0,0,0,0.75)';
+  ctx.fillRect(0, 0, GW, GH);
+
+  ctx.textAlign = 'center';
+
+  ctx.fillStyle = '#ff4444';
+  ctx.font = 'bold 24px monospace';
+  ctx.fillText('GAME OVER', GW / 2, GH * 0.28);
+
+  ctx.fillStyle = '#ffdd44';
+  ctx.font = 'bold 14px monospace';
+  ctx.fillText('Score: ' + score, GW / 2, GH * 0.45);
+
+  if (score >= highScore && score > 0) {
+    const pulse = Math.sin(frame * 0.06) * 0.3 + 0.7;
+    ctx.globalAlpha = pulse;
+    ctx.fillStyle = '#ffdd44';
+    ctx.font = 'bold 11px monospace';
+    ctx.fillText('NEW HIGH SCORE!', GW / 2, GH * 0.55);
+    ctx.globalAlpha = 1;
+  } else if (highScore > 0) {
+    ctx.fillStyle = '#888';
+    ctx.font = '10px monospace';
+    ctx.fillText('Best: ' + highScore, GW / 2, GH * 0.55);
+  }
+
+  ctx.fillStyle = '#fff';
+  ctx.font = '10px monospace';
+  ctx.fillText('Level Reached: ' + level, GW / 2, GH * 0.65);
+
+  const pulse2 = Math.sin(frame * 0.05) * 0.3 + 0.7;
+  ctx.globalAlpha = pulse2;
+  ctx.fillStyle = '#88ccff';
+  ctx.font = 'bold 10px monospace';
+  ctx.fillText('PRESS ANY KEY', GW / 2, GH * 0.82);
+  ctx.globalAlpha = 1;
+}
+
+// ============================================================
+// START GAME LOOP
+// ============================================================
+TAS.loop.start(update, draw);
+
+})();
+</script>
+</body>
+</html>

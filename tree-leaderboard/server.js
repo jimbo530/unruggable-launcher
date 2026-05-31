@@ -8,7 +8,7 @@ const http = require('http');
 
 const PORT = 3008;
 const RPC = process.env.BASE_RPC || 'https://mainnet.base.org';
-const MFTUSD = '0x85C78B8104D874d17e698b8c5678e3B8072347B1';
+const MFTUSD = '0xe3dd3881477c20C17Df080cEec0C1bD0C065A072';
 const MFTUSD_V1 = '0xe96fa44b4b82F085a457F9B7a0F85ea26FF1652F';
 const DECIMALS = 6;
 const ZERO = '0x0000000000000000000000000000000000000000';
@@ -20,7 +20,7 @@ const TREES_PER_USD_PER_SEC = (0.03 * (1/3)) / (0.10 * 365.25 * 86400);
 
 // Manual overrides for known non-pool addresses
 const MANUAL_LABELS = {
-  '0xe2a4a8b9d77080c57799a94ba8edeb2dd6e0ac10': 'Unruggable Operations',
+  '0xe2a4a8b9d77080c57799a94ba8edeb2dd6e0ac10': 'Unrugable Operations',
 };
 
 // Auto-detected pool labels (populated on startup + after each index)

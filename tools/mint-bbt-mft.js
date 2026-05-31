@@ -85,7 +85,8 @@ async function main() {
     const s = await pool.slot0();
     if (s[0] === 0n) throw new Error('not init');
     console.log('Already initialized, tick:', Number(s[1]));
-  } catch {
+  } catch (e) {
+    console.warn('[mint-bbt] pool not initialized, initializing:', e.message || e);
     const sqrtP = BigInt(Math.floor(Math.sqrt(bbtPerMft) * 79228162514264337593543950336));
     console.log('Initializing...');
     await (await pool.initialize(sqrtP, { gasLimit: 300000 })).wait();

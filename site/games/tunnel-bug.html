@@ -1,0 +1,1714 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Tunnel Bug</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body { width: 100%; height: 100%; overflow: hidden; background: #111; touch-action: none; }
+canvas { display: block; margin: 0 auto; }
+#back-link {
+  position: fixed; bottom: 8px; left: 50%; transform: translateX(-50%);
+  color: #666; font-family: monospace; font-size: 12px; text-decoration: none; z-index: 10;
+}
+#back-link:hover { color: #aaa; }
+</style>
+</head>
+<body>
+<canvas id="gc"></canvas>
+<a id="back-link" href="/games">Back to Arcade</a>
+<script src="nft-loader.js"></script>
+<script>if(window.NftLoader)NftLoader.gate();</script>
+<script>
+(function() {
+"use strict";
+
+// ============================================================
+// CONSTANTS
+// ============================================================
+const COLS = 20, ROWS = 15, BASE_TILE = 32;
+const DIRT = 0, TUNNEL = 1, ROCK = 2;
+const DIR = { NONE: -1, UP: 0, RIGHT: 1, DOWN: 2, LEFT: 3 };
+const DX = [0, 1, 0, -1], DY = [-1, 0, 1, 0];
+
+// Colors
+const C_BG = '#111';
+const C_DIRT = ['#8B6914', '#7A5C10', '#6B4F0C', '#5C4208'];
+const C_DIRT_SPEC = ['#A07828', '#906820', '#805818', '#704810'];
+const C_TUNNEL_BG = '#1a1008';
+const C_ROCK = '#778';
+const C_ROCK_DARK = '#556';
+const C_ROCK_LIGHT = '#99a';
+const C_PLAYER = '#FFD700';
+const C_HAT = '#FF6600';
+const C_BUG_GREEN = '#22CC44';
+const C_BUG_RED = '#EE3333';
+const C_BUG_PURPLE = '#9944DD';
+
+// ============================================================
+// CANVAS SETUP
+// ============================================================
+const canvas = document.getElementById('gc');
+const ctx = canvas.getContext('2d');
+let W, H, TILE, SCALE, OFFSET_X, OFFSET_Y;
+
+function resize() {
+  const dpr = window.devicePixelRatio || 1;
+  const sw = window.innerWidth;
+  const sh = window.innerHeight - 20;
+  SCALE = Math.min(sw / (COLS * BASE_TILE), sh / ((ROWS + 2) * BASE_TILE));
+  TILE = Math.floor(BASE_TILE * SCALE);
+  W = COLS * TILE;
+  H = (ROWS + 2) * TILE;
+  OFFSET_X = Math.floor((sw - W) / 2);
+  OFFSET_Y = Math.floor((sh - H) / 2);
+  canvas.width = W * dpr;
+  canvas.height = H * dpr;
+  canvas.style.width = W + 'px';
+  canvas.style.height = H + 'px';
+  canvas.style.marginTop = Math.max(0, OFFSET_Y) + 'px';
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+}
+window.addEventListener('resize', resize);
+resize();
+
+// ============================================================
+// AUDIO ENGINE
+// ============================================================
+let audioCtx = null;
+function ensureAudio() {
+  if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  if (audioCtx.state === 'suspended') audioCtx.resume();
+}
+
+function playTone(freq, dur, type, vol, slide) {
+  if (!audioCtx) return;
+  const osc = audioCtx.createOscillator();
+  const gain = audioCtx.createGain();
+  osc.type = type || 'square';
+  osc.frequency.setValueAtTime(freq, audioCtx.currentTime);
+  if (slide) osc.frequency.linearRampToValueAtTime(slide, audioCtx.currentTime + dur);
+  gain.gain.setValueAtTime(vol || 0.1, audioCtx.currentTime);
+  gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + dur);
+  osc.connect(gain);
+  gain.connect(audioCtx.destination);
+  osc.start();
+  osc.stop(audioCtx.currentTime + dur);
+}
+
+function playNoise(dur, vol) {
+  if (!audioCtx) return;
+  const bufSize = audioCtx.sampleRate * dur;
+  const buf = audioCtx.createBuffer(1, bufSize, audioCtx.sampleRate);
+  const data = buf.getChannelData(0);
+  for (let i = 0; i < bufSize; i++) data[i] = Math.random() * 2 - 1;
+  const src = audioCtx.createBufferSource();
+  src.buffer = buf;
+  const gain = audioCtx.createGain();
+  gain.gain.setValueAtTime(vol || 0.05, audioCtx.currentTime);
+  gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + dur);
+  const filt = audioCtx.createBiquadFilter();
+  filt.type = 'bandpass';
+  filt.frequency.value = 800;
+  filt.Q.value = 2;
+  src.connect(filt);
+  filt.connect(gain);
+  gain.connect(audioCtx.destination);
+  src.start();
+  src.stop(audioCtx.currentTime + dur);
+}
+
+const SFX = {
+  dig() { playNoise(0.06, 0.08); playTone(200, 0.05, 'triangle', 0.04, 120); },
+  squash() { playTone(300, 0.15, 'square', 0.12, 80); playNoise(0.12, 0.1); },
+  pump() { playTone(220, 0.08, 'square', 0.06, 440); },
+  pop() { playTone(600, 0.2, 'sawtooth', 0.1, 100); playNoise(0.15, 0.12); },
+  die() { playTone(400, 0.4, 'sawtooth', 0.12, 60); setTimeout(() => playTone(200, 0.3, 'square', 0.08, 40), 200); },
+  powerup() { playTone(440, 0.08, 'square', 0.08); setTimeout(() => playTone(660, 0.08, 'square', 0.08), 80); setTimeout(() => playTone(880, 0.12, 'square', 0.1), 160); },
+  levelComplete() {
+    const notes = [523, 659, 784, 1047];
+    notes.forEach((n, i) => setTimeout(() => playTone(n, 0.15, 'square', 0.08), i * 120));
+  },
+  rockFall() { playTone(80, 0.3, 'triangle', 0.1, 40); playNoise(0.2, 0.08); },
+  gameOver() {
+    const notes = [440, 349, 293, 220];
+    notes.forEach((n, i) => setTimeout(() => playTone(n, 0.25, 'sawtooth', 0.1), i * 200));
+  }
+};
+
+// ============================================================
+// DIRT TEXTURE (pre-rendered)
+// ============================================================
+const dirtCanvas = document.createElement('canvas');
+const dirtCtx = dirtCanvas.getContext('2d');
+function genDirtTextures() {
+  dirtCanvas.width = TILE * 4;
+  dirtCanvas.height = TILE;
+  for (let layer = 0; layer < 4; layer++) {
+    dirtCtx.fillStyle = C_DIRT[layer];
+    dirtCtx.fillRect(layer * TILE, 0, TILE, TILE);
+    for (let i = 0; i < 20; i++) {
+      dirtCtx.fillStyle = C_DIRT_SPEC[layer];
+      dirtCtx.globalAlpha = 0.3 + Math.random() * 0.4;
+      const sx = layer * TILE + Math.random() * (TILE - 2);
+      const sy = Math.random() * (TILE - 2);
+      dirtCtx.fillRect(sx, sy, 1 + Math.random() * 2, 1 + Math.random() * 2);
+    }
+    dirtCtx.globalAlpha = 1;
+  }
+}
+
+// ============================================================
+// PARTICLES
+// ============================================================
+let particles = [];
+function spawnParticles(x, y, color, count, speed) {
+  for (let i = 0; i < count; i++) {
+    const angle = Math.random() * Math.PI * 2;
+    const spd = (speed || 2) * (0.5 + Math.random());
+    particles.push({ x, y, vx: Math.cos(angle) * spd, vy: Math.sin(angle) * spd, life: 1, color, size: 2 + Math.random() * 3 });
+  }
+}
+function updateParticles(dt) {
+  for (let i = particles.length - 1; i >= 0; i--) {
+    const p = particles[i];
+    p.x += p.vx * dt * 60;
+    p.y += p.vy * dt * 60;
+    p.vy += 0.05 * dt * 60;
+    p.life -= dt * 2.5;
+    if (p.life <= 0) particles.splice(i, 1);
+  }
+}
+function drawParticles() {
+  for (const p of particles) {
+    ctx.globalAlpha = p.life;
+    ctx.fillStyle = p.color;
+    ctx.fillRect(p.x - p.size / 2, p.y - p.size / 2, p.size, p.size);
+  }
+  ctx.globalAlpha = 1;
+}
+
+// ============================================================
+// SCREEN FLASH
+// ============================================================
+let flashAlpha = 0, flashColor = '#fff';
+function flash(color) { flashColor = color || '#fff'; flashAlpha = 0.4; }
+function updateFlash(dt) { flashAlpha = Math.max(0, flashAlpha - dt * 3); }
+function drawFlash() {
+  if (flashAlpha > 0) {
+    ctx.globalAlpha = flashAlpha;
+    ctx.fillStyle = flashColor;
+    ctx.fillRect(0, 0, W, H);
+    ctx.globalAlpha = 1;
+  }
+}
+
+// ============================================================
+// GAME STATE
+// ============================================================
+let state = 'title'; // title, playing, levelComplete, dying, gameOver
+let grid = [];
+let player = {};
+let bugs = [];
+let rocks = [];
+let powerups = [];
+let score = 0, highScore = 0, lives = 3, level = 1, combo = 0;
+let stateTimer = 0;
+let inputDir = DIR.NONE, inputPump = false;
+let shieldTimer = 0, speedTimer = 0;
+let digAnimations = [];
+let keys = {};
+
+// Load high score
+try { highScore = parseInt(localStorage.getItem('tunnelbug_hi') || '0', 10); } catch(e) { highScore = 0; }
+
+// ============================================================
+// LEVEL GENERATION
+// ============================================================
+function initLevel() {
+  grid = [];
+  bugs = [];
+  rocks = [];
+  powerups = [];
+  particles = [];
+  digAnimations = [];
+  combo = 0;
+  shieldTimer = 0;
+  speedTimer = 0;
+
+  for (let y = 0; y < ROWS; y++) {
+    grid[y] = [];
+    for (let x = 0; x < COLS; x++) {
+      grid[y][x] = DIRT;
+    }
+  }
+
+  // Top 2 rows are always tunnel (sky/surface)
+  for (let x = 0; x < COLS; x++) {
+    grid[0][x] = TUNNEL;
+    grid[1][x] = TUNNEL;
+  }
+
+  // Starting tunnel for player (row 2, a few tiles wide)
+  for (let x = 0; x < 5; x++) {
+    grid[2][x] = TUNNEL;
+  }
+
+  // Place rocks (more at higher levels)
+  const rockCount = 3 + Math.min(level, 8);
+  let placed = 0;
+  let attempts = 0;
+  while (placed < rockCount && attempts < 200) {
+    attempts++;
+    const rx = Math.floor(Math.random() * COLS);
+    const ry = 3 + Math.floor(Math.random() * (ROWS - 4));
+    if (grid[ry][rx] === DIRT && grid[ry - 1] && grid[ry - 1][rx] === DIRT) {
+      grid[ry][rx] = ROCK;
+      rocks.push({ x: rx, y: ry, falling: false, fallY: 0, settled: true, fallSpeed: 0, crushed: false });
+      placed++;
+    }
+  }
+
+  // Place power-ups hidden in dirt
+  const puCount = 2 + Math.floor(level / 2);
+  const puTypes = ['speed', 'shield', 'bomb'];
+  for (let i = 0; i < puCount; i++) {
+    let px, py;
+    attempts = 0;
+    do {
+      px = Math.floor(Math.random() * COLS);
+      py = 3 + Math.floor(Math.random() * (ROWS - 4));
+      attempts++;
+    } while ((grid[py][px] !== DIRT || attempts > 100));
+    if (grid[py][px] === DIRT) {
+      powerups.push({ x: px, y: py, type: puTypes[Math.floor(Math.random() * puTypes.length)], collected: false, visible: false });
+    }
+  }
+
+  // Pre-dig some tunnels for bugs to start in
+  const tunnelSeeds = 2 + Math.min(level, 5);
+  for (let t = 0; t < tunnelSeeds; t++) {
+    let tx = 5 + Math.floor(Math.random() * (COLS - 7));
+    let ty = 4 + Math.floor(Math.random() * (ROWS - 6));
+    const len = 3 + Math.floor(Math.random() * 4);
+    const horiz = Math.random() > 0.5;
+    for (let i = 0; i < len; i++) {
+      const cx = horiz ? tx + i : tx;
+      const cy = horiz ? ty : ty + i;
+      if (cx >= 0 && cx < COLS && cy >= 0 && cy < ROWS && grid[cy][cx] === DIRT) {
+        grid[cy][cx] = TUNNEL;
+      }
+    }
+  }
+
+  // Place bugs
+  const bugCount = 2 + level;
+  const maxBugs = 12;
+  const actualBugs = Math.min(bugCount, maxBugs);
+  for (let i = 0; i < actualBugs; i++) {
+    let bx, by;
+    attempts = 0;
+    do {
+      bx = 5 + Math.floor(Math.random() * (COLS - 6));
+      by = 4 + Math.floor(Math.random() * (ROWS - 5));
+      attempts++;
+    } while ((grid[by][bx] !== TUNNEL || attempts > 100));
+    // Ensure tile is tunnel
+    grid[by][bx] = TUNNEL;
+
+    let bugType = 'green';
+    if (level >= 3 && Math.random() < 0.3) bugType = 'red';
+    if (level >= 5 && Math.random() < 0.15) bugType = 'purple';
+
+    bugs.push({
+      x: bx, y: by, px: bx * TILE, py: (by + 2) * TILE,
+      type: bugType, dir: DIR.RIGHT, hp: bugType === 'purple' ? 2 : 1,
+      moveTimer: 0, speed: bugType === 'red' ? 1.8 : (bugType === 'purple' ? 0.8 : 1.2),
+      inflate: 0, inflateDir: 0, dead: false,
+      animFrame: 0, animTimer: 0, stunTimer: 0
+    });
+  }
+
+  // Player
+  player = {
+    x: 1, y: 2, px: 1 * TILE, py: 4 * TILE,
+    dir: DIR.RIGHT, moving: false, moveTimer: 0,
+    animFrame: 0, animTimer: 0, pumping: false, pumpTarget: null,
+    speed: 5, dead: false, invincible: 0
+  };
+}
+
+// ============================================================
+// GRID HELPERS
+// ============================================================
+function inBounds(x, y) { return x >= 0 && x < COLS && y >= 0 && y < ROWS; }
+function getLayer(y) { return Math.min(3, Math.floor(y / (ROWS / 4))); }
+
+function digTile(x, y) {
+  if (!inBounds(x, y) || grid[y][x] !== DIRT) return false;
+
+  // Check for rock -- can't dig into a rock tile
+  for (const r of rocks) {
+    if (r.x === x && r.y === y && !r.crushed) return false;
+  }
+
+  grid[y][x] = TUNNEL;
+  SFX.dig();
+
+  // Dig animation
+  digAnimations.push({ x: x * TILE, y: (y + 2) * TILE, life: 1 });
+  spawnParticles(x * TILE + TILE / 2, (y + 2) * TILE + TILE / 2, C_DIRT[getLayer(y)], 6, 1.5);
+
+  // Reveal power-ups
+  for (const pu of powerups) {
+    if (pu.x === x && pu.y === y && !pu.collected) {
+      pu.visible = true;
+    }
+  }
+
+  // Check rocks above -- if dirt below a rock is dug, rock falls
+  checkRockFall();
+  return true;
+}
+
+function checkRockFall() {
+  for (const rock of rocks) {
+    if (rock.crushed || rock.falling) continue;
+    const below = rock.y + 1;
+    if (below < ROWS && grid[below][rock.x] === TUNNEL) {
+      rock.falling = true;
+      rock.settled = false;
+      rock.fallY = 0;
+      rock.fallSpeed = 0;
+      SFX.rockFall();
+    }
+  }
+}
+
+// ============================================================
+// PLAYER MOVEMENT
+// ============================================================
+function movePlayer(dt) {
+  if (player.dead) return;
+  player.invincible = Math.max(0, player.invincible - dt);
+  player.animTimer += dt;
+  if (player.animTimer > 0.15) { player.animTimer = 0; player.animFrame = (player.animFrame + 1) % 4; }
+
+  const spd = speedTimer > 0 ? player.speed * 1.6 : player.speed;
+
+  if (player.pumping) {
+    // Pumping logic
+    if (player.pumpTarget && !player.pumpTarget.dead) {
+      player.pumpTarget.inflate += dt * 2.5;
+      player.pumpTarget.stunTimer = 0.5;
+      if (player.pumpTarget.inflate >= 1) {
+        // Pop!
+        killBug(player.pumpTarget, false);
+        player.pumping = false;
+        player.pumpTarget = null;
+      }
+    } else {
+      player.pumping = false;
+      player.pumpTarget = null;
+    }
+    if (!inputPump) {
+      player.pumping = false;
+      if (player.pumpTarget) {
+        player.pumpTarget.inflateDir = -1;
+      }
+      player.pumpTarget = null;
+    }
+    return;
+  }
+
+  if (inputDir === DIR.NONE) {
+    player.moving = false;
+    return;
+  }
+
+  player.dir = inputDir;
+  const targetX = player.x + DX[inputDir];
+  const targetY = player.y + DY[inputDir];
+
+  if (!inBounds(targetX, targetY)) return;
+
+  // Check rock blocking
+  for (const r of rocks) {
+    if (r.x === targetX && r.y === targetY && !r.crushed && !r.falling) return;
+  }
+
+  // Dig if dirt
+  if (grid[targetY][targetX] === DIRT) {
+    digTile(targetX, targetY);
+  }
+
+  // Move with smooth interpolation
+  player.moving = true;
+  player.moveTimer += dt * spd;
+  if (player.moveTimer >= 1) {
+    player.moveTimer = 0;
+    player.x = targetX;
+    player.y = targetY;
+
+    // Collect power-ups
+    for (const pu of powerups) {
+      if (pu.x === player.x && pu.y === player.y && !pu.collected && pu.visible) {
+        pu.collected = true;
+        SFX.powerup();
+        score += 50;
+        if (pu.type === 'speed') speedTimer = 5;
+        else if (pu.type === 'shield') shieldTimer = 5;
+        else if (pu.type === 'bomb') doBomb(player.x, player.y);
+        flash('#ff0');
+      }
+    }
+  }
+
+  // Smooth pixel position
+  const tx = player.x * TILE;
+  const ty = (player.y + 2) * TILE;
+  const lerpSpeed = spd * dt * TILE * 1.5;
+  player.px += (tx - player.px) * Math.min(1, lerpSpeed / Math.max(1, Math.abs(tx - player.px)));
+  player.py += (ty - player.py) * Math.min(1, lerpSpeed / Math.max(1, Math.abs(ty - player.py)));
+  if (Math.abs(player.px - tx) < 0.5) player.px = tx;
+  if (Math.abs(player.py - ty) < 0.5) player.py = ty;
+}
+
+function doBomb(cx, cy) {
+  for (let dy = -2; dy <= 2; dy++) {
+    for (let dx = -2; dx <= 2; dx++) {
+      if (Math.abs(dx) + Math.abs(dy) > 3) continue;
+      const nx = cx + dx, ny = cy + dy;
+      if (inBounds(nx, ny) && grid[ny][nx] === DIRT) {
+        grid[ny][nx] = TUNNEL;
+        spawnParticles(nx * TILE + TILE / 2, (ny + 2) * TILE + TILE / 2, '#FA0', 3, 3);
+      }
+    }
+  }
+  // Kill bugs in range
+  for (const bug of bugs) {
+    if (!bug.dead && Math.abs(bug.x - cx) + Math.abs(bug.y - cy) <= 2) {
+      killBug(bug, false);
+    }
+  }
+  flash('#f80');
+  checkRockFall();
+}
+
+// ============================================================
+// PUMP MECHANIC
+// ============================================================
+function tryPump() {
+  if (player.dead || player.pumping) return;
+  // Find nearest bug in facing direction
+  const dx = DX[player.dir], dy = DY[player.dir];
+  for (let dist = 1; dist <= 4; dist++) {
+    const tx = player.x + dx * dist;
+    const ty = player.y + dy * dist;
+    if (!inBounds(tx, ty)) break;
+    if (grid[ty][tx] !== TUNNEL) break;
+    for (const bug of bugs) {
+      if (!bug.dead && bug.x === tx && bug.y === ty) {
+        player.pumping = true;
+        player.pumpTarget = bug;
+        bug.inflateDir = 1;
+        SFX.pump();
+        return;
+      }
+    }
+  }
+}
+
+// ============================================================
+// BUG AI
+// ============================================================
+function updateBugs(dt) {
+  for (const bug of bugs) {
+    if (bug.dead) continue;
+
+    bug.animTimer += dt;
+    if (bug.animTimer > 0.12) { bug.animTimer = 0; bug.animFrame = (bug.animFrame + 1) % 4; }
+
+    // Deflate when not being pumped
+    if (bug.inflateDir === -1) {
+      bug.inflate = Math.max(0, bug.inflate - dt * 1.5);
+      if (bug.inflate <= 0) bug.inflateDir = 0;
+    }
+
+    if (bug.stunTimer > 0) {
+      bug.stunTimer -= dt;
+      continue;
+    }
+
+    // Speed increases with level
+    const actualSpeed = bug.speed * (1 + (level - 1) * 0.08);
+    bug.moveTimer += dt * actualSpeed;
+
+    if (bug.moveTimer >= 1) {
+      bug.moveTimer = 0;
+
+      // Pathfind toward player through tunnels
+      const path = findPath(bug.x, bug.y, player.x, player.y, bug.type === 'red');
+      if (path && path.length > 1) {
+        const next = path[1];
+        if (bug.type === 'red' || grid[next.y][next.x] === TUNNEL) {
+          bug.x = next.x;
+          bug.y = next.y;
+          if (next.x > bug.x) bug.dir = DIR.RIGHT;
+          else if (next.x < bug.x) bug.dir = DIR.LEFT;
+          else if (next.y > bug.y) bug.dir = DIR.DOWN;
+          else bug.dir = DIR.UP;
+        }
+      } else {
+        // Random wander
+        const dirs = [0, 1, 2, 3].filter(d => {
+          const nx = bug.x + DX[d], ny = bug.y + DY[d];
+          if (!inBounds(nx, ny)) return false;
+          if (bug.type === 'red') return true; // Fliers can cross gaps
+          return grid[ny][nx] === TUNNEL;
+        });
+        if (dirs.length > 0) {
+          const d = dirs[Math.floor(Math.random() * dirs.length)];
+          bug.x += DX[d];
+          bug.y += DY[d];
+          bug.dir = d;
+        }
+      }
+    }
+
+    // Smooth pixel position
+    const tx = bug.x * TILE;
+    const ty = (bug.y + 2) * TILE;
+    bug.px += (tx - bug.px) * 0.2;
+    bug.py += (ty - bug.py) * 0.2;
+
+    // Check collision with player
+    if (!player.dead && !player.pumping && bug.x === player.x && bug.y === player.y) {
+      if (shieldTimer > 0) {
+        killBug(bug, false);
+        shieldTimer = 0;
+        flash('#0ff');
+      } else if (player.invincible <= 0) {
+        playerDie();
+      }
+    }
+  }
+}
+
+// Simple BFS pathfinding
+function findPath(sx, sy, tx, ty, canFly) {
+  if (sx === tx && sy === ty) return [{ x: sx, y: sy }];
+  const visited = {};
+  const queue = [{ x: sx, y: sy, path: [{ x: sx, y: sy }] }];
+  visited[sy * COLS + sx] = true;
+  const maxSteps = 200;
+  let steps = 0;
+
+  while (queue.length > 0 && steps < maxSteps) {
+    steps++;
+    const cur = queue.shift();
+    for (let d = 0; d < 4; d++) {
+      const nx = cur.x + DX[d], ny = cur.y + DY[d];
+      if (!inBounds(nx, ny)) continue;
+      const key = ny * COLS + nx;
+      if (visited[key]) continue;
+      if (!canFly && grid[ny][nx] !== TUNNEL) continue;
+      // Rocks block even fliers
+      let blocked = false;
+      for (const r of rocks) {
+        if (r.x === nx && r.y === ny && !r.crushed) { blocked = true; break; }
+      }
+      if (blocked) continue;
+      visited[key] = true;
+      const newPath = cur.path.concat({ x: nx, y: ny });
+      if (nx === tx && ny === ty) return newPath;
+      queue.push({ x: nx, y: ny, path: newPath });
+    }
+  }
+  return null;
+}
+
+// ============================================================
+// ROCKS
+// ============================================================
+function updateRocks(dt) {
+  for (const rock of rocks) {
+    if (rock.crushed) continue;
+    if (!rock.falling) continue;
+
+    rock.fallSpeed += dt * 12;
+    rock.fallY += rock.fallSpeed * dt * TILE;
+
+    // Check if rock reached next tile
+    if (rock.fallY >= TILE) {
+      rock.fallY -= TILE;
+      rock.y += 1;
+
+      // Check what's below
+      const below = rock.y + 1;
+
+      // Kill bugs at current position
+      let hitCount = 0;
+      for (const bug of bugs) {
+        if (!bug.dead && bug.x === rock.x && bug.y === rock.y) {
+          killBug(bug, true);
+          hitCount++;
+        }
+      }
+
+      // Kill player
+      if (!player.dead && player.x === rock.x && player.y === rock.y) {
+        if (shieldTimer > 0) {
+          shieldTimer = 0;
+          flash('#0ff');
+        } else if (player.invincible <= 0) {
+          playerDie();
+        }
+      }
+
+      if (hitCount > 0) {
+        combo += hitCount;
+      }
+
+      // Check if should keep falling
+      if (below >= ROWS || grid[below][rock.x] !== TUNNEL) {
+        // Stop
+        rock.falling = false;
+        rock.settled = true;
+        rock.fallY = 0;
+        rock.fallSpeed = 0;
+        // Mark as crushed after falling (becomes debris)
+        rock.crushed = true;
+        grid[rock.y][rock.x] = TUNNEL;
+        spawnParticles(rock.x * TILE + TILE / 2, (rock.y + 2) * TILE + TILE / 2, C_ROCK, 10, 2);
+        SFX.rockFall();
+        if (combo > 0) flash('#ff0');
+        combo = 0;
+      } else {
+        // Check for other rocks blocking
+        let rockBelow = false;
+        for (const r2 of rocks) {
+          if (r2 !== rock && r2.x === rock.x && r2.y === below && !r2.crushed) {
+            rockBelow = true; break;
+          }
+        }
+        if (rockBelow) {
+          rock.falling = false;
+          rock.settled = true;
+          rock.fallY = 0;
+          rock.fallSpeed = 0;
+          rock.crushed = true;
+          grid[rock.y][rock.x] = TUNNEL;
+          spawnParticles(rock.x * TILE + TILE / 2, (rock.y + 2) * TILE + TILE / 2, C_ROCK, 10, 2);
+          combo = 0;
+        }
+      }
+    }
+  }
+}
+
+// ============================================================
+// KILLS & SCORING
+// ============================================================
+function killBug(bug, byRock) {
+  bug.dead = true;
+  const baseScore = bug.type === 'purple' ? 400 : (bug.type === 'red' ? 200 : 100);
+  const comboMult = byRock ? Math.max(1, combo) : 1;
+  const levelMult = 1 + (level - 1) * 0.1;
+  const earned = Math.floor(baseScore * comboMult * levelMult);
+  score += earned;
+
+  if (byRock) {
+    SFX.squash();
+    flash('#f44');
+    spawnParticles(bug.px + TILE / 2, bug.py + TILE / 2, bug.type === 'green' ? C_BUG_GREEN : (bug.type === 'red' ? C_BUG_RED : C_BUG_PURPLE), 15, 3);
+  } else {
+    SFX.pop();
+    flash('#ff0');
+    spawnParticles(bug.px + TILE / 2, bug.py + TILE / 2, bug.type === 'green' ? C_BUG_GREEN : (bug.type === 'red' ? C_BUG_RED : C_BUG_PURPLE), 20, 4);
+  }
+
+  // Float score text
+  spawnParticles(bug.px + TILE / 2, bug.py, '#fff', 3, 1);
+
+  // Check level complete
+  const alive = bugs.filter(b => !b.dead);
+  if (alive.length === 0) {
+    state = 'levelComplete';
+    stateTimer = 2.5;
+    SFX.levelComplete();
+    score += level * 100; // Level bonus
+  }
+}
+
+function playerDie() {
+  if (player.dead) return;
+  player.dead = true;
+  SFX.die();
+  flash('#f00');
+  spawnParticles(player.px + TILE / 2, player.py + TILE / 2, C_PLAYER, 20, 3);
+  lives--;
+  state = 'dying';
+  stateTimer = 2;
+}
+
+// ============================================================
+// TIMERS
+// ============================================================
+function updateTimers(dt) {
+  if (shieldTimer > 0) shieldTimer -= dt;
+  if (speedTimer > 0) speedTimer -= dt;
+}
+
+// ============================================================
+// DRAWING
+// ============================================================
+function drawGrid() {
+  // Background
+  ctx.fillStyle = C_TUNNEL_BG;
+  ctx.fillRect(0, 2 * TILE, W, ROWS * TILE);
+
+  // Sky
+  ctx.fillStyle = '#2244aa';
+  ctx.fillRect(0, 0, W, 2 * TILE);
+  // Sun
+  ctx.fillStyle = '#FFD700';
+  ctx.beginPath();
+  ctx.arc(W - TILE, TILE * 0.7, TILE * 0.4, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Surface grass
+  ctx.fillStyle = '#33882266';
+  ctx.fillRect(0, 1.8 * TILE, W, TILE * 0.3);
+
+  // Dirt tiles
+  for (let y = 0; y < ROWS; y++) {
+    for (let x = 0; x < COLS; x++) {
+      const px = x * TILE, py = (y + 2) * TILE;
+      if (grid[y][x] === DIRT) {
+        const layer = getLayer(y);
+        ctx.drawImage(dirtCanvas, layer * TILE, 0, TILE, TILE, px, py, TILE, TILE);
+        // Edge shading
+        if (y > 0 && grid[y - 1][x] === TUNNEL) {
+          ctx.fillStyle = 'rgba(0,0,0,0.15)';
+          ctx.fillRect(px, py, TILE, 3);
+        }
+        if (x > 0 && grid[y][x - 1] === TUNNEL) {
+          ctx.fillStyle = 'rgba(0,0,0,0.1)';
+          ctx.fillRect(px, py, 3, TILE);
+        }
+      } else if (grid[y][x] === TUNNEL && y >= 2) {
+        // Tunnel has subtle gradient
+        ctx.fillStyle = `rgba(20, 12, 5, ${0.3 + y * 0.02})`;
+        ctx.fillRect(px, py, TILE, TILE);
+      }
+    }
+  }
+
+  // Dig animations
+  for (let i = digAnimations.length - 1; i >= 0; i--) {
+    const da = digAnimations[i];
+    da.life -= 0.05;
+    ctx.globalAlpha = da.life * 0.5;
+    ctx.fillStyle = '#654';
+    ctx.fillRect(da.x, da.y, TILE, TILE);
+    ctx.globalAlpha = 1;
+    if (da.life <= 0) digAnimations.splice(i, 1);
+  }
+}
+
+function drawRocks() {
+  for (const rock of rocks) {
+    if (rock.crushed) continue;
+    const px = rock.x * TILE;
+    const py = (rock.y + 2) * TILE + (rock.falling ? rock.fallY : 0);
+    const s = TILE;
+    const cx = px + s / 2, cy = py + s / 2;
+
+    // Shadow
+    ctx.fillStyle = 'rgba(0,0,0,0.3)';
+    ctx.fillRect(px + 2, py + 2, s - 2, s - 2);
+
+    // Main rock body
+    ctx.fillStyle = C_ROCK;
+    ctx.beginPath();
+    ctx.moveTo(px + 4, py + 2);
+    ctx.lineTo(px + s - 4, py + 2);
+    ctx.lineTo(px + s - 1, py + s * 0.4);
+    ctx.lineTo(px + s - 3, py + s - 2);
+    ctx.lineTo(px + 3, py + s - 2);
+    ctx.lineTo(px + 1, py + s * 0.5);
+    ctx.closePath();
+    ctx.fill();
+
+    // Highlight
+    ctx.fillStyle = C_ROCK_LIGHT;
+    ctx.beginPath();
+    ctx.moveTo(px + 5, py + 3);
+    ctx.lineTo(px + s * 0.6, py + 3);
+    ctx.lineTo(px + s * 0.4, py + s * 0.35);
+    ctx.lineTo(px + 4, py + s * 0.3);
+    ctx.closePath();
+    ctx.fill();
+
+    // Crack lines
+    ctx.strokeStyle = C_ROCK_DARK;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(cx - 2, cy - 4);
+    ctx.lineTo(cx + 1, cy);
+    ctx.lineTo(cx - 3, cy + 5);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(cx + 3, cy - 2);
+    ctx.lineTo(cx + 6, cy + 3);
+    ctx.stroke();
+  }
+}
+
+function drawPowerups() {
+  for (const pu of powerups) {
+    if (pu.collected || !pu.visible) continue;
+    const px = pu.x * TILE, py = (pu.y + 2) * TILE;
+    const cx = px + TILE / 2, cy = py + TILE / 2;
+    const pulse = Math.sin(Date.now() * 0.005) * 0.15 + 0.85;
+
+    ctx.save();
+    ctx.translate(cx, cy);
+    ctx.scale(pulse, pulse);
+
+    if (pu.type === 'speed') {
+      // Lightning bolt
+      ctx.fillStyle = '#FFD700';
+      ctx.beginPath();
+      ctx.moveTo(-3, -TILE * 0.35);
+      ctx.lineTo(3, -TILE * 0.05);
+      ctx.lineTo(-1, -TILE * 0.05);
+      ctx.lineTo(3, TILE * 0.35);
+      ctx.lineTo(-3, TILE * 0.05);
+      ctx.lineTo(1, TILE * 0.05);
+      ctx.closePath();
+      ctx.fill();
+    } else if (pu.type === 'shield') {
+      // Shield shape
+      ctx.fillStyle = '#00CCFF';
+      ctx.beginPath();
+      ctx.moveTo(0, -TILE * 0.35);
+      ctx.lineTo(TILE * 0.3, -TILE * 0.15);
+      ctx.lineTo(TILE * 0.3, TILE * 0.1);
+      ctx.lineTo(0, TILE * 0.35);
+      ctx.lineTo(-TILE * 0.3, TILE * 0.1);
+      ctx.lineTo(-TILE * 0.3, -TILE * 0.15);
+      ctx.closePath();
+      ctx.fill();
+      ctx.fillStyle = '#66EEFF';
+      ctx.beginPath();
+      ctx.moveTo(0, -TILE * 0.2);
+      ctx.lineTo(TILE * 0.15, -TILE * 0.05);
+      ctx.lineTo(0, TILE * 0.15);
+      ctx.lineTo(-TILE * 0.15, -TILE * 0.05);
+      ctx.closePath();
+      ctx.fill();
+    } else if (pu.type === 'bomb') {
+      // Bomb circle
+      ctx.fillStyle = '#333';
+      ctx.beginPath();
+      ctx.arc(0, 2, TILE * 0.28, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.strokeStyle = '#FA0';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(2, -TILE * 0.25);
+      ctx.lineTo(4, -TILE * 0.4);
+      ctx.stroke();
+      // Spark
+      ctx.fillStyle = '#FA0';
+      ctx.beginPath();
+      ctx.arc(4, -TILE * 0.4, 3, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    ctx.restore();
+  }
+}
+
+function drawPlayer() {
+  if (player.dead) return;
+  const px = player.px, py = player.py;
+  const s = TILE;
+  const cx = px + s / 2;
+  const cy = py + s / 2;
+  const flip = player.dir === DIR.LEFT ? -1 : 1;
+  const bobY = player.moving ? Math.sin(player.animFrame * Math.PI) * 2 : 0;
+
+  // Invincibility blink
+  if (player.invincible > 0 && Math.floor(player.invincible * 10) % 2) return;
+
+  ctx.save();
+  ctx.translate(cx, cy + bobY);
+  ctx.scale(flip, 1);
+
+  // Shield effect
+  if (shieldTimer > 0) {
+    ctx.strokeStyle = `rgba(0, 200, 255, ${0.4 + Math.sin(Date.now() * 0.01) * 0.2})`;
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.arc(0, 0, s * 0.55, 0, Math.PI * 2);
+    ctx.stroke();
+  }
+
+  // Speed effect
+  if (speedTimer > 0) {
+    ctx.globalAlpha = 0.3;
+    ctx.fillStyle = '#FFD700';
+    ctx.fillRect(-s * 0.5, -s * 0.1, s * 0.3, s * 0.05);
+    ctx.fillRect(-s * 0.45, s * 0.1, s * 0.25, s * 0.05);
+    ctx.globalAlpha = 1;
+  }
+
+  // Body (overalls)
+  ctx.fillStyle = '#4488CC';
+  ctx.fillRect(-s * 0.2, -s * 0.1, s * 0.4, s * 0.35);
+
+  // Legs (animated)
+  const legOffset = player.moving ? Math.sin(player.animFrame * Math.PI * 0.5) * 3 : 0;
+  ctx.fillStyle = '#4488CC';
+  ctx.fillRect(-s * 0.15, s * 0.2, s * 0.12, s * 0.2);
+  ctx.fillRect(s * 0.05, s * 0.2, s * 0.12, s * 0.2);
+  // Boots
+  ctx.fillStyle = '#553';
+  ctx.fillRect(-s * 0.17, s * 0.35 + legOffset, s * 0.16, s * 0.08);
+  ctx.fillRect(s * 0.03, s * 0.35 - legOffset, s * 0.16, s * 0.08);
+
+  // Head
+  ctx.fillStyle = '#FFCC88';
+  ctx.fillRect(-s * 0.18, -s * 0.35, s * 0.36, s * 0.28);
+
+  // Hard hat
+  ctx.fillStyle = C_HAT;
+  ctx.fillRect(-s * 0.25, -s * 0.43, s * 0.5, s * 0.12);
+  ctx.fillRect(-s * 0.2, -s * 0.48, s * 0.4, s * 0.08);
+  // Hat light
+  ctx.fillStyle = '#FFE44D';
+  ctx.fillRect(s * 0.05, -s * 0.48, s * 0.08, s * 0.06);
+
+  // Eyes
+  ctx.fillStyle = '#222';
+  ctx.fillRect(s * 0.02, -s * 0.28, s * 0.07, s * 0.07);
+  ctx.fillRect(-s * 0.12, -s * 0.28, s * 0.07, s * 0.07);
+
+  // Arms + pickaxe
+  ctx.fillStyle = '#FFCC88';
+  const armSwing = player.moving ? Math.sin(player.animFrame * Math.PI) * 15 : 0;
+  ctx.save();
+  ctx.translate(s * 0.2, -s * 0.05);
+  ctx.rotate((armSwing + 20) * Math.PI / 180);
+  ctx.fillRect(0, 0, s * 0.08, s * 0.22);
+  // Pickaxe handle
+  ctx.fillStyle = '#884';
+  ctx.fillRect(s * 0.02, -s * 0.05, s * 0.04, s * 0.15);
+  // Pickaxe head
+  ctx.fillStyle = '#AAB';
+  ctx.fillRect(-s * 0.06, -s * 0.08, s * 0.15, s * 0.05);
+  ctx.restore();
+
+  // Pump line when pumping
+  if (player.pumping && player.pumpTarget) {
+    ctx.strokeStyle = '#FFD700';
+    ctx.lineWidth = 2;
+    ctx.setLineDash([4, 4]);
+    const tpx = player.pumpTarget.px + TILE / 2 - cx * flip;
+    const tpy = player.pumpTarget.py + TILE / 2 - cy;
+    ctx.beginPath();
+    ctx.moveTo(s * 0.15, 0);
+    ctx.lineTo(tpx * flip, tpy - bobY);
+    ctx.stroke();
+    ctx.setLineDash([]);
+  }
+
+  ctx.restore();
+}
+
+function drawBug(bug) {
+  if (bug.dead) return;
+  const px = bug.px, py = bug.py;
+  const s = TILE;
+  const cx = px + s / 2;
+  const cy = py + s / 2;
+  const inflate = 1 + bug.inflate * 0.6;
+  const flip = bug.dir === DIR.LEFT ? -1 : 1;
+  const wobble = Math.sin(bug.animFrame * Math.PI * 0.5) * 2;
+
+  ctx.save();
+  ctx.translate(cx, cy);
+  ctx.scale(flip * inflate, inflate);
+
+  let bodyColor, legColor, eyeColor;
+  if (bug.type === 'green') {
+    bodyColor = C_BUG_GREEN;
+    legColor = '#188830';
+    eyeColor = '#FF4444';
+  } else if (bug.type === 'red') {
+    bodyColor = C_BUG_RED;
+    legColor = '#AA2222';
+    eyeColor = '#FFFF00';
+  } else {
+    bodyColor = C_BUG_PURPLE;
+    legColor = '#6622AA';
+    eyeColor = '#FF00FF';
+  }
+
+  // Inflate color shift
+  if (bug.inflate > 0) {
+    const redness = bug.inflate;
+    ctx.globalAlpha = 1;
+    bodyColor = `rgb(${Math.floor(200 + redness * 55)}, ${Math.floor(100 * (1 - redness))}, ${Math.floor(50 * (1 - redness))})`;
+  }
+
+  // Wings for red fliers
+  if (bug.type === 'red') {
+    ctx.fillStyle = 'rgba(255,200,200,0.4)';
+    const wingFlap = Math.sin(Date.now() * 0.02) * 5;
+    ctx.save();
+    ctx.rotate((-30 + wingFlap) * Math.PI / 180);
+    ctx.fillRect(-s * 0.1, -s * 0.35, s * 0.3, s * 0.15);
+    ctx.restore();
+    ctx.save();
+    ctx.rotate((30 - wingFlap) * Math.PI / 180);
+    ctx.fillRect(-s * 0.2, -s * 0.35, s * 0.3, s * 0.15);
+    ctx.restore();
+  }
+
+  // Body (oval-ish)
+  ctx.fillStyle = bodyColor;
+  ctx.beginPath();
+  ctx.ellipse(0, 0, s * 0.3, s * 0.22, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Segments
+  ctx.strokeStyle = legColor;
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(-s * 0.05, -s * 0.22);
+  ctx.lineTo(-s * 0.05, s * 0.22);
+  ctx.moveTo(s * 0.1, -s * 0.2);
+  ctx.lineTo(s * 0.1, s * 0.2);
+  ctx.stroke();
+
+  // Legs (animated)
+  ctx.strokeStyle = legColor;
+  ctx.lineWidth = 2;
+  for (let i = -1; i <= 1; i++) {
+    const lx = i * s * 0.12;
+    const legAnim = Math.sin((bug.animFrame + i) * Math.PI * 0.5) * 4;
+    // Top legs
+    ctx.beginPath();
+    ctx.moveTo(lx, -s * 0.18);
+    ctx.lineTo(lx - 4, -s * 0.32 + legAnim);
+    ctx.stroke();
+    // Bottom legs
+    ctx.beginPath();
+    ctx.moveTo(lx, s * 0.18);
+    ctx.lineTo(lx - 4, s * 0.32 - legAnim);
+    ctx.stroke();
+  }
+
+  // Eyes
+  ctx.fillStyle = '#fff';
+  ctx.beginPath();
+  ctx.arc(s * 0.18, -s * 0.07, s * 0.08, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.arc(s * 0.18, s * 0.07, s * 0.08, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = eyeColor;
+  ctx.beginPath();
+  ctx.arc(s * 0.21, -s * 0.07, s * 0.04, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.arc(s * 0.21, s * 0.07, s * 0.04, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Mandibles
+  ctx.strokeStyle = legColor;
+  ctx.lineWidth = 2;
+  const mandibleAnim = Math.sin(Date.now() * 0.008) * 3;
+  ctx.beginPath();
+  ctx.moveTo(s * 0.28, -s * 0.05);
+  ctx.lineTo(s * 0.36, -s * 0.1 - mandibleAnim);
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.moveTo(s * 0.28, s * 0.05);
+  ctx.lineTo(s * 0.36, s * 0.1 + mandibleAnim);
+  ctx.stroke();
+
+  // Purple boss: crown
+  if (bug.type === 'purple') {
+    ctx.fillStyle = '#FFD700';
+    ctx.beginPath();
+    ctx.moveTo(-s * 0.15, -s * 0.22);
+    ctx.lineTo(-s * 0.1, -s * 0.34);
+    ctx.lineTo(-s * 0.02, -s * 0.26);
+    ctx.lineTo(s * 0.06, -s * 0.34);
+    ctx.lineTo(s * 0.12, -s * 0.22);
+    ctx.closePath();
+    ctx.fill();
+    // HP indicator
+    if (bug.hp > 1) {
+      ctx.fillStyle = '#FFD700';
+      ctx.beginPath();
+      ctx.arc(0, -s * 0.28, 2, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+
+  ctx.restore();
+}
+
+function drawHUD() {
+  const hudY = 0;
+  ctx.fillStyle = '#1a1a2e';
+  ctx.fillRect(0, hudY, W, TILE * 1.6);
+
+  ctx.font = `bold ${Math.floor(TILE * 0.5)}px monospace`;
+
+  // Score
+  ctx.fillStyle = '#FFD700';
+  ctx.textAlign = 'left';
+  ctx.fillText('SCORE: ' + score, TILE * 0.3, hudY + TILE * 0.55);
+
+  // Level
+  ctx.fillStyle = '#88CCFF';
+  ctx.textAlign = 'center';
+  ctx.fillText('LV ' + level, W / 2, hudY + TILE * 0.55);
+
+  // High score
+  ctx.fillStyle = '#888';
+  ctx.font = `${Math.floor(TILE * 0.35)}px monospace`;
+  ctx.fillText('HI: ' + highScore, W / 2, hudY + TILE * 1.0);
+
+  // Lives
+  ctx.fillStyle = '#FF6644';
+  ctx.textAlign = 'right';
+  ctx.font = `bold ${Math.floor(TILE * 0.5)}px monospace`;
+  for (let i = 0; i < lives; i++) {
+    const lx = W - TILE * 0.5 - i * TILE * 0.7;
+    // Mini heart
+    ctx.fillStyle = '#FF4444';
+    ctx.beginPath();
+    ctx.arc(lx - 5, hudY + TILE * 0.42, 4, 0, Math.PI * 2);
+    ctx.arc(lx + 3, hudY + TILE * 0.42, 4, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.beginPath();
+    ctx.moveTo(lx - 9, hudY + TILE * 0.45);
+    ctx.lineTo(lx - 1, hudY + TILE * 0.7);
+    ctx.lineTo(lx + 7, hudY + TILE * 0.45);
+    ctx.fill();
+  }
+
+  // Power-up indicators
+  if (shieldTimer > 0) {
+    ctx.fillStyle = '#00CCFF';
+    ctx.font = `${Math.floor(TILE * 0.35)}px monospace`;
+    ctx.textAlign = 'left';
+    ctx.fillText('SHIELD ' + Math.ceil(shieldTimer) + 's', TILE * 0.3, hudY + TILE * 1.05);
+  }
+  if (speedTimer > 0) {
+    ctx.fillStyle = '#FFD700';
+    ctx.font = `${Math.floor(TILE * 0.35)}px monospace`;
+    ctx.textAlign = 'left';
+    const sy = shieldTimer > 0 ? hudY + TILE * 1.35 : hudY + TILE * 1.05;
+    ctx.fillText('SPEED ' + Math.ceil(speedTimer) + 's', TILE * 0.3, sy);
+  }
+}
+
+// ============================================================
+// TITLE SCREEN
+// ============================================================
+function drawTitle() {
+  ctx.fillStyle = C_BG;
+  ctx.fillRect(0, 0, W, H);
+
+  // Dirt background decoration
+  for (let y = 0; y < ROWS + 2; y++) {
+    for (let x = 0; x < COLS; x++) {
+      if (Math.random() < 0.15) {
+        const layer = Math.min(3, Math.floor(y / 4));
+        ctx.fillStyle = C_DIRT[layer];
+        ctx.globalAlpha = 0.15;
+        ctx.fillRect(x * TILE, y * TILE, TILE, TILE);
+      }
+    }
+  }
+  ctx.globalAlpha = 1;
+
+  // Title
+  const titleY = H * 0.18;
+  ctx.save();
+  ctx.textAlign = 'center';
+
+  // Shadow
+  ctx.fillStyle = '#000';
+  ctx.font = `bold ${Math.floor(TILE * 2.2)}px monospace`;
+  ctx.fillText('TUNNEL', W / 2 + 3, titleY + 3);
+  ctx.fillText('BUG', W / 2 + 3, titleY + TILE * 2.2 + 3);
+
+  // Main title
+  ctx.fillStyle = '#FF6600';
+  ctx.fillText('TUNNEL', W / 2, titleY);
+  ctx.fillStyle = '#22CC44';
+  ctx.fillText('BUG', W / 2, titleY + TILE * 2.2);
+
+  // Subtitle
+  ctx.font = `${Math.floor(TILE * 0.55)}px monospace`;
+  ctx.fillStyle = '#888';
+  ctx.fillText('Dig Deep. Squash Bugs.', W / 2, titleY + TILE * 3.5);
+
+  // Instructions
+  const instY = H * 0.55;
+  ctx.font = `${Math.floor(TILE * 0.45)}px monospace`;
+  ctx.fillStyle = '#AAA';
+  ctx.fillText('Arrow Keys / WASD to Dig', W / 2, instY);
+  ctx.fillText('SPACE to Pump & Pop Bugs', W / 2, instY + TILE * 0.8);
+  ctx.fillText('Drop Rocks on Bugs for Combos!', W / 2, instY + TILE * 1.6);
+
+  // High score
+  if (highScore > 0) {
+    ctx.fillStyle = '#FFD700';
+    ctx.fillText('High Score: ' + highScore, W / 2, instY + TILE * 3);
+  }
+
+  // Start prompt (pulsing)
+  const pulse = Math.sin(Date.now() * 0.004) * 0.3 + 0.7;
+  ctx.globalAlpha = pulse;
+  ctx.fillStyle = '#FFD700';
+  ctx.font = `bold ${Math.floor(TILE * 0.6)}px monospace`;
+  ctx.fillText('PRESS ANY KEY TO START', W / 2, H * 0.88);
+  ctx.globalAlpha = 1;
+
+  // NFT character info
+  if (window.NftLoader && window.NftLoader.selectedCharacter) {
+    ctx.globalAlpha = 1;
+    ctx.fillStyle = window.NftLoader.selectedCharacter.color;
+    ctx.font = `${Math.floor(TILE * 0.4)}px monospace`;
+    ctx.fillText('Playing as: ' + window.NftLoader.selectedCharacter.name, W / 2, H * 0.78);
+    ctx.fillStyle = '#888';
+    ctx.font = `${Math.floor(TILE * 0.3)}px monospace`;
+    ctx.fillText('+1 Life  ·  1.5x Score', W / 2, H * 0.82);
+  } else if (window.NftLoader && !window.NftLoader.wallet && window.ethereum) {
+    ctx.globalAlpha = 0.6;
+    ctx.fillStyle = '#4ecdc4';
+    ctx.font = `${Math.floor(TILE * 0.4)}px monospace`;
+    ctx.fillText('Press W to Connect Wallet for NFT Bonuses', W / 2, H * 0.78);
+  }
+
+  // Bug decorations
+  const bugDeco = Date.now() * 0.001;
+  drawDecoBug(W * 0.15, H * 0.3, bugDeco, 'green');
+  drawDecoBug(W * 0.85, H * 0.25, bugDeco + 1, 'red');
+  drawDecoBug(W * 0.5, H * 0.72, bugDeco + 2, 'purple');
+
+  ctx.restore();
+}
+
+function drawDecoBug(x, y, phase, type) {
+  const bob = Math.sin(phase * 2) * 5;
+  ctx.save();
+  ctx.translate(x, y + bob);
+  const s = TILE * 1.2;
+  let color = type === 'green' ? C_BUG_GREEN : (type === 'red' ? C_BUG_RED : C_BUG_PURPLE);
+  ctx.fillStyle = color;
+  ctx.beginPath();
+  ctx.ellipse(0, 0, s * 0.35, s * 0.25, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = '#fff';
+  ctx.beginPath();
+  ctx.arc(s * 0.22, -s * 0.08, s * 0.09, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.arc(s * 0.22, s * 0.08, s * 0.09, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = '#f00';
+  ctx.beginPath();
+  ctx.arc(s * 0.25, -s * 0.08, s * 0.04, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.arc(s * 0.25, s * 0.08, s * 0.04, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+}
+
+// ============================================================
+// GAME OVER SCREEN
+// ============================================================
+function drawGameOver() {
+  ctx.fillStyle = 'rgba(0,0,0,0.7)';
+  ctx.fillRect(0, 0, W, H);
+
+  ctx.textAlign = 'center';
+
+  ctx.fillStyle = '#FF4444';
+  ctx.font = `bold ${Math.floor(TILE * 1.8)}px monospace`;
+  ctx.fillText('GAME', W / 2, H * 0.28);
+  ctx.fillText('OVER', W / 2, H * 0.28 + TILE * 1.8);
+
+  ctx.fillStyle = '#FFD700';
+  ctx.font = `bold ${Math.floor(TILE * 0.7)}px monospace`;
+  ctx.fillText('Score: ' + score, W / 2, H * 0.55);
+
+  if (score >= highScore && score > 0) {
+    const pulse = Math.sin(Date.now() * 0.005) * 0.3 + 0.7;
+    ctx.globalAlpha = pulse;
+    ctx.fillStyle = '#FFD700';
+    ctx.font = `bold ${Math.floor(TILE * 0.55)}px monospace`;
+    ctx.fillText('NEW HIGH SCORE!', W / 2, H * 0.63);
+    ctx.globalAlpha = 1;
+  } else {
+    ctx.fillStyle = '#888';
+    ctx.font = `${Math.floor(TILE * 0.45)}px monospace`;
+    ctx.fillText('Best: ' + highScore, W / 2, H * 0.63);
+  }
+
+  ctx.fillStyle = '#fff';
+  ctx.font = `${Math.floor(TILE * 0.5)}px monospace`;
+  ctx.fillText('Level Reached: ' + level, W / 2, H * 0.72);
+
+  const pulse2 = Math.sin(Date.now() * 0.004) * 0.3 + 0.7;
+  ctx.globalAlpha = pulse2;
+  ctx.fillStyle = '#88CCFF';
+  ctx.font = `bold ${Math.floor(TILE * 0.55)}px monospace`;
+  ctx.fillText('PRESS ANY KEY', W / 2, H * 0.88);
+  ctx.globalAlpha = 1;
+}
+
+// ============================================================
+// LEVEL COMPLETE
+// ============================================================
+function drawLevelComplete() {
+  ctx.fillStyle = 'rgba(0,0,0,0.5)';
+  ctx.fillRect(0, 0, W, H);
+
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#22CC44';
+  ctx.font = `bold ${Math.floor(TILE * 1.2)}px monospace`;
+  ctx.fillText('LEVEL ' + level, W / 2, H * 0.35);
+  ctx.fillText('COMPLETE!', W / 2, H * 0.35 + TILE * 1.3);
+
+  ctx.fillStyle = '#FFD700';
+  ctx.font = `${Math.floor(TILE * 0.6)}px monospace`;
+  ctx.fillText('Bonus: +' + (level * 100), W / 2, H * 0.6);
+  ctx.fillStyle = '#fff';
+  ctx.fillText('Score: ' + score, W / 2, H * 0.7);
+}
+
+// ============================================================
+// MOBILE TOUCH CONTROLS
+// ============================================================
+let touchDpad = { active: false, x: 0, y: 0, dir: DIR.NONE };
+let touchAction = { active: false };
+const DPAD_SIZE = 120, DPAD_MARGIN = 20;
+const ACTION_SIZE = 70;
+let isMobile = false;
+
+function checkMobile() {
+  isMobile = 'ontouchstart' in window || navigator.maxTouchPoints > 0;
+}
+checkMobile();
+
+function getTouchPos(touch) {
+  const rect = canvas.getBoundingClientRect();
+  return { x: touch.clientX - rect.left, y: touch.clientY - rect.top };
+}
+
+function drawTouchControls() {
+  if (!isMobile) return;
+
+  const dpadX = DPAD_MARGIN + DPAD_SIZE / 2;
+  const dpadY = H - DPAD_MARGIN - DPAD_SIZE / 2;
+  const actionX = W - DPAD_MARGIN - ACTION_SIZE / 2;
+  const actionY = H - DPAD_MARGIN - ACTION_SIZE / 2;
+
+  ctx.globalAlpha = 0.25;
+
+  // D-pad background
+  ctx.fillStyle = '#444';
+  ctx.beginPath();
+  ctx.arc(dpadX, dpadY, DPAD_SIZE / 2, 0, Math.PI * 2);
+  ctx.fill();
+
+  // D-pad arrows
+  ctx.fillStyle = '#aaa';
+  const arrowSize = 15;
+  // Up
+  ctx.beginPath();
+  ctx.moveTo(dpadX, dpadY - 30);
+  ctx.lineTo(dpadX - arrowSize, dpadY - 15);
+  ctx.lineTo(dpadX + arrowSize, dpadY - 15);
+  ctx.fill();
+  // Down
+  ctx.beginPath();
+  ctx.moveTo(dpadX, dpadY + 30);
+  ctx.lineTo(dpadX - arrowSize, dpadY + 15);
+  ctx.lineTo(dpadX + arrowSize, dpadY + 15);
+  ctx.fill();
+  // Left
+  ctx.beginPath();
+  ctx.moveTo(dpadX - 30, dpadY);
+  ctx.lineTo(dpadX - 15, dpadY - arrowSize);
+  ctx.lineTo(dpadX - 15, dpadY + arrowSize);
+  ctx.fill();
+  // Right
+  ctx.beginPath();
+  ctx.moveTo(dpadX + 30, dpadY);
+  ctx.lineTo(dpadX + 15, dpadY - arrowSize);
+  ctx.lineTo(dpadX + 15, dpadY + arrowSize);
+  ctx.fill();
+
+  // Action button
+  ctx.fillStyle = '#FF6600';
+  ctx.beginPath();
+  ctx.arc(actionX, actionY, ACTION_SIZE / 2, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = '#fff';
+  ctx.font = `bold ${Math.floor(ACTION_SIZE * 0.3)}px monospace`;
+  ctx.textAlign = 'center';
+  ctx.fillText('PUMP', actionX, actionY + ACTION_SIZE * 0.1);
+
+  ctx.globalAlpha = 1;
+}
+
+canvas.addEventListener('touchstart', function(e) {
+  e.preventDefault();
+  ensureAudio();
+
+  if (state === 'title') { startGame(); return; }
+  if (state === 'gameOver') { state = 'title'; return; }
+
+  for (const touch of e.changedTouches) {
+    const pos = getTouchPos(touch);
+    const dpadX = DPAD_MARGIN + DPAD_SIZE / 2;
+    const dpadY = H - DPAD_MARGIN - DPAD_SIZE / 2;
+    const actionX = W - DPAD_MARGIN - ACTION_SIZE / 2;
+    const actionY = H - DPAD_MARGIN - ACTION_SIZE / 2;
+
+    // Check action button
+    const adx = pos.x - actionX, ady = pos.y - actionY;
+    if (adx * adx + ady * ady < ACTION_SIZE * ACTION_SIZE) {
+      touchAction.active = true;
+      inputPump = true;
+      tryPump();
+      continue;
+    }
+
+    // Check d-pad
+    const ddx = pos.x - dpadX, ddy = pos.y - dpadY;
+    if (ddx * ddx + ddy * ddy < DPAD_SIZE * DPAD_SIZE) {
+      touchDpad.active = true;
+      if (Math.abs(ddx) > Math.abs(ddy)) {
+        inputDir = ddx > 0 ? DIR.RIGHT : DIR.LEFT;
+      } else {
+        inputDir = ddy > 0 ? DIR.DOWN : DIR.UP;
+      }
+    }
+  }
+}, { passive: false });
+
+canvas.addEventListener('touchmove', function(e) {
+  e.preventDefault();
+  for (const touch of e.changedTouches) {
+    const pos = getTouchPos(touch);
+    const dpadX = DPAD_MARGIN + DPAD_SIZE / 2;
+    const dpadY = H - DPAD_MARGIN - DPAD_SIZE / 2;
+    const ddx = pos.x - dpadX, ddy = pos.y - dpadY;
+    if (ddx * ddx + ddy * ddy < DPAD_SIZE * DPAD_SIZE * 2) {
+      if (Math.abs(ddx) > Math.abs(ddy)) {
+        inputDir = ddx > 0 ? DIR.RIGHT : DIR.LEFT;
+      } else {
+        inputDir = ddy > 0 ? DIR.DOWN : DIR.UP;
+      }
+    }
+  }
+}, { passive: false });
+
+canvas.addEventListener('touchend', function(e) {
+  e.preventDefault();
+  if (e.touches.length === 0) {
+    inputDir = DIR.NONE;
+    inputPump = false;
+    touchDpad.active = false;
+    touchAction.active = false;
+  }
+}, { passive: false });
+
+// ============================================================
+// KEYBOARD INPUT
+// ============================================================
+window.addEventListener('keydown', function(e) {
+  ensureAudio();
+  keys[e.code] = true;
+
+  if (state === 'title') {
+    // W on title = wallet connect (if not already connected)
+    if ((e.code === 'KeyW') && window.NftLoader && !window.NftLoader.wallet && window.ethereum) {
+      window.NftLoader.connectWallet().then(function(addr) {
+        if (addr) window.NftLoader.checkNFTs().then(function(chars) {
+          if (chars.length > 0) window.NftLoader.selectedCharacter = chars[0]; // Auto-select first
+        });
+      });
+      return;
+    }
+    startGame(); return;
+  }
+  if (state === 'gameOver') {
+    state = 'title';
+    return;
+  }
+
+  if (e.code === 'ArrowUp' || e.code === 'KeyW') inputDir = DIR.UP;
+  else if (e.code === 'ArrowRight' || e.code === 'KeyD') inputDir = DIR.RIGHT;
+  else if (e.code === 'ArrowDown' || e.code === 'KeyS') inputDir = DIR.DOWN;
+  else if (e.code === 'ArrowLeft' || e.code === 'KeyA') inputDir = DIR.LEFT;
+
+  if (e.code === 'Space') {
+    e.preventDefault();
+    inputPump = true;
+    tryPump();
+  }
+});
+
+window.addEventListener('keyup', function(e) {
+  keys[e.code] = false;
+
+  // Update direction based on remaining held keys
+  if (keys['ArrowUp'] || keys['KeyW']) inputDir = DIR.UP;
+  else if (keys['ArrowRight'] || keys['KeyD']) inputDir = DIR.RIGHT;
+  else if (keys['ArrowDown'] || keys['KeyS']) inputDir = DIR.DOWN;
+  else if (keys['ArrowLeft'] || keys['KeyA']) inputDir = DIR.LEFT;
+  else inputDir = DIR.NONE;
+
+  if (e.code === 'Space') inputPump = false;
+});
+
+// ============================================================
+// GAME FLOW
+// ============================================================
+function startGame() {
+  state = 'playing';
+  score = 0;
+  lives = 3;
+  level = 1;
+  // NFT bonuses
+  if (window.NftLoader && window.NftLoader.selectedCharacter) {
+    var bonuses = window.NftLoader.getBonuses();
+    lives += bonuses.lives;
+  }
+  genDirtTextures();
+  initLevel();
+}
+
+function nextLevel() {
+  level++;
+  genDirtTextures();
+  initLevel();
+  state = 'playing';
+}
+
+// ============================================================
+// MAIN LOOP
+// ============================================================
+let lastTime = 0;
+
+function gameLoop(timestamp) {
+  const dt = Math.min((timestamp - lastTime) / 1000, 0.05);
+  lastTime = timestamp;
+
+  // Clear
+  ctx.fillStyle = C_BG;
+  ctx.fillRect(0, 0, W, H);
+
+  if (state === 'title') {
+    drawTitle();
+  } else if (state === 'playing') {
+    movePlayer(dt);
+    updateBugs(dt);
+    updateRocks(dt);
+    updateTimers(dt);
+    updateParticles(dt);
+    updateFlash(dt);
+
+    drawGrid();
+    drawPowerups();
+    drawRocks();
+    for (const bug of bugs) drawBug(bug);
+    drawPlayer();
+    drawParticles();
+    drawFlash();
+    drawHUD();
+    drawTouchControls();
+  } else if (state === 'dying') {
+    stateTimer -= dt;
+    updateParticles(dt);
+    updateFlash(dt);
+
+    drawGrid();
+    drawPowerups();
+    drawRocks();
+    for (const bug of bugs) drawBug(bug);
+    drawParticles();
+    drawFlash();
+    drawHUD();
+
+    if (stateTimer <= 0) {
+      if (lives <= 0) {
+        state = 'gameOver';
+        if (score > highScore) {
+          highScore = score;
+          try { localStorage.setItem('tunnelbug_hi', String(highScore)); } catch(e) { /* storage full */ }
+        }
+        SFX.gameOver();
+      } else {
+        // Respawn
+        player.dead = false;
+        player.x = 1;
+        player.y = 2;
+        player.px = 1 * TILE;
+        player.py = 4 * TILE;
+        player.invincible = 2;
+        player.pumping = false;
+        player.pumpTarget = null;
+        state = 'playing';
+      }
+    }
+  } else if (state === 'levelComplete') {
+    stateTimer -= dt;
+    updateParticles(dt);
+
+    drawGrid();
+    drawRocks();
+    drawPlayer();
+    drawParticles();
+    drawHUD();
+    drawLevelComplete();
+
+    if (stateTimer <= 0) {
+      nextLevel();
+    }
+  } else if (state === 'gameOver') {
+    drawGrid();
+    drawRocks();
+    drawHUD();
+    drawGameOver();
+  }
+
+  requestAnimationFrame(gameLoop);
+}
+
+// Kick off
+genDirtTextures();
+requestAnimationFrame(gameLoop);
+
+})();
+</script>
+</body>
+</html>

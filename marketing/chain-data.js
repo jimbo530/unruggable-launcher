@@ -1,5 +1,5 @@
 /**
- * chain-data.js — Live on-chain data for MfT/Unruggable marketing content
+ * chain-data.js — Live on-chain data for MfT/Unrugable marketing content
  * Fetches reactor status, burns, launches, prices, TVL
  */
 

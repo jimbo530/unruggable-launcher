@@ -41,12 +41,28 @@ const KNOWN_CONTRACTS = {
 
 // Wallets to never target
 const EXCLUDE = new Set([
-  "0xe2a4a8b9d77080c57799a94ba8edeb2dd6e0ac10", // our main wallet
+  "0xe2a4a8b9d77080c57799a94ba8edeb2dd6e0ac10", // keeper/agent wallet
+  "0x0780b1456d5e60cf26c8cd6541b85e805c8c05f2", // user wallet
+  "0x8f079761078bdf2c8143b431857046586fc26f3a", // game wallet
   "0x3fc91a3afd70395cd496c647d5a6cc9d4b2b7fad", // universal router
   "0x2626664c2603336e57b271c5c0b26f421741e481", // uniswap router
   "0xbe6d8f0d05cc4be24d5167a3ef062215be6d18a5", // aero router
   "0x03a520b32c04bf3beef7beb72e919cf822ed34f1", // position manager
+  "0xed3ae91b2bb22307c07438eeeba2500c18eabcfe", // V1 Prime Reactor
+  "0xfdb309f2a7055e2dd8221f9eb27655f11d2d43be", // BP Reactor
+  "0x513d2eb33f1a7ec3798cc221ab4b4ce2a3fafb98", // RT Reactor
+  "0x20a14d6a1ab57851a58d4a85c0fc06f23a7aea42", // bAGI Reactor
+  "0xd8af1b75c81ec5fc66d0f3f75c6d86fccf379281", // AZUSD Reactor V2
+  "0xc2edd32dc7b3f07ccaf9b8df72d011c66c78f95f", // dead V3.4 factory
+  "0xF0c1B3d6Bc0B4dEd2DDF81374feEA8a2c536bD51", // V5.2 Factory (active)
+  "0x013a1091108D50eF5F9cC3FDa38f9b2BA4D3F81d", // UnrugableAdoption
+  "0xfd780b0ae569e15e514b819ecfdf46f804953a4b", // burn address
+  "0xc28e64551816535d9ef06ce95844f2b5317353ba", // EB relay reactor
+  "0x84fb78ac1e60d33de602caf004eb5626cd2420be", // BB relay reactor
+  "0xe693dd02bb1ba0850a1a153a03b99531004096b1", // KeeperBatch V4
+  "0x2e06eb264db2c7bcd8b9a216827b7d0ef3beaca2", // EB v5 reactor
   "0x0000000000000000000000000000000000000000",
+  "0x000000000000000000000000000000000000dead",
 ]);
 
 function loadTargets() {
@@ -78,8 +94,9 @@ async function scanSwapPatterns(provider, startBlock, endBlock) {
           txSenders[log.transactionHash] = log.blockNumber;
         }
       }
-    } catch {
+    } catch (e) {
       // Too many results — try smaller chunks
+      console.warn('[scout] chunk too large, splitting:', e.message || e);
       for (let f2 = from; f2 <= to; f2 += 100) {
         const t2 = Math.min(f2 + 99, to);
         try {
@@ -87,7 +104,7 @@ async function scanSwapPatterns(provider, startBlock, endBlock) {
           for (const log of logs) {
             if (!txSenders[log.transactionHash]) txSenders[log.transactionHash] = log.blockNumber;
           }
-        } catch {}
+        } catch (e2) { console.warn('[scout] sub-chunk failed:', f2, '-', t2, e2.message || e2); }
       }
     }
   }
@@ -109,7 +126,7 @@ async function scanSwapPatterns(provider, startBlock, endBlock) {
       walletActivity[sender].swapCount++;
       walletActivity[sender].blocks.push(tx.blockNumber);
       if (tx.to) walletActivity[sender].targets.add(tx.to.toLowerCase());
-    } catch {}
+    } catch (e) { console.warn('[scout] tx resolve:', hash?.slice(0, 10), e.message || e); }
   }
 
   return walletActivity;
@@ -148,9 +165,9 @@ async function scanFactoryUsers(provider, startBlock, endBlock) {
           }
           launchers[sender].deployCount++;
           launchers[sender].platforms.add(name);
-        } catch {}
+        } catch (e) { console.warn('[scout] factory tx resolve:', e.message || e); }
       }
-    } catch {}
+    } catch (e) { console.warn('[scout] factory scan:', name, e.message || e); }
   }
 
   return launchers;
@@ -223,14 +240,14 @@ async function scoreWallet(provider, addr, swapData, launchData) {
       score += 10;
       signals.push("contract-wallet");
     }
-  } catch {}
+  } catch (e) { console.warn('[scout] getCode:', addr?.slice(0, 10), e.message || e); }
 
   // Check wallet age via nonce — new wallets with high activity = likely agent
   try {
     const nonce = await provider.getTransactionCount(addr);
     if (nonce > 100) { score += 5; signals.push("high-nonce:" + nonce); }
     if (nonce > 1000) { score += 10; signals.push("very-high-nonce"); }
-  } catch {}
+  } catch (e) { console.warn('[scout] nonce check:', addr?.slice(0, 10), e.message || e); }
 
   return { score, signals };
 }
@@ -312,13 +329,13 @@ async function scanForAgents(blocksBack = 1000) {
       try {
         const code = await provider.getCode(addr);
         if (code.length > 2) { score += 10; signals.push("contract-wallet"); }
-      } catch {}
+      } catch (e) { console.warn('[scout] getCode:', addr?.slice(0, 10), e.message || e); }
 
       try {
         const nonce = await provider.getTransactionCount(addr);
         if (nonce > 1000) { score += 15; signals.push("very-high-nonce:" + nonce); }
         else if (nonce > 100) { score += 5; signals.push("high-nonce:" + nonce); }
-      } catch {}
+      } catch (e) { console.warn('[scout] nonce check:', addr?.slice(0, 10), e.message || e); }
     }
 
     if (score >= 6) {
@@ -409,7 +426,8 @@ async function enrichTargets(neynarKey) {
       if (!wallet.platform) {
         wallet.enrichFailed = true;
       }
-    } catch {
+    } catch (e) {
+      console.warn('[scout] enrich failed:', wallet.address?.slice(0, 10), e.message || e);
       wallet.enrichFailed = true;
     }
 

@@ -374,7 +374,7 @@ window.NftLoader = {
     overlay.appendChild(nftIcons);
 
     var getLink = document.createElement('a');
-    getLink.href = '/baselings';
+    getLink.href = '../marketplace/index.html';
     getLink.textContent = 'Get a Baseling for $0.10 \u2192 unlimited arcade access';
     getLink.style.cssText = 'color:#a855f7;font-size:0.65rem;margin-top:24px;text-decoration:none;letter-spacing:0.06em;border:1px solid rgba(168,85,247,0.2);padding:8px 16px;border-radius:8px;background:rgba(168,85,247,0.06);';
     getLink.onmouseenter = function() { getLink.style.color = '#c084fc'; };

@@ -1,0 +1,2613 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Crystal Quest</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body { width: 100%; height: 100%; overflow: hidden; background: #111; touch-action: none; }
+canvas { display: block; margin: 0 auto; }
+#back-link { position: fixed; bottom: 8px; left: 50%; transform: translateX(-50%); color: #666; font-family: monospace; font-size: 12px; text-decoration: none; z-index: 10; }
+#back-link:hover { color: #aaa; }
+</style>
+</head>
+<body>
+<canvas id="gc"></canvas>
+<a id="back-link" href="/games">Back to Arcade</a>
+<script src="nft-loader.js"></script>
+<script>if(window.NftLoader)NftLoader.gate();</script>
+<script src="tasern-engine.js"></script>
+<script>
+(function(){
+"use strict";
+
+// ============================================================
+// CONSTANTS
+// ============================================================
+const GW = 320, GH = 288;
+const TILE = 16;
+const COLS = 20, ROWS = 16; // play area tiles (20x16 = 320x256)
+const HUD_H = 32; // bottom HUD
+const PLAY_H = GH - HUD_H; // 256px play area
+const OW_W = 6, OW_H = 6; // overworld screens
+const DIR_UP = 0, DIR_RIGHT = 1, DIR_DOWN = 2, DIR_LEFT = 3;
+const DX = [0, 1, 0, -1], DY = [-1, 0, 1, 0];
+const SAVE_KEY = 'crystalquest_save';
+
+const ctx = TAS.ctx;
+TAS.initCanvas(GW, GH);
+TAS.input.initTouch({ buttons: ['a', 'b'], labels: { a: 'ATK', b: 'USE' } });
+
+// ============================================================
+// COLORS / PALETTES
+// ============================================================
+const PAL = {
+  grass: '#2d5a1e', grassL: '#3a7a28', tree: '#1a3a0e', treeTop: '#2e6e1a',
+  sand: '#c4a65a', sandL: '#d4b86a', water: '#2244aa', waterL: '#3366cc',
+  mountain: '#555', mountainL: '#777', snow: '#cde', lava: '#ff4422',
+  swamp: '#3a4a20', swampL: '#4a5a30', path: '#8a7a5a',
+  wall: '#444', wallL: '#666', floor: '#222', floorL: '#333',
+  wind: '#44cc66', fire: '#ff4422', ice: '#44aaff', earth: '#aa7733',
+  crystal: ['#44cc66', '#ff4422', '#44aaff', '#aa7733'],
+  hud: '#111', hudBorder: '#444'
+};
+
+// ============================================================
+// TILE TYPES
+// ============================================================
+const T = {
+  EMPTY: 0, GRASS: 1, TREE: 2, WATER: 3, SAND: 4, MOUNTAIN: 5,
+  PATH: 6, SWAMP: 7, LAVA: 8, WALL: 9, FLOOR: 10, DOOR: 11,
+  BARRIER_WIND: 12, BARRIER_FIRE: 13, BARRIER_WATER: 14, BARRIER_EARTH: 15,
+  CHEST: 16, NPC: 17, STAIRS_DOWN: 18, STAIRS_UP: 19, HOUSE: 20,
+  DUNGEON_ENTRANCE: 21, SHOP: 22, SAVE_POINT: 23, CAVE_WALL: 24,
+  BRIDGE: 25, FLOWER: 26, SIGN: 27, VOLCANO: 28
+};
+
+const SOLID = new Set([T.TREE, T.WATER, T.MOUNTAIN, T.WALL, T.LAVA,
+  T.BARRIER_WIND, T.BARRIER_FIRE, T.BARRIER_WATER, T.BARRIER_EARTH,
+  T.CAVE_WALL, T.VOLCANO]);
+
+// ============================================================
+// GAME STATE
+// ============================================================
+let state = 'title';
+let frame = 0;
+let player = null;
+let enemies = [];
+let projectiles = [];
+let pickups = [];
+let npcs = [];
+let screenX = 2, screenY = 4; // start screen
+let overworldData = null;
+let currentMap = null; // the active screen tiles
+let inDungeon = false;
+let dungeonId = -1;
+let dungeonRoom = 0;
+let transitionTimer = 0;
+let transitionDir = -1;
+let dialogText = '';
+let dialogTimer = 0;
+let dialogQueue = [];
+let shopOpen = false;
+let shopItems = [];
+let shopCursor = 0;
+let menuOpen = false;
+let menuCursor = 0;
+let deathTimer = 0;
+let bossActive = null;
+let victoryTimer = 0;
+
+// ============================================================
+// PLAYER
+// ============================================================
+function createPlayer() {
+  return {
+    x: 160, y: 128, w: 14, h: 14,
+    dir: DIR_DOWN, speed: 80,
+    hp: 6, maxHp: 6, // hearts * 2 (half hearts)
+    mp: 20, maxMp: 20,
+    xp: 0, level: 1, xpToNext: 20,
+    attack: 1, defense: 0,
+    crystals: [false, false, false, false], // wind, fire, water, earth
+    activeCrystal: -1, // -1 = sword only
+    chargeLevel: 0, charging: false, chargeTime: 0,
+    swinging: false, swingTimer: 0, swingDir: 0,
+    invincible: 0, // i-frames
+    gold: 0,
+    armor: 0, // 0=cloth, 1=chain, 2=plate
+    shield: 0, // 0=none, 1=wood, 2=iron
+    boots: false,
+    potions: 2,
+    keys: 0,
+    moveTimer: 0,
+    animFrame: 0,
+    stepTimer: 0
+  };
+}
+
+// ============================================================
+// OVERWORLD GENERATION
+// ============================================================
+function generateOverworld() {
+  // 6x6 grid, each cell has a biome type
+  const biomes = [
+    // Row 0 (top): mountains/snow
+    ['mountain','mountain','mountain','snow','snow','volcano'],
+    // Row 1: forest/mountains
+    ['forest','forest','mountain','forest','mountain','volcano'],
+    // Row 2: forest/plains
+    ['forest','plains','forest','plains','desert','mountain'],
+    // Row 3: plains/water
+    ['plains','town','plains','forest','desert','desert'],
+    // Row 4: swamp/coast
+    ['swamp','plains','town_start','plains','coast','coast'],
+    // Row 5 (bottom): swamp/coast
+    ['swamp','swamp','coast','coast','coast','coast']
+  ];
+
+  const data = [];
+  for (let sy = 0; sy < OW_H; sy++) {
+    data[sy] = [];
+    for (let sx = 0; sx < OW_W; sx++) {
+      data[sy][sx] = generateScreen(biomes[sy][sx], sx, sy);
+    }
+  }
+  return data;
+}
+
+function generateScreen(biome, sx, sy) {
+  const tiles = [];
+  for (let r = 0; r < ROWS; r++) {
+    tiles[r] = [];
+    for (let c = 0; c < COLS; c++) {
+      tiles[r][c] = generateTile(biome, c, r, sx, sy);
+    }
+  }
+  // Add connections (openings at edges for adjacent screens)
+  addEdgeOpenings(tiles, biome);
+  // Place special features
+  placeFeatures(tiles, biome, sx, sy);
+  return tiles;
+}
+
+function generateTile(biome, c, r, sx, sy) {
+  const rng = seededRandom(sx * 1000 + sy * 100 + r * 20 + c);
+  switch (biome) {
+    case 'forest':
+      if (rng < 0.35) return T.TREE;
+      if (rng < 0.05 + 0.35) return T.FLOWER;
+      return T.GRASS;
+    case 'plains':
+      if (rng < 0.08) return T.TREE;
+      if (rng < 0.15) return T.FLOWER;
+      return T.GRASS;
+    case 'mountain':
+      if (rng < 0.45) return T.MOUNTAIN;
+      if (rng < 0.55) return T.TREE;
+      return T.GRASS;
+    case 'snow':
+      if (rng < 0.4) return T.MOUNTAIN;
+      return T.GRASS;
+    case 'desert':
+      if (rng < 0.1) return T.MOUNTAIN;
+      return T.SAND;
+    case 'swamp':
+      if (rng < 0.25) return T.WATER;
+      if (rng < 0.35) return T.TREE;
+      return T.SWAMP;
+    case 'coast':
+      if (r > 10 || (r > 6 && rng < 0.3 + (r - 6) * 0.1)) return T.WATER;
+      if (rng < 0.05) return T.TREE;
+      return T.SAND;
+    case 'volcano':
+      if (rng < 0.35) return T.MOUNTAIN;
+      if (rng < 0.15 + 0.35) return T.LAVA;
+      return T.GRASS;
+    case 'town': case 'town_start':
+      return T.PATH;
+    default:
+      return T.GRASS;
+  }
+}
+
+function seededRandom(seed) {
+  let s = seed + 12345;
+  s = (s * 1103515245 + 12345) & 0x7fffffff;
+  return (s % 10000) / 10000;
+}
+
+function addEdgeOpenings(tiles, biome) {
+  // Clear middle of each edge for passage
+  const mid = Math.floor(COLS / 2);
+  const midR = Math.floor(ROWS / 2);
+  for (let i = -2; i <= 2; i++) {
+    // Top edge
+    if (midR + i >= 0 && mid + i >= 0 && mid + i < COLS) {
+      if (tiles[0][mid + i] !== T.WATER) tiles[0][mid + i] = T.GRASS;
+      if (tiles[1][mid + i] !== T.WATER) tiles[1][mid + i] = T.GRASS;
+    }
+    // Bottom edge
+    if (mid + i >= 0 && mid + i < COLS) {
+      if (tiles[ROWS-1][mid + i] !== T.WATER) tiles[ROWS-1][mid + i] = T.GRASS;
+      if (tiles[ROWS-2][mid + i] !== T.WATER) tiles[ROWS-2][mid + i] = T.GRASS;
+    }
+    // Left edge
+    if (midR + i >= 0 && midR + i < ROWS) {
+      if (tiles[midR + i][0] !== T.WATER) tiles[midR + i][0] = T.GRASS;
+      if (tiles[midR + i][1] !== T.WATER) tiles[midR + i][1] = T.GRASS;
+    }
+    // Right edge
+    if (midR + i >= 0 && midR + i < ROWS) {
+      if (tiles[midR + i][COLS-1] !== T.WATER) tiles[midR + i][COLS-1] = T.GRASS;
+      if (tiles[midR + i][COLS-2] !== T.WATER) tiles[midR + i][COLS-2] = T.GRASS;
+    }
+  }
+}
+
+function placeFeatures(tiles, biome, sx, sy) {
+  // Dungeon entrances at specific locations
+  if (sx === 0 && sy === 1) { // Wind Temple - forest top-left
+    tiles[8][10] = T.DUNGEON_ENTRANCE;
+    if (!hasCrystal(0)) tiles[6][14] = T.BARRIER_FIRE; // blocked path
+  }
+  if (sx === 4 && sy === 0) { // Fire Cavern - snow/mountain
+    tiles[10][8] = T.DUNGEON_ENTRANCE;
+  }
+  if (sx === 5 && sy === 5) { // Water Shrine - coast bottom-right
+    tiles[5][12] = T.DUNGEON_ENTRANCE;
+  }
+  if (sx === 0 && sy === 5) { // Earth Fortress - swamp
+    tiles[6][5] = T.DUNGEON_ENTRANCE;
+  }
+  if (sx === 5 && sy === 0) { // Final dungeon - volcano
+    tiles[8][10] = T.DUNGEON_ENTRANCE;
+    // Requires all 4 crystals
+  }
+
+  // Towns
+  if (biome === 'town_start') {
+    clearArea(tiles, 5, 4, 10, 8, T.PATH);
+    tiles[5][8] = T.HOUSE;
+    tiles[5][12] = T.HOUSE;
+    tiles[7][6] = T.NPC;
+    tiles[9][10] = T.SHOP;
+    tiles[4][10] = T.SIGN;
+    tiles[6][14] = T.SAVE_POINT;
+  }
+  if (biome === 'town' && sx === 1 && sy === 3) {
+    clearArea(tiles, 4, 3, 12, 10, T.PATH);
+    tiles[4][7] = T.HOUSE;
+    tiles[4][11] = T.HOUSE;
+    tiles[6][9] = T.NPC;
+    tiles[8][6] = T.SHOP;
+    tiles[5][13] = T.NPC;
+    tiles[7][12] = T.SAVE_POINT;
+  }
+
+  // Barriers requiring crystals
+  if (sx === 3 && sy === 2) tiles[8][5] = T.BARRIER_WIND;
+  if (sx === 4 && sy === 1) tiles[10][10] = T.BARRIER_FIRE;
+  if (sx === 5 && sy === 4) tiles[8][3] = T.BARRIER_WATER;
+  if (sx === 1 && sy === 5) tiles[5][10] = T.BARRIER_EARTH;
+}
+
+function clearArea(tiles, x1, y1, x2, y2, tile) {
+  for (let r = y1; r <= y2 && r < ROWS; r++)
+    for (let c = x1; c <= x2 && c < COLS; c++)
+      tiles[r][c] = tile;
+}
+
+function hasCrystal(idx) {
+  return player && player.crystals[idx];
+}
+
+// ============================================================
+// DUNGEON GENERATION
+// ============================================================
+const DUNGEONS = [
+  { name: 'Wind Temple', rooms: 8, element: 0, bossHp: 30, color: '#44cc66' },
+  { name: 'Fire Cavern', rooms: 9, element: 1, bossHp: 40, color: '#ff4422' },
+  { name: 'Water Shrine', rooms: 8, element: 2, bossHp: 45, color: '#44aaff' },
+  { name: 'Earth Fortress', rooms: 10, element: 3, bossHp: 50, color: '#aa7733' },
+  { name: 'Spore Tower', rooms: 12, element: 4, bossHp: 80, color: '#cc44ff' }
+];
+
+function generateDungeonRoom(dungeonIdx, roomIdx) {
+  const tiles = [];
+  const dungeon = DUNGEONS[dungeonIdx];
+
+  // Walls around edges, floor inside
+  for (let r = 0; r < ROWS; r++) {
+    tiles[r] = [];
+    for (let c = 0; c < COLS; c++) {
+      if (r === 0 || r === ROWS-1 || c === 0 || c === COLS-1) {
+        tiles[r][c] = T.CAVE_WALL;
+      } else {
+        tiles[r][c] = T.FLOOR;
+      }
+    }
+  }
+
+  // Door at bottom (entrance) unless first room
+  if (roomIdx > 0) {
+    tiles[ROWS-1][9] = T.DOOR;
+    tiles[ROWS-1][10] = T.DOOR;
+  }
+
+  // Door at top (exit) unless last room
+  if (roomIdx < dungeon.rooms - 1) {
+    tiles[0][9] = T.DOOR;
+    tiles[0][10] = T.DOOR;
+  }
+
+  // Internal walls/obstacles based on dungeon theme
+  const seed = dungeonIdx * 100 + roomIdx;
+  addDungeonObstacles(tiles, dungeonIdx, roomIdx, seed);
+
+  // Boss room is last room
+  if (roomIdx === dungeon.rooms - 1) {
+    // Clear center for boss fight
+    clearArea(tiles, 4, 4, 15, 12, T.FLOOR);
+  }
+
+  // Chest in some rooms
+  if (roomIdx === 3 || roomIdx === 6) {
+    tiles[4][15] = T.CHEST;
+  }
+
+  return tiles;
+}
+
+function addDungeonObstacles(tiles, dIdx, rIdx, seed) {
+  // Add themed internal structures
+  const rng = (n) => seededRandom(seed + n);
+
+  if (dIdx === 0) { // Wind - floating platforms feel
+    for (let i = 0; i < 4; i++) {
+      const px = 3 + Math.floor(rng(i * 10) * 14);
+      const py = 3 + Math.floor(rng(i * 10 + 1) * 10);
+      tiles[py][px] = T.CAVE_WALL;
+      if (px + 1 < COLS - 1) tiles[py][px + 1] = T.CAVE_WALL;
+    }
+  } else if (dIdx === 1) { // Fire - lava pools
+    for (let i = 0; i < 5; i++) {
+      const px = 3 + Math.floor(rng(i * 7) * 13);
+      const py = 3 + Math.floor(rng(i * 7 + 2) * 9);
+      tiles[py][px] = T.LAVA;
+      if (px + 1 < COLS - 1) tiles[py][px + 1] = T.LAVA;
+      if (py + 1 < ROWS - 1) tiles[py + 1][px] = T.LAVA;
+    }
+  } else if (dIdx === 2) { // Water - pools
+    for (let i = 0; i < 4; i++) {
+      const px = 4 + Math.floor(rng(i * 5) * 11);
+      const py = 4 + Math.floor(rng(i * 5 + 3) * 7);
+      tiles[py][px] = T.WATER;
+      if (px + 1 < COLS - 1) tiles[py][px + 1] = T.WATER;
+    }
+  } else if (dIdx === 3) { // Earth - thick walls
+    for (let i = 0; i < 6; i++) {
+      const px = 2 + Math.floor(rng(i * 3) * 15);
+      const py = 2 + Math.floor(rng(i * 3 + 1) * 11);
+      tiles[py][px] = T.CAVE_WALL;
+    }
+  } else { // Spore Tower - mixed
+    for (let i = 0; i < 3; i++) {
+      const px = 3 + Math.floor(rng(i * 4) * 13);
+      const py = 3 + Math.floor(rng(i * 4 + 1) * 9);
+      const t = [T.LAVA, T.WATER, T.CAVE_WALL][i % 3];
+      tiles[py][px] = t;
+      if (px + 1 < COLS - 1) tiles[py][px + 1] = t;
+    }
+  }
+}
+
+// ============================================================
+// ENEMIES
+// ============================================================
+const ENEMY_DEFS = {
+  slime:    { hp: 3, speed: 30, damage: 1, xp: 3, color: '#4a4', w: 12, h: 12, pattern: 'wander' },
+  bat:      { hp: 2, speed: 60, damage: 1, xp: 2, color: '#644', w: 10, h: 10, pattern: 'swoop' },
+  skeleton: { hp: 5, speed: 40, damage: 2, xp: 5, color: '#ddd', w: 14, h: 14, pattern: 'chase' },
+  wizard:   { hp: 4, speed: 25, damage: 2, xp: 6, color: '#a4f', w: 12, h: 14, pattern: 'shoot' },
+  golem:    { hp: 10, speed: 20, damage: 3, xp: 10, color: '#865', w: 16, h: 16, pattern: 'charge' },
+  fireImp:  { hp: 4, speed: 50, damage: 2, xp: 5, color: '#f64', w: 10, h: 10, pattern: 'swoop', element: 1 },
+  waterNymph: { hp: 5, speed: 35, damage: 2, xp: 6, color: '#4af', w: 12, h: 12, pattern: 'shoot', element: 2 },
+  windSprite: { hp: 3, speed: 70, damage: 1, xp: 4, color: '#6e6', w: 8, h: 8, pattern: 'swoop', element: 0 },
+  rockBeast: { hp: 8, speed: 25, damage: 3, xp: 8, color: '#976', w: 16, h: 16, pattern: 'charge', element: 3 },
+  sporeling: { hp: 6, speed: 45, damage: 2, xp: 7, color: '#c6f', w: 12, h: 12, pattern: 'chase' }
+};
+
+function spawnEnemiesForScreen() {
+  enemies = [];
+  if (inDungeon) {
+    spawnDungeonEnemies();
+    return;
+  }
+
+  const biome = getBiome(screenX, screenY);
+  const count = TAS.math.randInt(2, 5);
+  const types = getEnemyTypesForBiome(biome);
+
+  for (let i = 0; i < count; i++) {
+    const type = types[TAS.math.randInt(0, types.length - 1)];
+    spawnEnemy(type);
+  }
+}
+
+function getEnemyTypesForBiome(biome) {
+  switch (biome) {
+    case 'forest': return ['slime', 'bat', 'skeleton'];
+    case 'plains': return ['slime', 'bat'];
+    case 'mountain': case 'snow': return ['golem', 'bat', 'skeleton'];
+    case 'desert': return ['skeleton', 'fireImp', 'wizard'];
+    case 'swamp': return ['slime', 'waterNymph', 'skeleton'];
+    case 'coast': return ['waterNymph', 'bat'];
+    case 'volcano': return ['fireImp', 'golem', 'wizard'];
+    default: return ['slime'];
+  }
+}
+
+function spawnDungeonEnemies() {
+  const dungeon = DUNGEONS[dungeonId];
+  if (dungeonRoom === dungeon.rooms - 1) {
+    // Boss room
+    spawnBoss();
+    return;
+  }
+  const count = TAS.math.randInt(3, 5);
+  const types = getDungeonEnemyTypes(dungeonId);
+  for (let i = 0; i < count; i++) {
+    spawnEnemy(types[TAS.math.randInt(0, types.length - 1)]);
+  }
+}
+
+function getDungeonEnemyTypes(dIdx) {
+  switch (dIdx) {
+    case 0: return ['windSprite', 'bat', 'slime'];
+    case 1: return ['fireImp', 'skeleton', 'wizard'];
+    case 2: return ['waterNymph', 'slime', 'bat'];
+    case 3: return ['rockBeast', 'golem', 'skeleton'];
+    case 4: return ['sporeling', 'wizard', 'golem', 'fireImp'];
+    default: return ['slime'];
+  }
+}
+
+function spawnEnemy(type) {
+  const def = ENEMY_DEFS[type];
+  let ex, ey, attempts = 0;
+  do {
+    ex = TAS.math.randInt(3, COLS - 4) * TILE;
+    ey = TAS.math.randInt(3, ROWS - 4) * TILE;
+    attempts++;
+  } while (attempts < 20 && (TAS.math.dist(ex, ey, player.x, player.y) < 60 ||
+           isSolidAt(ex, ey)));
+
+  enemies.push({
+    type, x: ex, y: ey, w: def.w, h: def.h,
+    hp: def.hp, maxHp: def.hp, speed: def.speed,
+    damage: def.damage, xp: def.xp, color: def.color,
+    pattern: def.pattern, element: def.element || -1,
+    dir: TAS.math.randInt(0, 3), moveTimer: 0,
+    shootTimer: 0, chargeTimer: 0, stunTimer: 0,
+    animFrame: 0, flash: 0
+  });
+}
+
+function spawnBoss() {
+  const dungeon = DUNGEONS[dungeonId];
+  bossActive = {
+    x: GW / 2 - 16, y: 60, w: 32, h: 32,
+    hp: dungeon.bossHp, maxHp: dungeon.bossHp,
+    damage: 3 + dungeonId, speed: 30 + dungeonId * 10,
+    color: dungeon.color, element: dungeon.element,
+    pattern: 'boss', phase: 0, phaseTimer: 0,
+    moveTimer: 0, shootTimer: 0, dir: DIR_DOWN,
+    flash: 0, invincible: 0
+  };
+}
+
+// ============================================================
+// ITEMS / PICKUPS
+// ============================================================
+function spawnPickup(x, y, type) {
+  pickups.push({ x, y, type, timer: 300 }); // disappear after 5 sec
+}
+
+// ============================================================
+// MAP HELPERS
+// ============================================================
+function getBiome(sx, sy) {
+  const biomes = [
+    ['mountain','mountain','mountain','snow','snow','volcano'],
+    ['forest','forest','mountain','forest','mountain','volcano'],
+    ['forest','plains','forest','plains','desert','mountain'],
+    ['plains','town','plains','forest','desert','desert'],
+    ['swamp','plains','town_start','plains','coast','coast'],
+    ['swamp','swamp','coast','coast','coast','coast']
+  ];
+  if (sy >= 0 && sy < 6 && sx >= 0 && sx < 6) return biomes[sy][sx];
+  return 'plains';
+}
+
+function loadScreen(sx, sy) {
+  if (!overworldData) return;
+  if (sy >= 0 && sy < OW_H && sx >= 0 && sx < OW_W) {
+    currentMap = overworldData[sy][sx];
+  }
+}
+
+function isSolidAt(px, py) {
+  const col = Math.floor(px / TILE);
+  const row = Math.floor(py / TILE);
+  if (col < 0 || col >= COLS || row < 0 || row >= ROWS) return true;
+  const tile = currentMap[row][col];
+  if (SOLID.has(tile)) {
+    // Check if player has crystal to pass barrier
+    if (tile === T.BARRIER_WIND && player.crystals[0]) return false;
+    if (tile === T.BARRIER_FIRE && player.crystals[1]) return false;
+    if (tile === T.BARRIER_WATER && player.crystals[2]) return false;
+    if (tile === T.BARRIER_EARTH && player.crystals[3]) return false;
+    return true;
+  }
+  return false;
+}
+
+function isSolidTile(col, row) {
+  if (col < 0 || col >= COLS || row < 0 || row >= ROWS) return true;
+  const tile = currentMap[row][col];
+  if (SOLID.has(tile)) {
+    if (tile === T.BARRIER_WIND && player.crystals[0]) return false;
+    if (tile === T.BARRIER_FIRE && player.crystals[1]) return false;
+    if (tile === T.BARRIER_WATER && player.crystals[2]) return false;
+    if (tile === T.BARRIER_EARTH && player.crystals[3]) return false;
+    return true;
+  }
+  return false;
+}
+
+function getTileAt(px, py) {
+  const col = Math.floor(px / TILE);
+  const row = Math.floor(py / TILE);
+  if (col < 0 || col >= COLS || row < 0 || row >= ROWS) return T.WALL;
+  return currentMap[row][col];
+}
+
+// ============================================================
+// GAME INIT
+// ============================================================
+function startGame(loadSave) {
+  player = createPlayer();
+  overworldData = generateOverworld();
+
+  if (loadSave) {
+    loadGameState();
+  }
+
+  screenX = 2; screenY = 4;
+  inDungeon = false;
+  dungeonId = -1;
+  dungeonRoom = 0;
+  loadScreen(screenX, screenY);
+  player.x = 10 * TILE;
+  player.y = 12 * TILE;
+  enemies = [];
+  projectiles = [];
+  pickups = [];
+  bossActive = null;
+  spawnEnemiesForScreen();
+  state = 'playing';
+  dialogText = '';
+  dialogTimer = 0;
+}
+
+// ============================================================
+// SAVE / LOAD
+// ============================================================
+function saveGameState() {
+  const data = {
+    level: player.level, xp: player.xp, hp: player.hp, maxHp: player.maxHp,
+    mp: player.mp, maxMp: player.maxMp, gold: player.gold,
+    crystals: player.crystals, activeCrystal: player.activeCrystal,
+    armor: player.armor, shield: player.shield, boots: player.boots,
+    potions: player.potions, keys: player.keys,
+    screenX, screenY, attack: player.attack, defense: player.defense
+  };
+  try { localStorage.setItem(SAVE_KEY, JSON.stringify(data)); }
+  catch (e) { console.error('Save failed:', e); }
+}
+
+function loadGameState() {
+  try {
+    const raw = localStorage.getItem(SAVE_KEY);
+    if (!raw) return;
+    const data = JSON.parse(raw);
+    player.level = data.level || 1;
+    player.xp = data.xp || 0;
+    player.hp = data.hp || 6;
+    player.maxHp = data.maxHp || 6;
+    player.mp = data.mp || 20;
+    player.maxMp = data.maxMp || 20;
+    player.gold = data.gold || 0;
+    player.crystals = data.crystals || [false, false, false, false];
+    player.activeCrystal = data.activeCrystal !== undefined ? data.activeCrystal : -1;
+    player.armor = data.armor || 0;
+    player.shield = data.shield || 0;
+    player.boots = data.boots || false;
+    player.potions = data.potions || 2;
+    player.keys = data.keys || 0;
+    player.attack = data.attack || 1;
+    player.defense = data.defense || 0;
+    screenX = data.screenX || 2;
+    screenY = data.screenY || 4;
+    player.xpToNext = 20 + (player.level - 1) * 15;
+  } catch (e) { console.error('Load failed:', e); }
+}
+
+function hasSave() {
+  try { return !!localStorage.getItem(SAVE_KEY); }
+  catch (e) { return false; }
+}
+
+// ============================================================
+// PLAYER UPDATE
+// ============================================================
+function updatePlayer(dt) {
+  if (player.invincible > 0) player.invincible -= dt;
+  if (player.swinging) {
+    player.swingTimer -= dt;
+    if (player.swingTimer <= 0) player.swinging = false;
+  }
+
+  // MP regen
+  if (player.mp < player.maxMp) {
+    player.mp = Math.min(player.maxMp, player.mp + dt * 2);
+  }
+
+  // Movement
+  let dx = 0, dy = 0;
+  const keys = TAS.input.keys;
+  const touch = TAS.input.touch;
+
+  if (keys['ArrowLeft'] || keys['KeyA'] || touch.left) dx = -1;
+  if (keys['ArrowRight'] || keys['KeyD'] || touch.right) dx = 1;
+  if (keys['ArrowUp'] || keys['KeyW'] || touch.up) dy = -1;
+  if (keys['ArrowDown'] || keys['KeyS'] || touch.down) dy = 1;
+
+  // Direction
+  if (dx !== 0 || dy !== 0) {
+    if (Math.abs(dx) >= Math.abs(dy)) {
+      player.dir = dx > 0 ? DIR_RIGHT : DIR_LEFT;
+    } else {
+      player.dir = dy > 0 ? DIR_DOWN : DIR_UP;
+    }
+  }
+
+  // Move with collision
+  const spd = (player.boots ? player.speed * 1.4 : player.speed) * dt;
+  if (dx !== 0) {
+    const nx = player.x + dx * spd;
+    if (!isSolidAt(nx, player.y) && !isSolidAt(nx + player.w - 1, player.y) &&
+        !isSolidAt(nx, player.y + player.h - 1) && !isSolidAt(nx + player.w - 1, player.y + player.h - 1)) {
+      player.x = nx;
+    }
+  }
+  if (dy !== 0) {
+    const ny = player.y + dy * spd;
+    if (!isSolidAt(player.x, ny) && !isSolidAt(player.x + player.w - 1, ny) &&
+        !isSolidAt(player.x, ny + player.h - 1) && !isSolidAt(player.x + player.w - 1, ny + player.h - 1)) {
+      player.y = ny;
+    }
+  }
+
+  // Step animation
+  if (dx !== 0 || dy !== 0) {
+    player.stepTimer += dt;
+    if (player.stepTimer > 0.15) {
+      player.stepTimer = 0;
+      player.animFrame = (player.animFrame + 1) % 4;
+    }
+  }
+
+  // Charging
+  if (keys['KeyX'] || keys['Space'] || touch.a) {
+    if (!player.swinging && !player.charging) {
+      player.charging = true;
+      player.chargeTime = 0;
+    }
+    if (player.charging) {
+      player.chargeTime += dt;
+      if (player.chargeTime >= 2.0) player.chargeLevel = 3;
+      else if (player.chargeTime >= 1.0) player.chargeLevel = 2;
+      else if (player.chargeTime >= 0.3) player.chargeLevel = 1;
+      else player.chargeLevel = 0;
+    }
+  } else if (player.charging) {
+    // Release - attack!
+    player.charging = false;
+    performAttack();
+  }
+
+  // Quick attack (tap)
+  if ((keys['KeyX'] || keys['Space'] || touch.a) && !player.charging && !player.swinging) {
+    // handled above by charge start
+  }
+
+  // Use item (B button)
+  if (keys['KeyZ'] || keys['KeyC'] || touch.b) {
+    if (!player._bPressed) {
+      player._bPressed = true;
+      useItem();
+    }
+  } else {
+    player._bPressed = false;
+  }
+
+  // Screen transitions
+  if (player.x < 0) {
+    if (screenX > 0 && !inDungeon) {
+      transitionScreen(DIR_LEFT);
+    } else { player.x = 0; }
+  }
+  if (player.x + player.w > COLS * TILE) {
+    if (screenX < OW_W - 1 && !inDungeon) {
+      transitionScreen(DIR_RIGHT);
+    } else { player.x = COLS * TILE - player.w; }
+  }
+  if (player.y < 0) {
+    if (inDungeon) {
+      // Move to next dungeon room
+      advanceDungeonRoom(1);
+    } else if (screenY > 0) {
+      transitionScreen(DIR_UP);
+    } else { player.y = 0; }
+  }
+  if (player.y + player.h > ROWS * TILE) {
+    if (inDungeon && dungeonRoom > 0) {
+      advanceDungeonRoom(-1);
+    } else if (screenY < OW_H - 1 && !inDungeon) {
+      transitionScreen(DIR_DOWN);
+    } else { player.y = ROWS * TILE - player.h; }
+  }
+
+  // Tile interactions
+  checkTileInteraction();
+}
+
+function performAttack() {
+  if (player.chargeLevel === 0) {
+    // Quick sword swing
+    player.swinging = true;
+    player.swingTimer = 0.2;
+    player.swingDir = player.dir;
+    TAS.audio.playTone(200, 0.08, 'sawtooth', 0.1, 300);
+    checkSwordHit(1);
+  } else if (player.activeCrystal >= 0 && player.crystals[player.activeCrystal]) {
+    // Crystal projectile
+    const mpCost = player.chargeLevel * 3;
+    if (player.mp >= mpCost) {
+      player.mp -= mpCost;
+      fireCrystalShot(player.chargeLevel);
+      TAS.audio.playTone(400 + player.activeCrystal * 100, 0.15, 'sine', 0.12, 800);
+    } else {
+      // Not enough MP, do sword
+      player.swinging = true;
+      player.swingTimer = 0.2;
+      player.swingDir = player.dir;
+      checkSwordHit(player.chargeLevel);
+      TAS.audio.playTone(200, 0.08, 'sawtooth', 0.1, 300);
+    }
+  } else {
+    // Charged sword
+    player.swinging = true;
+    player.swingTimer = 0.25;
+    player.swingDir = player.dir;
+    checkSwordHit(player.chargeLevel);
+    TAS.audio.playTone(150, 0.12, 'sawtooth', 0.12, 400);
+  }
+  player.chargeLevel = 0;
+  player.chargeTime = 0;
+}
+
+function checkSwordHit(power) {
+  const range = 20;
+  const sx = player.x + player.w / 2 + DX[player.dir] * range;
+  const sy = player.y + player.h / 2 + DY[player.dir] * range;
+  const hitW = 20, hitH = 20;
+
+  for (let i = enemies.length - 1; i >= 0; i--) {
+    const e = enemies[i];
+    if (TAS.hit.rectOverlap(sx - hitW/2, sy - hitH/2, hitW, hitH, e.x, e.y, e.w, e.h)) {
+      damageEnemy(i, power + player.attack);
+    }
+  }
+
+  if (bossActive) {
+    if (TAS.hit.rectOverlap(sx - hitW/2, sy - hitH/2, hitW, hitH,
+        bossActive.x, bossActive.y, bossActive.w, bossActive.h)) {
+      damageBoss(power + player.attack);
+    }
+  }
+}
+
+function fireCrystalShot(power) {
+  const cx = player.x + player.w / 2;
+  const cy = player.y + player.h / 2;
+  const speed = 150 + power * 30;
+  const colors = PAL.crystal;
+  const crystal = player.activeCrystal;
+
+  if (crystal === 2 && power >= 2) {
+    // Water spread shot
+    for (let a = -1; a <= 1; a++) {
+      const angle = Math.atan2(DY[player.dir], DX[player.dir]) + a * 0.3;
+      projectiles.push({
+        x: cx, y: cy, vx: Math.cos(angle) * speed, vy: Math.sin(angle) * speed,
+        damage: power + player.attack, color: colors[crystal], element: crystal,
+        size: 4 + power, life: 1.5, friendly: true
+      });
+    }
+  } else {
+    projectiles.push({
+      x: cx, y: cy, vx: DX[player.dir] * speed, vy: DY[player.dir] * speed,
+      damage: power + player.attack + (crystal === 1 ? 1 : 0), // fire bonus
+      color: colors[crystal], element: crystal,
+      size: 4 + power * 2, life: crystal === 0 ? 2.0 : 1.5, // wind faster/farther
+      friendly: true
+    });
+  }
+}
+
+function useItem() {
+  if (player.potions > 0 && player.hp < player.maxHp) {
+    player.potions--;
+    player.hp = Math.min(player.maxHp, player.hp + 6);
+    TAS.audio.playMelody([[523, 0.1], [659, 0.1], [784, 0.15]], 100);
+    showDialog('Used potion! HP restored.');
+  } else if (player.potions <= 0) {
+    showDialog('No potions left!');
+  } else {
+    // Cycle active crystal
+    cycleCrystal();
+  }
+}
+
+function cycleCrystal() {
+  let next = player.activeCrystal + 1;
+  let attempts = 0;
+  while (attempts < 5) {
+    if (next > 3) next = -1;
+    if (next === -1 || player.crystals[next]) {
+      player.activeCrystal = next;
+      const names = ['Wind', 'Fire', 'Water', 'Earth'];
+      if (next === -1) showDialog('Sword equipped');
+      else showDialog(names[next] + ' Crystal equipped');
+      TAS.audio.playTone(440, 0.05, 'sine', 0.08);
+      return;
+    }
+    next++;
+    attempts++;
+  }
+}
+
+function checkTileInteraction() {
+  const tcx = Math.floor((player.x + player.w/2) / TILE);
+  const tcy = Math.floor((player.y + player.h/2) / TILE);
+  const tile = currentMap[tcy] ? currentMap[tcy][tcx] : T.EMPTY;
+
+  switch (tile) {
+    case T.DUNGEON_ENTRANCE:
+      enterDungeon(tcx, tcy);
+      break;
+    case T.NPC:
+      if (TAS.input.keys['KeyX'] || TAS.input.keys['Space'] || TAS.input.touch.a) {
+        talkToNPC();
+      }
+      break;
+    case T.SHOP:
+      if (TAS.input.keys['KeyX'] || TAS.input.keys['Space'] || TAS.input.touch.a) {
+        openShop();
+      }
+      break;
+    case T.CHEST:
+      openChest(tcx, tcy);
+      break;
+    case T.SAVE_POINT:
+      saveGameState();
+      showDialog('Game saved!');
+      currentMap[tcy][tcx] = T.PATH; // prevent re-trigger
+      setTimeout(() => { if (currentMap[tcy]) currentMap[tcy][tcx] = T.SAVE_POINT; }, 2000);
+      break;
+    case T.SIGN:
+      showDialog('Welcome to Crystal Village! Find the 4 elemental crystals to save the world.');
+      break;
+  }
+}
+
+// ============================================================
+// SCREEN TRANSITIONS
+// ============================================================
+function transitionScreen(dir) {
+  transitionDir = dir;
+  transitionTimer = 0.3;
+
+  switch (dir) {
+    case DIR_LEFT:
+      screenX--;
+      player.x = COLS * TILE - player.w - 4;
+      break;
+    case DIR_RIGHT:
+      screenX++;
+      player.x = 4;
+      break;
+    case DIR_UP:
+      screenY--;
+      player.y = ROWS * TILE - player.h - 4;
+      break;
+    case DIR_DOWN:
+      screenY++;
+      player.y = 4;
+      break;
+  }
+
+  loadScreen(screenX, screenY);
+  enemies = [];
+  projectiles = [];
+  pickups = [];
+  bossActive = null;
+  spawnEnemiesForScreen();
+}
+
+function advanceDungeonRoom(direction) {
+  dungeonRoom += direction;
+  if (dungeonRoom < 0) {
+    // Exit dungeon
+    exitDungeon();
+    return;
+  }
+  currentMap = generateDungeonRoom(dungeonId, dungeonRoom);
+  if (direction > 0) {
+    player.y = (ROWS - 3) * TILE;
+  } else {
+    player.y = 2 * TILE;
+  }
+  player.x = 9 * TILE;
+  enemies = [];
+  projectiles = [];
+  pickups = [];
+  bossActive = null;
+  spawnEnemiesForScreen();
+  TAS.audio.playTone(200, 0.1, 'square', 0.05);
+}
+
+function enterDungeon() {
+  // Determine which dungeon based on screen
+  if (screenX === 0 && screenY === 1) dungeonId = 0;
+  else if (screenX === 4 && screenY === 0) dungeonId = 1;
+  else if (screenX === 5 && screenY === 5) dungeonId = 2;
+  else if (screenX === 0 && screenY === 5) dungeonId = 3;
+  else if (screenX === 5 && screenY === 0) {
+    // Final dungeon requires all crystals
+    if (!player.crystals.every(c => c)) {
+      showDialog('The tower requires all 4 crystal powers to enter...');
+      return;
+    }
+    dungeonId = 4;
+  } else return;
+
+  inDungeon = true;
+  dungeonRoom = 0;
+  currentMap = generateDungeonRoom(dungeonId, dungeonRoom);
+  player.x = 9 * TILE;
+  player.y = (ROWS - 3) * TILE;
+  enemies = [];
+  projectiles = [];
+  pickups = [];
+  bossActive = null;
+  spawnEnemiesForScreen();
+  showDialog('Entering ' + DUNGEONS[dungeonId].name + '...');
+  TAS.audio.playMelody([[220, 0.2], [196, 0.2], [175, 0.3]], 200);
+}
+
+function exitDungeon() {
+  inDungeon = false;
+  dungeonId = -1;
+  dungeonRoom = 0;
+  loadScreen(screenX, screenY);
+  player.x = 10 * TILE;
+  player.y = 6 * TILE;
+  enemies = [];
+  projectiles = [];
+  pickups = [];
+  bossActive = null;
+  spawnEnemiesForScreen();
+  showDialog('Left the dungeon.');
+}
+
+// ============================================================
+// COMBAT
+// ============================================================
+function damageEnemy(idx, damage) {
+  const e = enemies[idx];
+  if (e.stunTimer > 0) return;
+
+  // Element weakness bonus
+  if (player.activeCrystal >= 0) {
+    const weakness = (player.activeCrystal + 2) % 4; // fire beats earth's stuff etc
+    if (e.element === weakness) damage = Math.floor(damage * 1.5);
+  }
+
+  e.hp -= damage;
+  e.flash = 0.15;
+  e.stunTimer = 0.2;
+  TAS.audio.playTone(300, 0.05, 'square', 0.08, 100);
+  TAS.particles.spawn(e.x + e.w/2, e.y + e.h/2, '#fff', 4, 3);
+
+  if (e.hp <= 0) {
+    killEnemy(idx);
+  }
+}
+
+function killEnemy(idx) {
+  const e = enemies[idx];
+  TAS.particles.spawn(e.x + e.w/2, e.y + e.h/2, e.color, 10, 4);
+  TAS.audio.playTone(500, 0.1, 'sine', 0.08, 200);
+
+  player.xp += e.xp;
+  checkLevelUp();
+
+  // Drop chance
+  if (Math.random() < 0.2) {
+    spawnPickup(e.x, e.y, 'heart');
+  } else if (Math.random() < 0.15) {
+    spawnPickup(e.x, e.y, 'gold');
+  } else if (Math.random() < 0.1) {
+    spawnPickup(e.x, e.y, 'mp');
+  }
+
+  enemies.splice(idx, 1);
+}
+
+function damageBoss(damage) {
+  if (bossActive.invincible > 0) return;
+
+  // Element weakness
+  const bossWeak = (bossActive.element + 2) % 4;
+  if (player.activeCrystal === bossWeak) damage = Math.floor(damage * 2);
+
+  bossActive.hp -= damage;
+  bossActive.flash = 0.2;
+  bossActive.invincible = 0.3;
+  TAS.fx.shake(3, 0.85);
+  TAS.audio.playTone(200, 0.1, 'sawtooth', 0.12, 100);
+  TAS.particles.spawn(bossActive.x + bossActive.w/2, bossActive.y + bossActive.h/2, '#fff', 8, 5);
+
+  if (bossActive.hp <= 0) {
+    defeatBoss();
+  }
+}
+
+function defeatBoss() {
+  TAS.fx.flash('#fff', 0.8);
+  TAS.fx.shake(8, 0.9);
+  TAS.audio.playMelody([[523, 0.15], [659, 0.15], [784, 0.15], [1047, 0.3]], 150);
+  TAS.particles.spawn(bossActive.x + 16, bossActive.y + 16, bossActive.color, 30, 6);
+
+  if (dungeonId < 4) {
+    // Grant crystal
+    player.crystals[dungeonId] = true;
+    player.activeCrystal = dungeonId;
+    const names = ['Wind', 'Fire', 'Water', 'Earth'];
+    showDialog('You found the ' + names[dungeonId] + ' Crystal! Its power flows through you.');
+    player.xp += 30 + dungeonId * 10;
+    checkLevelUp();
+  } else {
+    // Final boss defeated!
+    victoryTimer = 5;
+    state = 'victory';
+  }
+
+  bossActive = null;
+  saveGameState();
+}
+
+function damagePlayer(amount) {
+  if (player.invincible > 0) return;
+  const reduction = player.defense + player.armor + Math.floor(player.shield * 0.5);
+  const finalDmg = Math.max(1, amount - reduction);
+  player.hp -= finalDmg;
+  player.invincible = 1.0;
+  TAS.fx.flash('#f00', 0.3);
+  TAS.fx.shake(4, 0.85);
+  TAS.audio.playTone(100, 0.15, 'sawtooth', 0.12, 50);
+
+  if (player.hp <= 0) {
+    player.hp = 0;
+    deathTimer = 2;
+    state = 'death';
+    TAS.audio.playMelody([[440, 0.2], [392, 0.2], [349, 0.2], [330, 0.4]], 250);
+  }
+}
+
+function checkLevelUp() {
+  while (player.xp >= player.xpToNext && player.level < 10) {
+    player.level++;
+    player.xp -= player.xpToNext;
+    player.xpToNext = 20 + (player.level - 1) * 15;
+    player.maxHp += 2;
+    player.hp = player.maxHp;
+    player.attack++;
+    player.maxMp += 5;
+    player.mp = player.maxMp;
+    TAS.audio.playMelody([[523, 0.1], [659, 0.1], [784, 0.1], [1047, 0.2]], 100);
+    TAS.fx.flash('#ff0', 0.4);
+    showDialog('Level up! Now level ' + player.level + '!');
+  }
+}
+
+// ============================================================
+// ENEMY AI
+// ============================================================
+function updateEnemies(dt) {
+  for (let i = enemies.length - 1; i >= 0; i--) {
+    const e = enemies[i];
+    if (e.flash > 0) e.flash -= dt;
+    if (e.stunTimer > 0) { e.stunTimer -= dt; continue; }
+
+    e.moveTimer += dt;
+    e.animFrame = Math.floor(e.moveTimer * 4) % 2;
+
+    switch (e.pattern) {
+      case 'wander':
+        updateWander(e, dt);
+        break;
+      case 'chase':
+        updateChase(e, dt);
+        break;
+      case 'swoop':
+        updateSwoop(e, dt);
+        break;
+      case 'shoot':
+        updateShooter(e, dt);
+        break;
+      case 'charge':
+        updateCharger(e, dt);
+        break;
+    }
+
+    // Check collision with player
+    if (player.invincible <= 0 && TAS.hit.rectOverlap(e.x, e.y, e.w, e.h,
+        player.x, player.y, player.w, player.h)) {
+      damagePlayer(e.damage);
+    }
+  }
+}
+
+function updateWander(e, dt) {
+  if (Math.floor(e.moveTimer * 2) % 3 === 0) {
+    if (Math.random() < dt * 2) {
+      e.dir = TAS.math.randInt(0, 3);
+    }
+  }
+  const spd = e.speed * dt;
+  const nx = e.x + DX[e.dir] * spd;
+  const ny = e.y + DY[e.dir] * spd;
+  if (!isSolidAt(nx, ny) && nx > TILE && nx < (COLS-2)*TILE && ny > TILE && ny < (ROWS-2)*TILE) {
+    e.x = nx; e.y = ny;
+  } else {
+    e.dir = (e.dir + TAS.math.randInt(1, 3)) % 4;
+  }
+}
+
+function updateChase(e, dt) {
+  const dx = player.x - e.x;
+  const dy = player.y - e.y;
+  const dist = Math.sqrt(dx * dx + dy * dy);
+  if (dist < 150 && dist > 0) {
+    const spd = e.speed * dt;
+    e.x += (dx / dist) * spd;
+    e.y += (dy / dist) * spd;
+  } else {
+    updateWander(e, dt);
+  }
+}
+
+function updateSwoop(e, dt) {
+  const dx = player.x - e.x;
+  const dy = player.y - e.y;
+  const dist = Math.sqrt(dx * dx + dy * dy);
+  // Swoop in sine pattern
+  const spd = e.speed * dt;
+  e.x += Math.sin(e.moveTimer * 3) * spd * 0.5;
+  if (dist < 120) {
+    e.x += (dx / dist) * spd * 0.7;
+    e.y += (dy / dist) * spd * 0.7;
+  } else {
+    e.y += Math.cos(e.moveTimer * 2) * spd * 0.5;
+    updateWander(e, dt);
+  }
+}
+
+function updateShooter(e, dt) {
+  e.shootTimer += dt;
+  const dist = TAS.math.dist(e.x, e.y, player.x, player.y);
+
+  if (dist < 120) {
+    // Move away
+    const dx = e.x - player.x;
+    const dy = e.y - player.y;
+    const d = Math.sqrt(dx * dx + dy * dy) || 1;
+    const spd = e.speed * dt * 0.5;
+    const nx = e.x + (dx / d) * spd;
+    const ny = e.y + (dy / d) * spd;
+    if (!isSolidAt(nx, ny)) { e.x = nx; e.y = ny; }
+  }
+
+  if (e.shootTimer > 2.0 && dist < 160) {
+    e.shootTimer = 0;
+    const angle = TAS.math.angle(e.x, e.y, player.x, player.y);
+    projectiles.push({
+      x: e.x + e.w/2, y: e.y + e.h/2,
+      vx: Math.cos(angle) * 80, vy: Math.sin(angle) * 80,
+      damage: e.damage, color: e.color, element: e.element,
+      size: 4, life: 2.0, friendly: false
+    });
+    TAS.audio.playTone(300, 0.05, 'sine', 0.04);
+  }
+}
+
+function updateCharger(e, dt) {
+  e.chargeTimer += dt;
+  const dist = TAS.math.dist(e.x, e.y, player.x, player.y);
+
+  if (dist < 100 && e.chargeTimer > 1.5) {
+    // Charge at player
+    e.chargeTimer = 0;
+    const angle = TAS.math.angle(e.x, e.y, player.x, player.y);
+    e._chargeVX = Math.cos(angle) * e.speed * 3;
+    e._chargeVY = Math.sin(angle) * e.speed * 3;
+    e._charging = 0.5;
+  }
+
+  if (e._charging > 0) {
+    e._charging -= dt;
+    e.x += e._chargeVX * dt;
+    e.y += e._chargeVY * dt;
+    // Clamp to bounds
+    e.x = TAS.math.clamp(e.x, TILE, (COLS-2) * TILE);
+    e.y = TAS.math.clamp(e.y, TILE, (ROWS-2) * TILE);
+  } else {
+    updateWander(e, dt);
+  }
+}
+
+// ============================================================
+// BOSS AI
+// ============================================================
+function updateBoss(dt) {
+  if (!bossActive) return;
+  const b = bossActive;
+  if (b.flash > 0) b.flash -= dt;
+  if (b.invincible > 0) b.invincible -= dt;
+
+  b.phaseTimer += dt;
+  b.moveTimer += dt;
+  b.shootTimer += dt;
+
+  // Phase changes
+  if (b.hp < b.maxHp * 0.5 && b.phase === 0) {
+    b.phase = 1;
+    b.speed *= 1.5;
+    TAS.fx.flash(b.color, 0.5);
+  }
+
+  // Movement - circle player
+  const angle = b.moveTimer * (1 + b.phase * 0.5);
+  const targetX = GW/2 + Math.cos(angle) * 80 - b.w/2;
+  const targetY = 40 + Math.sin(angle * 0.7) * 50;
+  b.x += (targetX - b.x) * dt * 2;
+  b.y += (targetY - b.y) * dt * 2;
+
+  // Attacks
+  if (b.shootTimer > (b.phase === 0 ? 1.5 : 0.8)) {
+    b.shootTimer = 0;
+
+    if (b.phase === 0) {
+      // Single aimed shot
+      const a = TAS.math.angle(b.x + b.w/2, b.y + b.h/2, player.x + player.w/2, player.y + player.h/2);
+      projectiles.push({
+        x: b.x + b.w/2, y: b.y + b.h/2,
+        vx: Math.cos(a) * 100, vy: Math.sin(a) * 100,
+        damage: b.damage, color: b.color, element: b.element,
+        size: 6, life: 2.5, friendly: false
+      });
+    } else {
+      // Spread shot
+      for (let i = 0; i < 5; i++) {
+        const a = (i / 5) * Math.PI * 2 + b.moveTimer;
+        projectiles.push({
+          x: b.x + b.w/2, y: b.y + b.h/2,
+          vx: Math.cos(a) * 80, vy: Math.sin(a) * 80,
+          damage: b.damage, color: b.color, element: b.element,
+          size: 5, life: 2, friendly: false
+        });
+      }
+    }
+    TAS.audio.playTone(150, 0.1, 'sawtooth', 0.08);
+  }
+
+  // Contact damage
+  if (player.invincible <= 0 && TAS.hit.rectOverlap(b.x, b.y, b.w, b.h,
+      player.x, player.y, player.w, player.h)) {
+    damagePlayer(b.damage);
+  }
+}
+
+// ============================================================
+// PROJECTILES
+// ============================================================
+function updateProjectiles(dt) {
+  for (let i = projectiles.length - 1; i >= 0; i--) {
+    const p = projectiles[i];
+    p.x += p.vx * dt;
+    p.y += p.vy * dt;
+    p.life -= dt;
+
+    if (p.life <= 0 || p.x < -10 || p.x > GW + 10 || p.y < -10 || p.y > GH + 10) {
+      projectiles.splice(i, 1);
+      continue;
+    }
+
+    // Collision check
+    if (p.friendly) {
+      // Hit enemies
+      for (let j = enemies.length - 1; j >= 0; j--) {
+        const e = enemies[j];
+        if (TAS.hit.circleOverlap(p.x, p.y, p.size, e.x + e.w/2, e.y + e.h/2, e.w/2)) {
+          damageEnemy(j, p.damage);
+          TAS.particles.spawn(p.x, p.y, p.color, 4, 2);
+          projectiles.splice(i, 1);
+          break;
+        }
+      }
+      // Hit boss
+      if (bossActive && projectiles[i]) {
+        if (TAS.hit.circleOverlap(p.x, p.y, p.size, bossActive.x + bossActive.w/2,
+            bossActive.y + bossActive.h/2, bossActive.w/2)) {
+          damageBoss(p.damage);
+          TAS.particles.spawn(p.x, p.y, p.color, 4, 2);
+          projectiles.splice(i, 1);
+        }
+      }
+    } else {
+      // Hit player
+      if (player.invincible <= 0 && TAS.hit.circleOverlap(p.x, p.y, p.size,
+          player.x + player.w/2, player.y + player.h/2, player.w/2)) {
+        damagePlayer(p.damage);
+        TAS.particles.spawn(p.x, p.y, p.color, 4, 2);
+        projectiles.splice(i, 1);
+      }
+    }
+  }
+}
+
+// ============================================================
+// PICKUPS
+// ============================================================
+function updatePickups(dt) {
+  for (let i = pickups.length - 1; i >= 0; i--) {
+    const p = pickups[i];
+    p.timer -= dt * 60;
+    if (p.timer <= 0) { pickups.splice(i, 1); continue; }
+
+    if (TAS.hit.rectOverlap(player.x, player.y, player.w, player.h, p.x, p.y, 12, 12)) {
+      switch (p.type) {
+        case 'heart':
+          player.hp = Math.min(player.maxHp, player.hp + 2);
+          TAS.audio.playTone(600, 0.08, 'sine', 0.08);
+          break;
+        case 'gold':
+          player.gold += TAS.math.randInt(3, 8);
+          TAS.audio.playTone(800, 0.05, 'sine', 0.06);
+          break;
+        case 'mp':
+          player.mp = Math.min(player.maxMp, player.mp + 8);
+          TAS.audio.playTone(700, 0.08, 'triangle', 0.07);
+          break;
+      }
+      TAS.particles.spawn(p.x + 6, p.y + 6, '#ff0', 5, 2);
+      pickups.splice(i, 1);
+    }
+  }
+}
+
+// ============================================================
+// NPC / SHOP / DIALOG
+// ============================================================
+function showDialog(text) {
+  dialogText = text;
+  dialogTimer = Math.max(2, text.length * 0.04);
+  TAS.audio.playTone(600, 0.03, 'square', 0.04);
+}
+
+function talkToNPC() {
+  const hints = [
+    'The Wind Temple lies to the northwest, hidden among ancient trees.',
+    'Fire beats ice, water beats fire... use the elements wisely!',
+    'I hear a powerful crystal rests in each of the four temples.',
+    'The Spore Tower can only be opened when all four crystals are united.',
+    'Hold your attack to charge a more powerful strike!',
+    'Some walls can only be broken with the right crystal power.',
+    'The shop sells potions and armor. Save your gold!',
+    'Press B to use a potion when you are hurt.',
+    'Each crystal gives you a different type of projectile attack.',
+    'Bosses are weak to the opposing element!'
+  ];
+  showDialog(hints[TAS.math.randInt(0, hints.length - 1)]);
+}
+
+function openShop() {
+  if (shopOpen) return;
+  shopOpen = true;
+  shopCursor = 0;
+  shopItems = [
+    { name: 'Health Potion', cost: 15, action: () => { player.potions++; } },
+    { name: 'Chain Mail', cost: 50, action: () => { player.armor = 1; player.defense = 1; }, req: () => player.armor < 1 },
+    { name: 'Plate Armor', cost: 120, action: () => { player.armor = 2; player.defense = 2; }, req: () => player.armor < 2 },
+    { name: 'Wood Shield', cost: 30, action: () => { player.shield = 1; }, req: () => player.shield < 1 },
+    { name: 'Iron Shield', cost: 80, action: () => { player.shield = 2; }, req: () => player.shield < 2 },
+    { name: 'Speed Boots', cost: 60, action: () => { player.boots = true; }, req: () => !player.boots }
+  ].filter(item => !item.req || item.req());
+}
+
+function updateShop(dt) {
+  const keys = TAS.input.keys;
+  const touch = TAS.input.touch;
+
+  if (keys['ArrowUp'] || touch.up) {
+    if (!player._shopUp) { shopCursor = Math.max(0, shopCursor - 1); player._shopUp = true; }
+  } else { player._shopUp = false; }
+
+  if (keys['ArrowDown'] || touch.down) {
+    if (!player._shopDown) { shopCursor = Math.min(shopItems.length - 1, shopCursor + 1); player._shopDown = true; }
+  } else { player._shopDown = false; }
+
+  if (keys['KeyX'] || keys['Space'] || touch.a) {
+    if (!player._shopBuy) {
+      player._shopBuy = true;
+      const item = shopItems[shopCursor];
+      if (player.gold >= item.cost) {
+        player.gold -= item.cost;
+        item.action();
+        TAS.audio.playMelody([[523, 0.08], [659, 0.08], [784, 0.12]], 80);
+        showDialog('Bought ' + item.name + '!');
+        shopOpen = false;
+      } else {
+        showDialog('Not enough gold! Need ' + item.cost + 'G.');
+      }
+    }
+  } else { player._shopBuy = false; }
+
+  if (keys['Escape'] || keys['KeyZ'] || touch.b) {
+    shopOpen = false;
+  }
+}
+
+function openChest(cx, cy) {
+  currentMap[cy][cx] = T.FLOOR; // remove chest
+  TAS.audio.playMelody([[440, 0.1], [554, 0.1], [659, 0.15]], 120);
+  TAS.particles.spawn(cx * TILE + 8, cy * TILE + 8, '#ff0', 10, 3);
+
+  // Random reward
+  const roll = Math.random();
+  if (roll < 0.3) {
+    player.potions += 2;
+    showDialog('Found 2 potions!');
+  } else if (roll < 0.6) {
+    const gold = TAS.math.randInt(15, 40);
+    player.gold += gold;
+    showDialog('Found ' + gold + ' gold!');
+  } else if (roll < 0.8) {
+    player.keys++;
+    showDialog('Found a key!');
+  } else {
+    player.hp = player.maxHp;
+    player.mp = player.maxMp;
+    showDialog('Found a full restore crystal!');
+  }
+}
+
+// ============================================================
+// MENU
+// ============================================================
+function updateMenu(dt) {
+  const keys = TAS.input.keys;
+  const touch = TAS.input.touch;
+
+  if (keys['ArrowUp'] || touch.up) {
+    if (!player._menuUp) { menuCursor = Math.max(0, menuCursor - 1); player._menuUp = true; }
+  } else { player._menuUp = false; }
+
+  if (keys['ArrowDown'] || touch.down) {
+    if (!player._menuDown) { menuCursor = Math.min(3, menuCursor + 1); player._menuDown = true; }
+  } else { player._menuDown = false; }
+
+  if (keys['Escape'] || keys['KeyM'] || touch.b) {
+    if (!player._menuClose) { menuOpen = false; player._menuClose = true; }
+  } else { player._menuClose = false; }
+
+  if (keys['KeyX'] || keys['Space'] || touch.a) {
+    if (!player._menuSelect) {
+      player._menuSelect = true;
+      switch (menuCursor) {
+        case 0: useItem(); menuOpen = false; break;
+        case 1: cycleCrystal(); menuOpen = false; break;
+        case 2: saveGameState(); showDialog('Game saved!'); menuOpen = false; break;
+        case 3: menuOpen = false; break;
+      }
+    }
+  } else { player._menuSelect = false; }
+}
+
+// ============================================================
+// MAIN UPDATE
+// ============================================================
+function update(dt) {
+  frame++;
+  TAS.particles.update(dt);
+  TAS.fx.updateEffects(dt);
+
+  if (state === 'title') {
+    if (TAS.input.keys['Space'] || TAS.input.keys['Enter'] || TAS.input.keys['KeyX'] || TAS.input.touch.a) {
+      if (!player) {
+        TAS.audio.ensureAudio();
+        if (hasSave()) startGame(true);
+        else startGame(false);
+      }
+    }
+    return;
+  }
+
+  if (state === 'death') {
+    deathTimer -= dt;
+    if (deathTimer <= 0) {
+      // Respawn with half HP at save point
+      player.hp = Math.floor(player.maxHp / 2);
+      player.gold = Math.floor(player.gold * 0.8);
+      if (inDungeon) exitDungeon();
+      screenX = 2; screenY = 4;
+      loadScreen(screenX, screenY);
+      player.x = 10 * TILE; player.y = 12 * TILE;
+      enemies = []; projectiles = []; pickups = [];
+      spawnEnemiesForScreen();
+      state = 'playing';
+    }
+    return;
+  }
+
+  if (state === 'victory') {
+    victoryTimer -= dt;
+    if (victoryTimer <= 0) {
+      state = 'credits';
+    }
+    return;
+  }
+
+  if (state === 'credits') {
+    if (TAS.input.keys['Space'] || TAS.input.keys['Enter'] || TAS.input.touch.a) {
+      state = 'title';
+      player = null;
+    }
+    return;
+  }
+
+  if (state !== 'playing') return;
+
+  // Dialog
+  if (dialogTimer > 0) {
+    dialogTimer -= dt;
+    if (TAS.input.keys['KeyX'] || TAS.input.keys['Space'] || TAS.input.touch.a) {
+      dialogTimer = Math.min(dialogTimer, 0.3);
+    }
+    return; // pause gameplay during dialog
+  }
+
+  // Shop
+  if (shopOpen) {
+    updateShop(dt);
+    return;
+  }
+
+  // Menu
+  if (TAS.input.keys['Escape'] || TAS.input.keys['KeyM']) {
+    if (!player._menuToggle) { menuOpen = !menuOpen; menuCursor = 0; player._menuToggle = true; }
+  } else { player._menuToggle = false; }
+
+  if (menuOpen) {
+    updateMenu(dt);
+    return;
+  }
+
+  // Transition
+  if (transitionTimer > 0) {
+    transitionTimer -= dt;
+    return;
+  }
+
+  updatePlayer(dt);
+  updateEnemies(dt);
+  updateBoss(dt);
+  updateProjectiles(dt);
+  updatePickups(dt);
+}
+
+// ============================================================
+// DRAWING
+// ============================================================
+function draw(dt) {
+  ctx.fillStyle = '#111';
+  ctx.fillRect(0, 0, GW, GH);
+
+  if (state === 'title') {
+    drawTitleScreen();
+    return;
+  }
+
+  if (state === 'credits') {
+    drawCredits();
+    return;
+  }
+
+  ctx.save();
+  TAS.fx.applyShake();
+
+  // Draw map
+  drawMap();
+
+  // Draw pickups
+  drawPickups();
+
+  // Draw enemies
+  drawEnemies();
+
+  // Draw boss
+  if (bossActive) drawBoss();
+
+  // Draw projectiles
+  drawProjectiles();
+
+  // Draw player
+  drawPlayer();
+
+  // Particles
+  TAS.particles.draw();
+
+  ctx.restore();
+
+  // Screen flash
+  TAS.fx.drawFlash(GW, GH);
+
+  // HUD
+  drawHUD();
+
+  // Dialog
+  if (dialogTimer > 0) drawDialog();
+
+  // Shop
+  if (shopOpen) drawShop();
+
+  // Menu
+  if (menuOpen) drawMenu();
+
+  // Death overlay
+  if (state === 'death') {
+    ctx.fillStyle = 'rgba(80,0,0,' + (1 - deathTimer / 2) * 0.7 + ')';
+    ctx.fillRect(0, 0, GW, GH);
+    ctx.textAlign = 'center';
+    ctx.fillStyle = '#f44';
+    ctx.font = 'bold 16px monospace';
+    ctx.fillText('YOU DIED', GW/2, GH/2 - 10);
+    ctx.fillStyle = '#aaa';
+    ctx.font = '10px monospace';
+    ctx.fillText('Returning to village...', GW/2, GH/2 + 10);
+  }
+
+  // Victory
+  if (state === 'victory') {
+    ctx.fillStyle = 'rgba(255,255,255,' + (1 - victoryTimer / 5) * 0.8 + ')';
+    ctx.fillRect(0, 0, GW, GH);
+    ctx.textAlign = 'center';
+    ctx.fillStyle = '#ff0';
+    ctx.font = 'bold 16px monospace';
+    ctx.fillText('VICTORY!', GW/2, GH/2 - 20);
+    ctx.fillStyle = '#fff';
+    ctx.font = '10px monospace';
+    ctx.fillText('The Spore Tower crumbles...', GW/2, GH/2);
+    ctx.fillText('Peace returns to the land.', GW/2, GH/2 + 15);
+  }
+
+  // Transition wipe
+  if (transitionTimer > 0) {
+    const progress = transitionTimer / 0.3;
+    ctx.fillStyle = '#000';
+    ctx.globalAlpha = progress;
+    ctx.fillRect(0, 0, GW, GH);
+    ctx.globalAlpha = 1;
+  }
+
+  // Touch controls
+  TAS.input.drawTouchControls(GW, GH);
+}
+
+// ============================================================
+// DRAW MAP
+// ============================================================
+function drawMap() {
+  if (!currentMap) return;
+  for (let r = 0; r < ROWS; r++) {
+    for (let c = 0; c < COLS; c++) {
+      const tile = currentMap[r][c];
+      const x = c * TILE;
+      const y = r * TILE;
+      drawTile(tile, x, y, c, r);
+    }
+  }
+}
+
+function drawTile(tile, x, y, c, r) {
+  switch (tile) {
+    case T.GRASS:
+      ctx.fillStyle = ((c + r) % 2 === 0) ? PAL.grass : PAL.grassL;
+      ctx.fillRect(x, y, TILE, TILE);
+      break;
+    case T.TREE:
+      ctx.fillStyle = PAL.grass;
+      ctx.fillRect(x, y, TILE, TILE);
+      // Trunk
+      ctx.fillStyle = '#5a3a1a';
+      ctx.fillRect(x + 6, y + 10, 4, 6);
+      // Canopy
+      ctx.fillStyle = PAL.treeTop;
+      ctx.fillRect(x + 2, y + 2, 12, 10);
+      ctx.fillStyle = '#3a8a2a';
+      ctx.fillRect(x + 4, y + 4, 8, 6);
+      break;
+    case T.WATER:
+      ctx.fillStyle = ((c + r + Math.floor(frame * 0.02)) % 2 === 0) ? PAL.water : PAL.waterL;
+      ctx.fillRect(x, y, TILE, TILE);
+      // Wave lines
+      ctx.strokeStyle = 'rgba(255,255,255,0.2)';
+      ctx.beginPath();
+      ctx.moveTo(x + 2, y + 6 + Math.sin(frame * 0.05 + c) * 2);
+      ctx.lineTo(x + 14, y + 6 + Math.sin(frame * 0.05 + c + 1) * 2);
+      ctx.stroke();
+      break;
+    case T.SAND:
+      ctx.fillStyle = ((c + r) % 2 === 0) ? PAL.sand : PAL.sandL;
+      ctx.fillRect(x, y, TILE, TILE);
+      break;
+    case T.MOUNTAIN:
+      ctx.fillStyle = PAL.grass;
+      ctx.fillRect(x, y, TILE, TILE);
+      ctx.fillStyle = PAL.mountain;
+      ctx.beginPath();
+      ctx.moveTo(x + 8, y + 2);
+      ctx.lineTo(x + 14, y + 14);
+      ctx.lineTo(x + 2, y + 14);
+      ctx.fill();
+      ctx.fillStyle = PAL.mountainL;
+      ctx.beginPath();
+      ctx.moveTo(x + 8, y + 2);
+      ctx.lineTo(x + 11, y + 8);
+      ctx.lineTo(x + 5, y + 8);
+      ctx.fill();
+      break;
+    case T.PATH:
+      ctx.fillStyle = PAL.path;
+      ctx.fillRect(x, y, TILE, TILE);
+      if ((c + r) % 3 === 0) {
+        ctx.fillStyle = 'rgba(0,0,0,0.1)';
+        ctx.fillRect(x + 4, y + 4, 3, 3);
+      }
+      break;
+    case T.SWAMP:
+      ctx.fillStyle = ((c + r) % 2 === 0) ? PAL.swamp : PAL.swampL;
+      ctx.fillRect(x, y, TILE, TILE);
+      ctx.fillStyle = 'rgba(0,100,0,0.3)';
+      ctx.fillRect(x + 3, y + 10, 2, 4);
+      break;
+    case T.LAVA:
+      ctx.fillStyle = '#cc2200';
+      ctx.fillRect(x, y, TILE, TILE);
+      ctx.fillStyle = '#ff' + (Math.floor(Math.sin(frame * 0.1 + c * r) * 30 + 60)).toString(16) + '00';
+      ctx.fillRect(x + 2, y + 2, 12, 12);
+      break;
+    case T.WALL: case T.CAVE_WALL:
+      ctx.fillStyle = PAL.wall;
+      ctx.fillRect(x, y, TILE, TILE);
+      ctx.fillStyle = PAL.wallL;
+      ctx.fillRect(x + 1, y + 1, 6, 6);
+      ctx.fillRect(x + 9, y + 9, 6, 6);
+      break;
+    case T.FLOOR:
+      ctx.fillStyle = ((c + r) % 2 === 0) ? PAL.floor : PAL.floorL;
+      ctx.fillRect(x, y, TILE, TILE);
+      break;
+    case T.DOOR:
+      ctx.fillStyle = '#553311';
+      ctx.fillRect(x, y, TILE, TILE);
+      ctx.fillStyle = '#aa8844';
+      ctx.fillRect(x + 3, y + 2, 10, 12);
+      break;
+    case T.BARRIER_WIND:
+      ctx.fillStyle = PAL.grass;
+      ctx.fillRect(x, y, TILE, TILE);
+      ctx.fillStyle = PAL.wind;
+      ctx.globalAlpha = 0.5 + Math.sin(frame * 0.08) * 0.3;
+      ctx.fillRect(x + 2, y + 2, 12, 12);
+      ctx.globalAlpha = 1;
+      break;
+    case T.BARRIER_FIRE:
+      ctx.fillStyle = PAL.grass;
+      ctx.fillRect(x, y, TILE, TILE);
+      ctx.fillStyle = PAL.fire;
+      ctx.globalAlpha = 0.5 + Math.sin(frame * 0.1) * 0.3;
+      ctx.fillRect(x + 2, y + 2, 12, 12);
+      ctx.globalAlpha = 1;
+      break;
+    case T.BARRIER_WATER:
+      ctx.fillStyle = PAL.grass;
+      ctx.fillRect(x, y, TILE, TILE);
+      ctx.fillStyle = PAL.ice;
+      ctx.globalAlpha = 0.5 + Math.sin(frame * 0.07) * 0.3;
+      ctx.fillRect(x + 2, y + 2, 12, 12);
+      ctx.globalAlpha = 1;
+      break;
+    case T.BARRIER_EARTH:
+      ctx.fillStyle = PAL.grass;
+      ctx.fillRect(x, y, TILE, TILE);
+      ctx.fillStyle = PAL.earth;
+      ctx.globalAlpha = 0.5 + Math.sin(frame * 0.06) * 0.3;
+      ctx.fillRect(x + 2, y + 2, 12, 12);
+      ctx.globalAlpha = 1;
+      break;
+    case T.CHEST:
+      ctx.fillStyle = PAL.floor;
+      ctx.fillRect(x, y, TILE, TILE);
+      ctx.fillStyle = '#886622';
+      ctx.fillRect(x + 2, y + 5, 12, 9);
+      ctx.fillStyle = '#ffcc00';
+      ctx.fillRect(x + 6, y + 8, 4, 3);
+      break;
+    case T.NPC:
+      ctx.fillStyle = PAL.path;
+      ctx.fillRect(x, y, TILE, TILE);
+      // Person
+      ctx.fillStyle = '#eeb';
+      ctx.fillRect(x + 5, y + 2, 6, 5); // head
+      ctx.fillStyle = '#44c';
+      ctx.fillRect(x + 4, y + 7, 8, 8); // body
+      break;
+    case T.SHOP:
+      ctx.fillStyle = PAL.path;
+      ctx.fillRect(x, y, TILE, TILE);
+      ctx.fillStyle = '#664422';
+      ctx.fillRect(x + 1, y + 4, 14, 11);
+      ctx.fillStyle = '#ff0';
+      ctx.font = '8px monospace';
+      ctx.textAlign = 'center';
+      ctx.fillText('$', x + 8, y + 12);
+      break;
+    case T.SAVE_POINT:
+      ctx.fillStyle = PAL.path;
+      ctx.fillRect(x, y, TILE, TILE);
+      ctx.fillStyle = 'hsl(' + (frame % 360) + ', 80%, 60%)';
+      ctx.beginPath();
+      ctx.arc(x + 8, y + 8, 5 + Math.sin(frame * 0.05) * 2, 0, Math.PI * 2);
+      ctx.fill();
+      break;
+    case T.HOUSE:
+      ctx.fillStyle = PAL.path;
+      ctx.fillRect(x, y, TILE, TILE);
+      ctx.fillStyle = '#553322';
+      ctx.fillRect(x + 1, y + 6, 14, 10);
+      // Roof
+      ctx.fillStyle = '#882222';
+      ctx.beginPath();
+      ctx.moveTo(x + 8, y + 1);
+      ctx.lineTo(x + 15, y + 7);
+      ctx.lineTo(x + 1, y + 7);
+      ctx.fill();
+      break;
+    case T.DUNGEON_ENTRANCE:
+      ctx.fillStyle = inDungeon ? PAL.floor : PAL.grass;
+      ctx.fillRect(x, y, TILE, TILE);
+      ctx.fillStyle = '#222';
+      ctx.fillRect(x + 3, y + 3, 10, 10);
+      ctx.fillStyle = '#111';
+      ctx.fillRect(x + 5, y + 5, 6, 6);
+      // Glow
+      const glowColor = DUNGEONS[getDungeonAtScreen()] ? DUNGEONS[getDungeonAtScreen()].color : '#888';
+      ctx.strokeStyle = glowColor;
+      ctx.globalAlpha = 0.5 + Math.sin(frame * 0.05) * 0.3;
+      ctx.strokeRect(x + 3, y + 3, 10, 10);
+      ctx.globalAlpha = 1;
+      break;
+    case T.FLOWER:
+      ctx.fillStyle = ((c + r) % 2 === 0) ? PAL.grass : PAL.grassL;
+      ctx.fillRect(x, y, TILE, TILE);
+      const fc = ['#f4a', '#ff4', '#f84', '#4af'][(c * 3 + r * 7) % 4];
+      ctx.fillStyle = fc;
+      ctx.fillRect(x + 6, y + 5, 4, 4);
+      ctx.fillStyle = '#2a4';
+      ctx.fillRect(x + 7, y + 9, 2, 5);
+      break;
+    case T.SIGN:
+      ctx.fillStyle = PAL.path;
+      ctx.fillRect(x, y, TILE, TILE);
+      ctx.fillStyle = '#664';
+      ctx.fillRect(x + 7, y + 8, 2, 7);
+      ctx.fillRect(x + 3, y + 3, 10, 6);
+      break;
+    case T.BRIDGE:
+      ctx.fillStyle = PAL.water;
+      ctx.fillRect(x, y, TILE, TILE);
+      ctx.fillStyle = '#886644';
+      ctx.fillRect(x + 2, y + 4, 12, 8);
+      break;
+    case T.VOLCANO:
+      ctx.fillStyle = PAL.grass;
+      ctx.fillRect(x, y, TILE, TILE);
+      ctx.fillStyle = '#443';
+      ctx.beginPath();
+      ctx.moveTo(x + 8, y + 1);
+      ctx.lineTo(x + 15, y + 15);
+      ctx.lineTo(x + 1, y + 15);
+      ctx.fill();
+      ctx.fillStyle = '#f40';
+      ctx.fillRect(x + 6, y + 1, 4, 3);
+      break;
+    default:
+      ctx.fillStyle = '#111';
+      ctx.fillRect(x, y, TILE, TILE);
+  }
+}
+
+function getDungeonAtScreen() {
+  if (screenX === 0 && screenY === 1) return 0;
+  if (screenX === 4 && screenY === 0) return 1;
+  if (screenX === 5 && screenY === 5) return 2;
+  if (screenX === 0 && screenY === 5) return 3;
+  if (screenX === 5 && screenY === 0) return 4;
+  return -1;
+}
+
+// ============================================================
+// DRAW PLAYER
+// ============================================================
+function drawPlayer() {
+  if (!player) return;
+  const px = Math.floor(player.x);
+  const py = Math.floor(player.y);
+
+  // Blink during invincibility
+  if (player.invincible > 0 && Math.floor(frame * 0.3) % 2 === 0) return;
+
+  // Body
+  ctx.fillStyle = '#4488cc';
+  ctx.fillRect(px + 2, py + 4, 10, 10);
+
+  // Head
+  ctx.fillStyle = '#eecc88';
+  ctx.fillRect(px + 3, py, 8, 6);
+
+  // Eyes
+  ctx.fillStyle = '#222';
+  if (player.dir === DIR_DOWN || player.dir === DIR_LEFT) ctx.fillRect(px + 4, py + 2, 2, 2);
+  if (player.dir === DIR_DOWN || player.dir === DIR_RIGHT) ctx.fillRect(px + 8, py + 2, 2, 2);
+  if (player.dir === DIR_UP) {
+    ctx.fillRect(px + 4, py + 1, 2, 2);
+    ctx.fillRect(px + 8, py + 1, 2, 2);
+  }
+
+  // Legs (animate)
+  ctx.fillStyle = '#336';
+  const legOff = player.animFrame % 2 === 0 ? 0 : 2;
+  ctx.fillRect(px + 3, py + 12, 3, 3 - legOff);
+  ctx.fillRect(px + 8, py + 12, 3, 1 + legOff);
+
+  // Sword swing
+  if (player.swinging) {
+    ctx.fillStyle = '#ddd';
+    const sLen = 10;
+    const sx = px + 7 + DX[player.swingDir] * sLen;
+    const sy = py + 7 + DY[player.swingDir] * sLen;
+    ctx.fillRect(sx - 2, sy - 2, 5, 5);
+    // Swing arc
+    ctx.strokeStyle = '#fff';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.arc(px + 7, py + 7, 12,
+      Math.atan2(DY[player.swingDir], DX[player.swingDir]) - 0.5,
+      Math.atan2(DY[player.swingDir], DX[player.swingDir]) + 0.5);
+    ctx.stroke();
+    ctx.lineWidth = 1;
+  }
+
+  // Charge indicator
+  if (player.charging && player.chargeLevel > 0) {
+    const colors = ['#8f8', '#ff8', '#f88'];
+    ctx.strokeStyle = colors[player.chargeLevel - 1];
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.arc(px + 7, py + 7, 10 + player.chargeLevel * 2, 0, Math.PI * 2 * (player.chargeTime / 2));
+    ctx.stroke();
+    ctx.lineWidth = 1;
+  }
+
+  // Active crystal glow
+  if (player.activeCrystal >= 0) {
+    ctx.globalAlpha = 0.3 + Math.sin(frame * 0.1) * 0.1;
+    ctx.fillStyle = PAL.crystal[player.activeCrystal];
+    ctx.beginPath();
+    ctx.arc(px + 7, py + 7, 9, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.globalAlpha = 1;
+  }
+}
+
+// ============================================================
+// DRAW ENEMIES
+// ============================================================
+function drawEnemies() {
+  for (const e of enemies) {
+    const ex = Math.floor(e.x);
+    const ey = Math.floor(e.y);
+
+    if (e.flash > 0) {
+      ctx.fillStyle = '#fff';
+    } else {
+      ctx.fillStyle = e.color;
+    }
+
+    // Basic enemy shape based on type
+    switch (e.type) {
+      case 'slime':
+        ctx.beginPath();
+        ctx.arc(ex + e.w/2, ey + e.h/2 + 2, e.w/2, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = '#fff';
+        ctx.fillRect(ex + 3, ey + 4, 2, 2);
+        ctx.fillRect(ex + 7, ey + 4, 2, 2);
+        break;
+      case 'bat':
+        ctx.fillRect(ex + 3, ey + 3, 4, 4);
+        // Wings
+        const wingOff = Math.sin(frame * 0.2) * 3;
+        ctx.fillRect(ex - 2, ey + 2 + wingOff, 4, 3);
+        ctx.fillRect(ex + 8, ey + 2 - wingOff, 4, 3);
+        break;
+      case 'skeleton':
+        ctx.fillRect(ex + 3, ey, 8, 6); // skull
+        ctx.fillRect(ex + 4, ey + 6, 6, 8); // body
+        ctx.fillStyle = '#222';
+        ctx.fillRect(ex + 4, ey + 2, 2, 2);
+        ctx.fillRect(ex + 8, ey + 2, 2, 2);
+        break;
+      case 'wizard':
+        ctx.fillRect(ex + 3, ey + 4, 8, 10);
+        // Hat
+        ctx.beginPath();
+        ctx.moveTo(ex + e.w/2, ey);
+        ctx.lineTo(ex + e.w - 2, ey + 5);
+        ctx.lineTo(ex + 2, ey + 5);
+        ctx.fill();
+        break;
+      case 'golem':
+        ctx.fillRect(ex, ey + 2, e.w, e.h - 2);
+        ctx.fillStyle = e.flash > 0 ? '#fff' : '#543';
+        ctx.fillRect(ex + 3, ey + 5, 3, 3);
+        ctx.fillRect(ex + 10, ey + 5, 3, 3);
+        break;
+      default:
+        ctx.fillRect(ex, ey, e.w, e.h);
+        break;
+    }
+
+    // HP bar for damaged enemies
+    if (e.hp < e.maxHp) {
+      ctx.fillStyle = '#400';
+      ctx.fillRect(ex, ey - 4, e.w, 3);
+      ctx.fillStyle = '#f44';
+      ctx.fillRect(ex, ey - 4, e.w * (e.hp / e.maxHp), 3);
+    }
+  }
+}
+
+// ============================================================
+// DRAW BOSS
+// ============================================================
+function drawBoss() {
+  const b = bossActive;
+  const bx = Math.floor(b.x);
+  const by = Math.floor(b.y);
+
+  if (b.invincible > 0 && Math.floor(frame * 0.3) % 2 === 0) return;
+
+  ctx.fillStyle = b.flash > 0 ? '#fff' : b.color;
+  // Large body
+  ctx.fillRect(bx + 2, by + 4, 28, 24);
+  // Head features
+  ctx.fillStyle = b.flash > 0 ? '#fff' : '#222';
+  ctx.fillRect(bx + 7, by + 10, 5, 5);
+  ctx.fillRect(bx + 20, by + 10, 5, 5);
+  // Crown/horns
+  ctx.fillStyle = b.flash > 0 ? '#fff' : '#ff0';
+  ctx.fillRect(bx + 6, by, 4, 6);
+  ctx.fillRect(bx + 22, by, 4, 6);
+  ctx.fillRect(bx + 14, by - 2, 4, 6);
+
+  // Phase 2 aura
+  if (b.phase > 0) {
+    ctx.globalAlpha = 0.3 + Math.sin(frame * 0.1) * 0.1;
+    ctx.strokeStyle = b.color;
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.arc(bx + 16, by + 16, 22 + Math.sin(frame * 0.05) * 4, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.lineWidth = 1;
+    ctx.globalAlpha = 1;
+  }
+
+  // HP bar
+  ctx.fillStyle = '#400';
+  ctx.fillRect(bx - 10, by - 10, 52, 5);
+  ctx.fillStyle = b.color;
+  ctx.fillRect(bx - 10, by - 10, 52 * (b.hp / b.maxHp), 5);
+  ctx.strokeStyle = '#fff';
+  ctx.strokeRect(bx - 10, by - 10, 52, 5);
+}
+
+// ============================================================
+// DRAW PROJECTILES
+// ============================================================
+function drawProjectiles() {
+  for (const p of projectiles) {
+    ctx.fillStyle = p.color;
+    ctx.globalAlpha = Math.min(1, p.life);
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
+    ctx.fill();
+    // Trail
+    ctx.globalAlpha = 0.3;
+    ctx.beginPath();
+    ctx.arc(p.x - p.vx * 0.02, p.y - p.vy * 0.02, p.size * 0.7, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.globalAlpha = 1;
+  }
+}
+
+// ============================================================
+// DRAW PICKUPS
+// ============================================================
+function drawPickups() {
+  for (const p of pickups) {
+    const bob = Math.sin(frame * 0.08 + p.x) * 2;
+    switch (p.type) {
+      case 'heart':
+        ctx.fillStyle = '#f44';
+        ctx.beginPath();
+        ctx.arc(p.x + 4, p.y + 4 + bob, 4, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = '#faa';
+        ctx.fillRect(p.x + 3, p.y + 3 + bob, 2, 2);
+        break;
+      case 'gold':
+        ctx.fillStyle = '#ff0';
+        ctx.beginPath();
+        ctx.arc(p.x + 6, p.y + 6 + bob, 5, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = '#aa0';
+        ctx.font = '8px monospace';
+        ctx.textAlign = 'center';
+        ctx.fillText('G', p.x + 6, p.y + 9 + bob);
+        break;
+      case 'mp':
+        ctx.fillStyle = '#44f';
+        ctx.beginPath();
+        ctx.arc(p.x + 6, p.y + 6 + bob, 5, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = '#aaf';
+        ctx.fillRect(p.x + 4, p.y + 4 + bob, 4, 4);
+        break;
+    }
+  }
+}
+
+// ============================================================
+// HUD
+// ============================================================
+function drawHUD() {
+  const hudY = PLAY_H;
+
+  // Background
+  ctx.fillStyle = PAL.hud;
+  ctx.fillRect(0, hudY, GW, HUD_H);
+  ctx.strokeStyle = PAL.hudBorder;
+  ctx.strokeRect(0, hudY, GW, HUD_H);
+
+  if (!player) return;
+
+  // Hearts
+  const hearts = Math.ceil(player.maxHp / 2);
+  for (let i = 0; i < hearts; i++) {
+    const hx = 4 + i * 14;
+    const hy = hudY + 4;
+    if (player.hp >= (i + 1) * 2) {
+      // Full heart
+      ctx.fillStyle = '#f44';
+      drawHeart(hx, hy, 10);
+    } else if (player.hp >= i * 2 + 1) {
+      // Half heart
+      ctx.fillStyle = '#822';
+      drawHeart(hx, hy, 10);
+      ctx.fillStyle = '#f44';
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(hx, hy, 5, 12);
+      ctx.clip();
+      drawHeart(hx, hy, 10);
+      ctx.restore();
+    } else {
+      // Empty heart
+      ctx.fillStyle = '#333';
+      drawHeart(hx, hy, 10);
+    }
+  }
+
+  // MP bar
+  ctx.fillStyle = '#224';
+  ctx.fillRect(4, hudY + 18, 80, 6);
+  ctx.fillStyle = '#44f';
+  ctx.fillRect(4, hudY + 18, 80 * (player.mp / player.maxMp), 6);
+  ctx.strokeStyle = '#448';
+  ctx.strokeRect(4, hudY + 18, 80, 6);
+  ctx.fillStyle = '#88f';
+  ctx.font = '7px monospace';
+  ctx.textAlign = 'left';
+  ctx.fillText('MP', 6, hudY + 24);
+
+  // XP bar
+  ctx.fillStyle = '#242';
+  ctx.fillRect(4, hudY + 26, 80, 4);
+  ctx.fillStyle = '#4a4';
+  ctx.fillRect(4, hudY + 26, 80 * (player.xp / player.xpToNext), 4);
+
+  // Level and gold
+  ctx.fillStyle = '#fff';
+  ctx.font = 'bold 9px monospace';
+  ctx.textAlign = 'left';
+  ctx.fillText('LV' + player.level, 90, hudY + 10);
+  ctx.fillStyle = '#ff0';
+  ctx.fillText(player.gold + 'G', 90, hudY + 22);
+
+  // Active crystal / equipment
+  ctx.fillStyle = '#aaa';
+  ctx.font = '8px monospace';
+  ctx.textAlign = 'center';
+  const crystalNames = ['WIND', 'FIRE', 'WATER', 'EARTH'];
+  if (player.activeCrystal >= 0) {
+    ctx.fillStyle = PAL.crystal[player.activeCrystal];
+    ctx.fillText(crystalNames[player.activeCrystal], 155, hudY + 10);
+    // Draw crystal icon
+    ctx.fillRect(148, hudY + 14, 14, 14);
+    ctx.fillStyle = '#fff';
+    ctx.fillRect(152, hudY + 18, 6, 6);
+  } else {
+    ctx.fillStyle = '#ccc';
+    ctx.fillText('SWORD', 155, hudY + 10);
+    ctx.fillStyle = '#aaa';
+    ctx.fillRect(152, hudY + 14, 2, 12);
+    ctx.fillRect(148, hudY + 14, 10, 3);
+  }
+
+  // Potions
+  ctx.fillStyle = '#f88';
+  ctx.font = '8px monospace';
+  ctx.textAlign = 'left';
+  ctx.fillText('POT:' + player.potions, 180, hudY + 10);
+
+  // Keys
+  ctx.fillStyle = '#ff0';
+  ctx.fillText('KEY:' + player.keys, 180, hudY + 22);
+
+  // Location
+  ctx.fillStyle = '#888';
+  ctx.font = '7px monospace';
+  ctx.textAlign = 'right';
+  if (inDungeon) {
+    ctx.fillText(DUNGEONS[dungeonId].name + ' R' + (dungeonRoom + 1), GW - 4, hudY + 10);
+  } else {
+    ctx.fillText('(' + screenX + ',' + screenY + ')', GW - 4, hudY + 10);
+  }
+
+  // Crystals collected indicator
+  ctx.textAlign = 'right';
+  for (let i = 0; i < 4; i++) {
+    ctx.fillStyle = player.crystals[i] ? PAL.crystal[i] : '#333';
+    ctx.fillRect(GW - 4 - (3 - i) * 10, hudY + 16, 8, 8);
+  }
+
+  // Charge level indicator
+  if (player.charging && player.chargeLevel > 0) {
+    ctx.fillStyle = '#fff';
+    ctx.font = 'bold 8px monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText('CHG:' + player.chargeLevel, GW / 2, hudY + 28);
+  }
+}
+
+function drawHeart(x, y, size) {
+  const s = size / 10;
+  ctx.beginPath();
+  ctx.arc(x + 2.5 * s, y + 2.5 * s, 2.5 * s, 0, Math.PI * 2);
+  ctx.arc(x + 7.5 * s, y + 2.5 * s, 2.5 * s, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.moveTo(x, y + 3 * s);
+  ctx.lineTo(x + 5 * s, y + 10 * s);
+  ctx.lineTo(x + 10 * s, y + 3 * s);
+  ctx.fill();
+}
+
+// ============================================================
+// DIALOG BOX
+// ============================================================
+function drawDialog() {
+  const boxH = 50;
+  const boxY = PLAY_H - boxH - 4;
+  ctx.fillStyle = 'rgba(0,0,20,0.9)';
+  ctx.fillRect(8, boxY, GW - 16, boxH);
+  ctx.strokeStyle = '#88ccff';
+  ctx.strokeRect(8, boxY, GW - 16, boxH);
+
+  ctx.fillStyle = '#fff';
+  ctx.font = '9px monospace';
+  ctx.textAlign = 'left';
+
+  // Word wrap
+  const words = dialogText.split(' ');
+  let line = '';
+  let lineY = boxY + 14;
+  const maxWidth = GW - 32;
+  for (const word of words) {
+    const test = line + word + ' ';
+    if (ctx.measureText(test).width > maxWidth) {
+      ctx.fillText(line, 14, lineY);
+      line = word + ' ';
+      lineY += 12;
+    } else {
+      line = test;
+    }
+  }
+  ctx.fillText(line, 14, lineY);
+
+  // Continue indicator
+  const pulse = Math.sin(frame * 0.1) * 0.4 + 0.6;
+  ctx.globalAlpha = pulse;
+  ctx.fillStyle = '#88ccff';
+  ctx.fillText('...', GW - 28, boxY + boxH - 6);
+  ctx.globalAlpha = 1;
+}
+
+// ============================================================
+// SHOP SCREEN
+// ============================================================
+function drawShop() {
+  ctx.fillStyle = 'rgba(0,0,20,0.92)';
+  ctx.fillRect(30, 20, GW - 60, PLAY_H - 40);
+  ctx.strokeStyle = '#ff0';
+  ctx.strokeRect(30, 20, GW - 60, PLAY_H - 40);
+
+  ctx.fillStyle = '#ff0';
+  ctx.font = 'bold 12px monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText('SHOP', GW / 2, 40);
+
+  ctx.fillStyle = '#fff';
+  ctx.font = '9px monospace';
+  ctx.textAlign = 'right';
+  ctx.fillText('Gold: ' + player.gold + 'G', GW - 40, 40);
+
+  ctx.textAlign = 'left';
+  for (let i = 0; i < shopItems.length; i++) {
+    const item = shopItems[i];
+    const iy = 58 + i * 22;
+
+    if (i === shopCursor) {
+      ctx.fillStyle = 'rgba(100,100,0,0.3)';
+      ctx.fillRect(36, iy - 10, GW - 72, 18);
+      ctx.fillStyle = '#ff0';
+      ctx.fillText('>', 40, iy);
+    }
+
+    ctx.fillStyle = player.gold >= item.cost ? '#fff' : '#666';
+    ctx.fillText(item.name, 56, iy);
+    ctx.fillStyle = '#ff0';
+    ctx.fillText(item.cost + 'G', GW - 80, iy);
+  }
+
+  ctx.fillStyle = '#888';
+  ctx.font = '8px monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText('[A] Buy   [B] Exit', GW / 2, PLAY_H - 30);
+}
+
+// ============================================================
+// MENU SCREEN
+// ============================================================
+function drawMenu() {
+  ctx.fillStyle = 'rgba(0,0,20,0.92)';
+  ctx.fillRect(50, 30, GW - 100, PLAY_H - 60);
+  ctx.strokeStyle = '#4af';
+  ctx.strokeRect(50, 30, GW - 100, PLAY_H - 60);
+
+  ctx.fillStyle = '#4af';
+  ctx.font = 'bold 11px monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText('MENU', GW / 2, 48);
+
+  const options = ['Use Potion (' + player.potions + ')', 'Switch Crystal', 'Save Game', 'Close'];
+  ctx.font = '9px monospace';
+  ctx.textAlign = 'left';
+
+  for (let i = 0; i < options.length; i++) {
+    const iy = 70 + i * 22;
+    if (i === menuCursor) {
+      ctx.fillStyle = 'rgba(40,80,120,0.3)';
+      ctx.fillRect(56, iy - 10, GW - 112, 18);
+      ctx.fillStyle = '#4af';
+      ctx.fillText('>', 60, iy);
+    }
+    ctx.fillStyle = '#fff';
+    ctx.fillText(options[i], 76, iy);
+  }
+
+  // Stats
+  ctx.fillStyle = '#888';
+  ctx.font = '8px monospace';
+  const statsY = 160;
+  ctx.fillText('ATK: ' + player.attack, 60, statsY);
+  ctx.fillText('DEF: ' + player.defense, 60, statsY + 12);
+  ctx.fillText('Armor: ' + ['Cloth', 'Chain', 'Plate'][player.armor], 140, statsY);
+  ctx.fillText('Shield: ' + ['None', 'Wood', 'Iron'][player.shield], 140, statsY + 12);
+  if (player.boots) ctx.fillText('Boots: Speed+', 60, statsY + 24);
+}
+
+// ============================================================
+// TITLE SCREEN
+// ============================================================
+function drawTitleScreen() {
+  // Background - dark with crystal particles
+  ctx.fillStyle = '#0a0a1a';
+  ctx.fillRect(0, 0, GW, GH);
+
+  // Animated crystal sparkles
+  for (let i = 0; i < 20; i++) {
+    const cx = (Math.sin(frame * 0.01 + i * 1.3) * 0.5 + 0.5) * GW;
+    const cy = (Math.cos(frame * 0.008 + i * 1.7) * 0.5 + 0.5) * GH;
+    ctx.globalAlpha = 0.3 + Math.sin(frame * 0.03 + i) * 0.2;
+    ctx.fillStyle = PAL.crystal[i % 4];
+    ctx.fillRect(cx, cy, 3, 3);
+  }
+  ctx.globalAlpha = 1;
+
+  // Title
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#000';
+  ctx.font = 'bold 22px monospace';
+  ctx.fillText('CRYSTAL QUEST', GW/2 + 2, 72);
+
+  // Gradient-ish title
+  ctx.fillStyle = '#88ddff';
+  ctx.fillText('CRYSTAL QUEST', GW/2, 70);
+
+  // Subtitle
+  ctx.fillStyle = '#668';
+  ctx.font = '10px monospace';
+  ctx.fillText('A Tasern Tale', GW/2, 92);
+
+  // 4 crystals
+  const crystalY = 130;
+  const crystalColors = ['#44cc66', '#ff4422', '#44aaff', '#aa7733'];
+  const crystalLabels = ['Wind', 'Fire', 'Water', 'Earth'];
+  for (let i = 0; i < 4; i++) {
+    const cx = 80 + i * 55;
+    ctx.fillStyle = crystalColors[i];
+    ctx.globalAlpha = 0.6 + Math.sin(frame * 0.04 + i * 1.5) * 0.3;
+    // Diamond shape
+    ctx.beginPath();
+    ctx.moveTo(cx, crystalY - 10);
+    ctx.lineTo(cx + 8, crystalY);
+    ctx.lineTo(cx, crystalY + 10);
+    ctx.lineTo(cx - 8, crystalY);
+    ctx.closePath();
+    ctx.fill();
+    ctx.globalAlpha = 1;
+    ctx.fillStyle = crystalColors[i];
+    ctx.font = '7px monospace';
+    ctx.fillText(crystalLabels[i], cx, crystalY + 20);
+  }
+
+  // Start prompt
+  const pulse = Math.sin(frame * 0.05) * 0.3 + 0.7;
+  ctx.globalAlpha = pulse;
+  ctx.fillStyle = '#ffdd44';
+  ctx.font = 'bold 11px monospace';
+  ctx.fillText('PRESS START', GW/2, 200);
+  ctx.globalAlpha = 1;
+
+  // Continue indicator
+  if (hasSave()) {
+    ctx.fillStyle = '#888';
+    ctx.font = '9px monospace';
+    ctx.fillText('(Save data found - will continue)', GW/2, 220);
+  }
+
+  // Controls
+  ctx.fillStyle = '#556';
+  ctx.font = '8px monospace';
+  ctx.fillText('Arrows: Move   X/Space: Attack (hold to charge)', GW/2, 248);
+  ctx.fillText('Z/C: Use Potion   M/Esc: Menu', GW/2, 260);
+}
+
+// ============================================================
+// CREDITS
+// ============================================================
+function drawCredits() {
+  ctx.fillStyle = '#0a0a1a';
+  ctx.fillRect(0, 0, GW, GH);
+
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#88ddff';
+  ctx.font = 'bold 16px monospace';
+  ctx.fillText('CRYSTAL QUEST', GW/2, 40);
+
+  ctx.fillStyle = '#ff0';
+  ctx.font = 'bold 12px monospace';
+  ctx.fillText('CONGRATULATIONS!', GW/2, 70);
+
+  ctx.fillStyle = '#fff';
+  ctx.font = '9px monospace';
+  ctx.fillText('You have defeated the Spore Tower', GW/2, 100);
+  ctx.fillText('and restored peace to the land.', GW/2, 115);
+  ctx.fillText('The four elemental crystals shine', GW/2, 140);
+  ctx.fillText('with renewed power.', GW/2, 155);
+
+  ctx.fillStyle = '#888';
+  ctx.fillText('A MfT Arcade Game', GW/2, 190);
+  ctx.fillText('Tales of Tasern Universe', GW/2, 205);
+
+  ctx.fillStyle = '#ff0';
+  ctx.font = '9px monospace';
+  ctx.fillText('Final Level: ' + player.level, GW/2, 235);
+  ctx.fillText('Gold Earned: ' + player.gold, GW/2, 250);
+
+  const pulse = Math.sin(frame * 0.05) * 0.3 + 0.7;
+  ctx.globalAlpha = pulse;
+  ctx.fillStyle = '#4af';
+  ctx.font = '10px monospace';
+  ctx.fillText('Press any key', GW/2, 275);
+  ctx.globalAlpha = 1;
+}
+
+// ============================================================
+// START GAME LOOP
+// ============================================================
+TAS.loop.start(update, draw);
+
+})();
+</script>
+</body>
+</html>

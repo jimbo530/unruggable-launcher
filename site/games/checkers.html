@@ -1,0 +1,1040 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Checkers</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body { width: 100%; height: 100%; overflow: hidden; background: #111; touch-action: none; }
+canvas { display: block; margin: 0 auto; }
+#back-link {
+  position: fixed; bottom: 8px; left: 50%; transform: translateX(-50%);
+  color: #666; font-family: monospace; font-size: 12px; text-decoration: none; z-index: 10;
+}
+#back-link:hover { color: #aaa; }
+</style>
+</head>
+<body>
+<canvas id="gc"></canvas>
+<a id="back-link" href="/games">Back to Arcade</a>
+<script src="nft-loader.js"></script>
+<script>if(window.NftLoader)NftLoader.gate();</script>
+<script>
+(function() {
+"use strict";
+
+// ============================================================
+// CONSTANTS
+// ============================================================
+var EMPTY = 0, RED = 1, BLACK = 2, RED_KING = 3, BLACK_KING = 4;
+var BOARD_SIZE = 8;
+var ANIM_DURATION = 200; // ms per hop
+var AI_DEPTH = 4;
+
+// ============================================================
+// STATE
+// ============================================================
+var board = [];
+var turn = RED; // red goes first
+var selected = null; // {r, c}
+var legalMoves = []; // [{r,c,jumps:[{r,c,captured:{r,c}},...]}]
+var forcedPieces = []; // [{r,c}] pieces that must jump
+var redCaptured = 0, blackCaptured = 0;
+var gameOver = false;
+var winner = null;
+var vsAI = true;
+var aiThinking = false;
+var showMenu = true;
+
+// Animation state
+var animating = false;
+var animPath = []; // [{fromR, fromC, toR, toC, captured}]
+var animStep = 0;
+var animStart = 0;
+var animPiece = EMPTY;
+var animPromotesTo = EMPTY;
+
+// Canvas
+var canvas = document.getElementById("gc");
+var ctx = canvas.getContext("2d");
+var cellSize = 0;
+var boardX = 0, boardY = 0;
+var panelH = 60; // top panel height
+
+// ============================================================
+// AUDIO (Web Audio API)
+// ============================================================
+var audioCtx = null;
+function initAudio() {
+  if (!audioCtx) {
+    try { audioCtx = new (window.AudioContext || window.webkitAudioContext)(); }
+    catch(e) { console.warn("Web Audio not available:", e); }
+  }
+}
+
+function playTone(freq, dur, type, vol) {
+  if (!audioCtx) return;
+  try {
+    var osc = audioCtx.createOscillator();
+    var gain = audioCtx.createGain();
+    osc.type = type || "sine";
+    osc.frequency.value = freq;
+    gain.gain.setValueAtTime(vol || 0.15, audioCtx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + dur);
+    osc.connect(gain);
+    gain.connect(audioCtx.destination);
+    osc.start();
+    osc.stop(audioCtx.currentTime + dur);
+  } catch(e) { console.warn("Audio error:", e); }
+}
+
+function soundMove() { playTone(300, 0.1, "sine", 0.12); }
+function soundJump() { playTone(500, 0.15, "square", 0.1); setTimeout(function(){ playTone(600, 0.1, "square", 0.08); }, 60); }
+function soundKing() { playTone(400, 0.3, "sine", 0.15); setTimeout(function(){ playTone(600, 0.25, "sine", 0.12); }, 100); setTimeout(function(){ playTone(800, 0.3, "sine", 0.1); }, 200); }
+function soundWin() { playTone(523, 0.2, "sine", 0.15); setTimeout(function(){ playTone(659, 0.2, "sine", 0.15); }, 150); setTimeout(function(){ playTone(784, 0.4, "sine", 0.18); }, 300); }
+function soundCapture() { playTone(200, 0.08, "triangle", 0.2); }
+
+// ============================================================
+// BOARD INIT
+// ============================================================
+function initBoard() {
+  board = [];
+  for (var r = 0; r < BOARD_SIZE; r++) {
+    board[r] = [];
+    for (var c = 0; c < BOARD_SIZE; c++) {
+      if ((r + c) % 2 === 1) {
+        if (r < 3) board[r][c] = BLACK;
+        else if (r > 4) board[r][c] = RED;
+        else board[r][c] = EMPTY;
+      } else {
+        board[r][c] = EMPTY;
+      }
+    }
+  }
+}
+
+function newGame() {
+  initBoard();
+  turn = RED;
+  selected = null;
+  legalMoves = [];
+  forcedPieces = [];
+  redCaptured = 0;
+  blackCaptured = 0;
+  gameOver = false;
+  winner = null;
+  animating = false;
+  aiThinking = false;
+  computeForcedAndLegal();
+}
+
+// ============================================================
+// PIECE HELPERS
+// ============================================================
+function isRed(p) { return p === RED || p === RED_KING; }
+function isBlack(p) { return p === BLACK || p === BLACK_KING; }
+function isKing(p) { return p === RED_KING || p === BLACK_KING; }
+function belongs(p, side) { return side === RED ? isRed(p) : isBlack(p); }
+function opponent(side) { return side === RED ? BLACK : RED; }
+
+function cloneBoard(b) {
+  var nb = [];
+  for (var r = 0; r < BOARD_SIZE; r++) {
+    nb[r] = b[r].slice();
+  }
+  return nb;
+}
+
+// ============================================================
+// MOVE GENERATION
+// ============================================================
+function getJumps(b, r, c, piece) {
+  var dirs = [];
+  var side = isRed(piece) ? RED : BLACK;
+  if (isKing(piece)) {
+    dirs = [[-1,-1],[-1,1],[1,-1],[1,1]];
+  } else if (side === RED) {
+    dirs = [[-1,-1],[-1,1]];
+  } else {
+    dirs = [[1,-1],[1,1]];
+  }
+  var jumps = [];
+  for (var i = 0; i < dirs.length; i++) {
+    var dr = dirs[i][0], dc = dirs[i][1];
+    var mr = r + dr, mc = c + dc;
+    var lr = r + 2*dr, lc = c + 2*dc;
+    if (lr >= 0 && lr < BOARD_SIZE && lc >= 0 && lc < BOARD_SIZE) {
+      if (b[mr][mc] !== EMPTY && !belongs(b[mr][mc], side) && b[lr][lc] === EMPTY) {
+        jumps.push({r: lr, c: lc, capturedR: mr, capturedC: mc});
+      }
+    }
+  }
+  return jumps;
+}
+
+function getJumpChains(b, r, c, piece) {
+  // Returns array of chains: each chain is [{r,c,capturedR,capturedC}, ...]
+  var singleJumps = getJumps(b, r, c, piece);
+  if (singleJumps.length === 0) return [];
+  var chains = [];
+  for (var i = 0; i < singleJumps.length; i++) {
+    var j = singleJumps[i];
+    var nb = cloneBoard(b);
+    nb[r][c] = EMPTY;
+    nb[j.capturedR][j.capturedC] = EMPTY;
+    var landPiece = piece;
+    // Promote mid-chain? Standard rules: promotion ends turn in some variants.
+    // We use: promotion ends the jump chain (international-style optional, American standard).
+    var promoted = false;
+    if (!isKing(piece)) {
+      if ((isRed(piece) && j.r === 0) || (isBlack(piece) && j.r === BOARD_SIZE - 1)) {
+        landPiece = isRed(piece) ? RED_KING : BLACK_KING;
+        promoted = true;
+      }
+    }
+    nb[j.r][j.c] = landPiece;
+    if (promoted) {
+      // Promotion ends the chain in American checkers
+      chains.push([j]);
+    } else {
+      var further = getJumpChains(nb, j.r, j.c, landPiece);
+      if (further.length === 0) {
+        chains.push([j]);
+      } else {
+        for (var k = 0; k < further.length; k++) {
+          chains.push([j].concat(further[k]));
+        }
+      }
+    }
+  }
+  return chains;
+}
+
+function getSimpleMoves(b, r, c, piece) {
+  var dirs = [];
+  var side = isRed(piece) ? RED : BLACK;
+  if (isKing(piece)) {
+    dirs = [[-1,-1],[-1,1],[1,-1],[1,1]];
+  } else if (side === RED) {
+    dirs = [[-1,-1],[-1,1]];
+  } else {
+    dirs = [[1,-1],[1,1]];
+  }
+  var moves = [];
+  for (var i = 0; i < dirs.length; i++) {
+    var dr = dirs[i][0], dc = dirs[i][1];
+    var nr = r + dr, nc = c + dc;
+    if (nr >= 0 && nr < BOARD_SIZE && nc >= 0 && nc < BOARD_SIZE && b[nr][nc] === EMPTY) {
+      moves.push({r: nr, c: nc});
+    }
+  }
+  return moves;
+}
+
+function getAllMoves(b, side) {
+  // Returns {jumps: [{fromR, fromC, chain: [{r,c,capturedR,capturedC},...]}], moves: [{fromR,fromC,toR,toC}]}
+  var jumps = [];
+  var moves = [];
+  for (var r = 0; r < BOARD_SIZE; r++) {
+    for (var c = 0; c < BOARD_SIZE; c++) {
+      if (belongs(b[r][c], side)) {
+        var chains = getJumpChains(b, r, c, b[r][c]);
+        for (var i = 0; i < chains.length; i++) {
+          jumps.push({fromR: r, fromC: c, chain: chains[i]});
+        }
+        if (chains.length === 0) {
+          var sm = getSimpleMoves(b, r, c, b[r][c]);
+          for (var j = 0; j < sm.length; j++) {
+            moves.push({fromR: r, fromC: c, toR: sm[j].r, toC: sm[j].c});
+          }
+        }
+      }
+    }
+  }
+  // Forced jumps: if any jumps exist, must jump
+  if (jumps.length > 0) return {jumps: jumps, moves: [], mustJump: true};
+  return {jumps: [], moves: moves, mustJump: false};
+}
+
+function computeForcedAndLegal() {
+  if (gameOver) return;
+  var all = getAllMoves(board, turn);
+  forcedPieces = [];
+  legalMoves = [];
+  if (all.mustJump) {
+    var seen = {};
+    for (var i = 0; i < all.jumps.length; i++) {
+      var key = all.jumps[i].fromR + "," + all.jumps[i].fromC;
+      if (!seen[key]) {
+        forcedPieces.push({r: all.jumps[i].fromR, c: all.jumps[i].fromC});
+        seen[key] = true;
+      }
+    }
+  }
+  // Check win/loss
+  if (all.jumps.length === 0 && all.moves.length === 0) {
+    gameOver = true;
+    winner = opponent(turn);
+    soundWin();
+  }
+}
+
+// ============================================================
+// APPLY MOVE
+// ============================================================
+function applyMove(b, fromR, fromC, toR, toC) {
+  var piece = b[fromR][fromC];
+  b[fromR][fromC] = EMPTY;
+  // Promote
+  if (piece === RED && toR === 0) piece = RED_KING;
+  if (piece === BLACK && toR === BOARD_SIZE - 1) piece = BLACK_KING;
+  b[toR][toC] = piece;
+  return piece;
+}
+
+function applyJumpChain(b, fromR, fromC, chain) {
+  var piece = b[fromR][fromC];
+  b[fromR][fromC] = EMPTY;
+  var captures = 0;
+  for (var i = 0; i < chain.length; i++) {
+    b[chain[i].capturedR][chain[i].capturedC] = EMPTY;
+    captures++;
+    piece = isKing(piece) ? piece :
+      (isRed(piece) && chain[i].r === 0) ? RED_KING :
+      (isBlack(piece) && chain[i].r === BOARD_SIZE - 1) ? BLACK_KING : piece;
+  }
+  var last = chain[chain.length - 1];
+  b[last.r][last.c] = piece;
+  return {piece: piece, captures: captures};
+}
+
+// ============================================================
+// EXECUTE PLAYER ACTION
+// ============================================================
+function selectPiece(r, c) {
+  if (gameOver || animating || aiThinking) return;
+  if (!belongs(board[r][c], turn)) return;
+  // If forced jumps, only allow selecting forced pieces
+  if (forcedPieces.length > 0) {
+    var isForced = false;
+    for (var i = 0; i < forcedPieces.length; i++) {
+      if (forcedPieces[i].r === r && forcedPieces[i].c === c) { isForced = true; break; }
+    }
+    if (!isForced) return;
+  }
+  selected = {r: r, c: c};
+  // Compute legal destinations for this piece
+  var all = getAllMoves(board, turn);
+  legalMoves = [];
+  if (all.mustJump) {
+    for (var i = 0; i < all.jumps.length; i++) {
+      if (all.jumps[i].fromR === r && all.jumps[i].fromC === c) {
+        var last = all.jumps[i].chain[all.jumps[i].chain.length - 1];
+        legalMoves.push({r: last.r, c: last.c, chain: all.jumps[i].chain});
+      }
+    }
+  } else {
+    for (var i = 0; i < all.moves.length; i++) {
+      if (all.moves[i].fromR === r && all.moves[i].fromC === c) {
+        legalMoves.push({r: all.moves[i].toR, c: all.moves[i].toC, chain: null});
+      }
+    }
+  }
+}
+
+function tryMove(r, c) {
+  if (!selected || gameOver || animating || aiThinking) return;
+  // Is (r,c) a legal destination?
+  var move = null;
+  for (var i = 0; i < legalMoves.length; i++) {
+    if (legalMoves[i].r === r && legalMoves[i].c === c) {
+      move = legalMoves[i];
+      break;
+    }
+  }
+  if (!move) {
+    // Maybe clicking a different own piece
+    if (belongs(board[r][c], turn)) {
+      selectPiece(r, c);
+    } else {
+      selected = null;
+      legalMoves = [];
+    }
+    return;
+  }
+  executeMove(selected.r, selected.c, move);
+}
+
+function executeMove(fromR, fromC, move) {
+  var piece = board[fromR][fromC];
+  if (move.chain) {
+    // Animate jump chain
+    animPath = [];
+    var pr = fromR, pc = fromC;
+    for (var i = 0; i < move.chain.length; i++) {
+      animPath.push({fromR: pr, fromC: pc, toR: move.chain[i].r, toC: move.chain[i].c,
+        capturedR: move.chain[i].capturedR, capturedC: move.chain[i].capturedC});
+      pr = move.chain[i].r;
+      pc = move.chain[i].c;
+    }
+    animPiece = piece;
+    // Check if promotes
+    var last = move.chain[move.chain.length - 1];
+    if (piece === RED && last.r === 0) animPromotesTo = RED_KING;
+    else if (piece === BLACK && last.r === BOARD_SIZE - 1) animPromotesTo = BLACK_KING;
+    else if (isKing(piece)) animPromotesTo = piece;
+    else animPromotesTo = piece;
+    animStep = 0;
+    animStart = performance.now();
+    animating = true;
+    board[fromR][fromC] = EMPTY; // remove from source immediately
+    soundJump();
+  } else {
+    // Simple move animation
+    animPath = [{fromR: fromR, fromC: fromC, toR: move.r, toC: move.c, capturedR: -1, capturedC: -1}];
+    animPiece = piece;
+    if (piece === RED && move.r === 0) animPromotesTo = RED_KING;
+    else if (piece === BLACK && move.r === BOARD_SIZE - 1) animPromotesTo = BLACK_KING;
+    else animPromotesTo = piece;
+    animStep = 0;
+    animStart = performance.now();
+    animating = true;
+    board[fromR][fromC] = EMPTY;
+    soundMove();
+  }
+  selected = null;
+  legalMoves = [];
+}
+
+function finishAnimation() {
+  animating = false;
+  // Apply all captures
+  var captures = 0;
+  for (var i = 0; i < animPath.length; i++) {
+    if (animPath[i].capturedR >= 0) {
+      board[animPath[i].capturedR][animPath[i].capturedC] = EMPTY;
+      captures++;
+    }
+  }
+  // Place piece at final position
+  var last = animPath[animPath.length - 1];
+  board[last.toR][last.toC] = animPromotesTo;
+  // Update captured counts
+  if (isRed(animPiece) || isRed(animPromotesTo)) {
+    blackCaptured += captures;
+  } else {
+    redCaptured += captures;
+  }
+  // King promotion sound
+  if (animPromotesTo !== animPiece && isKing(animPromotesTo)) {
+    soundKing();
+  }
+  if (captures > 0) soundCapture();
+  // Switch turn
+  turn = opponent(turn);
+  computeForcedAndLegal();
+  // AI move
+  if (!gameOver && vsAI && turn === BLACK) {
+    aiThinking = true;
+    setTimeout(doAIMove, 300);
+  }
+}
+
+// ============================================================
+// AI (Minimax with Alpha-Beta)
+// ============================================================
+function evaluateBoard(b) {
+  var score = 0;
+  for (var r = 0; r < BOARD_SIZE; r++) {
+    for (var c = 0; c < BOARD_SIZE; c++) {
+      var p = b[r][c];
+      if (p === RED) {
+        score += 100;
+        // Advancement bonus (closer to row 0 = closer to king)
+        score += (BOARD_SIZE - 1 - r) * 5;
+        // Edge protection
+        if (c === 0 || c === BOARD_SIZE - 1) score += 3;
+        // Back row defense
+        if (r === BOARD_SIZE - 1) score += 8;
+      } else if (p === RED_KING) {
+        score += 180;
+        // Center control for kings
+        var centerDist = Math.abs(r - 3.5) + Math.abs(c - 3.5);
+        score += (7 - centerDist) * 2;
+      } else if (p === BLACK) {
+        score -= 100;
+        score -= r * 5;
+        if (c === 0 || c === BOARD_SIZE - 1) score -= 3;
+        if (r === 0) score -= 8;
+      } else if (p === BLACK_KING) {
+        score -= 180;
+        var centerDist2 = Math.abs(r - 3.5) + Math.abs(c - 3.5);
+        score -= (7 - centerDist2) * 2;
+      }
+    }
+  }
+  return score;
+}
+
+function minimax(b, depth, alpha, beta, maximizing) {
+  var side = maximizing ? RED : BLACK;
+  var all = getAllMoves(b, side);
+  if (depth === 0 || (all.jumps.length === 0 && all.moves.length === 0)) {
+    return {score: evaluateBoard(b), move: null};
+  }
+  var bestMove = null;
+  if (maximizing) {
+    var maxEval = -Infinity;
+    var moveList = all.mustJump ? all.jumps : [];
+    if (!all.mustJump) {
+      for (var i = 0; i < all.moves.length; i++) {
+        moveList.push(all.moves[i]);
+      }
+    }
+    for (var i = 0; i < moveList.length; i++) {
+      var nb = cloneBoard(b);
+      if (all.mustJump) {
+        applyJumpChain(nb, moveList[i].fromR, moveList[i].fromC, moveList[i].chain);
+      } else {
+        applyMove(nb, moveList[i].fromR, moveList[i].fromC, moveList[i].toR, moveList[i].toC);
+      }
+      var result = minimax(nb, depth - 1, alpha, beta, false);
+      if (result.score > maxEval) {
+        maxEval = result.score;
+        bestMove = moveList[i];
+      }
+      alpha = Math.max(alpha, result.score);
+      if (beta <= alpha) break;
+    }
+    return {score: maxEval, move: bestMove};
+  } else {
+    var minEval = Infinity;
+    var moveList2 = all.mustJump ? all.jumps : [];
+    if (!all.mustJump) {
+      for (var i = 0; i < all.moves.length; i++) {
+        moveList2.push(all.moves[i]);
+      }
+    }
+    for (var i = 0; i < moveList2.length; i++) {
+      var nb2 = cloneBoard(b);
+      if (all.mustJump) {
+        applyJumpChain(nb2, moveList2[i].fromR, moveList2[i].fromC, moveList2[i].chain);
+      } else {
+        applyMove(nb2, moveList2[i].fromR, moveList2[i].fromC, moveList2[i].toR, moveList2[i].toC);
+      }
+      var result2 = minimax(nb2, depth - 1, alpha, beta, true);
+      if (result2.score < minEval) {
+        minEval = result2.score;
+        bestMove = moveList2[i];
+      }
+      beta = Math.min(beta, result2.score);
+      if (beta <= alpha) break;
+    }
+    return {score: minEval, move: bestMove};
+  }
+}
+
+function doAIMove() {
+  if (gameOver) { aiThinking = false; return; }
+  var all = getAllMoves(board, BLACK);
+  if (all.jumps.length === 0 && all.moves.length === 0) {
+    aiThinking = false;
+    return;
+  }
+  var result = minimax(board, AI_DEPTH, -Infinity, Infinity, false);
+  aiThinking = false;
+  if (!result.move) return;
+  var m = result.move;
+  if (m.chain) {
+    // Jump move
+    var last = m.chain[m.chain.length - 1];
+    executeMove(m.fromR, m.fromC, {r: last.r, c: last.c, chain: m.chain});
+  } else {
+    // Simple move
+    executeMove(m.fromR, m.fromC, {r: m.toR, c: m.toC, chain: null});
+  }
+}
+
+// ============================================================
+// RENDERING
+// ============================================================
+function resize() {
+  var dpr = window.devicePixelRatio || 1;
+  var w = window.innerWidth;
+  var h = window.innerHeight;
+  canvas.style.width = w + "px";
+  canvas.style.height = h + "px";
+  canvas.width = w * dpr;
+  canvas.height = h * dpr;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  // Compute board sizing
+  var availH = h - panelH - 40; // panel top + bottom margin
+  var availW = w - 20;
+  cellSize = Math.floor(Math.min(availW, availH) / BOARD_SIZE);
+  var boardPx = cellSize * BOARD_SIZE;
+  boardX = Math.floor((w - boardPx) / 2);
+  boardY = panelH + Math.floor((availH - boardPx) / 2);
+  if (boardY < panelH) boardY = panelH;
+}
+
+function drawBoard() {
+  var w = canvas.width / (window.devicePixelRatio || 1);
+  var h = canvas.height / (window.devicePixelRatio || 1);
+  // Background
+  ctx.fillStyle = "#111";
+  ctx.fillRect(0, 0, w, h);
+
+  if (showMenu) {
+    drawMenu(w, h);
+    return;
+  }
+
+  // Top panel
+  drawPanel(w);
+
+  // Board border
+  var boardPx = cellSize * BOARD_SIZE;
+  ctx.fillStyle = "#2a1a0a";
+  ctx.fillRect(boardX - 4, boardY - 4, boardPx + 8, boardPx + 8);
+
+  // Cells
+  for (var r = 0; r < BOARD_SIZE; r++) {
+    for (var c = 0; c < BOARD_SIZE; c++) {
+      var x = boardX + c * cellSize;
+      var y = boardY + r * cellSize;
+      if ((r + c) % 2 === 0) {
+        ctx.fillStyle = "#d4a76a";
+      } else {
+        ctx.fillStyle = "#4a2f1a";
+      }
+      ctx.fillRect(x, y, cellSize, cellSize);
+    }
+  }
+
+  // Highlight forced pieces
+  if (!animating && !aiThinking) {
+    for (var i = 0; i < forcedPieces.length; i++) {
+      var fp = forcedPieces[i];
+      var fx = boardX + fp.c * cellSize;
+      var fy = boardY + fp.r * cellSize;
+      ctx.fillStyle = "rgba(255, 200, 0, 0.3)";
+      ctx.fillRect(fx, fy, cellSize, cellSize);
+      ctx.strokeStyle = "#ffcc00";
+      ctx.lineWidth = 2;
+      ctx.strokeRect(fx + 1, fy + 1, cellSize - 2, cellSize - 2);
+    }
+  }
+
+  // Highlight selected piece
+  if (selected && !animating) {
+    var sx = boardX + selected.c * cellSize;
+    var sy = boardY + selected.r * cellSize;
+    ctx.fillStyle = "rgba(100, 200, 255, 0.35)";
+    ctx.fillRect(sx, sy, cellSize, cellSize);
+    ctx.strokeStyle = "#66ccff";
+    ctx.lineWidth = 3;
+    ctx.strokeRect(sx + 1, sy + 1, cellSize - 2, cellSize - 2);
+  }
+
+  // Highlight legal move destinations
+  if (!animating) {
+    for (var i = 0; i < legalMoves.length; i++) {
+      var lm = legalMoves[i];
+      var lx = boardX + lm.c * cellSize + cellSize / 2;
+      var ly = boardY + lm.r * cellSize + cellSize / 2;
+      ctx.beginPath();
+      ctx.arc(lx, ly, cellSize * 0.15, 0, Math.PI * 2);
+      ctx.fillStyle = "rgba(100, 255, 100, 0.5)";
+      ctx.fill();
+      ctx.strokeStyle = "rgba(100, 255, 100, 0.8)";
+      ctx.lineWidth = 2;
+      ctx.stroke();
+    }
+  }
+
+  // Draw pieces (skip animating piece)
+  for (var r = 0; r < BOARD_SIZE; r++) {
+    for (var c = 0; c < BOARD_SIZE; c++) {
+      if (board[r][c] !== EMPTY) {
+        // If this cell is about to be captured in animation, skip it at the right time
+        if (animating) {
+          var skipThis = false;
+          for (var s = 0; s <= animStep; s++) {
+            if (s < animPath.length && animPath[s].capturedR === r && animPath[s].capturedC === c) {
+              skipThis = true;
+              break;
+            }
+          }
+          if (skipThis) continue;
+        }
+        drawPiece(boardX + c * cellSize + cellSize / 2, boardY + r * cellSize + cellSize / 2, board[r][c], cellSize * 0.4);
+      }
+    }
+  }
+
+  // Draw animating piece
+  if (animating) {
+    var now = performance.now();
+    var elapsed = now - animStart;
+    var t = Math.min(elapsed / ANIM_DURATION, 1);
+    // Ease in-out
+    t = t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
+    var step = animPath[animStep];
+    var fromX = boardX + step.fromC * cellSize + cellSize / 2;
+    var fromY = boardY + step.fromR * cellSize + cellSize / 2;
+    var toX = boardX + step.toC * cellSize + cellSize / 2;
+    var toY = boardY + step.toR * cellSize + cellSize / 2;
+    var curX = fromX + (toX - fromX) * t;
+    var curY = fromY + (toY - fromY) * t;
+    // Jump arc
+    if (step.capturedR >= 0) {
+      var jumpH = cellSize * 0.3;
+      curY -= Math.sin(t * Math.PI) * jumpH;
+    }
+    // Determine piece appearance: use final piece type only on last step when complete
+    var drawAs = animPiece;
+    if (animStep === animPath.length - 1 && t >= 1) {
+      drawAs = animPromotesTo;
+    }
+    drawPiece(curX, curY, drawAs, cellSize * 0.4);
+
+    if (t >= 1) {
+      // Advance to next step or finish
+      if (step.capturedR >= 0) {
+        soundCapture();
+      }
+      animStep++;
+      if (animStep >= animPath.length) {
+        finishAnimation();
+      } else {
+        animStart = performance.now();
+        if (animPath[animStep].capturedR >= 0) soundJump();
+      }
+    }
+  }
+
+  // Game over overlay
+  if (gameOver) {
+    ctx.fillStyle = "rgba(0, 0, 0, 0.7)";
+    ctx.fillRect(0, 0, w, h);
+    ctx.fillStyle = "#fff";
+    ctx.font = "bold " + Math.floor(cellSize * 0.6) + "px monospace";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    var winText = winner === RED ? "Red Wins!" : "Black Wins!";
+    ctx.fillText(winText, w / 2, h / 2 - 30);
+    ctx.font = Math.floor(cellSize * 0.3) + "px monospace";
+    ctx.fillStyle = "#aaa";
+    ctx.fillText("Tap to play again", w / 2, h / 2 + 30);
+  }
+}
+
+function drawPiece(cx, cy, piece, radius) {
+  var isR = isRed(piece);
+  var isK = isKing(piece);
+
+  // Shadow
+  ctx.beginPath();
+  ctx.arc(cx + 2, cy + 3, radius, 0, Math.PI * 2);
+  ctx.fillStyle = "rgba(0, 0, 0, 0.4)";
+  ctx.fill();
+
+  // Base circle (darker)
+  ctx.beginPath();
+  ctx.arc(cx, cy, radius, 0, Math.PI * 2);
+  var baseColor = isR ? "#8b1a1a" : "#1a1a1a";
+  ctx.fillStyle = baseColor;
+  ctx.fill();
+
+  // Main gradient
+  var grad = ctx.createRadialGradient(cx - radius * 0.3, cy - radius * 0.3, radius * 0.1, cx, cy, radius);
+  if (isR) {
+    grad.addColorStop(0, "#ff5555");
+    grad.addColorStop(0.5, "#cc2222");
+    grad.addColorStop(1, "#6b0f0f");
+  } else {
+    grad.addColorStop(0, "#555555");
+    grad.addColorStop(0.5, "#333333");
+    grad.addColorStop(1, "#111111");
+  }
+  ctx.beginPath();
+  ctx.arc(cx, cy, radius * 0.92, 0, Math.PI * 2);
+  ctx.fillStyle = grad;
+  ctx.fill();
+
+  // Glossy highlight
+  ctx.beginPath();
+  ctx.ellipse(cx - radius * 0.15, cy - radius * 0.25, radius * 0.5, radius * 0.35, -0.3, 0, Math.PI * 2);
+  var gloss = ctx.createRadialGradient(cx - radius * 0.15, cy - radius * 0.3, 0, cx - radius * 0.15, cy - radius * 0.25, radius * 0.5);
+  gloss.addColorStop(0, "rgba(255, 255, 255, 0.45)");
+  gloss.addColorStop(1, "rgba(255, 255, 255, 0)");
+  ctx.fillStyle = gloss;
+  ctx.fill();
+
+  // Edge ring
+  ctx.beginPath();
+  ctx.arc(cx, cy, radius * 0.85, 0, Math.PI * 2);
+  ctx.strokeStyle = isR ? "rgba(255, 100, 100, 0.3)" : "rgba(150, 150, 150, 0.3)";
+  ctx.lineWidth = 1.5;
+  ctx.stroke();
+
+  // Inner ring for 3D depth
+  ctx.beginPath();
+  ctx.arc(cx, cy + 1, radius * 0.7, 0, Math.PI * 2);
+  ctx.strokeStyle = isR ? "rgba(120, 20, 20, 0.4)" : "rgba(60, 60, 60, 0.4)";
+  ctx.lineWidth = 1;
+  ctx.stroke();
+
+  // King crown
+  if (isK) {
+    var cr = radius * 0.35;
+    var crownY = cy - 1;
+    ctx.save();
+    ctx.beginPath();
+    // Crown shape: 5 point zigzag
+    ctx.moveTo(cx - cr, crownY + cr * 0.3);
+    ctx.lineTo(cx - cr, crownY - cr * 0.3);
+    ctx.lineTo(cx - cr * 0.5, crownY + cr * 0.1);
+    ctx.lineTo(cx, crownY - cr * 0.5);
+    ctx.lineTo(cx + cr * 0.5, crownY + cr * 0.1);
+    ctx.lineTo(cx + cr, crownY - cr * 0.3);
+    ctx.lineTo(cx + cr, crownY + cr * 0.3);
+    ctx.closePath();
+    ctx.fillStyle = "#ffd700";
+    ctx.fill();
+    ctx.strokeStyle = "#b8860b";
+    ctx.lineWidth = 1;
+    ctx.stroke();
+    // Crown jewels
+    ctx.beginPath();
+    ctx.arc(cx, crownY - cr * 0.3, cr * 0.12, 0, Math.PI * 2);
+    ctx.fillStyle = "#ff4444";
+    ctx.fill();
+    ctx.beginPath();
+    ctx.arc(cx - cr * 0.55, crownY - cr * 0.1, cr * 0.08, 0, Math.PI * 2);
+    ctx.fillStyle = "#4488ff";
+    ctx.fill();
+    ctx.beginPath();
+    ctx.arc(cx + cr * 0.55, crownY - cr * 0.1, cr * 0.08, 0, Math.PI * 2);
+    ctx.fillStyle = "#4488ff";
+    ctx.fill();
+    ctx.restore();
+  }
+
+  // Outer rim
+  ctx.beginPath();
+  ctx.arc(cx, cy, radius, 0, Math.PI * 2);
+  ctx.strokeStyle = isR ? "rgba(200, 50, 50, 0.5)" : "rgba(100, 100, 100, 0.5)";
+  ctx.lineWidth = 2;
+  ctx.stroke();
+}
+
+function drawPanel(w) {
+  // Background bar
+  ctx.fillStyle = "#1a1a1a";
+  ctx.fillRect(0, 0, w, panelH);
+  ctx.fillStyle = "#333";
+  ctx.fillRect(0, panelH - 1, w, 1);
+
+  var fontSize = Math.min(16, cellSize * 0.3);
+  ctx.font = fontSize + "px monospace";
+  ctx.textBaseline = "middle";
+
+  // Turn indicator
+  ctx.textAlign = "center";
+  var turnText = aiThinking ? "AI Thinking..." : (turn === RED ? "Red's Turn" : "Black's Turn");
+  if (gameOver) turnText = (winner === RED ? "Red Wins!" : "Black Wins!");
+  ctx.fillStyle = turn === RED ? "#ff5555" : "#aaaaaa";
+  ctx.fillText(turnText, w / 2, panelH / 2 - fontSize * 0.7);
+
+  // Captured counts
+  ctx.textAlign = "left";
+  ctx.font = (fontSize * 0.85) + "px monospace";
+
+  // Red side (left)
+  drawPiece(20, panelH / 2 + fontSize * 0.4, RED, fontSize * 0.5);
+  ctx.fillStyle = "#ff5555";
+  ctx.fillText("x" + (12 - redCaptured), 20 + fontSize * 0.8, panelH / 2 + fontSize * 0.5);
+  ctx.fillStyle = "#666";
+  ctx.fillText("lost:" + redCaptured, 20 + fontSize * 2.3, panelH / 2 + fontSize * 0.5);
+
+  // Black side (right)
+  ctx.textAlign = "right";
+  drawPiece(w - 20, panelH / 2 + fontSize * 0.4, BLACK, fontSize * 0.5);
+  ctx.fillStyle = "#aaaaaa";
+  ctx.fillText("x" + (12 - blackCaptured), w - 20 - fontSize * 0.3, panelH / 2 + fontSize * 0.5);
+  ctx.fillStyle = "#666";
+  ctx.fillText("lost:" + blackCaptured, w - 20 - fontSize * 2, panelH / 2 + fontSize * 0.5);
+
+  // New Game button
+  ctx.textAlign = "center";
+  var btnW = fontSize * 6;
+  var btnH = fontSize * 1.6;
+  var btnX = w / 2 - btnW / 2;
+  var btnY = panelH / 2 + fontSize * 0.1;
+  ctx.fillStyle = "#2a2a2a";
+  ctx.fillRect(btnX, btnY, btnW, btnH);
+  ctx.strokeStyle = "#444";
+  ctx.lineWidth = 1;
+  ctx.strokeRect(btnX, btnY, btnW, btnH);
+  ctx.fillStyle = "#888";
+  ctx.font = (fontSize * 0.75) + "px monospace";
+  ctx.fillText("New Game", w / 2, btnY + btnH / 2);
+
+  // Store button rect for hit testing
+  drawPanel._btnRect = {x: btnX, y: btnY, w: btnW, h: btnH};
+}
+
+function drawMenu(w, h) {
+  ctx.fillStyle = "#111";
+  ctx.fillRect(0, 0, w, h);
+
+  var titleSize = Math.min(48, w * 0.08);
+  ctx.font = "bold " + titleSize + "px monospace";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillStyle = "#ddd";
+  ctx.fillText("CHECKERS", w / 2, h * 0.2);
+
+  // Draw decorative pieces
+  drawPiece(w / 2 - titleSize * 2.5, h * 0.2, RED, titleSize * 0.4);
+  drawPiece(w / 2 + titleSize * 2.5, h * 0.2, BLACK_KING, titleSize * 0.4);
+
+  var btnSize = Math.min(32, w * 0.05);
+  var btnW = Math.min(280, w * 0.6);
+  var btnH = btnSize * 2.2;
+  var gap = btnH * 1.5;
+
+  // VS AI button
+  var aiY = h * 0.45;
+  ctx.fillStyle = "#2a2a2a";
+  roundRect(ctx, w / 2 - btnW / 2, aiY - btnH / 2, btnW, btnH, 8);
+  ctx.fill();
+  ctx.strokeStyle = "#555";
+  ctx.lineWidth = 2;
+  roundRect(ctx, w / 2 - btnW / 2, aiY - btnH / 2, btnW, btnH, 8);
+  ctx.stroke();
+  ctx.fillStyle = "#ff7755";
+  ctx.font = "bold " + btnSize + "px monospace";
+  ctx.fillText("vs Computer", w / 2, aiY);
+
+  // VS Human button
+  var pvpY = aiY + gap;
+  ctx.fillStyle = "#2a2a2a";
+  roundRect(ctx, w / 2 - btnW / 2, pvpY - btnH / 2, btnW, btnH, 8);
+  ctx.fill();
+  ctx.strokeStyle = "#555";
+  ctx.lineWidth = 2;
+  roundRect(ctx, w / 2 - btnW / 2, pvpY - btnH / 2, btnW, btnH, 8);
+  ctx.stroke();
+  ctx.fillStyle = "#55aaff";
+  ctx.font = "bold " + btnSize + "px monospace";
+  ctx.fillText("vs Human", w / 2, pvpY);
+
+  // Rules hint
+  ctx.font = (btnSize * 0.5) + "px monospace";
+  ctx.fillStyle = "#555";
+  ctx.fillText("Red moves first. Jumps are mandatory.", w / 2, pvpY + gap * 0.7);
+  ctx.fillText("Reach the far side to become a King.", w / 2, pvpY + gap * 0.7 + btnSize * 0.7);
+
+  // Store button rects
+  drawMenu._aiBtnRect = {x: w / 2 - btnW / 2, y: aiY - btnH / 2, w: btnW, h: btnH};
+  drawMenu._pvpBtnRect = {x: w / 2 - btnW / 2, y: pvpY - btnH / 2, w: btnW, h: btnH};
+}
+
+function roundRect(ctx, x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.lineTo(x + w - r, y);
+  ctx.arcTo(x + w, y, x + w, y + r, r);
+  ctx.lineTo(x + w, y + h - r);
+  ctx.arcTo(x + w, y + h, x + w - r, y + h, r);
+  ctx.lineTo(x + r, y + h);
+  ctx.arcTo(x, y + h, x, y + h - r, r);
+  ctx.lineTo(x, y + r);
+  ctx.arcTo(x, y, x + r, y, r);
+  ctx.closePath();
+}
+
+// ============================================================
+// INPUT
+// ============================================================
+function handleInput(px, py) {
+  initAudio();
+
+  if (showMenu) {
+    if (drawMenu._aiBtnRect && hitTest(px, py, drawMenu._aiBtnRect)) {
+      vsAI = true;
+      showMenu = false;
+      newGame();
+      return;
+    }
+    if (drawMenu._pvpBtnRect && hitTest(px, py, drawMenu._pvpBtnRect)) {
+      vsAI = false;
+      showMenu = false;
+      newGame();
+      return;
+    }
+    return;
+  }
+
+  if (gameOver) {
+    showMenu = true;
+    return;
+  }
+
+  // New Game button
+  if (drawPanel._btnRect && hitTest(px, py, drawPanel._btnRect)) {
+    showMenu = true;
+    return;
+  }
+
+  if (animating || aiThinking) return;
+  if (vsAI && turn === BLACK) return;
+
+  // Board click
+  var bc = Math.floor((px - boardX) / cellSize);
+  var br = Math.floor((py - boardY) / cellSize);
+  if (br < 0 || br >= BOARD_SIZE || bc < 0 || bc >= BOARD_SIZE) return;
+
+  if (selected) {
+    tryMove(br, bc);
+  } else {
+    selectPiece(br, bc);
+  }
+}
+
+function hitTest(px, py, rect) {
+  return px >= rect.x && px <= rect.x + rect.w && py >= rect.y && py <= rect.y + rect.h;
+}
+
+canvas.addEventListener("mousedown", function(e) {
+  e.preventDefault();
+  handleInput(e.offsetX, e.offsetY);
+});
+
+canvas.addEventListener("touchstart", function(e) {
+  e.preventDefault();
+  var rect = canvas.getBoundingClientRect();
+  var touch = e.touches[0];
+  handleInput(touch.clientX - rect.left, touch.clientY - rect.top);
+}, {passive: false});
+
+// ============================================================
+// GAME LOOP
+// ============================================================
+function frame() {
+  drawBoard();
+  requestAnimationFrame(frame);
+}
+
+window.addEventListener("resize", resize);
+resize();
+showMenu = true;
+requestAnimationFrame(frame);
+
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,1169 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Reactor Pipes</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body { width: 100%; height: 100%; overflow: hidden; background: #111; touch-action: none; }
+canvas { display: block; margin: 0 auto; }
+#back-link { position: fixed; bottom: 8px; left: 50%; transform: translateX(-50%); color: #666; font-family: monospace; font-size: 12px; text-decoration: none; z-index: 10; }
+#back-link:hover { color: #aaa; }
+</style>
+</head>
+<body>
+<canvas id="gc"></canvas>
+<a id="back-link" href="/games">Back to Arcade</a>
+<script src="nft-loader.js"></script>
+<script>if(window.NftLoader)NftLoader.gate();</script>
+<script src="tasern-engine.js"></script>
+<script>
+(function(){
+"use strict";
+
+// === CONSTANTS ===
+var GW = 400, GH = 400;
+var ctx = TAS.ctx;
+TAS.initCanvas(GW, GH);
+
+var GRID = 7;
+var CELL = 40;
+var GRID_X = 10;
+var GRID_Y = 50;
+var QUEUE_X = 320;
+var QUEUE_Y = 60;
+var QUEUE_SIZE = 5;
+
+// Directions: 0=up, 1=right, 2=down, 3=left
+var DX = [0, 1, 0, -1];
+var DY = [-1, 0, 1, 0];
+
+// Pipe types and their connections
+// Each pipe has openings: array of directions it connects
+var PIPE_TYPES = {
+  H: { name: 'straight-h', openings: [1, 3] },       // horizontal
+  V: { name: 'straight-v', openings: [0, 2] },       // vertical
+  TL: { name: 'elbow-tl', openings: [0, 3] },        // top-left
+  TR: { name: 'elbow-tr', openings: [0, 1] },        // top-right
+  BL: { name: 'elbow-bl', openings: [2, 3] },        // bottom-left
+  BR: { name: 'elbow-br', openings: [1, 2] },        // bottom-right
+  X: { name: 'cross', openings: [0, 1, 2, 3] },      // cross (all 4)
+  RES: { name: 'reservoir', openings: [0, 1, 2, 3] } // reservoir (holds flow 2 ticks)
+};
+
+var PIPE_KEYS = ['H', 'V', 'TL', 'TR', 'BL', 'BR', 'X', 'RES'];
+var BASIC_PIPES = ['H', 'V', 'TL', 'TR', 'BL', 'BR'];
+var ALL_PIPES = ['H', 'V', 'TL', 'TR', 'BL', 'BR', 'X', 'RES'];
+
+// === GAME STATE ===
+var state = 'title';
+var score = 0;
+var highScore = TAS.score.load('reactorpipes_hi');
+var level = 1;
+var frame = 0;
+
+// Grid: null = empty, { type, filled, fillDir, fillProgress, flowTick }
+var grid = [];
+var blocked = []; // boolean grid for blocked cells
+var walls = [];   // walls between cells [{r,c,dir}]
+var startCell = { r: 0, c: 0, dir: 2 }; // start position and initial flow dir
+var startCells = []; // multiple starts for later levels
+
+var queue = [];
+var countdown = 0;
+var countdownMax = 0;
+var flowActive = false;
+var flowTimer = 0;
+var flowSpeed = 0.8; // seconds per segment
+var flowHead = null; // {r, c, enterDir, progress}
+var flowHeads = []; // for multiple starts
+var segmentsFilled = 0;
+var minSegments = 5;
+var levelComplete = false;
+var levelFailed = false;
+var levelTransition = 0;
+var replaceCost = 20;
+var skipCost = 50;
+
+// One-way valves: [{r,c,dir}] - can only flow in that direction through cell
+var oneWays = [];
+var wrapEdges = false;
+var replaceRestricted = false; // later levels: can't replace after flow starts
+
+// Visual
+var steamVents = [];
+var corePhase = 0;
+var flowParticles = [];
+
+// === LEVEL DEFINITIONS ===
+function getLevelConfig(lv) {
+  var cfg = {
+    countdown: 12,
+    flowSpeed: 0.8,
+    minSegments: 5,
+    blockedCount: 0,
+    wallCount: 0,
+    oneWayCount: 0,
+    multiStart: false,
+    wrapEdges: false,
+    replaceRestricted: false,
+    pipePool: BASIC_PIPES
+  };
+
+  if (lv <= 5) {
+    // Easy: long countdown, no obstacles
+    cfg.countdown = 14 - lv;
+    cfg.flowSpeed = 1.0 - lv * 0.02;
+    cfg.minSegments = 4 + lv;
+    cfg.pipePool = BASIC_PIPES.concat(lv >= 3 ? ['X'] : []).concat(lv >= 4 ? ['RES'] : []);
+  } else if (lv <= 10) {
+    // Medium: shorter countdown, blocked cells
+    cfg.countdown = 9 - (lv - 6) * 0.5;
+    cfg.flowSpeed = 0.85 - (lv - 6) * 0.03;
+    cfg.minSegments = 8 + (lv - 6) * 2;
+    cfg.blockedCount = 2 + (lv - 6);
+    cfg.pipePool = ALL_PIPES;
+  } else if (lv <= 15) {
+    // Hard: one-ways, walls, very short countdown
+    cfg.countdown = 7 - (lv - 11) * 0.4;
+    cfg.flowSpeed = 0.7 - (lv - 11) * 0.02;
+    cfg.minSegments = 14 + (lv - 11) * 2;
+    cfg.blockedCount = 3 + (lv - 11);
+    cfg.wallCount = 2 + (lv - 11);
+    cfg.oneWayCount = 1 + Math.floor((lv - 11) / 2);
+    cfg.pipePool = ALL_PIPES;
+  } else {
+    // Expert: multiple starts, wrap edges, replace restrictions
+    cfg.countdown = 6 - (lv - 16) * 0.3;
+    cfg.flowSpeed = 0.6 - (lv - 16) * 0.02;
+    cfg.minSegments = 18 + (lv - 16) * 3;
+    cfg.blockedCount = 4 + (lv - 16);
+    cfg.wallCount = 3;
+    cfg.oneWayCount = 2;
+    cfg.multiStart = lv >= 17;
+    cfg.wrapEdges = lv >= 18;
+    cfg.replaceRestricted = lv >= 19;
+    cfg.pipePool = ALL_PIPES;
+  }
+
+  return cfg;
+}
+
+// === INIT LEVEL ===
+function initLevel() {
+  var cfg = getLevelConfig(level);
+  grid = [];
+  blocked = [];
+  walls = [];
+  oneWays = [];
+  steamVents = [];
+  flowParticles = [];
+  startCells = [];
+
+  for (var r = 0; r < GRID; r++) {
+    grid[r] = [];
+    blocked[r] = [];
+    for (var c = 0; c < GRID; c++) {
+      grid[r][c] = null;
+      blocked[r][c] = false;
+    }
+  }
+
+  // Place start cell
+  var edge = TAS.math.randInt(0, 3);
+  if (edge === 0) { startCell = { r: 0, c: TAS.math.randInt(1, 5), dir: 2 }; }
+  else if (edge === 1) { startCell = { r: TAS.math.randInt(1, 5), c: GRID - 1, dir: 3 }; }
+  else if (edge === 2) { startCell = { r: GRID - 1, c: TAS.math.randInt(1, 5), dir: 0 }; }
+  else { startCell = { r: TAS.math.randInt(1, 5), c: 0, dir: 1 }; }
+
+  blocked[startCell.r][startCell.c] = true;
+  grid[startCell.r][startCell.c] = { type: 'START', filled: true, fillProgress: 1 };
+
+  // Multiple starts for later levels
+  if (cfg.multiStart) {
+    var edge2 = (edge + 2) % 4;
+    var s2;
+    if (edge2 === 0) { s2 = { r: 0, c: TAS.math.randInt(1, 5), dir: 2 }; }
+    else if (edge2 === 1) { s2 = { r: TAS.math.randInt(1, 5), c: GRID - 1, dir: 3 }; }
+    else if (edge2 === 2) { s2 = { r: GRID - 1, c: TAS.math.randInt(1, 5), dir: 0 }; }
+    else { s2 = { r: TAS.math.randInt(1, 5), c: 0, dir: 1 }; }
+    if (!blocked[s2.r][s2.c]) {
+      blocked[s2.r][s2.c] = true;
+      grid[s2.r][s2.c] = { type: 'START', filled: true, fillProgress: 1 };
+      startCells.push(s2);
+    }
+  }
+  startCells.unshift(startCell);
+
+  // Place blocked cells
+  var placed = 0;
+  var attempts = 0;
+  while (placed < cfg.blockedCount && attempts < 100) {
+    var br = TAS.math.randInt(0, GRID - 1);
+    var bc = TAS.math.randInt(0, GRID - 1);
+    if (!blocked[br][bc]) {
+      blocked[br][bc] = true;
+      placed++;
+    }
+    attempts++;
+  }
+
+  // Place walls between cells
+  for (var w = 0; w < cfg.wallCount; w++) {
+    var wr = TAS.math.randInt(0, GRID - 2);
+    var wc = TAS.math.randInt(0, GRID - 2);
+    var wd = TAS.math.randInt(1, 2); // right or down only
+    walls.push({ r: wr, c: wc, dir: wd });
+  }
+
+  // Place one-way valves
+  for (var ow = 0; ow < cfg.oneWayCount; ow++) {
+    var owr = TAS.math.randInt(1, GRID - 2);
+    var owc = TAS.math.randInt(1, GRID - 2);
+    if (!blocked[owr][owc]) {
+      oneWays.push({ r: owr, c: owc, dir: TAS.math.randInt(0, 3) });
+    }
+  }
+
+  wrapEdges = cfg.wrapEdges;
+  replaceRestricted = cfg.replaceRestricted;
+
+  // Fill queue
+  queue = [];
+  for (var q = 0; q < QUEUE_SIZE + 1; q++) {
+    queue.push(randomPipe(cfg.pipePool));
+  }
+
+  // Setup flow
+  countdown = cfg.countdown;
+  countdownMax = cfg.countdown;
+  flowSpeed = cfg.flowSpeed;
+  minSegments = cfg.minSegments;
+  flowActive = false;
+  flowHeads = [];
+  flowHead = null;
+  segmentsFilled = 0;
+  levelComplete = false;
+  levelFailed = false;
+  levelTransition = 0;
+
+  // Steam vents
+  for (var sv = 0; sv < 6; sv++) {
+    steamVents.push({
+      x: TAS.math.randInt(0, GW),
+      y: sv < 3 ? 0 : GH,
+      timer: Math.random() * 3,
+      interval: 1.5 + Math.random() * 2
+    });
+  }
+}
+
+function randomPipe(pool) {
+  return pool[TAS.math.randInt(0, pool.length - 1)];
+}
+
+// === START GAME ===
+function startGame() {
+  state = 'playing';
+  score = 0;
+  level = 1;
+  TAS.particles.clear();
+  initLevel();
+  TAS.audio.ensureAudio();
+}
+
+// === INPUT ===
+var clickX = -1, clickY = -1;
+var clicked = false;
+
+TAS.canvas.addEventListener('mousedown', function(e) {
+  TAS.audio.ensureAudio();
+  var rect = TAS.canvas.getBoundingClientRect();
+  var scaleX = GW / rect.width;
+  var scaleY = GH / rect.height;
+  clickX = (e.clientX - rect.left) * scaleX;
+  clickY = (e.clientY - rect.top) * scaleY;
+  clicked = true;
+});
+
+TAS.canvas.addEventListener('touchstart', function(e) {
+  e.preventDefault();
+  TAS.audio.ensureAudio();
+  if (e.touches.length > 0) {
+    var rect = TAS.canvas.getBoundingClientRect();
+    var scaleX = GW / rect.width;
+    var scaleY = GH / rect.height;
+    clickX = (e.touches[0].clientX - rect.left) * scaleX;
+    clickY = (e.touches[0].clientY - rect.top) * scaleY;
+    clicked = true;
+  }
+}, { passive: false });
+
+// === PIPE CONNECTION LOGIC ===
+function getOpposite(dir) {
+  return (dir + 2) % 4;
+}
+
+function pipeHasOpening(type, dir) {
+  var p = PIPE_TYPES[type];
+  if (!p) return false;
+  return p.openings.indexOf(dir) >= 0;
+}
+
+function hasWallBetween(r1, c1, dir) {
+  for (var i = 0; i < walls.length; i++) {
+    var w = walls[i];
+    if (w.r === r1 && w.c === c1 && w.dir === dir) return true;
+    // Check reverse
+    var nr = r1 + DY[dir];
+    var nc = c1 + DX[dir];
+    var opp = getOpposite(dir);
+    if (w.r === nr && w.c === nc && w.dir === opp) return true;
+  }
+  return false;
+}
+
+function isOneWayBlocked(r, c, enterDir) {
+  for (var i = 0; i < oneWays.length; i++) {
+    var ow = oneWays[i];
+    if (ow.r === r && ow.c === c) {
+      // One-way only allows flow in ow.dir direction
+      // enterDir is where flow came FROM, so flow goes in getOpposite(enterDir)
+      // Actually: enterDir is the side the flow enters from
+      // The flow's travel direction is enterDir (it entered from that side heading inward)
+      // One-way allows only if the flow exits in ow.dir direction
+      return false; // We check on exit
+    }
+  }
+  return false;
+}
+
+function getOneWayDir(r, c) {
+  for (var i = 0; i < oneWays.length; i++) {
+    if (oneWays[i].r === r && oneWays[i].c === c) return oneWays[i].dir;
+  }
+  return -1;
+}
+
+function getNextCell(r, c, dir) {
+  var nr = r + DY[dir];
+  var nc = c + DX[dir];
+  if (wrapEdges) {
+    nr = ((nr % GRID) + GRID) % GRID;
+    nc = ((nc % GRID) + GRID) % GRID;
+  }
+  if (nr < 0 || nr >= GRID || nc < 0 || nc >= GRID) return null;
+  return { r: nr, c: nc };
+}
+
+// Given we enter a pipe from enterDir, what direction does flow exit?
+function getExitDir(type, enterDir) {
+  var p = PIPE_TYPES[type];
+  if (!p) return -1;
+
+  // enterDir = the direction FROM which flow comes (e.g. 0=from top, meaning flow goes down into this cell)
+  // We need the side the flow enters: it enters from getOpposite(enterDir) side
+  var enterSide = getOpposite(enterDir);
+
+  if (p.openings.indexOf(enterSide) < 0) return -1; // can't enter from this side
+
+  // For cross/reservoir: flow continues straight through
+  if (type === 'X' || type === 'RES') {
+    // Flow continues in the same direction it was going
+    if (p.openings.indexOf(enterDir) >= 0) return enterDir;
+    return -1;
+  }
+
+  // For 2-opening pipes: exit through the other opening
+  for (var i = 0; i < p.openings.length; i++) {
+    if (p.openings[i] !== enterSide) {
+      return p.openings[i];
+    }
+  }
+  return -1;
+}
+
+// === FLOW LOGIC ===
+function startFlow() {
+  flowActive = true;
+  flowHeads = [];
+  for (var i = 0; i < startCells.length; i++) {
+    var sc = startCells[i];
+    flowHeads.push({
+      r: sc.r + DY[sc.dir],
+      c: sc.c + DX[sc.dir],
+      enterDir: sc.dir,
+      progress: 0,
+      dead: false,
+      reservoirDelay: 0
+    });
+    // Handle wrap
+    if (wrapEdges) {
+      var fh = flowHeads[flowHeads.length - 1];
+      fh.r = ((fh.r % GRID) + GRID) % GRID;
+      fh.c = ((fh.c % GRID) + GRID) % GRID;
+    }
+  }
+  flowTimer = 0;
+}
+
+function advanceFlow(dt) {
+  flowTimer += dt;
+  var allDead = true;
+
+  for (var fi = 0; fi < flowHeads.length; fi++) {
+    var fh = flowHeads[fi];
+    if (fh.dead) continue;
+
+    // Reservoir delay
+    if (fh.reservoirDelay > 0) {
+      fh.reservoirDelay -= dt;
+      allDead = false;
+      continue;
+    }
+
+    fh.progress += dt / flowSpeed;
+
+    if (fh.progress >= 1) {
+      fh.progress = 0;
+
+      // Mark current cell as fully filled
+      var cell = grid[fh.r] ? grid[fh.r][fh.c] : null;
+      if (cell) {
+        cell.filled = true;
+        cell.fillProgress = 1;
+        segmentsFilled++;
+        score += 10;
+
+        // Bonus for cross pieces
+        if (cell.type === 'X') { score += 15; }
+        // Bonus for reservoir
+        if (cell.type === 'RES') { score += 25; }
+
+        // Determine exit direction
+        var exitDir = getExitDir(cell.type, fh.enterDir);
+
+        // Check one-way restriction
+        var owDir = getOneWayDir(fh.r, fh.c);
+        if (owDir >= 0 && exitDir !== owDir) {
+          fh.dead = true;
+          continue;
+        }
+
+        if (exitDir < 0) {
+          fh.dead = true;
+          continue;
+        }
+
+        // Check wall
+        if (hasWallBetween(fh.r, fh.c, exitDir)) {
+          fh.dead = true;
+          continue;
+        }
+
+        // Move to next cell
+        var next = getNextCell(fh.r, fh.c, exitDir);
+        if (!next) {
+          fh.dead = true;
+          continue;
+        }
+
+        var nextCell = grid[next.r] ? grid[next.r][next.c] : null;
+        if (!nextCell || blocked[next.r][next.c]) {
+          fh.dead = true;
+          continue;
+        }
+
+        // Check if next cell can accept flow from this direction
+        var nextEnterSide = getOpposite(exitDir);
+        if (!pipeHasOpening(nextCell.type, nextEnterSide)) {
+          fh.dead = true;
+          continue;
+        }
+
+        // Already filled? Dead end (unless cross allowing perpendicular)
+        if (nextCell.filled) {
+          fh.dead = true;
+          continue;
+        }
+
+        fh.r = next.r;
+        fh.c = next.c;
+        fh.enterDir = exitDir;
+
+        // Reservoir delay
+        if (nextCell.type === 'RES') {
+          fh.reservoirDelay = flowSpeed * 2;
+        }
+
+        // Particles on flow advance
+        var px = GRID_X + fh.c * CELL + CELL / 2;
+        var py = GRID_Y + fh.r * CELL + CELL / 2;
+        TAS.particles.spawn(px, py, '#44ff88', 3, 1.5, { size: 1, sizeVar: 1 });
+
+        // Sound
+        TAS.audio.playTone(200 + segmentsFilled * 8, 0.08, 'sine', 0.04);
+      } else {
+        // No pipe in this cell - dead end
+        fh.dead = true;
+        continue;
+      }
+
+      allDead = false;
+    } else {
+      // Animate fill progress on current cell
+      var curCell = grid[fh.r] ? grid[fh.r][fh.c] : null;
+      if (curCell && !curCell.filled) {
+        curCell.fillProgress = fh.progress;
+        curCell.fillDir = fh.enterDir;
+      }
+      allDead = false;
+    }
+  }
+
+  // Check if all heads are dead
+  if (allDead || flowHeads.length === 0) {
+    endFlow();
+  }
+}
+
+function endFlow() {
+  flowActive = false;
+  if (segmentsFilled >= minSegments) {
+    levelComplete = true;
+    score += 50 + level * 10;
+    if (score > highScore) {
+      highScore = score;
+      TAS.score.save('reactorpipes_hi', highScore);
+    }
+    TAS.audio.playMelody([[440, 0.1], [550, 0.1], [660, 0.1], [880, 0.2]], 100);
+    TAS.fx.flash('#44ff88', 0.3);
+  } else {
+    levelFailed = true;
+    TAS.audio.playMelody([[300, 0.15], [200, 0.15], [150, 0.3]], 120);
+    TAS.fx.flash('#ff4444', 0.4);
+    TAS.fx.shake(6, 0.9);
+  }
+  levelTransition = 2.5;
+}
+
+// === PLACE PIPE ===
+function placePipe(r, c) {
+  if (r < 0 || r >= GRID || c < 0 || c >= GRID) return false;
+  if (blocked[r][c]) return false;
+
+  var existing = grid[r][c];
+  if (existing && existing.type === 'START') return false;
+
+  // Replace restriction
+  if (existing) {
+    if (existing.filled) return false; // Can't replace filled pipe
+    if (replaceRestricted && flowActive) return false;
+    score = Math.max(0, score - replaceCost);
+    TAS.audio.playTone(150, 0.1, 'triangle', 0.06);
+  } else {
+    TAS.audio.playTone(600, 0.06, 'square', 0.04);
+  }
+
+  var type = queue[0];
+  grid[r][c] = { type: type, filled: false, fillProgress: 0, fillDir: -1 };
+  queue.shift();
+  queue.push(randomPipe(getLevelConfig(level).pipePool));
+
+  TAS.particles.spawn(
+    GRID_X + c * CELL + CELL / 2,
+    GRID_Y + r * CELL + CELL / 2,
+    '#88aaff', 5, 2, { size: 1, sizeVar: 2 }
+  );
+
+  return true;
+}
+
+function skipPiece() {
+  if (queue.length < 2) return;
+  score = Math.max(0, score - skipCost);
+  queue.shift();
+  queue.push(randomPipe(getLevelConfig(level).pipePool));
+  TAS.audio.playTone(100, 0.08, 'sawtooth', 0.03);
+}
+
+// === UPDATE ===
+function update(dt) {
+  frame++;
+  TAS.particles.update(dt);
+  TAS.fx.updateEffects(dt);
+  corePhase += dt * 2;
+
+  // Steam vents
+  for (var sv = 0; sv < steamVents.length; sv++) {
+    steamVents[sv].timer -= dt;
+    if (steamVents[sv].timer <= 0) {
+      steamVents[sv].timer = steamVents[sv].interval;
+      TAS.particles.spawn(steamVents[sv].x, steamVents[sv].y, '#556677', 3, 0.8, { size: 2, sizeVar: 2, gravity: steamVents[sv].y === 0 ? 0.3 : -0.3 });
+    }
+  }
+
+  if (state === 'title') {
+    if (clicked) {
+      clicked = false;
+      startGame();
+    }
+    if (Object.values(TAS.input.keys).some(Boolean)) {
+      startGame();
+    }
+    return;
+  }
+
+  if (state === 'gameOver') {
+    if (clicked) {
+      clicked = false;
+      state = 'title';
+    }
+    if (Object.values(TAS.input.keys).some(Boolean)) {
+      state = 'title';
+    }
+    return;
+  }
+
+  if (state === 'playing') {
+    // Level transition
+    if (levelComplete || levelFailed) {
+      levelTransition -= dt;
+      if (levelTransition <= 0) {
+        if (levelComplete) {
+          level++;
+          if (level > 20) {
+            // Victory!
+            state = 'gameOver';
+            return;
+          }
+          initLevel();
+        } else {
+          state = 'gameOver';
+        }
+      }
+      return;
+    }
+
+    // Countdown before flow
+    if (!flowActive) {
+      countdown -= dt;
+      if (countdown <= 0) {
+        startFlow();
+      }
+    }
+
+    // Advance flow
+    if (flowActive) {
+      advanceFlow(dt);
+    }
+
+    // Handle click
+    if (clicked) {
+      clicked = false;
+
+      // Check if clicking on grid
+      var gr = Math.floor((clickY - GRID_Y) / CELL);
+      var gc = Math.floor((clickX - GRID_X) / CELL);
+
+      if (gr >= 0 && gr < GRID && gc >= 0 && gc < GRID) {
+        placePipe(gr, gc);
+      }
+
+      // Check if clicking skip button (below queue)
+      if (clickX >= QUEUE_X - 5 && clickX <= QUEUE_X + 70 &&
+          clickY >= QUEUE_Y + QUEUE_SIZE * 50 + 10 && clickY <= QUEUE_Y + QUEUE_SIZE * 50 + 40) {
+        skipPiece();
+      }
+    }
+  }
+}
+
+// === DRAW ===
+function drawPipe(x, y, size, type, filled, fillProgress, fillDir) {
+  var cx = x + size / 2;
+  var cy = y + size / 2;
+  var half = size / 2;
+  var pipeW = size * 0.3;
+  var halfPW = pipeW / 2;
+
+  // Pipe body (dark metal)
+  ctx.strokeStyle = '#334455';
+  ctx.lineWidth = 2;
+
+  var openings = PIPE_TYPES[type] ? PIPE_TYPES[type].openings : [];
+
+  // Draw pipe segments
+  ctx.fillStyle = filled ? '#226644' : '#1a2a33';
+  ctx.strokeStyle = '#445566';
+  ctx.lineWidth = 1.5;
+
+  if (type === 'H') {
+    ctx.fillRect(x, cy - halfPW, size, pipeW);
+    ctx.strokeRect(x, cy - halfPW, size, pipeW);
+  } else if (type === 'V') {
+    ctx.fillRect(cx - halfPW, y, pipeW, size);
+    ctx.strokeRect(cx - halfPW, y, pipeW, size);
+  } else if (type === 'TL') {
+    ctx.fillRect(x, cy - halfPW, half + halfPW, pipeW);
+    ctx.fillRect(cx - halfPW, y, pipeW, half + halfPW);
+    ctx.strokeRect(x, cy - halfPW, half + halfPW, pipeW);
+    ctx.strokeRect(cx - halfPW, y, pipeW, half + halfPW);
+  } else if (type === 'TR') {
+    ctx.fillRect(cx - halfPW, cy - halfPW, half + halfPW, pipeW);
+    ctx.fillRect(cx - halfPW, y, pipeW, half + halfPW);
+    ctx.strokeRect(cx - halfPW, cy - halfPW, half + halfPW, pipeW);
+    ctx.strokeRect(cx - halfPW, y, pipeW, half + halfPW);
+  } else if (type === 'BL') {
+    ctx.fillRect(x, cy - halfPW, half + halfPW, pipeW);
+    ctx.fillRect(cx - halfPW, cy - halfPW, pipeW, half + halfPW);
+    ctx.strokeRect(x, cy - halfPW, half + halfPW, pipeW);
+    ctx.strokeRect(cx - halfPW, cy - halfPW, pipeW, half + halfPW);
+  } else if (type === 'BR') {
+    ctx.fillRect(cx - halfPW, cy - halfPW, half + halfPW, pipeW);
+    ctx.fillRect(cx - halfPW, cy - halfPW, pipeW, half + halfPW);
+    ctx.strokeRect(cx - halfPW, cy - halfPW, half + halfPW, pipeW);
+    ctx.strokeRect(cx - halfPW, cy - halfPW, pipeW, half + halfPW);
+  } else if (type === 'X') {
+    ctx.fillRect(x, cy - halfPW, size, pipeW);
+    ctx.fillRect(cx - halfPW, y, pipeW, size);
+    ctx.strokeRect(x, cy - halfPW, size, pipeW);
+    ctx.strokeRect(cx - halfPW, y, pipeW, size);
+    // Cross indicator
+    ctx.fillStyle = '#556677';
+    ctx.fillRect(cx - 3, cy - 3, 6, 6);
+  } else if (type === 'RES') {
+    // Reservoir: big tank shape
+    ctx.fillStyle = filled ? '#226644' : '#1a2a33';
+    ctx.fillRect(x + 4, y + 4, size - 8, size - 8);
+    ctx.strokeStyle = '#667788';
+    ctx.lineWidth = 2;
+    ctx.strokeRect(x + 4, y + 4, size - 8, size - 8);
+    // Openings on all sides
+    ctx.fillStyle = filled ? '#226644' : '#1a2a33';
+    ctx.fillRect(cx - halfPW, y, pipeW, 4);
+    ctx.fillRect(cx - halfPW, y + size - 4, pipeW, 4);
+    ctx.fillRect(x, cy - halfPW, 4, pipeW);
+    ctx.fillRect(x + size - 4, cy - halfPW, 4, pipeW);
+    // RES label
+    ctx.fillStyle = '#889988';
+    ctx.font = '8px monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText('RES', cx, cy + 3);
+  }
+
+  // Draw fill (glowing green coolant)
+  if (fillProgress > 0 && type !== 'RES') {
+    ctx.globalAlpha = 0.7;
+    var grd;
+    ctx.fillStyle = '#33ff88';
+    ctx.shadowColor = '#33ff88';
+    ctx.shadowBlur = 4;
+
+    if (type === 'H') {
+      var fw = size * fillProgress;
+      if (fillDir === 1) { ctx.fillRect(x, cy - halfPW + 2, fw, pipeW - 4); }
+      else if (fillDir === 3) { ctx.fillRect(x + size - fw, cy - halfPW + 2, fw, pipeW - 4); }
+      else { ctx.fillRect(x, cy - halfPW + 2, fw, pipeW - 4); }
+    } else if (type === 'V') {
+      var fh = size * fillProgress;
+      if (fillDir === 2) { ctx.fillRect(cx - halfPW + 2, y, pipeW - 4, fh); }
+      else if (fillDir === 0) { ctx.fillRect(cx - halfPW + 2, y + size - fh, pipeW - 4, fh); }
+      else { ctx.fillRect(cx - halfPW + 2, y, pipeW - 4, fh); }
+    } else {
+      // For elbows/cross, fill from center
+      var fillAmt = fillProgress;
+      for (var oi = 0; oi < openings.length; oi++) {
+        var od = openings[oi];
+        var segLen = half * fillAmt;
+        if (od === 0) ctx.fillRect(cx - halfPW + 2, cy - segLen, pipeW - 4, segLen);
+        else if (od === 1) ctx.fillRect(cx, cy - halfPW + 2, segLen, pipeW - 4);
+        else if (od === 2) ctx.fillRect(cx - halfPW + 2, cy, pipeW - 4, segLen);
+        else if (od === 3) ctx.fillRect(cx - segLen, cy - halfPW + 2, segLen, pipeW - 4);
+      }
+    }
+    ctx.shadowBlur = 0;
+    ctx.globalAlpha = 1;
+  }
+
+  // Reservoir fill
+  if (type === 'RES' && fillProgress > 0) {
+    ctx.globalAlpha = 0.6;
+    ctx.fillStyle = '#33ff88';
+    ctx.shadowColor = '#33ff88';
+    ctx.shadowBlur = 6;
+    var fillH = (size - 10) * fillProgress;
+    ctx.fillRect(x + 5, y + size - 5 - fillH, size - 10, fillH);
+    ctx.shadowBlur = 0;
+    ctx.globalAlpha = 1;
+  }
+}
+
+function drawStartPiece(x, y, size, dir) {
+  var cx = x + size / 2;
+  var cy = y + size / 2;
+  var halfPW = size * 0.15;
+
+  // Glowing source
+  ctx.fillStyle = '#115522';
+  ctx.fillRect(x + 2, y + 2, size - 4, size - 4);
+  ctx.strokeStyle = '#33ff88';
+  ctx.lineWidth = 2;
+  ctx.strokeRect(x + 2, y + 2, size - 4, size - 4);
+
+  // Pulsing core
+  var pulse = Math.sin(corePhase * 3) * 0.3 + 0.7;
+  ctx.globalAlpha = pulse;
+  ctx.fillStyle = '#44ffaa';
+  ctx.beginPath();
+  ctx.arc(cx, cy, 6, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.globalAlpha = 1;
+
+  // Arrow showing flow direction
+  ctx.fillStyle = '#88ffcc';
+  ctx.beginPath();
+  if (dir === 0) { ctx.moveTo(cx, y + 4); ctx.lineTo(cx - 4, y + 12); ctx.lineTo(cx + 4, y + 12); }
+  else if (dir === 1) { ctx.moveTo(x + size - 4, cy); ctx.lineTo(x + size - 12, cy - 4); ctx.lineTo(x + size - 12, cy + 4); }
+  else if (dir === 2) { ctx.moveTo(cx, y + size - 4); ctx.lineTo(cx - 4, y + size - 12); ctx.lineTo(cx + 4, y + size - 12); }
+  else { ctx.moveTo(x + 4, cy); ctx.lineTo(x + 12, cy - 4); ctx.lineTo(x + 12, cy + 4); }
+  ctx.fill();
+
+  // S label
+  ctx.fillStyle = '#88ffcc';
+  ctx.font = 'bold 10px monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText('S', cx, cy + 4);
+}
+
+function draw(dt) {
+  // Background
+  ctx.fillStyle = '#0a0e12';
+  ctx.fillRect(0, 0, GW, GH);
+
+  // Reactor core glow in background
+  var corePulse = Math.sin(corePhase) * 0.1 + 0.15;
+  ctx.globalAlpha = corePulse;
+  var coreGrad = ctx.createRadialGradient(GW / 2, GH / 2, 20, GW / 2, GH / 2, 200);
+  coreGrad.addColorStop(0, '#22ff66');
+  coreGrad.addColorStop(1, 'transparent');
+  ctx.fillStyle = coreGrad;
+  ctx.fillRect(0, 0, GW, GH);
+  ctx.globalAlpha = 1;
+
+  if (state === 'title') {
+    drawTitleScreen();
+    return;
+  }
+
+  if (state === 'gameOver') {
+    TAS.ui.drawGameOver(score, highScore, GW, GH, { frame: frame, extra: 'Level ' + level + ' | Segments: ' + segmentsFilled });
+    return;
+  }
+
+  if (state === 'playing') {
+    ctx.save();
+    TAS.fx.applyShake();
+
+    // Draw grid background
+    for (var r = 0; r < GRID; r++) {
+      for (var c = 0; c < GRID; c++) {
+        var gx = GRID_X + c * CELL;
+        var gy = GRID_Y + r * CELL;
+
+        if (blocked[r][c] && !(grid[r][c] && grid[r][c].type === 'START')) {
+          // Blocked cell
+          ctx.fillStyle = '#1a1a22';
+          ctx.fillRect(gx, gy, CELL, CELL);
+          ctx.strokeStyle = '#2a2a33';
+          ctx.lineWidth = 1;
+          ctx.strokeRect(gx, gy, CELL, CELL);
+          // X pattern
+          ctx.strokeStyle = '#333340';
+          ctx.beginPath();
+          ctx.moveTo(gx + 4, gy + 4); ctx.lineTo(gx + CELL - 4, gy + CELL - 4);
+          ctx.moveTo(gx + CELL - 4, gy + 4); ctx.lineTo(gx + 4, gy + CELL - 4);
+          ctx.stroke();
+        } else {
+          // Empty cell
+          ctx.fillStyle = '#121820';
+          ctx.fillRect(gx, gy, CELL, CELL);
+          ctx.strokeStyle = '#1e2830';
+          ctx.lineWidth = 0.5;
+          ctx.strokeRect(gx, gy, CELL, CELL);
+        }
+
+        // Draw placed pipe
+        var cell = grid[r][c];
+        if (cell) {
+          if (cell.type === 'START') {
+            var sDir = 2;
+            for (var si = 0; si < startCells.length; si++) {
+              if (startCells[si].r === r && startCells[si].c === c) {
+                sDir = startCells[si].dir;
+                break;
+              }
+            }
+            drawStartPiece(gx, gy, CELL, sDir);
+          } else {
+            drawPipe(gx, gy, CELL, cell.type, cell.filled, cell.fillProgress, cell.fillDir);
+          }
+        }
+      }
+    }
+
+    // Draw walls
+    ctx.strokeStyle = '#ff6644';
+    ctx.lineWidth = 3;
+    for (var wi = 0; wi < walls.length; wi++) {
+      var wall = walls[wi];
+      var wx = GRID_X + wall.c * CELL;
+      var wy = GRID_Y + wall.r * CELL;
+      ctx.beginPath();
+      if (wall.dir === 1) {
+        // Right wall
+        ctx.moveTo(wx + CELL, wy + 2);
+        ctx.lineTo(wx + CELL, wy + CELL - 2);
+      } else if (wall.dir === 2) {
+        // Bottom wall
+        ctx.moveTo(wx + 2, wy + CELL);
+        ctx.lineTo(wx + CELL - 2, wy + CELL);
+      }
+      ctx.stroke();
+    }
+
+    // Draw one-way indicators
+    for (var owi = 0; owi < oneWays.length; owi++) {
+      var ow = oneWays[owi];
+      var owx = GRID_X + ow.c * CELL + CELL / 2;
+      var owy = GRID_Y + ow.r * CELL + CELL / 2;
+      ctx.fillStyle = '#ffaa22';
+      ctx.globalAlpha = 0.6;
+      ctx.beginPath();
+      var arrowSize = 6;
+      if (ow.dir === 0) { ctx.moveTo(owx, owy - arrowSize); ctx.lineTo(owx - arrowSize, owy + arrowSize); ctx.lineTo(owx + arrowSize, owy + arrowSize); }
+      else if (ow.dir === 1) { ctx.moveTo(owx + arrowSize, owy); ctx.lineTo(owx - arrowSize, owy - arrowSize); ctx.lineTo(owx - arrowSize, owy + arrowSize); }
+      else if (ow.dir === 2) { ctx.moveTo(owx, owy + arrowSize); ctx.lineTo(owx - arrowSize, owy - arrowSize); ctx.lineTo(owx + arrowSize, owy - arrowSize); }
+      else { ctx.moveTo(owx - arrowSize, owy); ctx.lineTo(owx + arrowSize, owy - arrowSize); ctx.lineTo(owx + arrowSize, owy + arrowSize); }
+      ctx.fill();
+      ctx.globalAlpha = 1;
+    }
+
+    // Draw flow head indicator
+    if (flowActive) {
+      for (var fhi = 0; fhi < flowHeads.length; fhi++) {
+        var fh = flowHeads[fhi];
+        if (fh.dead) continue;
+        var fhx = GRID_X + fh.c * CELL + CELL / 2;
+        var fhy = GRID_Y + fh.r * CELL + CELL / 2;
+        ctx.globalAlpha = 0.5 + Math.sin(frame * 0.15) * 0.3;
+        ctx.fillStyle = '#66ffaa';
+        ctx.beginPath();
+        ctx.arc(fhx, fhy, 4, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.globalAlpha = 1;
+      }
+    }
+
+    TAS.particles.draw();
+    ctx.restore();
+    TAS.fx.drawFlash(GW, GH);
+
+    // === SIDE PANEL ===
+    // Queue background
+    ctx.fillStyle = '#0d1218';
+    ctx.fillRect(QUEUE_X - 10, QUEUE_Y - 30, 85, QUEUE_SIZE * 50 + 70);
+    ctx.strokeStyle = '#2a3a44';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(QUEUE_X - 10, QUEUE_Y - 30, 85, QUEUE_SIZE * 50 + 70);
+
+    // Queue label
+    ctx.fillStyle = '#88aacc';
+    ctx.font = 'bold 10px monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText('NEXT', QUEUE_X + 32, QUEUE_Y - 16);
+
+    // Current piece highlight
+    ctx.strokeStyle = '#44ff88';
+    ctx.lineWidth = 2;
+    ctx.strokeRect(QUEUE_X + 2, QUEUE_Y + 2, 60, 44);
+
+    // Draw queue pieces
+    for (var qi = 0; qi < Math.min(queue.length, QUEUE_SIZE); qi++) {
+      var qx = QUEUE_X + 12;
+      var qy = QUEUE_Y + qi * 50 + 6;
+      drawPipe(qx, qy, 36, queue[qi], false, 0, -1);
+      if (qi === 0) {
+        ctx.fillStyle = '#44ff88';
+        ctx.font = '8px monospace';
+        ctx.textAlign = 'left';
+        ctx.fillText('PLACE', QUEUE_X + 50, qy + 20);
+      }
+    }
+
+    // Skip button
+    var skipY = QUEUE_Y + QUEUE_SIZE * 50 + 10;
+    ctx.fillStyle = '#1a2233';
+    ctx.fillRect(QUEUE_X - 5, skipY, 70, 26);
+    ctx.strokeStyle = '#ff8844';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(QUEUE_X - 5, skipY, 70, 26);
+    ctx.fillStyle = '#ff8844';
+    ctx.font = 'bold 9px monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText('SKIP -' + skipCost, QUEUE_X + 30, skipY + 16);
+
+    // === HUD ===
+    // Top bar
+    ctx.fillStyle = 'rgba(10,14,18,0.85)';
+    ctx.fillRect(0, 0, GW, 42);
+
+    ctx.font = 'bold 11px monospace';
+    ctx.textAlign = 'left';
+
+    // Score
+    ctx.fillStyle = '#ffdd44';
+    ctx.fillText('SCORE: ' + score, 8, 14);
+
+    // Level
+    ctx.fillStyle = '#88ccff';
+    ctx.fillText('LV ' + level, 8, 30);
+
+    // High score
+    ctx.fillStyle = '#666';
+    ctx.textAlign = 'right';
+    ctx.fillText('HI: ' + highScore, 300, 14);
+
+    // Countdown / Flow status
+    ctx.textAlign = 'center';
+    if (!flowActive && !levelComplete && !levelFailed) {
+      var cdColor = countdown > 3 ? '#44ff88' : '#ff6644';
+      ctx.fillStyle = cdColor;
+      ctx.font = 'bold 12px monospace';
+      ctx.fillText('FLOW IN: ' + Math.ceil(countdown) + 's', 160, 30);
+
+      // Countdown bar
+      var barW = 200;
+      var barX = 60;
+      var barY = 35;
+      ctx.fillStyle = '#1a2a33';
+      ctx.fillRect(barX, barY, barW, 4);
+      ctx.fillStyle = cdColor;
+      ctx.fillRect(barX, barY, barW * (countdown / countdownMax), 4);
+    } else if (flowActive) {
+      ctx.fillStyle = '#44ff88';
+      ctx.font = 'bold 11px monospace';
+      ctx.fillText('FLOWING... ' + segmentsFilled + '/' + minSegments, 160, 30);
+    }
+
+    // Min segments indicator
+    ctx.fillStyle = '#888';
+    ctx.font = '9px monospace';
+    ctx.textAlign = 'right';
+    ctx.fillText('NEED: ' + minSegments + ' segs', 300, 30);
+
+    // Level transition overlay
+    if (levelComplete) {
+      ctx.fillStyle = 'rgba(0,40,20,0.6)';
+      ctx.fillRect(0, 0, GW, GH);
+      ctx.textAlign = 'center';
+      ctx.fillStyle = '#44ff88';
+      ctx.font = 'bold 20px monospace';
+      ctx.fillText('LEVEL CLEAR!', GW / 2, GH / 2 - 20);
+      ctx.font = '12px monospace';
+      ctx.fillStyle = '#88ffcc';
+      ctx.fillText('Segments: ' + segmentsFilled + ' | +' + (50 + level * 10) + ' bonus', GW / 2, GH / 2 + 10);
+    }
+    if (levelFailed) {
+      ctx.fillStyle = 'rgba(40,0,0,0.6)';
+      ctx.fillRect(0, 0, GW, GH);
+      ctx.textAlign = 'center';
+      ctx.fillStyle = '#ff4444';
+      ctx.font = 'bold 20px monospace';
+      ctx.fillText('COOLANT BREACH!', GW / 2, GH / 2 - 20);
+      ctx.font = '12px monospace';
+      ctx.fillStyle = '#ff8888';
+      ctx.fillText('Needed ' + minSegments + ' segments, got ' + segmentsFilled, GW / 2, GH / 2 + 10);
+    }
+
+    // Wrap indicator
+    if (wrapEdges) {
+      ctx.fillStyle = '#6644ff';
+      ctx.font = '8px monospace';
+      ctx.textAlign = 'left';
+      ctx.fillText('WRAP', GRID_X, GH - 8);
+    }
+
+    // Bottom info
+    ctx.fillStyle = '#333';
+    ctx.font = '8px monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText('Click grid to place | Click SKIP to discard (-' + skipCost + ' pts)', GW / 2, GH - 8);
+  }
+}
+
+function drawTitleScreen() {
+  // Background grid pattern
+  ctx.globalAlpha = 0.1;
+  ctx.strokeStyle = '#33ff88';
+  for (var i = 0; i < 10; i++) {
+    for (var j = 0; j < 10; j++) {
+      ctx.strokeRect(i * 40 + 5, j * 40 + 5, 30, 30);
+    }
+  }
+  ctx.globalAlpha = 1;
+
+  // Animated pipe demo
+  var demoTime = frame * 0.02;
+  for (var d = 0; d < 5; d++) {
+    var dx = 60 + d * 55;
+    var dy = 200 + Math.sin(demoTime + d) * 10;
+    var types = ['H', 'TR', 'V', 'BL', 'X'];
+    var fp = (Math.sin(demoTime + d * 0.5) + 1) / 2;
+    drawPipe(dx, dy, 40, types[d], fp > 0.7, fp, 1);
+  }
+
+  // Title
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#000';
+  ctx.font = 'bold 28px monospace';
+  ctx.fillText('REACTOR PIPES', GW / 2 + 2, 82);
+  ctx.fillStyle = '#33ff88';
+  ctx.fillText('REACTOR PIPES', GW / 2, 80);
+
+  // Subtitle
+  ctx.fillStyle = '#88aacc';
+  ctx.font = '11px monospace';
+  ctx.fillText('Guide the coolant through the reactor', GW / 2, 110);
+
+  // Instructions
+  ctx.fillStyle = '#667788';
+  ctx.font = '10px monospace';
+  ctx.fillText('Place pipes before the flow starts', GW / 2, 270);
+  ctx.fillText('Fill enough segments to clear each level', GW / 2, 285);
+  ctx.fillText('Cross pieces and reservoirs = bonus points', GW / 2, 300);
+
+  // High score
+  if (highScore > 0) {
+    ctx.fillStyle = '#ffdd44';
+    ctx.font = '10px monospace';
+    ctx.fillText('HIGH SCORE: ' + highScore, GW / 2, 330);
+  }
+
+  // Start prompt
+  var pulse = Math.sin(frame * 0.05) * 0.3 + 0.7;
+  ctx.globalAlpha = pulse;
+  ctx.fillStyle = '#ffdd44';
+  ctx.font = 'bold 13px monospace';
+  ctx.fillText('TAP OR PRESS ANY KEY', GW / 2, 370);
+  ctx.globalAlpha = 1;
+}
+
+// === START LOOP ===
+TAS.loop.start(update, draw);
+
+})();
+</script>
+</body>
+</html>

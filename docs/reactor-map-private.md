@@ -5,7 +5,7 @@
 ### BTCband v1
 - Reactor: 0x2879706E115150BBB9ffb5C432024264dEE0852F
 - Token: 0x2988187BDa15c71eC8b3Eb9873457174733d2524
-- 4 pools, feeds MycoPad:
+- 4 pools, feeds Unrugable Hub:
   - BTCband/cbBTC
   - BTCband/USDC
   - BTCband/WETH
@@ -14,7 +14,7 @@
 ### ETHband v1
 - Reactor: 0x7018660EFBd7CfE3219388322417D405fC15b23B
 - Token: 0x1248e04075b7a191931E6C8a2999d2Fae4d13BEa
-- 4 pools, feeds MycoPad:
+- 4 pools, feeds Unrugable Hub:
   - ETHband/WETH
   - ETHband/USDC
   - ETHband/cbBTC
@@ -25,7 +25,7 @@
 ### BTCband v2
 - Reactor: 0x038B87f2Abc1dcE269FF7DE4d3e721b5b57eD8cf
 - Token: 0x11DFE729F1211904efB99F4d4a3f9FAF6C93CCB5
-- 8 pools, feeds MycoPad:
+- 8 pools, feeds Unrugable Hub:
   - BTCv2/cbBTC
   - BTCv2/USDC
   - BTCv2/WETH
@@ -38,7 +38,7 @@
 ### ETHband v2
 - Reactor: 0xeB02d1137342cD08C1c4bf61C188d86C5253b631
 - Token: 0xd7ac547B8a5d7756F36b593287431Bad7Feb7864
-- 7 pools, feeds MycoPad:
+- 7 pools, feeds Unrugable Hub:
   - ETHv2/WETH
   - ETHv2/USDC
   - ETHv2/cbBTC
@@ -52,7 +52,7 @@
 ### BB v3
 - Reactor: 0x5375817c1798d43036d3b2DAAfaFB8e2247bAcF2
 - Token: 0x4032bFe88eaeb0a9F5EBeFc14D66564DDf95CC29
-- 6 pools, feeds MycoPad:
+- 6 pools, feeds Unrugable Hub:
   - BB3/cbBTC
   - BB3/USDC
   - BB3/WETH
@@ -63,7 +63,7 @@
 ### EB v3
 - Reactor: 0x361A4E356847c5a0C60B510b2531b640aC51f090
 - Token: 0x73B98EA6359b1289306e0E16ad8d32d088ea1cC8
-- 6 pools, feeds MycoPad:
+- 6 pools, feeds Unrugable Hub:
   - EB3/WETH
   - EB3/USDC
   - EB3/cbBTC
@@ -179,12 +179,12 @@
 BTCband v1 (4p) ──┐
 ETHband v1 (4p) ──┤
 BTCband v2 (8p) ──┤
-ETHband v2 (7p) ──┼──> MycoPad (5p)
+ETHband v2 (7p) ──┼──> Unrugable Hub (5p)
 BB v3 (6p) ───────┤
 EB v3 (6p) ───────┘
 
 BB v5 (10p) ──┐
-              ├──> EB relay (10p) -> MycoPad
+              ├──> EB relay (10p) -> Unrugable Hub
 EB v5 (10p) ──┘
 
 BBT (4p) ──┐
@@ -192,7 +192,7 @@ EBT (4p) ──┼──> V1 Prime
 WALL (3p) ─┘
 
 BRUH (4p) -> V1 Prime (BRICKED)
-ILM/RT/SC (4p each) -> MycoPad (BRICKED)
+ILM/RT/SC (4p each) -> Unrugable Hub (BRICKED)
 ```
 
 ## Unused

@@ -7,7 +7,7 @@ Post as @jamesmagee. Match content type to channel audience.
 | Channel | Audience | Best Content | Tone |
 |---------|----------|--------------|------|
 | /defi | DeFi builders, yield farmers, protocol teams | Reactor mechanics, clockwork heartbeat, burn stats, floor math | Technical, data-heavy, no hype |
-| /base | Base ecosystem builders + users | MycoPad launches, network growth, gas efficiency, new features | Builder-focused, ecosystem pride |
+| /base | Base ecosystem builders + users | Unrugable launches, network growth, gas efficiency, new features | Builder-focused, ecosystem pride |
 | /base-builders | Developers building on Base | Agent SDK, MCP tools, API endpoints, integration guides | Code-first, show don't tell |
 | /agents | AI agent operators + framework devs | MCP tools, llms.txt, permissionless execute(), agent adoption stories | Ultra-technical, API-focused |
 
@@ -26,7 +26,7 @@ Post as @jamesmagee. Match content type to channel audience.
 |---------|----------|--------------|
 | /ai | General AI enthusiasts | When MCP tools get traction, new agent capabilities |
 | /refi | Regenerative finance | CHAR milestones, charity progress updates |
-| /clanker | Token launchers on Farcaster | When MycoPad has notable launches or competitive comparison |
+| /clanker | Token launchers on Farcaster | When Unrugable has notable launches or competitive comparison |
 | /degen | Degen traders, memecoin enthusiasts | Token adoption stories, "every dump is fuel" angle |
 
 ## Content Type -> Channel Map
@@ -37,7 +37,7 @@ Post as @jamesmagee. Match content type to channel audience.
 | Agent SDK / MCP tools | /agents, /base-builders | /ai |
 | Carbon impact / CHAR | /climate, /refi | /onchain |
 | Baseling game updates | /gaming, /base | /nft |
-| MycoPad launches | /base, /defi | /clanker |
+| Unrugable launches | /base, /defi | /clanker |
 | Token adoption stories | /defi, /agents | /degen, /base |
 | Heartbeat Reports | /defi | /base, /onchain |
 | Partnership news | /base | relevant partner channel |

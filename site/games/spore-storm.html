@@ -1,0 +1,1621 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Spore Storm</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body { width: 100%; height: 100%; overflow: hidden; background: #111; touch-action: none; }
+canvas { display: block; margin: 0 auto; }
+#back-link { position: fixed; bottom: 8px; left: 50%; transform: translateX(-50%); color: #666; font-family: monospace; font-size: 12px; text-decoration: none; z-index: 10; }
+#back-link:hover { color: #aaa; }
+</style>
+</head>
+<body>
+<canvas id="gc"></canvas>
+<a id="back-link" href="/games">Back to Arcade</a>
+<script src="nft-loader.js"></script>
+<script>if(window.NftLoader)NftLoader.gate();</script>
+<script src="tasern-engine.js"></script>
+<script>
+(function(){
+"use strict";
+
+// === GAME CONSTANTS ===
+const GW = 320, GH = 480;
+const ctx = TAS.ctx;
+TAS.initCanvas(GW, GH);
+
+// === WEAPON TYPES ===
+const WEAPONS = {
+  RED: 0,    // Spread
+  BLUE: 1,   // Laser
+  GREEN: 2,  // Homing
+  YELLOW: 3, // Wave
+  PURPLE: 4  // Plasma
+};
+const WEAPON_COLORS = ['#ff4444', '#44aaff', '#44ff44', '#ffdd44', '#cc44ff'];
+const WEAPON_NAMES = ['SPREAD', 'LASER', 'HOMING', 'WAVE', 'PLASMA'];
+
+// === STAGE DATA ===
+const STAGES = [
+  { name: 'Fungal Fields', bgTop: '#1a3320', bgBot: '#0a1a10', scrollColor: '#2d5a2d', enemyRate: 1.8 },
+  { name: 'Spore Clouds', bgTop: '#2a1a3a', bgBot: '#10081a', scrollColor: '#4a2a6a', enemyRate: 1.5 },
+  { name: 'Crystal Cavern', bgTop: '#1a2a3a', bgBot: '#081020', scrollColor: '#3a5a7a', enemyRate: 1.3 },
+  { name: 'Reactor Core', bgTop: '#3a1a0a', bgBot: '#1a0800', scrollColor: '#5a3a2a', enemyRate: 1.1 },
+  { name: 'Ocean of Ooze', bgTop: '#0a2a2a', bgBot: '#041414', scrollColor: '#1a4a4a', enemyRate: 1.0 },
+  { name: 'Asteroid Belt', bgTop: '#1a1a2a', bgBot: '#080810', scrollColor: '#3a3a4a', enemyRate: 0.9 },
+  { name: 'Alien Hive', bgTop: '#2a1a1a', bgBot: '#140808', scrollColor: '#5a2a3a', enemyRate: 0.7 },
+  { name: 'Final Dimension', bgTop: '#0a0a1a', bgBot: '#000008', scrollColor: '#2a2a4a', enemyRate: 0.6 }
+];
+
+// === GAME STATE ===
+let state = 'title';
+let score = 0;
+let highScore = TAS.score.load('sporestorm_hi');
+let lives = 3;
+let stage = 0;
+let frame = 0;
+let bombs = 3;
+let weaponType = WEAPONS.RED;
+let weaponLevel = 1;
+let speedLevel = 1;
+let invincible = 0;
+let chainTimer = 0;
+let chainCount = 0;
+let stageTimer = 0;
+let stageLength = 1800; // frames per stage (30 seconds at 60fps)
+let bossActive = false;
+let midBossActive = false;
+let midBossSpawned = false;
+let bossSpawned = false;
+let stageCleared = false;
+let stageClearTimer = 0;
+let noDeath = true;
+let noBomb = true;
+let bombActive = 0;
+let stageIntroTimer = 0;
+
+// Player
+let px = GW / 2, py = GH - 80;
+let pSpeed = 3;
+
+// Object pools
+let bullets = [];
+let enemyBullets = [];
+let enemies = [];
+let powerups = [];
+let bgElements = [];
+let boss = null;
+
+// Background scrolling
+let scrollY = 0;
+
+// Touch/mouse control
+let dragActive = false;
+let dragOffsetX = 0, dragOffsetY = 0;
+let lastTouchX = 0, lastTouchY = 0;
+let bombTapped = false;
+
+// Fire timing
+let fireTimer = 0;
+let fireRate = 6; // frames between shots
+
+// === TOUCH INPUT (custom drag-to-move) ===
+const canvas = TAS.canvas;
+
+function canvasCoords(clientX, clientY) {
+  const rect = canvas.getBoundingClientRect();
+  const dpr = window.devicePixelRatio || 1;
+  const scaleX = (canvas.width / dpr) / rect.width;
+  const scaleY = (canvas.height / dpr) / rect.height;
+  return {
+    x: (clientX - rect.left) * scaleX,
+    y: (clientY - rect.top) * scaleY
+  };
+}
+
+canvas.addEventListener('touchstart', function(e) {
+  e.preventDefault();
+  TAS.audio.ensureAudio();
+  if (state === 'title' || state === 'gameOver') {
+    if (state === 'title') startGame();
+    else state = 'title';
+    return;
+  }
+  const t = e.touches[0];
+  const c = canvasCoords(t.clientX, t.clientY);
+  // Bomb: tap right half of screen
+  if (c.x > GW / 2 && state === 'playing') {
+    bombTapped = true;
+  }
+  dragActive = true;
+  lastTouchX = c.x;
+  lastTouchY = c.y;
+}, { passive: false });
+
+canvas.addEventListener('touchmove', function(e) {
+  e.preventDefault();
+  if (!dragActive || state !== 'playing') return;
+  const t = e.touches[0];
+  const c = canvasCoords(t.clientX, t.clientY);
+  const dx = c.x - lastTouchX;
+  const dy = c.y - lastTouchY;
+  px += dx;
+  py += dy;
+  lastTouchX = c.x;
+  lastTouchY = c.y;
+}, { passive: false });
+
+canvas.addEventListener('touchend', function(e) {
+  e.preventDefault();
+  dragActive = false;
+}, { passive: false });
+
+// Mouse fallback for desktop testing
+let mouseDown = false;
+canvas.addEventListener('mousedown', function(e) {
+  TAS.audio.ensureAudio();
+  if (state === 'title' || state === 'gameOver') {
+    if (state === 'title') startGame();
+    else state = 'title';
+    return;
+  }
+  const c = canvasCoords(e.clientX, e.clientY);
+  if (c.x > GW / 2) bombTapped = true;
+  mouseDown = true;
+  lastTouchX = c.x;
+  lastTouchY = c.y;
+});
+canvas.addEventListener('mousemove', function(e) {
+  if (!mouseDown || state !== 'playing') return;
+  const c = canvasCoords(e.clientX, e.clientY);
+  const dx = c.x - lastTouchX;
+  const dy = c.y - lastTouchY;
+  px += dx;
+  py += dy;
+  lastTouchX = c.x;
+  lastTouchY = c.y;
+});
+canvas.addEventListener('mouseup', function() { mouseDown = false; });
+
+// === GAME START ===
+function startGame() {
+  state = 'playing';
+  score = 0;
+  lives = 3;
+  bombs = 3;
+  stage = 0;
+  weaponType = WEAPONS.RED;
+  weaponLevel = 1;
+  speedLevel = 1;
+  px = GW / 2;
+  py = GH - 80;
+  invincible = 120;
+  bullets = [];
+  enemyBullets = [];
+  enemies = [];
+  powerups = [];
+  boss = null;
+  bossActive = false;
+  midBossActive = false;
+  midBossSpawned = false;
+  bossSpawned = false;
+  stageCleared = false;
+  stageTimer = 0;
+  chainTimer = 0;
+  chainCount = 0;
+  noDeath = true;
+  noBomb = true;
+  bombActive = 0;
+  stageIntroTimer = 120;
+  frame = 0;
+  TAS.particles.clear();
+  initBgElements();
+}
+
+// === BACKGROUND ELEMENTS ===
+function initBgElements() {
+  bgElements = [];
+  for (let i = 0; i < 40; i++) {
+    bgElements.push({
+      x: Math.random() * GW,
+      y: Math.random() * GH,
+      size: 1 + Math.random() * 3,
+      speed: 0.5 + Math.random() * 2,
+      alpha: 0.2 + Math.random() * 0.4
+    });
+  }
+}
+
+// === FIRE WEAPONS ===
+function fireWeapon() {
+  const cx = px, cy = py - 10;
+  switch(weaponType) {
+    case WEAPONS.RED: // Spread
+      if (weaponLevel === 1) {
+        bullets.push({ x: cx, y: cy, vx: 0, vy: -7, dmg: 1, color: '#ff4444', w: 3, h: 8 });
+      } else if (weaponLevel === 2) {
+        bullets.push({ x: cx - 4, y: cy, vx: -0.3, vy: -7, dmg: 1, color: '#ff4444', w: 3, h: 8 });
+        bullets.push({ x: cx + 4, y: cy, vx: 0.3, vy: -7, dmg: 1, color: '#ff4444', w: 3, h: 8 });
+      } else if (weaponLevel === 3) {
+        bullets.push({ x: cx, y: cy, vx: 0, vy: -7, dmg: 1, color: '#ff6644', w: 3, h: 8 });
+        bullets.push({ x: cx - 6, y: cy, vx: -0.8, vy: -6.8, dmg: 1, color: '#ff4444', w: 3, h: 8 });
+        bullets.push({ x: cx + 6, y: cy, vx: 0.8, vy: -6.8, dmg: 1, color: '#ff4444', w: 3, h: 8 });
+      } else if (weaponLevel === 4) {
+        bullets.push({ x: cx - 3, y: cy, vx: -0.2, vy: -7, dmg: 1, color: '#ff6644', w: 3, h: 8 });
+        bullets.push({ x: cx + 3, y: cy, vx: 0.2, vy: -7, dmg: 1, color: '#ff6644', w: 3, h: 8 });
+        bullets.push({ x: cx - 10, y: cy, vx: -1.3, vy: -6.5, dmg: 1, color: '#ff4444', w: 3, h: 8 });
+        bullets.push({ x: cx + 10, y: cy, vx: 1.3, vy: -6.5, dmg: 1, color: '#ff4444', w: 3, h: 8 });
+      } else {
+        bullets.push({ x: cx, y: cy, vx: 0, vy: -7.5, dmg: 2, color: '#ffaa44', w: 4, h: 10 });
+        bullets.push({ x: cx - 6, y: cy, vx: -0.5, vy: -7, dmg: 1, color: '#ff6644', w: 3, h: 8 });
+        bullets.push({ x: cx + 6, y: cy, vx: 0.5, vy: -7, dmg: 1, color: '#ff6644', w: 3, h: 8 });
+        bullets.push({ x: cx - 14, y: cy, vx: -1.8, vy: -6, dmg: 1, color: '#ff4444', w: 3, h: 8 });
+        bullets.push({ x: cx + 14, y: cy, vx: 1.8, vy: -6, dmg: 1, color: '#ff4444', w: 3, h: 8 });
+      }
+      break;
+
+    case WEAPONS.BLUE: // Laser
+      var w = 2 + weaponLevel * 2;
+      var dmg = weaponLevel;
+      bullets.push({ x: cx, y: cy, vx: 0, vy: -10, dmg: dmg, color: '#44aaff', w: w, h: 16 + weaponLevel * 4, pierce: true });
+      break;
+
+    case WEAPONS.GREEN: // Homing
+      var count = weaponLevel + 1;
+      for (var i = 0; i < count; i++) {
+        var spread = (i - (count - 1) / 2) * 0.4;
+        bullets.push({ x: cx, y: cy, vx: spread * 2, vy: -5, dmg: 1, color: '#44ff44', w: 5, h: 5, homing: true, speed: 5 + weaponLevel * 0.5 });
+      }
+      break;
+
+    case WEAPONS.YELLOW: // Wave
+      var amp = 1 + weaponLevel * 0.8;
+      bullets.push({ x: cx - 4, y: cy, vx: 0, vy: -6, dmg: 1 + Math.floor(weaponLevel / 3), color: '#ffdd44', w: 4, h: 6, wave: true, waveAmp: amp, waveT: 0 });
+      if (weaponLevel >= 3) {
+        bullets.push({ x: cx + 4, y: cy, vx: 0, vy: -6, dmg: 1, color: '#ffdd44', w: 4, h: 6, wave: true, waveAmp: amp, waveT: Math.PI });
+      }
+      if (weaponLevel >= 5) {
+        bullets.push({ x: cx, y: cy, vx: 0, vy: -7, dmg: 2, color: '#ffff88', w: 5, h: 8, wave: true, waveAmp: amp * 1.5, waveT: Math.PI / 2 });
+      }
+      break;
+
+    case WEAPONS.PURPLE: // Plasma (front + rear)
+      bullets.push({ x: cx, y: cy, vx: 0, vy: -6.5, dmg: 1 + Math.floor(weaponLevel / 2), color: '#cc44ff', w: 5, h: 8 });
+      if (weaponLevel >= 2) {
+        bullets.push({ x: cx, y: cy + 10, vx: 0, vy: 4, dmg: 1, color: '#aa22dd', w: 4, h: 6 });
+      }
+      if (weaponLevel >= 3) {
+        bullets.push({ x: cx - 8, y: cy, vx: -1, vy: -6, dmg: 1, color: '#cc44ff', w: 4, h: 6 });
+        bullets.push({ x: cx + 8, y: cy, vx: 1, vy: -6, dmg: 1, color: '#cc44ff', w: 4, h: 6 });
+      }
+      if (weaponLevel >= 4) {
+        bullets.push({ x: cx - 6, y: cy + 10, vx: -1.5, vy: 3, dmg: 1, color: '#aa22dd', w: 3, h: 5 });
+        bullets.push({ x: cx + 6, y: cy + 10, vx: 1.5, vy: 3, dmg: 1, color: '#aa22dd', w: 3, h: 5 });
+      }
+      if (weaponLevel >= 5) {
+        bullets.push({ x: cx - 14, y: cy, vx: -2, vy: -5, dmg: 1, color: '#ee66ff', w: 4, h: 6 });
+        bullets.push({ x: cx + 14, y: cy, vx: 2, vy: -5, dmg: 1, color: '#ee66ff', w: 4, h: 6 });
+      }
+      break;
+  }
+  // Fire SFX varies by weapon
+  var freqs = [800, 1200, 600, 500, 900];
+  TAS.audio.playTone(freqs[weaponType], 0.04, 'square', 0.04, freqs[weaponType] * 0.5);
+}
+
+// === ENEMY SPAWNING ===
+function spawnEnemy(type, x, y, opts) {
+  opts = opts || {};
+  var e = {
+    type: type,
+    x: x !== undefined ? x : TAS.math.randRange(20, GW - 20),
+    y: y !== undefined ? y : -20,
+    hp: opts.hp || 1,
+    maxHp: opts.hp || 1,
+    vx: opts.vx || 0,
+    vy: opts.vy || 1.5,
+    w: opts.w || 16,
+    h: opts.h || 16,
+    color: opts.color || '#ff8844',
+    fireRate: opts.fireRate || 0,
+    fireTimer: 0,
+    age: 0,
+    score: opts.score || 10,
+    pattern: opts.pattern || null,
+    startX: x !== undefined ? x : 0
+  };
+  enemies.push(e);
+  return e;
+}
+
+function spawnFormation(count, startX, spacing, vy) {
+  for (var i = 0; i < count; i++) {
+    spawnEnemy('formation', startX + i * spacing, -20 - i * 15, {
+      hp: 1, vy: vy || 2, color: '#88ff88', score: 15, w: 14, h: 14
+    });
+  }
+}
+
+function spawnWave() {
+  var diff = stage + 1;
+  var roll = Math.random();
+  var stageData = STAGES[stage];
+
+  if (roll < 0.25) {
+    // Drifters
+    var count = 2 + Math.floor(diff * 0.5);
+    for (var i = 0; i < count; i++) {
+      spawnEnemy('drifter', TAS.math.randRange(20, GW - 20), -20 - i * 30, {
+        hp: 1 + Math.floor(diff / 3), vy: 1 + diff * 0.1, color: '#88ccaa', score: 10
+      });
+    }
+  } else if (roll < 0.4) {
+    // Swoopers
+    var side = Math.random() < 0.5 ? -20 : GW + 20;
+    var dir = side < 0 ? 1 : -1;
+    for (var i = 0; i < 2 + Math.floor(diff / 2); i++) {
+      spawnEnemy('swooper', side, 60 + i * 40, {
+        hp: 1 + Math.floor(diff / 4), vx: dir * (2 + diff * 0.2), vy: 0.5, color: '#ffaa44', score: 20, w: 18, h: 14
+      });
+    }
+  } else if (roll < 0.55) {
+    // Spinners
+    var cx = TAS.math.randRange(40, GW - 40);
+    for (var i = 0; i < 1 + Math.floor(diff / 2); i++) {
+      spawnEnemy('spinner', cx, -30 - i * 25, {
+        hp: 2 + Math.floor(diff / 3), vy: 1, color: '#ff66aa', score: 25, w: 14, h: 14
+      });
+    }
+  } else if (roll < 0.7) {
+    // Turrets
+    var tx = TAS.math.randRange(30, GW - 30);
+    spawnEnemy('turret', tx, -20, {
+      hp: 3 + diff, vy: 0.8, color: '#aaaaaa', score: 30, w: 20, h: 20,
+      fireRate: Math.max(30, 80 - diff * 5)
+    });
+  } else if (roll < 0.85) {
+    // Formation
+    var sx = TAS.math.randRange(20, GW - 100);
+    spawnFormation(3 + Math.floor(diff / 2), sx, 22, 1.8 + diff * 0.1);
+  } else if (roll < 0.95) {
+    // Tank
+    spawnEnemy('tank', TAS.math.randRange(30, GW - 30), -30, {
+      hp: 8 + diff * 3, vy: 0.6, color: '#886644', score: 50, w: 28, h: 24,
+      fireRate: Math.max(40, 90 - diff * 5)
+    });
+  } else {
+    // Kamikaze
+    for (var i = 0; i < 2 + Math.floor(diff / 3); i++) {
+      spawnEnemy('kamikaze', TAS.math.randRange(20, GW - 20), -20 - i * 50, {
+        hp: 1, vy: 0, color: '#ff4444', score: 15, w: 12, h: 12
+      });
+    }
+  }
+}
+
+// === MID-BOSS ===
+function spawnMidBoss() {
+  midBossActive = true;
+  var hp = 30 + stage * 20;
+  spawnEnemy('midboss', GW / 2, -40, {
+    hp: hp, vy: 1, color: '#ffaa00', score: 200, w: 40, h: 36,
+    fireRate: Math.max(20, 50 - stage * 3)
+  });
+}
+
+// === BOSS ===
+function spawnBoss() {
+  bossActive = true;
+  var hp = 80 + stage * 40;
+  boss = {
+    x: GW / 2, y: -60,
+    targetY: 70,
+    hp: hp, maxHp: hp,
+    w: 80 + stage * 5, h: 50 + stage * 3,
+    phase: 0,
+    phaseTimer: 0,
+    fireTimer: 0,
+    moveTimer: 0,
+    moveDir: 1,
+    color: '#ff6600',
+    age: 0,
+    parts: []
+  };
+  // Boss parts (weak points)
+  var partCount = 2 + Math.floor(stage / 2);
+  for (var i = 0; i < partCount; i++) {
+    boss.parts.push({
+      offsetX: (i - (partCount - 1) / 2) * 25,
+      offsetY: 15,
+      hp: 15 + stage * 5,
+      maxHp: 15 + stage * 5,
+      w: 14, h: 14,
+      alive: true
+    });
+  }
+  TAS.audio.playTone(200, 0.5, 'sawtooth', 0.12, 100);
+  TAS.audio.playTone(150, 0.8, 'square', 0.08, 80);
+}
+
+// === POWERUP SPAWNING ===
+function spawnPowerup(x, y, type) {
+  powerups.push({ x: x, y: y, type: type, vy: 1.5, age: 0, w: 12, h: 12 });
+}
+
+// === BOMB ===
+function useBomb() {
+  if (bombs <= 0 || bombActive > 0) return;
+  bombs--;
+  bombActive = 60;
+  noBomb = false;
+  TAS.fx.flash('#fff', 0.8);
+  TAS.fx.shake(12, 0.92);
+  TAS.audio.playNoise(0.6, 0.2, 400);
+  TAS.audio.playTone(100, 0.5, 'sawtooth', 0.15, 30);
+
+  // Damage all enemies
+  for (var i = enemies.length - 1; i >= 0; i--) {
+    enemies[i].hp -= 20;
+    if (enemies[i].hp <= 0) {
+      killEnemy(i);
+    }
+  }
+  // Damage boss
+  if (boss) {
+    boss.hp -= 15;
+    for (var i = 0; i < boss.parts.length; i++) {
+      if (boss.parts[i].alive) boss.parts[i].hp -= 10;
+    }
+  }
+  // Clear enemy bullets
+  enemyBullets = [];
+  // Big particle burst
+  for (var i = 0; i < 60; i++) {
+    TAS.particles.spawn(px, py, '#fff', 3, 6, { size: 3, sizeVar: 4 });
+  }
+}
+
+// === KILL ENEMY ===
+function killEnemy(idx) {
+  var e = enemies[idx];
+  score += e.score;
+  chainCount++;
+  chainTimer = 60;
+  if (chainCount >= 5) {
+    score += chainCount * 10;
+  }
+  // Explosion
+  TAS.particles.spawn(e.x, e.y, e.color, 8, 3, { size: 2, sizeVar: 3 });
+  TAS.particles.spawn(e.x, e.y, '#ffdd44', 4, 2);
+  TAS.audio.playNoise(0.08, 0.06, 800);
+  TAS.audio.playTone(200 + Math.random() * 200, 0.06, 'square', 0.04);
+
+  // Powerup drop chance
+  if (Math.random() < 0.08 + (e.type === 'midboss' ? 0.9 : 0) + (e.type === 'tank' ? 0.3 : 0)) {
+    var r = Math.random();
+    if (r < 0.15) spawnPowerup(e.x, e.y, 'speed');
+    else if (e.type === 'midboss' && Math.random() < 0.5) spawnPowerup(e.x, e.y, 'bomb');
+    else spawnPowerup(e.x, e.y, 'weapon');
+  }
+
+  enemies.splice(idx, 1);
+}
+
+// === PLAYER DEATH ===
+function playerDie() {
+  if (invincible > 0) return;
+  lives--;
+  noDeath = false;
+  invincible = 180;
+  weaponLevel = Math.max(1, weaponLevel - 1);
+  TAS.particles.spawn(px, py, '#ff4444', 20, 4, { size: 3, sizeVar: 4 });
+  TAS.particles.spawn(px, py, '#ffaa44', 12, 3);
+  TAS.fx.flash('#ff0000', 0.4);
+  TAS.fx.shake(8, 0.9);
+  TAS.audio.playNoise(0.3, 0.15, 600);
+  TAS.audio.playTone(150, 0.3, 'sawtooth', 0.1, 50);
+  if (lives <= 0) {
+    gameOver();
+  }
+}
+
+function gameOver() {
+  state = 'gameOver';
+  if (score > highScore) {
+    highScore = score;
+    TAS.score.save('sporestorm_hi', highScore);
+  }
+}
+
+// === UPDATE ===
+function update(dt) {
+  frame++;
+  TAS.particles.update(dt);
+  TAS.fx.updateEffects(dt);
+
+  if (state === 'title') {
+    if (TAS.input.keys['Space'] || TAS.input.keys['Enter'] || TAS.input.keys['KeyZ']) {
+      startGame();
+    }
+    return;
+  }
+
+  if (state === 'gameOver') {
+    if (frame % 3 === 0 && TAS.input.keys['Space'] || TAS.input.keys['Enter']) {
+      state = 'title';
+    }
+    return;
+  }
+
+  if (state !== 'playing') return;
+
+  // Stage intro
+  if (stageIntroTimer > 0) {
+    stageIntroTimer--;
+    return;
+  }
+
+  // Stage cleared transition
+  if (stageCleared) {
+    stageClearTimer++;
+    if (stageClearTimer > 180) {
+      stage++;
+      if (stage >= 8) {
+        // Game complete - massive bonus
+        score += 10000;
+        if (noDeath) score += 5000;
+        if (noBomb) score += 3000;
+        gameOver();
+        return;
+      }
+      stageCleared = false;
+      stageClearTimer = 0;
+      bossSpawned = false;
+      midBossSpawned = false;
+      bossActive = false;
+      midBossActive = false;
+      boss = null;
+      stageTimer = 0;
+      stageIntroTimer = 120;
+      noDeath = true;
+      noBomb = true;
+    }
+    return;
+  }
+
+  stageTimer++;
+
+  // Invincibility countdown
+  if (invincible > 0) invincible--;
+
+  // Chain timer
+  if (chainTimer > 0) {
+    chainTimer--;
+    if (chainTimer <= 0) chainCount = 0;
+  }
+
+  // Bomb animation
+  if (bombActive > 0) bombActive--;
+
+  // Bomb input
+  if (bombTapped || TAS.input.keys['KeyX'] || TAS.input.keys['Shift']) {
+    useBomb();
+    bombTapped = false;
+  }
+  bombTapped = false;
+
+  // Player movement (keyboard)
+  pSpeed = 2.5 + speedLevel * 0.8;
+  if (TAS.input.keys['ArrowLeft'] || TAS.input.keys['KeyA']) px -= pSpeed;
+  if (TAS.input.keys['ArrowRight'] || TAS.input.keys['KeyD']) px += pSpeed;
+  if (TAS.input.keys['ArrowUp'] || TAS.input.keys['KeyW']) py -= pSpeed;
+  if (TAS.input.keys['ArrowDown'] || TAS.input.keys['KeyS']) py += pSpeed;
+
+  // Clamp player
+  px = TAS.math.clamp(px, 10, GW - 10);
+  py = TAS.math.clamp(py, GH * 0.3, GH - 15);
+
+  // Auto-fire
+  fireTimer++;
+  if (fireTimer >= fireRate) {
+    fireTimer = 0;
+    fireWeapon();
+  }
+
+  // Update bullets
+  for (var i = bullets.length - 1; i >= 0; i--) {
+    var b = bullets[i];
+    if (b.homing) {
+      // Find nearest enemy
+      var nearest = null, nearDist = 9999;
+      for (var j = 0; j < enemies.length; j++) {
+        var d = TAS.math.dist(b.x, b.y, enemies[j].x, enemies[j].y);
+        if (d < nearDist) { nearDist = d; nearest = enemies[j]; }
+      }
+      if (boss && !nearest) nearest = boss;
+      if (nearest) {
+        var ang = TAS.math.angle(b.x, b.y, nearest.x, nearest.y);
+        b.vx = TAS.math.lerp(b.vx, Math.cos(ang) * b.speed, 0.08);
+        b.vy = TAS.math.lerp(b.vy, Math.sin(ang) * b.speed, 0.08);
+      }
+    }
+    if (b.wave) {
+      b.waveT += 0.2;
+      b.x += Math.sin(b.waveT) * b.waveAmp;
+    }
+    b.x += b.vx;
+    b.y += b.vy;
+    if (b.y < -20 || b.y > GH + 20 || b.x < -20 || b.x > GW + 20) {
+      bullets.splice(i, 1);
+    }
+  }
+
+  // Update enemy bullets
+  for (var i = enemyBullets.length - 1; i >= 0; i--) {
+    var eb = enemyBullets[i];
+    eb.x += eb.vx;
+    eb.y += eb.vy;
+    if (eb.y > GH + 10 || eb.y < -10 || eb.x < -10 || eb.x > GW + 10) {
+      enemyBullets.splice(i, 1);
+      continue;
+    }
+    // Hit player
+    if (invincible <= 0 && TAS.hit.circleOverlap(px, py, 4, eb.x, eb.y, eb.w / 2)) {
+      enemyBullets.splice(i, 1);
+      playerDie();
+    }
+  }
+
+  // Spawn enemies based on stage timer
+  var rate = STAGES[stage].enemyRate;
+  if (!bossActive && !midBossActive && stageTimer % Math.floor(60 * rate) === 0) {
+    spawnWave();
+  }
+
+  // Mid-boss at halfway
+  if (!midBossSpawned && stageTimer >= stageLength / 2 && !bossActive) {
+    midBossSpawned = true;
+    spawnMidBoss();
+  }
+
+  // Boss at end
+  if (!bossSpawned && stageTimer >= stageLength && !midBossActive) {
+    bossSpawned = true;
+    spawnBoss();
+  }
+
+  // Update enemies
+  for (var i = enemies.length - 1; i >= 0; i--) {
+    var e = enemies[i];
+    e.age++;
+
+    switch(e.type) {
+      case 'drifter':
+        e.y += e.vy;
+        e.x += Math.sin(e.age * 0.03) * 0.5;
+        break;
+      case 'swooper':
+        e.x += e.vx;
+        e.y += e.vy + Math.sin(e.age * 0.04) * 0.8;
+        break;
+      case 'spinner':
+        var spAngle = e.age * 0.05;
+        e.x += Math.cos(spAngle) * 1.5;
+        e.y += e.vy + Math.sin(spAngle) * 0.3;
+        break;
+      case 'turret':
+        e.y += e.vy;
+        if (e.y > 40) e.vy = 0;
+        e.fireTimer++;
+        if (e.fireTimer >= e.fireRate) {
+          e.fireTimer = 0;
+          var a = TAS.math.angle(e.x, e.y, px, py);
+          enemyBullets.push({ x: e.x, y: e.y, vx: Math.cos(a) * 3, vy: Math.sin(a) * 3, w: 5, color: '#ff8888' });
+          TAS.audio.playTone(300, 0.03, 'square', 0.02);
+        }
+        break;
+      case 'formation':
+        e.y += e.vy;
+        e.x += Math.sin(e.age * 0.04) * 1.2;
+        break;
+      case 'tank':
+        e.y += e.vy;
+        e.fireTimer++;
+        if (e.fireTimer >= e.fireRate) {
+          e.fireTimer = 0;
+          for (var s = -1; s <= 1; s++) {
+            enemyBullets.push({ x: e.x, y: e.y + 10, vx: s * 1.5, vy: 2.5, w: 4, color: '#ffaa44' });
+          }
+          TAS.audio.playTone(200, 0.05, 'sawtooth', 0.03);
+        }
+        break;
+      case 'kamikaze':
+        // Aim at player
+        var ka = TAS.math.angle(e.x, e.y, px, py);
+        e.vx = TAS.math.lerp(e.vx || 0, Math.cos(ka) * 4, 0.03);
+        e.vy = TAS.math.lerp(e.vy || 0, Math.sin(ka) * 4, 0.03);
+        e.x += e.vx;
+        e.y += e.vy;
+        break;
+      case 'midboss':
+        if (e.y < 80) e.y += e.vy;
+        else {
+          e.y = 80 + Math.sin(e.age * 0.02) * 10;
+          e.x += Math.sin(e.age * 0.03) * 2;
+          e.x = TAS.math.clamp(e.x, 40, GW - 40);
+        }
+        e.fireTimer++;
+        if (e.fireTimer >= e.fireRate) {
+          e.fireTimer = 0;
+          // Circle pattern
+          var bCount = 5 + stage;
+          for (var b2 = 0; b2 < bCount; b2++) {
+            var ba = (b2 / bCount) * Math.PI * 2 + e.age * 0.02;
+            enemyBullets.push({ x: e.x, y: e.y, vx: Math.cos(ba) * 2.5, vy: Math.sin(ba) * 2.5, w: 4, color: '#ffdd44' });
+          }
+          TAS.audio.playTone(250, 0.06, 'sawtooth', 0.03);
+        }
+        break;
+      default:
+        e.y += e.vy;
+        e.x += e.vx || 0;
+    }
+
+    // Remove off-screen
+    if (e.y > GH + 40 || e.x < -60 || e.x > GW + 60) {
+      enemies.splice(i, 1);
+      if (e.type === 'midboss') midBossActive = false;
+      continue;
+    }
+
+    // Collide with player
+    if (invincible <= 0 && TAS.hit.rectOverlap(px - 5, py - 5, 10, 10, e.x - e.w / 2, e.y - e.h / 2, e.w, e.h)) {
+      playerDie();
+    }
+
+    // Bullet vs enemy
+    for (var j = bullets.length - 1; j >= 0; j--) {
+      var bul = bullets[j];
+      if (TAS.hit.rectOverlap(bul.x - bul.w / 2, bul.y - bul.h / 2, bul.w, bul.h, e.x - e.w / 2, e.y - e.h / 2, e.w, e.h)) {
+        e.hp -= bul.dmg;
+        if (!bul.pierce) {
+          bullets.splice(j, 1);
+        }
+        TAS.particles.spawn(bul.x, bul.y, '#fff', 2, 1.5);
+        if (e.hp <= 0) {
+          killEnemy(i);
+          break;
+        }
+      }
+    }
+  }
+
+  // Mid-boss cleared check
+  if (midBossActive && !enemies.find(function(e) { return e.type === 'midboss'; })) {
+    midBossActive = false;
+  }
+
+  // === BOSS UPDATE ===
+  if (boss) {
+    boss.age++;
+    // Move into position
+    if (boss.y < boss.targetY) {
+      boss.y += 1;
+    } else {
+      // Movement pattern
+      boss.moveTimer++;
+      if (boss.moveTimer > 60) {
+        boss.moveTimer = 0;
+        boss.moveDir = -boss.moveDir;
+      }
+      boss.x += boss.moveDir * (1 + stage * 0.3);
+      boss.x = TAS.math.clamp(boss.x, boss.w / 2 + 10, GW - boss.w / 2 - 10);
+      boss.y = boss.targetY + Math.sin(boss.age * 0.02) * 15;
+
+      // Fire patterns
+      boss.phaseTimer++;
+      boss.fireTimer++;
+      var fireInterval = Math.max(12, 35 - stage * 2);
+      if (boss.fireTimer >= fireInterval) {
+        boss.fireTimer = 0;
+        boss.phase = (boss.phase + 1) % 4;
+
+        switch(boss.phase) {
+          case 0: // Aimed spread
+            for (var s = -2; s <= 2; s++) {
+              var a = TAS.math.angle(boss.x, boss.y + boss.h / 2, px, py) + s * 0.15;
+              enemyBullets.push({ x: boss.x, y: boss.y + boss.h / 2, vx: Math.cos(a) * 3, vy: Math.sin(a) * 3, w: 5, color: '#ff6644' });
+            }
+            break;
+          case 1: // Circle burst
+            var bc = 8 + stage;
+            for (var b2 = 0; b2 < bc; b2++) {
+              var ba = (b2 / bc) * Math.PI * 2;
+              enemyBullets.push({ x: boss.x, y: boss.y, vx: Math.cos(ba) * 2, vy: Math.sin(ba) * 2, w: 4, color: '#ffaa44' });
+            }
+            break;
+          case 2: // Spiral
+            for (var b2 = 0; b2 < 3; b2++) {
+              var sa = boss.age * 0.1 + b2 * (Math.PI * 2 / 3);
+              enemyBullets.push({ x: boss.x, y: boss.y + 20, vx: Math.cos(sa) * 2.5, vy: Math.sin(sa) * 2.5 + 1, w: 4, color: '#ff88ff' });
+            }
+            break;
+          case 3: // Streams from parts
+            for (var p = 0; p < boss.parts.length; p++) {
+              if (boss.parts[p].alive) {
+                var partX = boss.x + boss.parts[p].offsetX;
+                var partY = boss.y + boss.parts[p].offsetY;
+                var a = TAS.math.angle(partX, partY, px, py);
+                enemyBullets.push({ x: partX, y: partY, vx: Math.cos(a) * 3.5, vy: Math.sin(a) * 3.5, w: 4, color: '#44ffff' });
+              }
+            }
+            break;
+        }
+        TAS.audio.playTone(180, 0.05, 'sawtooth', 0.03);
+      }
+    }
+
+    // Boss collision with player bullets
+    for (var j = bullets.length - 1; j >= 0; j--) {
+      var bul = bullets[j];
+      // Hit main body
+      if (TAS.hit.rectOverlap(bul.x - bul.w / 2, bul.y - bul.h / 2, bul.w, bul.h, boss.x - boss.w / 2, boss.y - boss.h / 2, boss.w, boss.h)) {
+        boss.hp -= bul.dmg;
+        if (!bul.pierce) bullets.splice(j, 1);
+        TAS.particles.spawn(bul.x, bul.y, '#fff', 2, 1.5);
+        continue;
+      }
+      // Hit parts
+      for (var p = 0; p < boss.parts.length; p++) {
+        if (!boss.parts[p].alive) continue;
+        var partX = boss.x + boss.parts[p].offsetX;
+        var partY = boss.y + boss.parts[p].offsetY;
+        if (TAS.hit.rectOverlap(bul.x - bul.w / 2, bul.y - bul.h / 2, bul.w, bul.h, partX - 7, partY - 7, 14, 14)) {
+          boss.parts[p].hp -= bul.dmg;
+          if (!bul.pierce) bullets.splice(j, 1);
+          TAS.particles.spawn(bul.x, bul.y, '#ffaa00', 2, 1.5);
+          if (boss.parts[p].hp <= 0) {
+            boss.parts[p].alive = false;
+            score += 100;
+            TAS.particles.spawn(partX, partY, '#ffdd44', 12, 4, { size: 3, sizeVar: 3 });
+            TAS.audio.playNoise(0.15, 0.08, 600);
+          }
+          break;
+        }
+      }
+    }
+
+    // Boss defeated
+    if (boss.hp <= 0) {
+      score += 500 + stage * 200;
+      // Massive explosion
+      for (var i = 0; i < 8; i++) {
+        var ex = boss.x + TAS.math.randRange(-boss.w / 2, boss.w / 2);
+        var ey = boss.y + TAS.math.randRange(-boss.h / 2, boss.h / 2);
+        TAS.particles.spawn(ex, ey, '#ffdd44', 10, 4, { size: 3, sizeVar: 4 });
+        TAS.particles.spawn(ex, ey, '#ff6644', 8, 3);
+      }
+      TAS.fx.flash('#ffdd44', 0.6);
+      TAS.fx.shake(15, 0.92);
+      TAS.audio.playNoise(0.5, 0.2, 300);
+      TAS.audio.playTone(100, 0.6, 'sawtooth', 0.15, 30);
+
+      // Stage bonuses
+      if (noDeath) score += 1000;
+      if (noBomb) score += 500;
+
+      boss = null;
+      bossActive = false;
+      stageCleared = true;
+      stageClearTimer = 0;
+      enemyBullets = [];
+
+      // Drop bomb powerup from boss
+      spawnPowerup(GW / 2, 100, 'bomb');
+    }
+
+    // Boss body hits player
+    if (boss && invincible <= 0) {
+      if (TAS.hit.rectOverlap(px - 5, py - 5, 10, 10, boss.x - boss.w / 2, boss.y - boss.h / 2, boss.w, boss.h)) {
+        playerDie();
+      }
+    }
+  }
+
+  // Update powerups
+  for (var i = powerups.length - 1; i >= 0; i--) {
+    var p = powerups[i];
+    p.y += p.vy;
+    p.age++;
+    if (p.y > GH + 20) { powerups.splice(i, 1); continue; }
+
+    // Collect
+    if (TAS.hit.circleOverlap(px, py, 12, p.x, p.y, 8)) {
+      if (p.type === 'weapon') {
+        var newWeapon = TAS.math.randInt(0, 4);
+        if (newWeapon === weaponType) {
+          weaponLevel = Math.min(5, weaponLevel + 1);
+        } else {
+          weaponType = newWeapon;
+          weaponLevel = 1;
+        }
+        TAS.audio.playMelody([[440, 0.06], [660, 0.06], [880, 0.06]], 60);
+      } else if (p.type === 'speed') {
+        speedLevel = Math.min(3, speedLevel + 1);
+        TAS.audio.playMelody([[330, 0.06], [550, 0.06]], 60);
+      } else if (p.type === 'bomb') {
+        bombs = Math.min(9, bombs + 1);
+        TAS.audio.playMelody([[220, 0.08], [440, 0.08], [660, 0.08]], 80);
+      }
+      TAS.particles.spawn(p.x, p.y, '#fff', 6, 2);
+      powerups.splice(i, 1);
+    }
+  }
+
+  // Update background
+  scrollY += 1.5 + stage * 0.2;
+  for (var i = 0; i < bgElements.length; i++) {
+    var bg = bgElements[i];
+    bg.y += bg.speed;
+    if (bg.y > GH + 10) {
+      bg.y = -10;
+      bg.x = Math.random() * GW;
+    }
+  }
+}
+
+// === DRAW ===
+function draw(dt) {
+  var stageData = STAGES[stage] || STAGES[0];
+
+  // Background gradient
+  var grd = ctx.createLinearGradient(0, 0, 0, GH);
+  grd.addColorStop(0, stageData.bgTop);
+  grd.addColorStop(1, stageData.bgBot);
+  ctx.fillStyle = grd;
+  ctx.fillRect(0, 0, GW, GH);
+
+  if (state === 'title') {
+    drawTitleScreen();
+    return;
+  }
+
+  if (state === 'gameOver') {
+    TAS.ui.drawGameOver(score, highScore, GW, GH, { frame: frame, extra: 'Stage: ' + (stage + 1) + ' | Chain Max: ' + chainCount });
+    return;
+  }
+
+  ctx.save();
+  TAS.fx.applyShake();
+
+  // Draw bg elements (scrolling particles)
+  ctx.globalAlpha = 0.4;
+  for (var i = 0; i < bgElements.length; i++) {
+    var bg = bgElements[i];
+    ctx.fillStyle = stageData.scrollColor;
+    ctx.globalAlpha = bg.alpha;
+    ctx.beginPath();
+    ctx.arc(bg.x, bg.y, bg.size, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+
+  // Scrolling terrain lines
+  ctx.strokeStyle = stageData.scrollColor;
+  ctx.globalAlpha = 0.15;
+  ctx.lineWidth = 1;
+  for (var i = 0; i < 8; i++) {
+    var ly = ((scrollY * 0.5 + i * 70) % (GH + 40)) - 20;
+    ctx.beginPath();
+    ctx.moveTo(0, ly);
+    for (var x = 0; x < GW; x += 20) {
+      ctx.lineTo(x, ly + Math.sin((x + scrollY) * 0.02) * 8);
+    }
+    ctx.stroke();
+  }
+  ctx.globalAlpha = 1;
+
+  // Draw powerups
+  for (var i = 0; i < powerups.length; i++) {
+    var p = powerups[i];
+    var pulse = Math.sin(p.age * 0.1) * 2;
+    ctx.save();
+    ctx.translate(p.x, p.y);
+    if (p.type === 'weapon') {
+      var wColor = WEAPON_COLORS[TAS.math.randInt(0, 4)];
+      ctx.fillStyle = wColor;
+      ctx.fillRect(-6 - pulse / 2, -6 - pulse / 2, 12 + pulse, 12 + pulse);
+      ctx.strokeStyle = '#fff';
+      ctx.lineWidth = 1;
+      ctx.strokeRect(-6 - pulse / 2, -6 - pulse / 2, 12 + pulse, 12 + pulse);
+      ctx.fillStyle = '#fff';
+      ctx.font = 'bold 8px monospace';
+      ctx.textAlign = 'center';
+      ctx.fillText('W', 0, 3);
+    } else if (p.type === 'speed') {
+      ctx.fillStyle = '#88ffff';
+      ctx.beginPath();
+      ctx.arc(0, 0, 7 + pulse / 2, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = '#003';
+      ctx.font = 'bold 9px monospace';
+      ctx.textAlign = 'center';
+      ctx.fillText('S', 0, 3);
+    } else if (p.type === 'bomb') {
+      ctx.fillStyle = '#ff4444';
+      ctx.beginPath();
+      ctx.arc(0, 0, 8 + pulse / 2, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = '#fff';
+      ctx.font = 'bold 8px monospace';
+      ctx.textAlign = 'center';
+      ctx.fillText('B', 0, 3);
+    }
+    ctx.restore();
+  }
+
+  // Draw enemies
+  for (var i = 0; i < enemies.length; i++) {
+    var e = enemies[i];
+    ctx.save();
+    ctx.translate(e.x, e.y);
+
+    if (e.type === 'midboss') {
+      // Mid-boss: larger with health bar
+      drawMidBoss(e);
+    } else {
+      // Regular enemy body
+      ctx.fillStyle = e.color;
+      if (e.type === 'tank') {
+        ctx.fillRect(-e.w / 2, -e.h / 2, e.w, e.h);
+        ctx.fillStyle = '#554433';
+        ctx.fillRect(-e.w / 2 + 3, -e.h / 2 + 3, e.w - 6, e.h - 6);
+        // Cannon
+        ctx.fillStyle = '#777';
+        ctx.fillRect(-3, e.h / 2 - 4, 6, 8);
+      } else if (e.type === 'turret') {
+        ctx.beginPath();
+        ctx.arc(0, 0, e.w / 2, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = '#666';
+        ctx.beginPath();
+        ctx.arc(0, 0, e.w / 3, 0, Math.PI * 2);
+        ctx.fill();
+        // Barrel aimed at player
+        var aim = TAS.math.angle(e.x, e.y, px, py);
+        ctx.strokeStyle = '#888';
+        ctx.lineWidth = 3;
+        ctx.beginPath();
+        ctx.moveTo(0, 0);
+        ctx.lineTo(Math.cos(aim) * 12, Math.sin(aim) * 12);
+        ctx.stroke();
+      } else if (e.type === 'kamikaze') {
+        // Pointed shape
+        ctx.fillStyle = '#ff2222';
+        ctx.beginPath();
+        ctx.moveTo(0, -e.h / 2);
+        ctx.lineTo(e.w / 2, e.h / 2);
+        ctx.lineTo(-e.w / 2, e.h / 2);
+        ctx.closePath();
+        ctx.fill();
+        // Glow trail
+        ctx.fillStyle = 'rgba(255,100,0,0.4)';
+        ctx.beginPath();
+        ctx.arc(0, e.h / 2, 4 + Math.sin(e.age * 0.2) * 2, 0, Math.PI * 2);
+        ctx.fill();
+      } else if (e.type === 'spinner') {
+        ctx.rotate(e.age * 0.1);
+        ctx.fillRect(-e.w / 2, -e.h / 2, e.w, e.h);
+      } else if (e.type === 'swooper') {
+        // Wing shape
+        ctx.beginPath();
+        ctx.moveTo(0, -e.h / 2);
+        ctx.lineTo(e.w / 2, e.h / 3);
+        ctx.lineTo(0, e.h / 2);
+        ctx.lineTo(-e.w / 2, e.h / 3);
+        ctx.closePath();
+        ctx.fill();
+      } else {
+        // Default: circle-ish body
+        ctx.beginPath();
+        ctx.arc(0, 0, e.w / 2, 0, Math.PI * 2);
+        ctx.fill();
+        // Spore cap detail
+        ctx.fillStyle = 'rgba(255,255,255,0.2)';
+        ctx.beginPath();
+        ctx.arc(0, -2, e.w / 3, Math.PI, 0);
+        ctx.fill();
+      }
+
+      // Damage flash
+      if (e.hp < e.maxHp && e.age % 4 < 2) {
+        ctx.fillStyle = 'rgba(255,255,255,0.3)';
+        ctx.beginPath();
+        ctx.arc(0, 0, e.w / 2, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+    ctx.restore();
+  }
+
+  // Draw boss
+  if (boss) {
+    drawBoss();
+  }
+
+  // Draw enemy bullets
+  for (var i = 0; i < enemyBullets.length; i++) {
+    var eb = enemyBullets[i];
+    ctx.fillStyle = eb.color;
+    ctx.beginPath();
+    ctx.arc(eb.x, eb.y, eb.w / 2, 0, Math.PI * 2);
+    ctx.fill();
+    // Bright center
+    ctx.fillStyle = '#fff';
+    ctx.beginPath();
+    ctx.arc(eb.x, eb.y, eb.w / 4, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  // Draw player bullets
+  for (var i = 0; i < bullets.length; i++) {
+    var b = bullets[i];
+    ctx.fillStyle = b.color;
+    if (b.homing) {
+      ctx.beginPath();
+      ctx.arc(b.x, b.y, b.w / 2, 0, Math.PI * 2);
+      ctx.fill();
+      // Trail
+      ctx.fillStyle = 'rgba(68,255,68,0.3)';
+      ctx.beginPath();
+      ctx.arc(b.x - b.vx * 0.5, b.y - b.vy * 0.5, b.w / 2 + 1, 0, Math.PI * 2);
+      ctx.fill();
+    } else {
+      ctx.fillRect(b.x - b.w / 2, b.y - b.h / 2, b.w, b.h);
+      // Glow effect
+      ctx.globalAlpha = 0.3;
+      ctx.fillRect(b.x - b.w / 2 - 1, b.y - b.h / 2 - 1, b.w + 2, b.h + 2);
+      ctx.globalAlpha = 1;
+    }
+  }
+
+  // Draw player
+  if (invincible <= 0 || frame % 4 < 2) {
+    drawPlayer();
+  }
+
+  // Bomb flash effect
+  if (bombActive > 0) {
+    ctx.globalAlpha = bombActive / 60 * 0.4;
+    ctx.fillStyle = '#fff';
+    ctx.fillRect(0, 0, GW, GH);
+    ctx.globalAlpha = 1;
+  }
+
+  TAS.particles.draw();
+  ctx.restore();
+
+  TAS.fx.drawFlash(GW, GH);
+
+  // === HUD ===
+  drawHUD();
+
+  // Stage intro overlay
+  if (stageIntroTimer > 0) {
+    var alpha = stageIntroTimer > 60 ? 1 : stageIntroTimer / 60;
+    ctx.globalAlpha = alpha;
+    ctx.fillStyle = 'rgba(0,0,0,0.7)';
+    ctx.fillRect(0, 0, GW, GH);
+    ctx.fillStyle = '#ffdd44';
+    ctx.font = 'bold 20px monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText('STAGE ' + (stage + 1), GW / 2, GH / 2 - 20);
+    ctx.fillStyle = '#88ccff';
+    ctx.font = '14px monospace';
+    ctx.fillText(STAGES[stage].name, GW / 2, GH / 2 + 10);
+    ctx.globalAlpha = 1;
+  }
+
+  // Stage clear overlay
+  if (stageCleared) {
+    var alpha = Math.min(1, stageClearTimer / 30);
+    ctx.globalAlpha = alpha;
+    ctx.fillStyle = 'rgba(0,0,0,0.5)';
+    ctx.fillRect(0, GH / 2 - 50, GW, 100);
+    ctx.fillStyle = '#44ff88';
+    ctx.font = 'bold 18px monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText('STAGE CLEAR!', GW / 2, GH / 2 - 10);
+    ctx.fillStyle = '#ffdd44';
+    ctx.font = '12px monospace';
+    var bonusText = '';
+    if (noDeath) bonusText += ' NO DEATH +1000';
+    if (noBomb) bonusText += ' NO BOMB +500';
+    if (bonusText) ctx.fillText(bonusText, GW / 2, GH / 2 + 15);
+    ctx.globalAlpha = 1;
+  }
+
+  // Chain counter
+  if (chainCount >= 3) {
+    ctx.fillStyle = chainCount >= 10 ? '#ff4444' : chainCount >= 5 ? '#ffdd44' : '#88ccff';
+    ctx.font = 'bold 10px monospace';
+    ctx.textAlign = 'right';
+    ctx.globalAlpha = Math.min(1, chainTimer / 20);
+    ctx.fillText('CHAIN x' + chainCount, GW - 5, GH - 10);
+    ctx.globalAlpha = 1;
+  }
+
+  // Touch bomb hint (mobile)
+  if (TAS.input.isMobile && state === 'playing') {
+    ctx.globalAlpha = 0.15;
+    ctx.fillStyle = '#ff4444';
+    ctx.font = '10px monospace';
+    ctx.textAlign = 'right';
+    ctx.fillText('TAP RIGHT = BOMB', GW - 5, GH - 25);
+    ctx.globalAlpha = 1;
+  }
+}
+
+function drawPlayer() {
+  ctx.save();
+  ctx.translate(px, py);
+
+  // Engine glow
+  var glowSize = 4 + Math.sin(frame * 0.3) * 2;
+  ctx.fillStyle = 'rgba(68, 220, 255, 0.4)';
+  ctx.beginPath();
+  ctx.arc(0, 10, glowSize + 2, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = '#44ddff';
+  ctx.beginPath();
+  ctx.arc(0, 10, glowSize, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Engine trail particles
+  if (frame % 2 === 0) {
+    TAS.particles.spawn(px + TAS.math.randRange(-3, 3), py + 12, '#44ccff', 1, 1, { size: 1, sizeVar: 2, gravity: 0.1 });
+  }
+
+  // Ship body (spore-pod shape)
+  ctx.fillStyle = '#66dd88';
+  ctx.beginPath();
+  ctx.moveTo(0, -14);
+  ctx.lineTo(-10, 4);
+  ctx.lineTo(-8, 10);
+  ctx.lineTo(8, 10);
+  ctx.lineTo(10, 4);
+  ctx.closePath();
+  ctx.fill();
+
+  // Ship details
+  ctx.fillStyle = '#44aa66';
+  ctx.beginPath();
+  ctx.moveTo(0, -10);
+  ctx.lineTo(-6, 3);
+  ctx.lineTo(6, 3);
+  ctx.closePath();
+  ctx.fill();
+
+  // Wings
+  ctx.fillStyle = '#55cc77';
+  ctx.beginPath();
+  ctx.moveTo(-10, 4);
+  ctx.lineTo(-16, 8);
+  ctx.lineTo(-8, 10);
+  ctx.closePath();
+  ctx.fill();
+  ctx.beginPath();
+  ctx.moveTo(10, 4);
+  ctx.lineTo(16, 8);
+  ctx.lineTo(8, 10);
+  ctx.closePath();
+  ctx.fill();
+
+  // Cockpit (baseling eye)
+  ctx.fillStyle = '#111';
+  ctx.beginPath();
+  ctx.arc(0, -2, 4, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = '#fff';
+  ctx.beginPath();
+  ctx.arc(1, -3, 1.5, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Weapon indicator glow
+  ctx.fillStyle = WEAPON_COLORS[weaponType];
+  ctx.globalAlpha = 0.5 + Math.sin(frame * 0.1) * 0.2;
+  ctx.beginPath();
+  ctx.arc(0, -14, 3, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.globalAlpha = 1;
+
+  ctx.restore();
+}
+
+function drawMidBoss(e) {
+  // Body
+  ctx.fillStyle = e.color;
+  ctx.beginPath();
+  ctx.arc(0, 0, e.w / 2, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Inner rings
+  ctx.strokeStyle = '#ffcc00';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.arc(0, 0, e.w / 3, 0, Math.PI * 2);
+  ctx.stroke();
+
+  // Rotating spikes
+  for (var i = 0; i < 6; i++) {
+    var a = (i / 6) * Math.PI * 2 + e.age * 0.03;
+    ctx.fillStyle = '#ff8800';
+    ctx.beginPath();
+    ctx.moveTo(Math.cos(a) * (e.w / 2 - 4), Math.sin(a) * (e.w / 2 - 4));
+    ctx.lineTo(Math.cos(a) * (e.w / 2 + 6), Math.sin(a) * (e.w / 2 + 6));
+    ctx.lineTo(Math.cos(a + 0.2) * (e.w / 2 - 2), Math.sin(a + 0.2) * (e.w / 2 - 2));
+    ctx.fill();
+  }
+
+  // Core
+  ctx.fillStyle = '#ff4444';
+  ctx.beginPath();
+  ctx.arc(0, 0, 6 + Math.sin(e.age * 0.08) * 2, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Health bar
+  var hpPct = e.hp / e.maxHp;
+  ctx.fillStyle = '#333';
+  ctx.fillRect(-25, -e.h / 2 - 10, 50, 5);
+  ctx.fillStyle = hpPct > 0.5 ? '#44ff44' : hpPct > 0.25 ? '#ffdd44' : '#ff4444';
+  ctx.fillRect(-25, -e.h / 2 - 10, 50 * hpPct, 5);
+}
+
+function drawBoss() {
+  ctx.save();
+  ctx.translate(boss.x, boss.y);
+
+  // Main body
+  ctx.fillStyle = boss.color;
+  ctx.beginPath();
+  // Organic boss shape
+  ctx.moveTo(0, -boss.h / 2);
+  ctx.bezierCurveTo(boss.w / 2, -boss.h / 2, boss.w / 2, boss.h / 4, boss.w / 3, boss.h / 2);
+  ctx.lineTo(-boss.w / 3, boss.h / 2);
+  ctx.bezierCurveTo(-boss.w / 2, boss.h / 4, -boss.w / 2, -boss.h / 2, 0, -boss.h / 2);
+  ctx.fill();
+
+  // Dark inner
+  ctx.fillStyle = '#441100';
+  ctx.beginPath();
+  ctx.ellipse(0, 0, boss.w / 3, boss.h / 3, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Pulsing core
+  var coreSize = 8 + Math.sin(boss.age * 0.05) * 3;
+  ctx.fillStyle = '#ff0000';
+  ctx.beginPath();
+  ctx.arc(0, 0, coreSize, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = '#ffaa00';
+  ctx.beginPath();
+  ctx.arc(0, 0, coreSize * 0.5, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Draw parts (weak points)
+  for (var i = 0; i < boss.parts.length; i++) {
+    var part = boss.parts[i];
+    if (!part.alive) continue;
+    var px2 = part.offsetX;
+    var py2 = part.offsetY;
+    ctx.fillStyle = '#ffaa44';
+    ctx.beginPath();
+    ctx.arc(px2, py2, 7, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = '#ff4444';
+    ctx.beginPath();
+    ctx.arc(px2, py2, 4, 0, Math.PI * 2);
+    ctx.fill();
+    // Part health indicator
+    var partHpPct = part.hp / part.maxHp;
+    if (partHpPct < 1) {
+      ctx.fillStyle = '#333';
+      ctx.fillRect(px2 - 8, py2 - 12, 16, 3);
+      ctx.fillStyle = '#44ff44';
+      ctx.fillRect(px2 - 8, py2 - 12, 16 * partHpPct, 3);
+    }
+  }
+
+  // Armor plates / detail
+  ctx.strokeStyle = '#883300';
+  ctx.lineWidth = 2;
+  for (var i = 0; i < 4; i++) {
+    var a = (i / 4) * Math.PI * 2 + boss.age * 0.01;
+    var r = boss.w / 2 - 5;
+    ctx.beginPath();
+    ctx.arc(Math.cos(a) * r * 0.3, Math.sin(a) * r * 0.3, 8, a, a + 1);
+    ctx.stroke();
+  }
+
+  // Health bar
+  var hpPct = boss.hp / boss.maxHp;
+  ctx.fillStyle = '#222';
+  ctx.fillRect(-boss.w / 2, -boss.h / 2 - 14, boss.w, 7);
+  ctx.fillStyle = hpPct > 0.5 ? '#44ff44' : hpPct > 0.25 ? '#ffdd44' : '#ff4444';
+  ctx.fillRect(-boss.w / 2, -boss.h / 2 - 14, boss.w * hpPct, 7);
+  ctx.strokeStyle = '#666';
+  ctx.lineWidth = 1;
+  ctx.strokeRect(-boss.w / 2, -boss.h / 2 - 14, boss.w, 7);
+
+  ctx.restore();
+}
+
+function drawHUD() {
+  // Top bar
+  ctx.fillStyle = 'rgba(10,5,20,0.8)';
+  ctx.fillRect(0, 0, GW, 30);
+
+  ctx.font = 'bold 11px monospace';
+
+  // Score
+  ctx.fillStyle = '#ffdd44';
+  ctx.textAlign = 'left';
+  ctx.fillText(String(score).padStart(8, '0'), 4, 12);
+
+  // High score
+  ctx.fillStyle = '#888';
+  ctx.font = '9px monospace';
+  ctx.fillText('HI:' + String(highScore).padStart(8, '0'), 4, 24);
+
+  // Stage
+  ctx.fillStyle = '#88ccff';
+  ctx.font = 'bold 10px monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText('STG ' + (stage + 1), GW / 2, 12);
+
+  // Weapon indicator
+  ctx.fillStyle = WEAPON_COLORS[weaponType];
+  ctx.font = '9px monospace';
+  ctx.fillText(WEAPON_NAMES[weaponType] + ' Lv' + weaponLevel, GW / 2, 24);
+
+  // Lives
+  ctx.textAlign = 'right';
+  for (var i = 0; i < lives; i++) {
+    ctx.fillStyle = '#44dd88';
+    ctx.beginPath();
+    ctx.moveTo(GW - 8 - i * 16, 8);
+    ctx.lineTo(GW - 14 - i * 16, 14);
+    ctx.lineTo(GW - 2 - i * 16, 14);
+    ctx.closePath();
+    ctx.fill();
+  }
+
+  // Bombs
+  for (var i = 0; i < bombs; i++) {
+    ctx.fillStyle = '#ff4444';
+    ctx.beginPath();
+    ctx.arc(GW - 8 - i * 12, 24, 4, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  // Speed indicator
+  ctx.fillStyle = '#88ffff';
+  ctx.font = '8px monospace';
+  ctx.textAlign = 'left';
+  ctx.fillText('SPD:' + speedLevel, GW - 55, 24);
+}
+
+function drawTitleScreen() {
+  // Dark background with scrolling spores
+  var grd = ctx.createLinearGradient(0, 0, 0, GH);
+  grd.addColorStop(0, '#0a1a10');
+  grd.addColorStop(0.5, '#1a2a1a');
+  grd.addColorStop(1, '#0a0a1a');
+  ctx.fillStyle = grd;
+  ctx.fillRect(0, 0, GW, GH);
+
+  // Floating spores background
+  for (var i = 0; i < 30; i++) {
+    var sx = (i * 37 + frame * 0.3) % GW;
+    var sy = (i * 53 + frame * 0.5) % GH;
+    var s = 1 + (i % 3);
+    ctx.globalAlpha = 0.2 + (i % 5) * 0.05;
+    ctx.fillStyle = ['#44ff88', '#88ffaa', '#22aa55', '#66ffcc'][i % 4];
+    ctx.beginPath();
+    ctx.arc(sx, sy, s, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+
+  // Title
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#000';
+  ctx.font = 'bold 28px monospace';
+  ctx.fillText('SPORE STORM', GW / 2 + 2, 100 + 2);
+  ctx.fillStyle = '#44ff88';
+  ctx.fillText('SPORE STORM', GW / 2, 100);
+
+  // Subtitle
+  ctx.fillStyle = '#88ccaa';
+  ctx.font = '11px monospace';
+  ctx.fillText('A Tasern Tale', GW / 2, 125);
+
+  // Ship preview
+  ctx.save();
+  ctx.translate(GW / 2, 200);
+  ctx.scale(2, 2);
+  ctx.fillStyle = '#66dd88';
+  ctx.beginPath();
+  ctx.moveTo(0, -14);
+  ctx.lineTo(-10, 4);
+  ctx.lineTo(-8, 10);
+  ctx.lineTo(8, 10);
+  ctx.lineTo(10, 4);
+  ctx.closePath();
+  ctx.fill();
+  ctx.fillStyle = '#44aa66';
+  ctx.beginPath();
+  ctx.moveTo(0, -10);
+  ctx.lineTo(-6, 3);
+  ctx.lineTo(6, 3);
+  ctx.closePath();
+  ctx.fill();
+  ctx.fillStyle = '#111';
+  ctx.beginPath();
+  ctx.arc(0, -2, 4, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = '#fff';
+  ctx.beginPath();
+  ctx.arc(1, -3, 1.5, 0, Math.PI * 2);
+  ctx.fill();
+  // Engine glow
+  var g = 3 + Math.sin(frame * 0.15) * 1.5;
+  ctx.fillStyle = '#44ddff';
+  ctx.beginPath();
+  ctx.arc(0, 12, g, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+
+  // Controls info
+  ctx.fillStyle = '#aaa';
+  ctx.font = '10px monospace';
+  ctx.fillText('ARROWS/WASD = Move', GW / 2, 290);
+  ctx.fillText('Auto-fire | X/SHIFT = Bomb', GW / 2, 305);
+  ctx.fillText('Touch: Drag to move, Tap right = Bomb', GW / 2, 320);
+
+  // Weapon legend
+  ctx.font = '9px monospace';
+  var legendY = 350;
+  ctx.fillStyle = '#ff4444'; ctx.fillText('RED=Spread  BLUE=Laser  GREEN=Homing', GW / 2, legendY);
+  ctx.fillStyle = '#ffdd44'; ctx.fillText('YELLOW=Wave  PURPLE=Plasma', GW / 2, legendY + 14);
+
+  // High score
+  if (highScore > 0) {
+    ctx.fillStyle = '#ffdd44';
+    ctx.font = '10px monospace';
+    ctx.fillText('HIGH SCORE: ' + highScore, GW / 2, 400);
+  }
+
+  // Start prompt
+  var pulse = Math.sin(frame * 0.05) * 0.3 + 0.7;
+  ctx.globalAlpha = pulse;
+  ctx.fillStyle = '#ffdd44';
+  ctx.font = 'bold 14px monospace';
+  ctx.fillText('PRESS START', GW / 2, 440);
+  ctx.globalAlpha = 1;
+
+  ctx.fillStyle = '#555';
+  ctx.font = '8px monospace';
+  ctx.fillText('8 Stages | Gun Nac Style', GW / 2, 465);
+}
+
+// === START LOOP ===
+TAS.loop.start(update, draw);
+
+})();
+</script>
+</body>
+</html>

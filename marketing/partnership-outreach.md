@@ -5,28 +5,26 @@ Send via Farcaster DM or project Discord. Follow up after 3 days if no response.
 
 ---
 
-## 1. KlimaDAO / Toucan Protocol (Carbon/Climate)
+## 1. Carbon/Climate Impact DAOs
 
-**Why them:** CHAR already burns Toucan biochar certificates. A formal partnership validates our carbon claims and gives them a new distribution channel.
+**Why them:** CHAR removes carbon credits from markets permanently via LP trading fees. A partnership with climate-focused DAOs validates our impact and introduces us to the impact community.
 
-**Channel:** Farcaster DM to KlimaDAO team / Toucan Protocol team, or their Discord
+**Channel:** Farcaster DM or Discord
 
 **Message:**
 
-> We built a DeFi reactor network on Base that burns carbon credits automatically every 2 hours.
+> We built a DeFi reactor network on Base that removes carbon credits from markets automatically every 2 hours.
 >
-> CHAR token in our system retires Toucan Protocol biochar certificates on-chain. This happens programmatically — 27 reactors fire every cycle, and CHAR burns are built into every launch through MycoPad (6% of seed goes to CHAR reactor pools).
+> CHAR (1 CHAR = 1 lb CO2e biochar) is collected from LP trading fees across the reactor network. Collected CHAR is sent to a dedicated no-withdraw tracking address — permanently removed from circulation. We also burn charity fund tokens via LP fees, tracked at the same address.
 >
-> We'd like to formalize this. What that could look like:
-> - Co-branded carbon impact dashboard (live on-chain burn stats)
-> - Your verification badge on our CHAR burn tracking page
-> - Joint announcement: "First automated carbon retirement engine on Base"
-> - We add more Toucan certificate types to our burn pipeline
+> We have no overhead to offset. We just create demand for carbon credit removal because we can. 6% of every Unrugable token launch goes to CHAR reactor pools.
 >
-> We're building toward registered charity status. Transparent, auditable, on-chain. Your validation would accelerate that.
+> What collaboration could look like:
+> - Co-branded carbon impact dashboard (live on-chain removal stats)
+> - Joint visibility on Base ecosystem impact initiatives
+> - Cross-promotion with climate-focused communities
 >
-> All burns verifiable: tasern.quest/impact/
-> Burn address: 0xfd780B0aE569e15e514B819ecFDF46f804953a4B (no private key)
+> All removals verifiable on-chain. Transparent, auditable, permanent.
 >
 > Happy to jump on a call or share contract details.
 
@@ -34,13 +32,13 @@ Send via Farcaster DM or project Discord. Follow up after 3 days if no response.
 
 ## 2. Aerodrome Finance (Base-Native DEX)
 
-**Why them:** Aerodrome is the dominant DEX on Base. Getting Unruggable tokens listed in their gauge system means veAERO voters direct emissions to our pools = free liquidity incentives.
+**Why them:** Aerodrome is the dominant DEX on Base. Getting Unrugable tokens listed in their gauge system means veAERO voters direct emissions to our pools = free liquidity incentives.
 
 **Channel:** Aerodrome Discord or Farcaster
 
 **Message:**
 
-> We run the MfT reactor network — 27 reactors, 180+ V3 pools on Base, automated buy+burn every 2 hours.
+> We run the MfT reactor network — a network of reactors, hundreds of V3 pools on Base, automated buy+burn every 2 hours.
 >
 > Our tokens (MfT, BB, EB, CHAR, EARTH, POOP) have permanent locked liquidity but no Aerodrome presence yet. We'd like to explore:
 >
@@ -48,12 +46,12 @@ Send via Farcaster DM or project Discord. Follow up after 3 days if no response.
 > - Gauge listing for veAERO emission routing
 > - Cross-liquidity: our reactors generate arb volume that benefits any DEX with our pairs
 >
-> What we bring: 27 reactors create predictable buy pressure every 2 hours. This means consistent volume and fees for any pool connected to the network — including Aerodrome pools.
+> What we bring: our reactor network creates automated trading activity every 2 hours across hundreds of pools. This means volume and fees for any pool connected to the network — including Aerodrome pools.
 >
 > Our reactor model is unique: no admin key, no withdraw function, 5 reactors fully renounced. Liquidity is permanent by code, not by promise.
 >
 > MfT: 0x8FB87d13B40B1A67B22ED1a17e2835fe7e3a9bA3
-> Network stats: tasern.quest/api/unruggable/tokenomics
+> Network stats: tasern.quest/api/unrugable/tokenomics
 >
 > Would love to discuss how the reactor model could complement Aerodrome's liquidity infrastructure.
 
@@ -61,29 +59,29 @@ Send via Farcaster DM or project Discord. Follow up after 3 days if no response.
 
 ## 3. Based Nouns / Tiny Based Frogs (NFT Project on Base)
 
-**Why them:** NFT communities = retail users. PowerVault families can integrate their NFTs. Their community gets reactor buy pressure for free.
+**Why them:** NFT communities = retail users. PowerVault families can integrate their NFTs. Their community gets trading routes across the network for free.
 
 **Channel:** Farcaster DM or project Discord
 
 **Message:**
 
-> We built something that could give your community token free, automated buy pressure — permanently.
+> We built open tools on Base that give your community token permanent liquidity and trading routes — for free.
 >
-> The Unruggable reactor network fires 27 reactors every 2 hours on Base. When a token is added as a reactor pair, it receives automated buy pressure from collected trading fees. No cost, no rev-share, no token allocation.
+> The Unrugable reactor network fires every 2 hours across hundreds of pools. When a token is added as a reactor pair, it gets connected to all those trading routes. No cost, no rev-share, no token allocation.
 >
 > How it works for you:
 > 1. Create a V3 LP position pairing your token with MfT
 > 2. Send the LP to a reactor contract (permanently locked, no withdraw function)
-> 3. Reactor fires every 2 hours — collects fees, buys your token, burns the other side
+> 3. Reactor fires every 2 hours — collects fees, cycles them through connected pools
 > 4. Done. No maintenance. Runs until the chain stops.
 >
 > What your community gets:
-> - Green candles every 2 hours from automated buy pressure
-> - Permanent floor support (liquidity can never be removed)
-> - Cross-ecosystem exposure (your token appears across 180+ connected pools)
+> - Trading routes across hundreds of connected pools
+> - Permanent locked liquidity (can never be removed)
 > - Arb bot volume from price dislocations between pools
+> - Mandatory charity fund wall — every launch funds impact automatically
 >
-> Zero cost. The reactor network benefits from more pairs because more pairs = more fee surfaces = more fuel for everyone.
+> Zero cost. The reactor network benefits from more pairs because more pairs = more fee surfaces = more trading routes for everyone.
 >
 > Full details: tasern.quest/launcher/reactor-map.html
 >
@@ -99,14 +97,14 @@ Send via Farcaster DM or project Discord. Follow up after 3 days if no response.
 
 **Message:**
 
-> We built 40 MCP tools for AI agents to interact with real DeFi on Base.
+> We built 49 MCP tools for AI agents to interact with real DeFi on Base.
 >
 > baselings-mcp gives any agent framework:
-> - Token launching (MycoPad — locked LP, reactor integration)
+> - Token launching (Unrugable — locked LP, reactor integration)
 > - Reactor execution (permissionless buy+burn every 2hrs)
 > - Cross-pool arbitrage (predictable 2hr price dislocation windows)
 > - Pet game economy (Baselings — LP farming disguised as gameplay)
-> - Full read access to 27 reactors, 180+ pools, burn stats
+> - Full read access to the reactor network, hundreds of pools, burn stats
 >
 > Standards-compliant: llms.txt, OpenAPI spec, ai-plugin.json.
 > npm install: `npx baselings-mcp`
@@ -144,8 +142,8 @@ Send via Farcaster DM or project Discord. Follow up after 3 days if no response.
 > - Co-marketed events (seasonal tournaments, limited edition cross-game items)
 >
 > Our infrastructure:
-> - 27 reactors firing every 2 hours (automated economy engine)
-> - 40 MCP tools for AI agent gameplay
+> - Reactor network firing every 2 hours (automated economy engine)
+> - 49 MCP tools for AI agent gameplay
 > - Full agent SDK for autonomous play
 > - POOP token economy with real yield (garden LP positions)
 >
@@ -171,7 +169,7 @@ Send via Farcaster DM or project Discord. Follow up after 3 days if no response.
 
 | Target | Sent | Channel | Response | Status |
 |--------|------|---------|----------|--------|
-| KlimaDAO/Toucan | | | | Pending |
+| Carbon/Climate DAOs | | | | Pending |
 | Aerodrome | | | | Pending |
 | Based Nouns/TBF | | | | Pending |
 | ElizaOS/ai16z | | | | Pending |

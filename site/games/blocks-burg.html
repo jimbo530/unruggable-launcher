@@ -1,0 +1,1534 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Blocks Burg</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body { width: 100%; height: 100%; overflow: hidden; background: #0a0a14; touch-action: none; }
+canvas { display: block; margin: 0 auto; }
+#back-link {
+  position: fixed; bottom: 8px; left: 50%; transform: translateX(-50%);
+  color: #666; font-family: monospace; font-size: 12px; text-decoration: none; z-index: 10;
+}
+#back-link:hover { color: #aaa; }
+</style>
+</head>
+<body>
+<canvas id="gc"></canvas>
+<a id="back-link" href="/games">Back to Arcade</a>
+<script src="nft-loader.js"></script>
+<script>if(window.NftLoader)NftLoader.gate();</script>
+<script>
+(function() {
+"use strict";
+
+// ============================================================
+// BLOCKS BURG - A Candy Land board game with dark fantasy theme
+// 2-4 players (human + AI), race to the castle
+// ============================================================
+
+// ============================================================
+// CONSTANTS
+// ============================================================
+var COLORS = ["#c0392b","#d35400","#d4a017","#27ae60","#2980b9","#8e44ad"];
+var COLOR_NAMES = ["Red","Orange","Yellow","Green","Blue","Purple"];
+var PLAYER_COLORS = ["#ff6b6b","#ffd93d","#6bcb77","#4d96ff"];
+var PLAYER_NAMES = ["Knight","Wizard","Ranger","Thief"];
+var PLAYER_ICONS = ["K","W","R","T"];
+var PATH_LENGTH = 64;
+var MOVE_SPEED = 8;
+var CARD_FLIP_FRAMES = 30;
+var CARD_SHOW_DELAY = 25;
+var SPECIAL_DELAY = 40;
+var DARK_BG = "#0a0a14";
+var PANEL_BG = "#12121f";
+var PANEL_BORDER = "#2a2a4e";
+
+// Special location indices
+var LOC_SWAMP = [15, 38];
+var LOC_TAR_PIT = [27, 52];
+var LOC_BRIDGE_START = [9, 33, 48];
+var LOC_BRIDGE_END = [17, 41, 55];
+var LOC_NAMED = {
+  10: {name:"Dark Forest", bg:"#1a3a1a"},
+  25: {name:"Stone Bridge", bg:"#5a4a2a"},
+  40: {name:"Dragon Peak", bg:"#4a2a3a"},
+  55: {name:"Iron Gate", bg:"#3a3a4a"}
+};
+
+// Character card locations (jump-to targets)
+var CHARACTER_CARDS = [
+  {name:"The Wizard", icon:"W", target:10, desc:"Teleport to Dark Forest!"},
+  {name:"The Knight", icon:"K", target:25, desc:"Ride to Stone Bridge!"},
+  {name:"The Dragon", icon:"D", target:40, desc:"Fly to Dragon Peak!"},
+  {name:"The King", icon:"G", target:55, desc:"March to Iron Gate!"}
+];
+
+// ============================================================
+// CANVAS
+// ============================================================
+var canvas = document.getElementById("gc");
+var ctx = canvas.getContext("2d");
+var canvasW = 0, canvasH = 0;
+var dpr = 1;
+
+function resize() {
+  dpr = window.devicePixelRatio || 1;
+  var w = window.innerWidth;
+  var h = window.innerHeight;
+  canvas.style.width = w + "px";
+  canvas.style.height = h + "px";
+  canvas.width = w * dpr;
+  canvas.height = h * dpr;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  canvasW = w;
+  canvasH = h;
+  if (pathSquares.length > 0) buildPath();
+}
+
+// ============================================================
+// AUDIO
+// ============================================================
+var audioCtx = null;
+function initAudio() {
+  if (!audioCtx) {
+    try { audioCtx = new (window.AudioContext || window.webkitAudioContext)(); }
+    catch(e) { console.warn("Web Audio not available:", e); }
+  }
+}
+
+function playTone(freq, dur, type, vol) {
+  if (!audioCtx) return;
+  try {
+    var osc = audioCtx.createOscillator();
+    var gain = audioCtx.createGain();
+    osc.type = type || "square";
+    osc.frequency.value = freq;
+    gain.gain.setValueAtTime(vol || 0.1, audioCtx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + dur);
+    osc.connect(gain);
+    gain.connect(audioCtx.destination);
+    osc.start();
+    osc.stop(audioCtx.currentTime + dur);
+  } catch(e) { console.warn("Audio error:", e); }
+}
+
+function sfxCardDraw() {
+  playTone(600, 0.08, "square", 0.08);
+  setTimeout(function(){ playTone(900, 0.1, "square", 0.1); }, 80);
+}
+function sfxMoveStep() { playTone(330 + Math.random() * 200, 0.04, "triangle", 0.05); }
+function sfxShortcut() {
+  playTone(500, 0.12, "sine", 0.07);
+  setTimeout(function(){ playTone(700, 0.12, "sine", 0.07); }, 100);
+  setTimeout(function(){ playTone(900, 0.15, "sine", 0.08); }, 200);
+}
+function sfxTrap() {
+  playTone(300, 0.2, "sawtooth", 0.08);
+  setTimeout(function(){ playTone(200, 0.25, "sawtooth", 0.08); }, 150);
+}
+function sfxStuck() { playTone(150, 0.4, "triangle", 0.07); }
+function sfxWin() {
+  var notes = [523, 659, 784, 1047];
+  for (var i = 0; i < notes.length; i++) {
+    (function(n, delay){ setTimeout(function(){ playTone(n, 0.3, "square", 0.08); }, delay); })(notes[i], i * 150);
+  }
+}
+function sfxClick() { playTone(800, 0.05, "square", 0.05); }
+function sfxCharacter() {
+  playTone(400, 0.15, "sine", 0.1);
+  setTimeout(function(){ playTone(600, 0.15, "sine", 0.1); }, 120);
+  setTimeout(function(){ playTone(800, 0.2, "sine", 0.12); }, 240);
+}
+
+// ============================================================
+// SETTINGS (localStorage)
+// ============================================================
+var settings = { numPlayers: 2, sfxOn: true };
+
+function loadSettings() {
+  try {
+    var s = localStorage.getItem("blocksburg_settings");
+    if (s) {
+      var parsed = JSON.parse(s);
+      if (parsed.numPlayers >= 2 && parsed.numPlayers <= 4) settings.numPlayers = parsed.numPlayers;
+      if (typeof parsed.sfxOn === "boolean") settings.sfxOn = parsed.sfxOn;
+    }
+  } catch(e) { console.warn("Settings load error:", e); }
+}
+
+function saveSettings() {
+  try { localStorage.setItem("blocksburg_settings", JSON.stringify(settings)); }
+  catch(e) { console.warn("Settings save error:", e); }
+}
+
+loadSettings();
+
+// ============================================================
+// PATH BUILDING
+// ============================================================
+var pathSquares = [];
+
+function buildPath() {
+  pathSquares = [];
+  var sqSize = Math.max(16, Math.floor(Math.min(canvasW, canvasH) * 0.038));
+  var margin = Math.floor(canvasW * 0.06);
+  var topMargin = Math.floor(canvasH * 0.1);
+  var boardW = canvasW - margin * 2;
+  var squaresPerRow = 10;
+  var totalRows = Math.ceil((PATH_LENGTH + 1) / squaresPerRow);
+  var availH = canvasH - topMargin - Math.floor(canvasH * 0.12);
+  var rowSpacing = Math.floor(availH / totalRows);
+
+  var colorIdx = 0;
+  var idx = 0;
+  var startY = canvasH - Math.floor(canvasH * 0.1);
+
+  for (var row = 0; row < totalRows && idx <= PATH_LENGTH; row++) {
+    var goingRight = (row % 2 === 0);
+    var y = startY - row * rowSpacing;
+    var countThisRow = Math.min(squaresPerRow, PATH_LENGTH + 1 - idx);
+
+    for (var col = 0; col < countThisRow; col++) {
+      var actualCol = goingRight ? col : (squaresPerRow - 1 - col);
+      var x = margin + actualCol * (boardW / (squaresPerRow - 1)) - sqSize / 2;
+
+      var special = null;
+      // Check sticky (swamp)
+      for (var si = 0; si < LOC_SWAMP.length; si++) {
+        if (idx === LOC_SWAMP[si]) special = {type:"sticky", target:null, label:"Swamp"};
+      }
+      // Check sticky (tar pit)
+      for (var ti = 0; ti < LOC_TAR_PIT.length; ti++) {
+        if (idx === LOC_TAR_PIT[ti]) special = {type:"sticky", target:null, label:"Tar Pit"};
+      }
+      // Check bridge starts
+      for (var bi = 0; bi < LOC_BRIDGE_START.length; bi++) {
+        if (idx === LOC_BRIDGE_START[bi]) special = {type:"shortcut", target:LOC_BRIDGE_END[bi], label:"Bridge"};
+      }
+
+      var locInfo = LOC_NAMED[idx] || null;
+
+      pathSquares.push({
+        x: x,
+        y: y - sqSize,
+        size: sqSize,
+        color: COLORS[colorIdx % 6],
+        colorIdx: colorIdx % 6,
+        idx: idx,
+        special: special,
+        locName: locInfo ? locInfo.name : null,
+        locBg: locInfo ? locInfo.bg : null
+      });
+      colorIdx++;
+      idx++;
+    }
+  }
+
+  pathSquares = pathSquares.slice(0, PATH_LENGTH + 1);
+}
+
+// ============================================================
+// CARD DECK
+// ============================================================
+var deck = [];
+
+function buildDeck() {
+  deck = [];
+  // 8 singles + 2 doubles per color = 60 color cards
+  for (var c = 0; c < 6; c++) {
+    for (var i = 0; i < 8; i++) deck.push({type:"color", colorIdx:c, double:false});
+    for (var j = 0; j < 2; j++) deck.push({type:"color", colorIdx:c, double:true});
+  }
+  // 4 character cards (2 copies each = 8)
+  for (var k = 0; k < CHARACTER_CARDS.length; k++) {
+    deck.push({type:"character", charIdx:k});
+    deck.push({type:"character", charIdx:k});
+  }
+  shuffle(deck);
+}
+
+function shuffle(arr) {
+  for (var i = arr.length - 1; i > 0; i--) {
+    var j = Math.floor(Math.random() * (i + 1));
+    var tmp = arr[i]; arr[i] = arr[j]; arr[j] = tmp;
+  }
+}
+
+function drawCard() {
+  if (deck.length === 0) buildDeck();
+  return deck.pop();
+}
+
+// ============================================================
+// FIND NEXT MATCHING COLOR
+// ============================================================
+function findNextOfColor(fromPos, colorIdx, isDouble) {
+  var found = 0;
+  var needed = isDouble ? 2 : 1;
+  for (var i = fromPos + 1; i < pathSquares.length; i++) {
+    if (pathSquares[i].colorIdx === colorIdx) {
+      found++;
+      if (found >= needed) return i;
+    }
+  }
+  return pathSquares.length - 1;
+}
+
+// ============================================================
+// GAME STATE
+// ============================================================
+var STATE = {
+  screen: "title",     // title, setup, playing, cardDraw, moving, specialEvent, winner
+  numPlayers: 2,
+  players: [],
+  currentPlayer: 0,
+  drawnCard: null,
+  cardFlipProgress: 0,
+  cardShowTimer: 0,
+  moveQueue: [],
+  moveStepTimer: 0,
+  moveStepIdx: 0,
+  movingPlayerIdx: -1,
+  specialMessage: "",
+  specialTimer: 0,
+  winnerIdx: -1,
+  confetti: [],
+  titlePulse: 0,
+  aiDelay: 0
+};
+
+// ============================================================
+// INPUT
+// ============================================================
+var mouseX = 0, mouseY = 0, mouseClicked = false;
+
+canvas.addEventListener("mousedown", function(e) {
+  e.preventDefault();
+  var r = canvas.getBoundingClientRect();
+  mouseX = e.clientX - r.left;
+  mouseY = e.clientY - r.top;
+  mouseClicked = true;
+  initAudio();
+});
+
+canvas.addEventListener("mousemove", function(e) {
+  var r = canvas.getBoundingClientRect();
+  mouseX = e.clientX - r.left;
+  mouseY = e.clientY - r.top;
+});
+
+canvas.addEventListener("touchstart", function(e) {
+  e.preventDefault();
+  var r = canvas.getBoundingClientRect();
+  var touch = e.touches[0];
+  mouseX = touch.clientX - r.left;
+  mouseY = touch.clientY - r.top;
+  mouseClicked = true;
+  initAudio();
+}, {passive: false});
+
+canvas.addEventListener("touchmove", function(e) {
+  e.preventDefault();
+  var r = canvas.getBoundingClientRect();
+  mouseX = e.touches[0].clientX - r.left;
+  mouseY = e.touches[0].clientY - r.top;
+}, {passive: false});
+
+canvas.addEventListener("touchend", function(e) { e.preventDefault(); }, {passive: false});
+
+// ============================================================
+// DRAWING HELPERS
+// ============================================================
+function roundRect(x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.lineTo(x + w - r, y);
+  ctx.arcTo(x + w, y, x + w, y + r, r);
+  ctx.lineTo(x + w, y + h - r);
+  ctx.arcTo(x + w, y + h, x + w - r, y + h, r);
+  ctx.lineTo(x + r, y + h);
+  ctx.arcTo(x, y + h, x, y + h - r, r);
+  ctx.lineTo(x, y + r);
+  ctx.arcTo(x, y, x + r, y, r);
+  ctx.closePath();
+}
+
+function fillRoundRect(x, y, w, h, r, fillColor, strokeColor) {
+  roundRect(x, y, w, h, r);
+  if (fillColor) { ctx.fillStyle = fillColor; ctx.fill(); }
+  if (strokeColor) { ctx.strokeStyle = strokeColor; ctx.lineWidth = 2; ctx.stroke(); }
+}
+
+function hitTest(px, py, rx, ry, rw, rh) {
+  return px >= rx && px <= rx + rw && py >= ry && py <= ry + rh;
+}
+
+function drawBtn(text, x, y, w, h, hover) {
+  var fill = hover ? "#3a3a6e" : "#2a2a4e";
+  var border = hover ? "#8a8aee" : "#4a4a7e";
+  fillRoundRect(x, y, w, h, 8, fill, border);
+  ctx.fillStyle = hover ? "#fff" : "#ccc";
+  ctx.font = "bold " + Math.max(12, Math.floor(Math.min(canvasW, canvasH) * 0.022)) + "px monospace";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillText(text, x + w / 2, y + h / 2);
+}
+
+function shadeColor(color, amount) {
+  var num = parseInt(color.replace("#", ""), 16);
+  var r = Math.min(255, Math.max(0, (num >> 16) + amount));
+  var g = Math.min(255, Math.max(0, ((num >> 8) & 0xFF) + amount));
+  var b = Math.min(255, Math.max(0, (num & 0xFF) + amount));
+  return "#" + (0x1000000 + r * 0x10000 + g * 0x100 + b).toString(16).slice(1);
+}
+
+function scaledFont(sizeFraction, bold) {
+  var px = Math.max(10, Math.floor(Math.min(canvasW, canvasH) * sizeFraction));
+  return (bold ? "bold " : "") + px + "px monospace";
+}
+
+// ============================================================
+// SCENERY DRAWING
+// ============================================================
+function drawCastle(cx, cy, size) {
+  var s = size;
+  ctx.save();
+
+  // Main wall
+  ctx.fillStyle = "#6B5B45";
+  ctx.fillRect(cx - s * 0.35, cy - s * 0.15, s * 0.7, s * 0.4);
+
+  // Stone texture lines
+  ctx.strokeStyle = "#5a4a35";
+  ctx.lineWidth = 1;
+  for (var row = 0; row < 4; row++) {
+    var ly = cy - s * 0.12 + row * s * 0.09;
+    ctx.beginPath(); ctx.moveTo(cx - s * 0.33, ly); ctx.lineTo(cx + s * 0.33, ly); ctx.stroke();
+  }
+
+  // Towers
+  ctx.fillStyle = "#5B4B35";
+  ctx.fillRect(cx - s * 0.42, cy - s * 0.4, s * 0.16, s * 0.65);
+  ctx.fillRect(cx + s * 0.26, cy - s * 0.4, s * 0.16, s * 0.65);
+
+  // Tower tops (crenellations)
+  ctx.fillStyle = "#5B4B35";
+  for (var t = 0; t < 2; t++) {
+    var tx = t === 0 ? cx - s * 0.42 : cx + s * 0.26;
+    for (var m = 0; m < 3; m++) {
+      ctx.fillRect(tx + m * s * 0.05 + s * 0.01, cy - s * 0.46, s * 0.04, s * 0.08);
+    }
+  }
+
+  // Tower roofs
+  ctx.fillStyle = "#8B2500";
+  ctx.beginPath();
+  ctx.moveTo(cx - s * 0.34, cy - s * 0.58);
+  ctx.lineTo(cx - s * 0.45, cy - s * 0.4);
+  ctx.lineTo(cx - s * 0.23, cy - s * 0.4);
+  ctx.closePath();
+  ctx.fill();
+  ctx.beginPath();
+  ctx.moveTo(cx + s * 0.34, cy - s * 0.58);
+  ctx.lineTo(cx + s * 0.23, cy - s * 0.4);
+  ctx.lineTo(cx + s * 0.45, cy - s * 0.4);
+  ctx.closePath();
+  ctx.fill();
+
+  // Center battlements
+  ctx.fillStyle = "#6B5B45";
+  for (var b = -2; b <= 2; b++) {
+    ctx.fillRect(cx + b * s * 0.09 - s * 0.025, cy - s * 0.2, s * 0.05, s * 0.07);
+  }
+
+  // Gate arch
+  ctx.fillStyle = "#1a0e06";
+  ctx.beginPath();
+  ctx.moveTo(cx - s * 0.1, cy + s * 0.25);
+  ctx.lineTo(cx - s * 0.1, cy + s * 0.03);
+  ctx.quadraticCurveTo(cx, cy - s * 0.06, cx + s * 0.1, cy + s * 0.03);
+  ctx.lineTo(cx + s * 0.1, cy + s * 0.25);
+  ctx.closePath();
+  ctx.fill();
+
+  // Gate grill
+  ctx.strokeStyle = "#3a2a0a";
+  ctx.lineWidth = 1;
+  for (var gi = -1; gi <= 1; gi++) {
+    ctx.beginPath();
+    ctx.moveTo(cx + gi * s * 0.04, cy + s * 0.25);
+    ctx.lineTo(cx + gi * s * 0.04, cy + s * 0.05);
+    ctx.stroke();
+  }
+
+  // Windows (warm glow)
+  ctx.fillStyle = "#ffd700";
+  ctx.shadowColor = "#ffd700";
+  ctx.shadowBlur = 4;
+  ctx.fillRect(cx - s * 0.22, cy - s * 0.05, s * 0.05, s * 0.06);
+  ctx.fillRect(cx + s * 0.17, cy - s * 0.05, s * 0.05, s * 0.06);
+  ctx.fillRect(cx - s * 0.38, cy - s * 0.25, s * 0.04, s * 0.05);
+  ctx.fillRect(cx + s * 0.34, cy - s * 0.25, s * 0.04, s * 0.05);
+  ctx.shadowBlur = 0;
+
+  // Flag
+  ctx.strokeStyle = "#555";
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(cx, cy - s * 0.2);
+  ctx.lineTo(cx, cy - s * 0.45);
+  ctx.stroke();
+  var flagWave = Math.sin(Date.now() / 300) * s * 0.02;
+  ctx.fillStyle = "#c0392b";
+  ctx.beginPath();
+  ctx.moveTo(cx + 1, cy - s * 0.45);
+  ctx.lineTo(cx + s * 0.12 + flagWave, cy - s * 0.39);
+  ctx.lineTo(cx + 1, cy - s * 0.33);
+  ctx.fill();
+
+  ctx.restore();
+}
+
+function drawTree(x, y, size) {
+  ctx.save();
+  ctx.fillStyle = "#3a2a1a";
+  ctx.fillRect(x - size * 0.06, y, size * 0.12, size * 0.2);
+  ctx.fillStyle = "#1a5a2a";
+  ctx.beginPath();
+  ctx.moveTo(x, y - size * 0.35);
+  ctx.lineTo(x + size * 0.2, y + size * 0.05);
+  ctx.lineTo(x - size * 0.2, y + size * 0.05);
+  ctx.closePath();
+  ctx.fill();
+  ctx.fillStyle = "#1a6a2a";
+  ctx.beginPath();
+  ctx.moveTo(x, y - size * 0.5);
+  ctx.lineTo(x + size * 0.16, y - size * 0.15);
+  ctx.lineTo(x - size * 0.16, y - size * 0.15);
+  ctx.closePath();
+  ctx.fill();
+  ctx.restore();
+}
+
+function drawMountain(x, y, size) {
+  ctx.save();
+  ctx.fillStyle = "#4a4a5a";
+  ctx.beginPath();
+  ctx.moveTo(x, y - size * 0.5);
+  ctx.lineTo(x + size * 0.35, y + size * 0.15);
+  ctx.lineTo(x - size * 0.35, y + size * 0.15);
+  ctx.closePath();
+  ctx.fill();
+  // Snow cap
+  ctx.fillStyle = "#ccd";
+  ctx.beginPath();
+  ctx.moveTo(x, y - size * 0.5);
+  ctx.lineTo(x + size * 0.1, y - size * 0.33);
+  ctx.lineTo(x - size * 0.1, y - size * 0.33);
+  ctx.closePath();
+  ctx.fill();
+  ctx.restore();
+}
+
+// ============================================================
+// PLAYER TOKEN DRAWING
+// ============================================================
+function drawPlayerToken(cx, cy, size, colorHex, iconLetter, highlight) {
+  ctx.save();
+
+  // Shadow
+  ctx.fillStyle = "rgba(0,0,0,0.35)";
+  ctx.beginPath();
+  ctx.ellipse(cx, cy + size * 0.45, size * 0.35, size * 0.1, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Shield body
+  ctx.beginPath();
+  ctx.moveTo(cx, cy - size * 0.45);
+  ctx.quadraticCurveTo(cx + size * 0.45, cy - size * 0.35, cx + size * 0.4, cy + size * 0.05);
+  ctx.quadraticCurveTo(cx + size * 0.2, cy + size * 0.4, cx, cy + size * 0.48);
+  ctx.quadraticCurveTo(cx - size * 0.2, cy + size * 0.4, cx - size * 0.4, cy + size * 0.05);
+  ctx.quadraticCurveTo(cx - size * 0.45, cy - size * 0.35, cx, cy - size * 0.45);
+  ctx.closePath();
+  ctx.fillStyle = colorHex;
+  ctx.fill();
+  ctx.strokeStyle = shadeColor(colorHex, -40);
+  ctx.lineWidth = Math.max(1, size * 0.06);
+  ctx.stroke();
+
+  // Highlight
+  ctx.beginPath();
+  ctx.moveTo(cx, cy - size * 0.38);
+  ctx.quadraticCurveTo(cx + size * 0.3, cy - size * 0.28, cx + size * 0.25, cy - size * 0.05);
+  ctx.lineTo(cx, cy - size * 0.15);
+  ctx.quadraticCurveTo(cx - size * 0.15, cy - size * 0.28, cx, cy - size * 0.38);
+  ctx.closePath();
+  ctx.fillStyle = "rgba(255,255,255,0.2)";
+  ctx.fill();
+
+  // Letter
+  ctx.fillStyle = "#fff";
+  ctx.font = "bold " + Math.max(8, Math.floor(size * 0.45)) + "px monospace";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillText(iconLetter, cx, cy + size * 0.02);
+
+  // Active glow
+  if (highlight) {
+    ctx.beginPath();
+    ctx.arc(cx, cy, size * 0.55, 0, Math.PI * 2);
+    ctx.strokeStyle = "#ffd700";
+    ctx.lineWidth = 2;
+    ctx.stroke();
+  }
+
+  ctx.restore();
+}
+
+// ============================================================
+// CONFETTI
+// ============================================================
+function spawnConfetti() {
+  STATE.confetti = [];
+  for (var i = 0; i < 120; i++) {
+    STATE.confetti.push({
+      x: Math.random() * canvasW,
+      y: Math.random() * -canvasH,
+      vx: (Math.random() - 0.5) * 4,
+      vy: Math.random() * 3 + 2,
+      color: COLORS[Math.floor(Math.random() * 6)],
+      size: Math.random() * 5 + 3,
+      rot: Math.random() * Math.PI * 2,
+      rotV: (Math.random() - 0.5) * 0.2
+    });
+  }
+}
+
+function updateConfetti() {
+  for (var i = 0; i < STATE.confetti.length; i++) {
+    var c = STATE.confetti[i];
+    c.x += c.vx;
+    c.y += c.vy;
+    c.rot += c.rotV;
+    c.vy += 0.02;
+    if (c.y > canvasH + 20) {
+      c.y = -20;
+      c.x = Math.random() * canvasW;
+      c.vy = Math.random() * 3 + 2;
+    }
+  }
+}
+
+function drawConfetti() {
+  for (var i = 0; i < STATE.confetti.length; i++) {
+    var c = STATE.confetti[i];
+    ctx.save();
+    ctx.translate(c.x, c.y);
+    ctx.rotate(c.rot);
+    ctx.fillStyle = c.color;
+    ctx.fillRect(-c.size / 2, -c.size / 4, c.size, c.size / 2);
+    ctx.restore();
+  }
+}
+
+// ============================================================
+// GAME INIT
+// ============================================================
+function newGame(numPlayers) {
+  STATE.numPlayers = numPlayers;
+  STATE.players = [];
+  for (var i = 0; i < numPlayers; i++) {
+    STATE.players.push({
+      name: PLAYER_NAMES[i],
+      color: PLAYER_COLORS[i],
+      icon: PLAYER_ICONS[i],
+      position: 0,
+      skipTurn: false,
+      isAI: i > 0,
+      animX: 0,
+      animY: 0
+    });
+  }
+  STATE.currentPlayer = 0;
+  STATE.drawnCard = null;
+  STATE.winnerIdx = -1;
+  STATE.confetti = [];
+  STATE.aiDelay = 0;
+  buildDeck();
+  buildPath();
+  // Position all tokens at start
+  if (pathSquares.length > 0) {
+    var sq = pathSquares[0];
+    for (var j = 0; j < STATE.players.length; j++) {
+      STATE.players[j].animX = sq.x + sq.size / 2;
+      STATE.players[j].animY = sq.y + sq.size / 2;
+    }
+  }
+  STATE.screen = "playing";
+}
+
+// ============================================================
+// TITLE SCREEN
+// ============================================================
+function drawTitleScreen() {
+  STATE.titlePulse += 0.03;
+  var w = canvasW;
+  var h = canvasH;
+
+  // Dim animated background blocks
+  ctx.globalAlpha = 0.08;
+  for (var i = 0; i < 50; i++) {
+    var bx = ((i * 137 + 50) % w);
+    var by = ((i * 89 + 30 + Math.sin(STATE.titlePulse + i) * 3) % h);
+    var bs = 6 + (i % 5) * 4;
+    ctx.fillStyle = COLORS[i % 6];
+    ctx.fillRect(bx, by, bs, bs);
+  }
+  ctx.globalAlpha = 1;
+
+  // Castle
+  drawCastle(w / 2, h * 0.38, Math.min(w, h) * 0.18);
+
+  // Title
+  var pulse = Math.sin(STATE.titlePulse) * 3;
+  var titleSize = Math.max(20, Math.floor(Math.min(w, h) * 0.065));
+  ctx.font = "bold " + titleSize + "px monospace";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+
+  // Shadow
+  ctx.fillStyle = "#000";
+  ctx.fillText("BLOCKS BURG", w / 2 + 2, h * 0.14 + 2 + pulse);
+
+  // Rainbow letters
+  var title = "BLOCKS BURG";
+  var measured = ctx.measureText(title).width;
+  var startX = w / 2 - measured / 2;
+  for (var ci = 0; ci < title.length; ci++) {
+    var ch = title[ci];
+    var chW = ctx.measureText(ch).width;
+    if (ch !== " ") {
+      ctx.fillStyle = COLORS[ci % 6];
+      ctx.textAlign = "left";
+      ctx.fillText(ch, startX, h * 0.14 + pulse);
+    }
+    startX += chW;
+  }
+  ctx.textAlign = "center";
+
+  // Subtitle
+  ctx.font = scaledFont(0.018);
+  ctx.fillStyle = "#777";
+  ctx.fillText("Race to the Castle!", w / 2, h * 0.21);
+
+  // Decorative tokens
+  var tokenSize = Math.min(w, h) * 0.04;
+  drawPlayerToken(w * 0.15, h * 0.5, tokenSize, PLAYER_COLORS[0], "K", false);
+  drawPlayerToken(w * 0.35, h * 0.54, tokenSize * 0.85, PLAYER_COLORS[1], "W", false);
+  drawPlayerToken(w * 0.65, h * 0.54, tokenSize * 0.85, PLAYER_COLORS[2], "R", false);
+  drawPlayerToken(w * 0.85, h * 0.5, tokenSize, PLAYER_COLORS[3], "T", false);
+
+  // Trees flanking
+  var treeSize = Math.min(w, h) * 0.06;
+  drawTree(w * 0.08, h * 0.42, treeSize);
+  drawTree(w * 0.92, h * 0.4, treeSize * 0.8);
+  drawTree(w * 0.05, h * 0.36, treeSize * 0.6);
+  drawTree(w * 0.95, h * 0.35, treeSize * 0.65);
+
+  // Player count buttons
+  var btnW = Math.min(w * 0.22, 160);
+  var btnH = Math.max(36, h * 0.065);
+  var gap = Math.max(10, w * 0.02);
+  var totalBtnW = btnW * 3 + gap * 2;
+  var bStartX = w / 2 - totalBtnW / 2;
+  var btnY = h * 0.66;
+
+  ctx.font = scaledFont(0.016);
+  ctx.fillStyle = "#999";
+  ctx.fillText("Choose players (You + AI opponents)", w / 2, btnY - btnH * 0.6);
+
+  for (var n = 0; n < 3; n++) {
+    var count = n + 2;
+    var bx = bStartX + n * (btnW + gap);
+    var hover = hitTest(mouseX, mouseY, bx, btnY, btnW, btnH);
+    var label = count + " Players";
+    drawBtn(label, bx, btnY, btnW, btnH, hover);
+
+    if (mouseClicked && hover) {
+      settings.numPlayers = count;
+      saveSettings();
+      sfxClick();
+      newGame(count);
+    }
+  }
+
+  // Footer
+  ctx.font = scaledFont(0.014);
+  ctx.fillStyle = "#444";
+  ctx.fillText("Draw cards. Race through the kingdom. First to the castle wins!", w / 2, h * 0.82);
+  ctx.fillText("Player 1 = You, others are AI", w / 2, h * 0.87);
+}
+
+// ============================================================
+// BOARD DRAWING
+// ============================================================
+function drawBoard() {
+  // Path connection lines
+  ctx.lineWidth = 3;
+  for (var i = 0; i < pathSquares.length - 1; i++) {
+    var a = pathSquares[i];
+    var b = pathSquares[i + 1];
+    var grad = ctx.createLinearGradient(
+      a.x + a.size / 2, a.y + a.size / 2,
+      b.x + b.size / 2, b.y + b.size / 2
+    );
+    grad.addColorStop(0, a.color + "40");
+    grad.addColorStop(1, b.color + "40");
+    ctx.strokeStyle = grad;
+    ctx.beginPath();
+    ctx.moveTo(a.x + a.size / 2, a.y + a.size / 2);
+    ctx.lineTo(b.x + b.size / 2, b.y + b.size / 2);
+    ctx.stroke();
+  }
+
+  // Bridge arcs
+  for (var bi = 0; bi < LOC_BRIDGE_START.length; bi++) {
+    var si = LOC_BRIDGE_START[bi];
+    var ei = LOC_BRIDGE_END[bi];
+    if (si < pathSquares.length && ei < pathSquares.length) {
+      var startSq = pathSquares[si];
+      var endSq = pathSquares[ei];
+      var sx = startSq.x + startSq.size / 2;
+      var sy = startSq.y + startSq.size / 2;
+      var ex = endSq.x + endSq.size / 2;
+      var ey = endSq.y + endSq.size / 2;
+      var midX = (sx + ex) / 2;
+      var midY = Math.min(sy, ey) - Math.abs(ey - sy) * 0.4 - 20;
+
+      ctx.strokeStyle = "#8B7355";
+      ctx.lineWidth = 3;
+      ctx.setLineDash([4, 4]);
+      ctx.beginPath();
+      ctx.moveTo(sx, sy);
+      ctx.quadraticCurveTo(midX, midY, ex, ey);
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
+  }
+
+  // Scenery near named locations
+  if (pathSquares[10]) {
+    var sq10 = pathSquares[10];
+    var ts = Math.max(14, sq10.size * 0.7);
+    drawTree(sq10.x - ts, sq10.y + 2, ts);
+    drawTree(sq10.x + sq10.size + ts * 0.7, sq10.y - 2, ts * 0.8);
+  }
+  if (pathSquares[40]) {
+    var sq40 = pathSquares[40];
+    var ms = Math.max(18, sq40.size * 0.9);
+    drawMountain(sq40.x - ms * 0.6, sq40.y + 4, ms);
+    drawMountain(sq40.x + sq40.size + ms * 0.5, sq40.y, ms * 0.7);
+  }
+
+  // Draw squares
+  for (var idx = 0; idx < pathSquares.length; idx++) {
+    var sq = pathSquares[idx];
+    var isFinish = (idx === pathSquares.length - 1);
+
+    // Location label
+    if (sq.locName) {
+      ctx.font = scaledFont(0.01, true);
+      ctx.fillStyle = "#ccc";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "bottom";
+      ctx.fillText(sq.locName, sq.x + sq.size / 2, sq.y - 3);
+    }
+
+    if (isFinish) {
+      // Golden castle finish
+      var glow = Math.sin(Date.now() / 400) * 0.15 + 0.85;
+      ctx.globalAlpha = glow;
+      fillRoundRect(sq.x - 4, sq.y - 4, sq.size + 8, sq.size + 8, 5, "#ffd70030", "#ffd700");
+      ctx.globalAlpha = 1;
+      drawCastle(sq.x + sq.size / 2, sq.y + sq.size / 2, sq.size * 0.8);
+    } else {
+      // Normal colored square
+      fillRoundRect(sq.x, sq.y, sq.size, sq.size, 3, sq.color);
+      // Top highlight
+      ctx.fillStyle = "rgba(255,255,255,0.18)";
+      ctx.fillRect(sq.x + 2, sq.y + 2, sq.size - 4, sq.size * 0.22);
+      // Bottom shadow
+      ctx.fillStyle = "rgba(0,0,0,0.12)";
+      ctx.fillRect(sq.x + 2, sq.y + sq.size * 0.78, sq.size - 4, sq.size * 0.2);
+
+      // Special square icons
+      if (sq.special) {
+        var iconSize = Math.max(8, Math.floor(sq.size * 0.5));
+        ctx.font = "bold " + iconSize + "px monospace";
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        var scx = sq.x + sq.size / 2;
+        var scy = sq.y + sq.size / 2;
+
+        if (sq.special.type === "shortcut") {
+          ctx.fillStyle = "#fff";
+          ctx.shadowColor = "#fff";
+          ctx.shadowBlur = 3;
+          ctx.fillText(">>", scx, scy);
+          ctx.shadowBlur = 0;
+        } else if (sq.special.type === "sticky") {
+          ctx.fillStyle = "#000";
+          ctx.globalAlpha = 0.7;
+          ctx.fillText("~", scx, scy);
+          ctx.globalAlpha = 1;
+        }
+      }
+
+      // Square number (small, faded)
+      ctx.font = Math.max(6, Math.floor(sq.size * 0.28)) + "px monospace";
+      ctx.fillStyle = "rgba(0,0,0,0.25)";
+      ctx.textAlign = "right";
+      ctx.textBaseline = "bottom";
+      ctx.fillText(idx.toString(), sq.x + sq.size - 2, sq.y + sq.size - 1);
+    }
+  }
+
+  // Draw player tokens
+  for (var pi = 0; pi < STATE.players.length; pi++) {
+    var p = STATE.players[pi];
+    var psqIdx = Math.min(p.position, pathSquares.length - 1);
+    var psq = pathSquares[psqIdx];
+    var tokenSize = Math.max(8, psq.size * 0.45);
+    var offX = (pi - (STATE.players.length - 1) / 2) * tokenSize * 0.7;
+    var tx, ty;
+
+    if (STATE.movingPlayerIdx === pi && STATE.screen === "moving") {
+      tx = p.animX;
+      ty = p.animY;
+    } else {
+      tx = psq.x + psq.size / 2 + offX;
+      ty = psq.y - tokenSize * 0.3;
+      p.animX = tx;
+      p.animY = ty;
+    }
+
+    var isActive = (pi === STATE.currentPlayer && (STATE.screen === "playing" || STATE.screen === "cardDraw"));
+    drawPlayerToken(tx, ty, tokenSize, p.color, p.icon, isActive);
+  }
+}
+
+// ============================================================
+// PLAYER INFO PANEL
+// ============================================================
+function drawPlayerPanel() {
+  var panelH = Math.max(40, canvasH * 0.075);
+  fillRoundRect(4, 4, canvasW - 8, panelH, 6, PANEL_BG + "dd", PANEL_BORDER);
+
+  var segW = (canvasW - 16) / STATE.players.length;
+  for (var i = 0; i < STATE.players.length; i++) {
+    var p = STATE.players[i];
+    var sx = 8 + i * segW;
+    var active = (i === STATE.currentPlayer &&
+      (STATE.screen === "playing" || STATE.screen === "cardDraw" || STATE.screen === "moving"));
+
+    if (active) {
+      fillRoundRect(sx, 6, segW - 4, panelH - 4, 4, "rgba(255,255,255,0.06)");
+    }
+
+    // Mini token
+    var tokenS = Math.max(6, panelH * 0.2);
+    drawPlayerToken(sx + tokenS + 4, 6 + panelH * 0.4, tokenS, p.color, p.icon, false);
+
+    // Name
+    ctx.font = scaledFont(0.013, true);
+    ctx.fillStyle = active ? "#fff" : "#666";
+    ctx.textAlign = "left";
+    ctx.textBaseline = "top";
+    var displayName = p.name + (p.isAI ? " (AI)" : " (You)");
+    if (displayName.length > 12) displayName = displayName.substring(0, 12);
+    ctx.fillText(displayName, sx + tokenS * 2 + 8, 8);
+
+    // Progress bar
+    var barW = segW - tokenS * 2 - 16;
+    var barH = Math.max(3, panelH * 0.1);
+    var barX = sx + tokenS * 2 + 8;
+    var barY = 8 + panelH * 0.38;
+    ctx.fillStyle = "#222";
+    ctx.fillRect(barX, barY, barW, barH);
+    var pct = Math.min(1, p.position / PATH_LENGTH);
+    ctx.fillStyle = p.color;
+    ctx.fillRect(barX, barY, barW * pct, barH);
+
+    // Position text
+    ctx.font = Math.max(7, Math.floor(panelH * 0.16)) + "px monospace";
+    ctx.fillStyle = "#555";
+    ctx.textBaseline = "top";
+    ctx.fillText(p.position + "/" + PATH_LENGTH, barX, barY + barH + 2);
+
+    if (p.skipTurn) {
+      ctx.fillStyle = "#c0392b";
+      ctx.textAlign = "right";
+      ctx.fillText("STUCK", barX + barW, barY + barH + 2);
+      ctx.textAlign = "left";
+    }
+  }
+}
+
+// ============================================================
+// PLAYING SCREEN
+// ============================================================
+function drawPlayingScreen() {
+  drawBoard();
+  drawPlayerPanel();
+
+  var p = STATE.players[STATE.currentPlayer];
+  var btnW = Math.min(canvasW * 0.35, 200);
+  var btnH = Math.max(34, canvasH * 0.06);
+  var btnX = canvasW / 2 - btnW / 2;
+  var btnY = canvasH - btnH - Math.max(16, canvasH * 0.025);
+
+  // Turn label
+  ctx.font = scaledFont(0.016, true);
+  ctx.fillStyle = p.color;
+  ctx.textAlign = "center";
+  ctx.textBaseline = "bottom";
+  ctx.fillText(p.name + "'s Turn" + (p.isAI ? " (AI)" : ""), canvasW / 2, btnY - 6);
+
+  if (p.skipTurn) {
+    // Stuck -- skip turn
+    fillRoundRect(btnX - 10, btnY - 2, btnW + 20, btnH + 4, 8, "#3a1a1a", "#8a3a3a");
+    ctx.font = scaledFont(0.017, true);
+    ctx.fillStyle = "#ff6b6b";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText("STUCK! Tap to skip", canvasW / 2, btnY + btnH / 2);
+
+    if (p.isAI) {
+      STATE.aiDelay++;
+      if (STATE.aiDelay > 40) {
+        p.skipTurn = false;
+        sfxStuck();
+        STATE.currentPlayer = (STATE.currentPlayer + 1) % STATE.numPlayers;
+        STATE.aiDelay = 0;
+      }
+    } else if (mouseClicked) {
+      p.skipTurn = false;
+      sfxStuck();
+      STATE.currentPlayer = (STATE.currentPlayer + 1) % STATE.numPlayers;
+    }
+  } else {
+    // Draw card button
+    if (p.isAI) {
+      // AI auto-draws after delay
+      STATE.aiDelay++;
+      drawBtn("AI thinking...", btnX, btnY, btnW, btnH, false);
+      if (STATE.aiDelay > 30) {
+        STATE.drawnCard = drawCard();
+        STATE.screen = "cardDraw";
+        STATE.cardFlipProgress = 0;
+        STATE.cardShowTimer = 0;
+        STATE.aiDelay = 0;
+        sfxCardDraw();
+      }
+    } else {
+      var hover = hitTest(mouseX, mouseY, btnX, btnY, btnW, btnH);
+      if (hover) {
+        ctx.shadowColor = "#6a6abe";
+        ctx.shadowBlur = 10;
+      }
+      drawBtn("DRAW CARD", btnX, btnY, btnW, btnH, hover);
+      ctx.shadowBlur = 0;
+
+      if (mouseClicked && hover) {
+        STATE.drawnCard = drawCard();
+        STATE.screen = "cardDraw";
+        STATE.cardFlipProgress = 0;
+        STATE.cardShowTimer = 0;
+        sfxCardDraw();
+      }
+    }
+  }
+}
+
+// ============================================================
+// CARD DRAW SCREEN
+// ============================================================
+function drawCardDrawScreen() {
+  drawBoard();
+  drawPlayerPanel();
+
+  STATE.cardFlipProgress = Math.min(1, STATE.cardFlipProgress + 1 / CARD_FLIP_FRAMES);
+  STATE.cardShowTimer++;
+
+  var card = STATE.drawnCard;
+
+  // Dim overlay
+  ctx.fillStyle = "rgba(0,0,0,0.55)";
+  ctx.fillRect(0, 0, canvasW, canvasH);
+
+  // Card dimensions
+  var cardW = Math.min(canvasW * 0.2, 130);
+  var cardH = cardW * 1.4;
+  var showFront = STATE.cardFlipProgress > 0.5;
+  var flipScale = Math.abs(Math.cos(Math.PI * (1 - STATE.cardFlipProgress)));
+
+  ctx.save();
+  ctx.translate(canvasW / 2, canvasH * 0.42);
+  ctx.scale(Math.max(0.01, flipScale), 1);
+
+  if (showFront) {
+    if (card.type === "color") {
+      // Color card front
+      var color = COLORS[card.colorIdx];
+      var colorName = COLOR_NAMES[card.colorIdx];
+      fillRoundRect(-cardW / 2, -cardH / 2, cardW, cardH, 10, "#1a1a2e", color);
+
+      // Color name
+      ctx.font = scaledFont(0.018, true);
+      ctx.fillStyle = color;
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText(colorName, 0, -cardH / 2 + cardH * 0.1);
+
+      // Main color area
+      var areaX = -cardW / 2 + cardW * 0.1;
+      var areaY = -cardH / 2 + cardH * 0.18;
+      var areaW = cardW * 0.8;
+      var areaH = cardH * 0.55;
+      fillRoundRect(areaX, areaY, areaW, areaH, 5, color);
+      ctx.fillStyle = "rgba(255,255,255,0.15)";
+      ctx.fillRect(areaX + 3, areaY + 3, areaW - 6, areaH * 0.25);
+
+      if (card.double) {
+        ctx.fillStyle = "#fff";
+        ctx.font = scaledFont(0.04, true);
+        ctx.fillText("x2", 0, areaY + areaH * 0.4);
+        ctx.font = scaledFont(0.014, true);
+        ctx.fillText("DOUBLE!", 0, areaY + areaH * 0.65);
+      } else {
+        // Single block icon
+        ctx.fillStyle = "#fff";
+        fillRoundRect(-cardW * 0.08, areaY + areaH * 0.3, cardW * 0.16, cardW * 0.16, 2, "#fff");
+        fillRoundRect(-cardW * 0.06, areaY + areaH * 0.3 + 2, cardW * 0.12, cardW * 0.12, 1, color);
+      }
+
+      // Footer
+      ctx.font = Math.max(7, Math.floor(cardW * 0.06)) + "px monospace";
+      ctx.fillStyle = "#555";
+      ctx.fillText("BLOCKS BURG", 0, cardH / 2 - cardH * 0.06);
+
+    } else if (card.type === "character") {
+      // Character card front
+      var charInfo = CHARACTER_CARDS[card.charIdx];
+      fillRoundRect(-cardW / 2, -cardH / 2, cardW, cardH, 10, "#1a1a2e", "#ffd700");
+
+      // Character name
+      ctx.font = scaledFont(0.016, true);
+      ctx.fillStyle = "#ffd700";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText(charInfo.name, 0, -cardH / 2 + cardH * 0.1);
+
+      // Character icon area
+      var cAreaX = -cardW / 2 + cardW * 0.1;
+      var cAreaY = -cardH / 2 + cardH * 0.18;
+      var cAreaW = cardW * 0.8;
+      var cAreaH = cardH * 0.55;
+      fillRoundRect(cAreaX, cAreaY, cAreaW, cAreaH, 5, "#2a1a3a");
+
+      // Large icon letter
+      ctx.fillStyle = "#ffd700";
+      ctx.font = scaledFont(0.06, true);
+      ctx.fillText(charInfo.icon, 0, cAreaY + cAreaH * 0.4);
+
+      // Stars
+      ctx.fillStyle = "#ffd70080";
+      ctx.font = Math.max(8, Math.floor(cardW * 0.12)) + "px monospace";
+      ctx.fillText("*", -cardW * 0.25, cAreaY + cAreaH * 0.2);
+      ctx.fillText("*", cardW * 0.22, cAreaY + cAreaH * 0.6);
+      ctx.fillText("*", -cardW * 0.15, cAreaY + cAreaH * 0.75);
+
+      // Description
+      ctx.font = Math.max(7, Math.floor(cardW * 0.07)) + "px monospace";
+      ctx.fillStyle = "#ccc";
+      ctx.fillText(charInfo.desc, 0, cAreaY + cAreaH + cardH * 0.04);
+
+      // Footer
+      ctx.font = Math.max(7, Math.floor(cardW * 0.06)) + "px monospace";
+      ctx.fillStyle = "#555";
+      ctx.fillText("BLOCKS BURG", 0, cardH / 2 - cardH * 0.06);
+    }
+  } else {
+    // Card back
+    fillRoundRect(-cardW / 2, -cardH / 2, cardW, cardH, 10, "#2a2a4e", "#4a4a7e");
+    // Decorative grid
+    for (var py = -3; py <= 3; py++) {
+      for (var px = -2; px <= 2; px++) {
+        var bc = COLORS[((py + px + 10) % 6)];
+        ctx.fillStyle = bc + "25";
+        ctx.fillRect(px * cardW * 0.12 - 4, py * cardW * 0.12 - 4, 8, 8);
+      }
+    }
+    ctx.font = scaledFont(0.03, true);
+    ctx.fillStyle = "#555";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText("?", 0, 0);
+  }
+
+  ctx.restore();
+
+  // After flip completes, show instructions
+  if (STATE.cardFlipProgress >= 1 && STATE.cardShowTimer > CARD_SHOW_DELAY) {
+    var desc = "";
+    if (card.type === "color") {
+      desc = card.double
+        ? "Move to 2nd " + COLOR_NAMES[card.colorIdx] + " square"
+        : "Move to next " + COLOR_NAMES[card.colorIdx] + " square";
+    } else {
+      desc = CHARACTER_CARDS[card.charIdx].desc;
+    }
+
+    ctx.font = scaledFont(0.017);
+    ctx.fillStyle = "#ccc";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "top";
+    ctx.fillText(desc, canvasW / 2, canvasH * 0.42 + cardH / 2 + 10);
+
+    var p = STATE.players[STATE.currentPlayer];
+    if (p.isAI) {
+      // AI auto-proceeds
+      STATE.aiDelay++;
+      if (STATE.aiDelay > 20) {
+        executeCardMove();
+      }
+    } else {
+      ctx.font = scaledFont(0.014);
+      ctx.fillStyle = "#888";
+      ctx.fillText("Tap to move", canvasW / 2, canvasH * 0.42 + cardH / 2 + 30);
+
+      if (mouseClicked) {
+        executeCardMove();
+      }
+    }
+  }
+}
+
+function executeCardMove() {
+  var card = STATE.drawnCard;
+  var p = STATE.players[STATE.currentPlayer];
+  var dest;
+
+  if (card.type === "color") {
+    dest = findNextOfColor(p.position, card.colorIdx, card.double);
+  } else {
+    // Character card: jump to target location
+    var target = CHARACTER_CARDS[card.charIdx].target;
+    // Only jump forward; if already past, go to end
+    if (target > p.position) {
+      dest = target;
+    } else {
+      dest = Math.min(p.position + 3, PATH_LENGTH);
+    }
+    sfxCharacter();
+  }
+
+  STATE.aiDelay = 0;
+  beginMove(STATE.currentPlayer, dest);
+}
+
+// ============================================================
+// MOVEMENT
+// ============================================================
+function beginMove(playerIdx, destIdx) {
+  STATE.screen = "moving";
+  STATE.movingPlayerIdx = playerIdx;
+  STATE.moveStepTimer = 0;
+  STATE.moveStepIdx = 0;
+
+  var start = STATE.players[playerIdx].position;
+  STATE.moveQueue = [];
+  if (destIdx >= start) {
+    for (var i = start + 1; i <= Math.min(destIdx, PATH_LENGTH); i++) STATE.moveQueue.push(i);
+  } else {
+    for (var i = start - 1; i >= destIdx; i--) STATE.moveQueue.push(i);
+  }
+  if (STATE.moveQueue.length === 0) {
+    // No movement needed, finish immediately
+    finishMove();
+  }
+}
+
+function updateMovement() {
+  STATE.moveStepTimer++;
+
+  var p = STATE.players[STATE.movingPlayerIdx];
+  var offX = (STATE.movingPlayerIdx - (STATE.players.length - 1) / 2) * Math.max(5, pathSquares[0].size * 0.35);
+
+  if (STATE.moveStepIdx < STATE.moveQueue.length) {
+    var curSq = pathSquares[Math.min(p.position, pathSquares.length - 1)];
+    var nxtIdx = Math.min(STATE.moveQueue[STATE.moveStepIdx], pathSquares.length - 1);
+    var nxtSq = pathSquares[nxtIdx];
+
+    if (curSq && nxtSq) {
+      var t = Math.min(1, STATE.moveStepTimer / MOVE_SPEED);
+      var eased = t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
+      var fromX = curSq.x + curSq.size / 2 + offX;
+      var fromY = curSq.y - curSq.size * 0.15;
+      var toX = nxtSq.x + nxtSq.size / 2 + offX;
+      var toY = nxtSq.y - nxtSq.size * 0.15;
+      p.animX = fromX + (toX - fromX) * eased;
+      p.animY = fromY + (toY - fromY) * eased - Math.sin(eased * Math.PI) * 8;
+    }
+
+    if (STATE.moveStepTimer >= MOVE_SPEED) {
+      p.position = STATE.moveQueue[STATE.moveStepIdx];
+      STATE.moveStepIdx++;
+      STATE.moveStepTimer = 0;
+      sfxMoveStep();
+    }
+  } else {
+    // Movement complete
+    var sq = pathSquares[Math.min(p.position, pathSquares.length - 1)];
+    p.animX = sq.x + sq.size / 2 + offX;
+    p.animY = sq.y - sq.size * 0.15;
+
+    if (STATE.moveStepTimer > 8) {
+      finishMove();
+    }
+  }
+}
+
+function finishMove() {
+  var p = STATE.players[STATE.currentPlayer];
+  STATE.movingPlayerIdx = -1;
+
+  // Win check
+  if (p.position >= PATH_LENGTH) {
+    STATE.screen = "winner";
+    STATE.winnerIdx = STATE.currentPlayer;
+    spawnConfetti();
+    sfxWin();
+    return;
+  }
+
+  // Special square check
+  var sq = pathSquares[p.position];
+  if (sq && sq.special) {
+    STATE.screen = "specialEvent";
+    STATE.specialTimer = 0;
+    STATE.aiDelay = 0;
+
+    if (sq.special.type === "shortcut") {
+      STATE.specialMessage = "SHORTCUT! Cross the bridge to square " + sq.special.target + "!";
+      sfxShortcut();
+    } else if (sq.special.type === "sticky") {
+      STATE.specialMessage = sq.special.label.toUpperCase() + "! Skip next turn!";
+      p.skipTurn = true;
+      sfxStuck();
+    }
+  } else {
+    STATE.currentPlayer = (STATE.currentPlayer + 1) % STATE.numPlayers;
+    STATE.screen = "playing";
+    STATE.aiDelay = 0;
+  }
+}
+
+function drawMovingScreen() {
+  drawBoard();
+  drawPlayerPanel();
+  updateMovement();
+
+  // Show card info at bottom
+  if (STATE.drawnCard) {
+    var c = STATE.drawnCard;
+    ctx.font = scaledFont(0.014);
+    ctx.textAlign = "center";
+    ctx.textBaseline = "bottom";
+    if (c.type === "color") {
+      ctx.fillStyle = COLORS[c.colorIdx];
+      var label = c.double ? "Double " + COLOR_NAMES[c.colorIdx] : COLOR_NAMES[c.colorIdx];
+      ctx.fillText("Moving: " + label, canvasW / 2, canvasH - 12);
+    } else {
+      ctx.fillStyle = "#ffd700";
+      ctx.fillText("Moving: " + CHARACTER_CARDS[c.charIdx].name, canvasW / 2, canvasH - 12);
+    }
+  }
+}
+
+// ============================================================
+// SPECIAL EVENT SCREEN
+// ============================================================
+function drawSpecialEventScreen() {
+  drawBoard();
+  drawPlayerPanel();
+
+  STATE.specialTimer++;
+
+  ctx.fillStyle = "rgba(0,0,0,0.6)";
+  ctx.fillRect(0, 0, canvasW, canvasH);
+
+  var boxW = Math.min(canvasW * 0.75, 400);
+  var boxH = Math.max(80, canvasH * 0.14);
+  var boxX = canvasW / 2 - boxW / 2;
+  var boxY = canvasH / 2 - boxH / 2;
+
+  var sq = pathSquares[STATE.players[STATE.currentPlayer].position];
+  var borderColor = "#ffd700";
+  var icon = "";
+  if (sq && sq.special) {
+    if (sq.special.type === "shortcut") { borderColor = "#27ae60"; icon = ">>"; }
+    else if (sq.special.type === "sticky") { borderColor = "#d35400"; icon = "~"; }
+  }
+
+  fillRoundRect(boxX, boxY, boxW, boxH, 10, "#1a1a2e", borderColor);
+
+  // Icon
+  ctx.font = scaledFont(0.04, true);
+  ctx.fillStyle = borderColor;
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillText(icon, canvasW / 2, boxY + boxH * 0.3);
+
+  // Message
+  ctx.font = scaledFont(0.017, true);
+  ctx.fillStyle = "#fff";
+  ctx.fillText(STATE.specialMessage, canvasW / 2, boxY + boxH * 0.6);
+
+  var p = STATE.players[STATE.currentPlayer];
+
+  if (STATE.specialTimer > SPECIAL_DELAY) {
+    if (p.isAI) {
+      STATE.aiDelay++;
+      if (STATE.aiDelay > 15) {
+        resolveSpecialEvent();
+      }
+    } else {
+      ctx.font = scaledFont(0.013);
+      ctx.fillStyle = "#888";
+      ctx.fillText("Tap to continue", canvasW / 2, boxY + boxH - 10);
+
+      if (mouseClicked) {
+        resolveSpecialEvent();
+      }
+    }
+  }
+}
+
+function resolveSpecialEvent() {
+  var p = STATE.players[STATE.currentPlayer];
+  var sq = pathSquares[p.position];
+
+  if (sq && sq.special && sq.special.type === "shortcut" && sq.special.target !== null) {
+    STATE.aiDelay = 0;
+    beginMove(STATE.currentPlayer, sq.special.target);
+  } else {
+    STATE.currentPlayer = (STATE.currentPlayer + 1) % STATE.numPlayers;
+    STATE.screen = "playing";
+    STATE.aiDelay = 0;
+  }
+}
+
+// ============================================================
+// WINNER SCREEN
+// ============================================================
+function drawWinnerScreen() {
+  updateConfetti();
+
+  ctx.fillStyle = DARK_BG;
+  ctx.fillRect(0, 0, canvasW, canvasH);
+
+  drawConfetti();
+
+  var winner = STATE.players[STATE.winnerIdx];
+  STATE.titlePulse += 0.04;
+  var pulse = Math.sin(STATE.titlePulse * 2) * 5;
+
+  // Victory text
+  ctx.font = scaledFont(0.06, true);
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.shadowColor = "#ffd700";
+  ctx.shadowBlur = 20;
+  ctx.fillStyle = "#ffd700";
+  ctx.fillText("VICTORY!", canvasW / 2, canvasH * 0.15 + pulse);
+  ctx.shadowBlur = 0;
+
+  // Large winner token
+  var charBounce = Math.sin(STATE.titlePulse * 3) * 5;
+  var tokenSize = Math.min(canvasW, canvasH) * 0.1;
+  drawPlayerToken(canvasW / 2, canvasH * 0.34 + charBounce, tokenSize, winner.color, winner.icon, true);
+
+  // Winner name
+  ctx.font = scaledFont(0.04, true);
+  ctx.fillStyle = winner.color;
+  ctx.fillText(winner.name, canvasW / 2, canvasH * 0.5);
+
+  ctx.font = scaledFont(0.022);
+  ctx.fillStyle = "#ccc";
+  ctx.fillText("reached the Castle!", canvasW / 2, canvasH * 0.57);
+
+  if (winner.isAI) {
+    ctx.fillStyle = "#888";
+    ctx.font = scaledFont(0.016);
+    ctx.fillText("Better luck next time!", canvasW / 2, canvasH * 0.63);
+  }
+
+  // Castle
+  drawCastle(canvasW / 2, canvasH * 0.74, Math.min(canvasW, canvasH) * 0.12);
+
+  drawConfetti();
+
+  // Play again button
+  var btnW = Math.min(canvasW * 0.35, 200);
+  var btnH = Math.max(34, canvasH * 0.06);
+  var btnX = canvasW / 2 - btnW / 2;
+  var btnY = canvasH * 0.88;
+  var hover = hitTest(mouseX, mouseY, btnX, btnY, btnW, btnH);
+  drawBtn("PLAY AGAIN", btnX, btnY, btnW, btnH, hover);
+
+  if (mouseClicked && hover) {
+    STATE.screen = "title";
+    STATE.winnerIdx = -1;
+    STATE.confetti = [];
+    sfxClick();
+  }
+}
+
+// ============================================================
+// MAIN LOOP
+// ============================================================
+function gameLoop() {
+  ctx.fillStyle = DARK_BG;
+  ctx.fillRect(0, 0, canvasW, canvasH);
+
+  switch (STATE.screen) {
+    case "title": drawTitleScreen(); break;
+    case "playing": drawPlayingScreen(); break;
+    case "cardDraw": drawCardDrawScreen(); break;
+    case "moving": drawMovingScreen(); break;
+    case "specialEvent": drawSpecialEventScreen(); break;
+    case "winner": drawWinnerScreen(); break;
+  }
+
+  // Reset per-frame input
+  mouseClicked = false;
+
+  requestAnimationFrame(gameLoop);
+}
+
+// ============================================================
+// INIT
+// ============================================================
+window.addEventListener("resize", resize);
+resize();
+buildPath();
+requestAnimationFrame(gameLoop);
+
+})();
+</script>
+</body>
+</html>

@@ -1,32 +1,32 @@
-# MfT Unruggable — Press Kit
+# MfT Unrugable — Press Kit
 
 ## Boilerplate Descriptions
 
 ### 25 words
-MfT Unruggable: autonomous DeFi reactor network on Base. 37 reactors fire every 2 hours, buying and burning tokens permanently. Unruggable by code.
+MfT Unrugable: autonomous DeFi reactor network on Base. Reactors fire every 2 hours, buying and burning tokens permanently. Unrugable by code.
 
 ### 50 words
-MfT Unruggable is an autonomous DeFi reactor network on Base chain. 37 reactors fire every 2 hours across 180+ pools, collecting trading fees, buying tokens, and burning supply permanently. Five reactors are fully renounced with no admin keys. Every token launched strengthens the entire network. Carbon credits burned every cycle.
+Meme for Trees started as sharing memes on X to fund tree planting. Then we launched MfT on Bankr and built open tools: a token launcher, reactor network, charity vaults, and games on Base. Every launch gets a mandatory charity fund wall. Five reactors are fully renounced. Carbon credits removed from markets every cycle.
 
 ### 100 words
-MfT Unruggable is a DeFi infrastructure protocol on Base featuring 37 autonomous reactors that fire every 2 hours across 180+ liquidity pools. Each cycle collects V3 trading fees, buys tokens, and permanently burns supply. Five reactors are fully renounced — no admin key, no withdraw function, no kill switch. The protocol includes MycoPad (token launchpad with permanently locked LP), Baselings (pet game with real DeFi yield), CHAR (automated carbon credit retirement), and a 40-tool MCP SDK for AI agents. Every launch, trade, and game action generates reactor fuel. Built on Base for low gas costs. All claims verifiable on-chain.
+Meme for Trees started as sharing memes to fund tree planting — no purchase necessary. Then we launched MfT as a meme on Bankr and built open tools around it. The Unrugable Launcher creates tokens with 8 permanently locked LP positions and a mandatory charity fund wall for $5. A reactor network fires every 2 hours across hundreds of pools, cycling fees and burning token supply. Five reactors are fully renounced — immutable forever. The ecosystem includes Baselings (pet game), CHAR (carbon credit removal from markets), and a 49-tool MCP SDK for AI agents. Charity deposits move to non-refundable LP positions automatically. All claims verifiable on-chain.
 
 ### 250 words
-MfT Unruggable is a DeFi infrastructure protocol on Base chain built around the Reactor Heartbeat — a network of 37 autonomous on-chain processors that fire every 2 hours across 180+ liquidity pools.
+Meme for Trees started as sharing memes on X to fund tree planting. Then we launched MfT as a meme on Bankr and built open tools around it — a token launcher, reactor network, charity vaults, and games. All on Base.
 
-Each firing cycle collects uncollected V3 LP fees, burns the native token, and swaps cross-tokens into buy pressure. Fees cascade bottom-up through the network, with secondary reactors compressing MfT into sell walls below price. V1 Prime fires last, buying through all accumulated MfT with fees from the entire network. All MfT purchased gets burned permanently.
+The reactor network fires every 2 hours across hundreds of Uniswap V3 pools, cycling fees through connected tokens. Fees cascade bottom-up through the network, with secondary reactors processing their pools first. V1 Prime fires last, collecting accumulated fees from the entire network and burning MfT permanently.
 
 Five reactors are fully renounced — ownership transferred to the zero address, making them immutable. No admin key, no withdraw function, no kill switch. The remaining reactors are managed by the team with plans to renounce as the network matures.
 
 The ecosystem includes:
-- **MycoPad**: Token launchpad where 100% of supply locks in permanent V3 liquidity from block 1. $200 seed creates 15 LP positions with reactor integration.
-- **Baselings**: Pet game where feeding creatures deposits LP tokens, building real DeFi positions. 40 MCP tools enable AI agent gameplay.
-- **CHAR**: Carbon token that retires biochar credits on every reactor cycle.
+- **Unrugable Launcher**: Token launchpad where 100% of supply locks in permanent V3 liquidity from block 1. $5 seed creates 8 LP positions with reactor integration.
+- **Baselings**: Pet game where feeding creatures deposits LP tokens, building real DeFi positions. 49 MCP tools enable AI agent gameplay.
+- **CHAR**: Carbon token that removes carbon credits from markets on every reactor cycle via LP fees and a dedicated no-withdraw tracking address.
 - **EARTH**: Rebase token with its own dedicated reactor and VPS keeper.
 
 The protocol is self-funded with $0 new external capital. Revenue comes from launch fees, reactor network fees, game monetization, and marketplace commissions. Long-term goal: registered charity funded by profitable DeFi infrastructure.
 
-All claims are verifiable on-chain. Unruggable by code, not by promise.
+All claims are verifiable on-chain. Unrugable by code, not by promise.
 
 ---
 
@@ -34,14 +34,14 @@ All claims are verifiable on-chain. Unruggable by code, not by promise.
 
 | Metric | Value |
 |--------|-------|
-| Active reactors | 37 |
-| LP pools | 180+ |
+| Active reactors | Network of reactors |
+| LP pools | Hundreds |
 | Immutable reactors | 5 (renounced) |
 | Firing interval | Every 2 hours |
-| MCP tools | 40 |
+| MCP tools | 49 |
 | REST API endpoints | 17 |
 | Chain | Base (8453) |
-| Launch cost | $200 seed |
+| Launch cost | $5 seed |
 | Marketing budget | $0 |
 | External funding | $0 |
 
@@ -52,7 +52,8 @@ All claims are verifiable on-chain. Unruggable by code, not by promise.
 | MfT Token | 0x8FB87d13B40B1A67B22ED1a17e2835fe7e3a9bA3 |
 | V1 Prime Reactor | 0xed3aE91b2bb22307c07438EEebA2500C18EABcFE |
 | Burn Address | 0xfd780B0aE569e15e514B819ecFDF46f804953a4B |
-| MycoPad V5.2 Factory | 0xF0c1B3d6Bc0B4dEd2DDF81374feEA8a2c536bD51 |
+| Unrugable V5.4 Factory (active) | 0xb1fE |
+| Unrugable V5.3 Factory (BRUH/NZ) | 0x65F8 |
 | CHAR Token | 0x20b048fA035D5763685D695e66aDF62c5D9F5055 |
 | EARTH Token | 0x5CfBecf0209F7ada1EdF1fC0D2Fce3a809C0aE08 |
 | POOP Token | 0x126555aecBAC290b25644e4b7f29c016aE95f4dc |
@@ -62,10 +63,10 @@ All claims are verifiable on-chain. Unruggable by code, not by promise.
 | Resource | URL |
 |----------|-----|
 | Burns Dashboard | tasern.quest/mft/ |
-| Token Launcher | tasern.quest/launcher/unruggable.html |
+| Token Launcher | tasern.quest/launcher/unrugable.html |
 | Reactor Map | tasern.quest/launcher/reactor-map.html |
 | Agent Discovery | tasern.quest/llms.txt |
-| API (tokenomics) | tasern.quest/api/unruggable/tokenomics |
+| API (tokenomics) | tasern.quest/api/unrugable/tokenomics |
 | OpenAPI Spec | tasern.quest/.well-known/openapi.json |
 | AI Plugin | tasern.quest/.well-known/ai-plugin.json |
 | Baseling Game | tasern.quest/baseling/ |
@@ -78,9 +79,11 @@ All claims are verifiable on-chain. Unruggable by code, not by promise.
 
 **Do:**
 - Lead with verifiable on-chain data
-- Use "heartbeat", "automated buy pressure", "buy-back cycle"
+- Use "heartbeat", "automated fee cycling", "reactor network"
+- NEVER use "buy pressure" as a selling point or headline — describe the mechanism factually
+- NEVER say "green candles" as if promising price action
 - Include block explorer links or tx hashes
-- Say "our mission is to connect burns to real carbon retirement"
+- Say "every reactor cycle removes carbon credits from markets permanently — no overhead to offset, we create demand for impact because we can"
 - Frame complexity simply: "your pet does DeFi for you"
 
 **Don't:**
@@ -91,7 +94,7 @@ All claims are verifiable on-chain. Unruggable by code, not by promise.
 - Use emojis excessively
 
 **Taglines:**
-- "Unruggable by code, not by promise."
+- "Unrugable by code, not by promise."
 - "The heartbeat never stops."
 - "Built for agents. Humans welcome."
 - "Every launch strengthens the whole network."

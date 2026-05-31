@@ -1,0 +1,1639 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Ecco of the Deep</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body { width: 100%; height: 100%; overflow: hidden; background: #111; touch-action: none; }
+canvas { display: block; margin: 0 auto; }
+#back-link { position: fixed; bottom: 8px; left: 50%; transform: translateX(-50%); color: #666; font-family: monospace; font-size: 12px; text-decoration: none; z-index: 10; }
+#back-link:hover { color: #aaa; }
+</style>
+</head>
+<body>
+<canvas id="gc"></canvas>
+<a id="back-link" href="/games">Back to Arcade</a>
+<script src="nft-loader.js"></script>
+<script>if(window.NftLoader)NftLoader.gate();</script>
+<script src="tasern-engine.js"></script>
+<script>
+(function(){
+"use strict";
+
+const GW = 480, GH = 320;
+const ctx = TAS.ctx;
+TAS.initCanvas(GW, GH);
+TAS.input.initTouch({ buttons: ['a', 'b'], labels: { a: 'SONAR', b: 'CHARGE' } });
+
+// === CONSTANTS ===
+const TILE = 32;
+const MAX_AIR = 20;
+const MAX_HP = 5;
+const CHARGE_COOLDOWN = 1.5;
+const SONAR_COOLDOWN = 2.0;
+const SONAR_RADIUS_MAX = 200;
+const PLAYER_ACCEL = 280;
+const PLAYER_MAX_SPEED = 150;
+const PLAYER_DRAG = 0.97;
+const CHARGE_SPEED = 350;
+const CHARGE_DURATION = 0.35;
+
+let state = 'title';
+let frame = 0;
+let level = 0;
+let score = 0;
+let highScore = TAS.score.load('eccodeep_hi');
+
+// === PLAYER ===
+let player = {};
+let camera = { x: 0, y: 0 };
+
+// === LEVEL DATA ===
+let map = [];
+let mapW = 0, mapH = 0;
+let enemies = [];
+let npcs = [];
+let airPockets = [];
+let crystals = [];
+let shells = [];
+let gates = [];
+let currents = [];
+let exitZone = null;
+let surfaceY = 0;
+let sonarPings = [];
+let bubbles = [];
+let levelDarkness = 0;
+let levelName = '';
+
+// === LEVEL DEFINITIONS ===
+const LEVELS = [
+  { name: 'Coral Reef Home', w: 20, h: 12, dark: 0, surface: 1, enemies: 2, npcs: 3, shells: 2 },
+  { name: 'Kelp Forest', w: 25, h: 15, dark: 0.1, surface: 1, enemies: 6, npcs: 1, shells: 2 },
+  { name: 'Deep Trench', w: 22, h: 20, dark: 0.7, surface: 0, enemies: 8, npcs: 0, shells: 3 },
+  { name: 'Crystal Caves', w: 24, h: 16, dark: 0.4, surface: 0, enemies: 5, npcs: 1, shells: 2 },
+  { name: 'Thermal Vents', w: 26, h: 14, dark: 0.2, surface: 1, enemies: 7, npcs: 0, shells: 3 },
+  { name: 'Sunken Reactor', w: 28, h: 16, dark: 0.5, surface: 0, enemies: 10, npcs: 1, shells: 3 },
+  { name: 'Abyssal Plain', w: 30, h: 18, dark: 0.85, surface: 0, enemies: 5, npcs: 0, shells: 4 },
+  { name: 'The Hive', w: 24, h: 20, dark: 0.6, surface: 0, enemies: 12, npcs: 0, shells: 4 }
+];
+
+// === SEEDED RANDOM ===
+let seed = 1;
+function seededRandom() { seed = (seed * 16807) % 2147483647; return (seed - 1) / 2147483646; }
+
+// === GENERATE LEVEL ===
+function generateLevel(idx) {
+  const def = LEVELS[idx];
+  seed = (idx + 1) * 7919;
+  mapW = def.w;
+  mapH = def.h;
+  surfaceY = def.surface ? TILE : -999;
+  levelDarkness = def.dark;
+  levelName = def.name;
+  map = [];
+  enemies = [];
+  npcs = [];
+  airPockets = [];
+  crystals = [];
+  shells = [];
+  gates = [];
+  currents = [];
+  sonarPings = [];
+  bubbles = [];
+  exitZone = null;
+
+  // Generate map: 0=water, 1=wall, 2=coral, 3=kelp, 4=crystal, 5=vent
+  for (let y = 0; y < mapH; y++) {
+    map[y] = [];
+    for (let x = 0; x < mapW; x++) {
+      if (x === 0 || x === mapW - 1 || y === mapH - 1) {
+        map[y][x] = 1;
+      } else if (y === 0 && def.surface) {
+        map[y][x] = 0; // surface row
+      } else if (y === 0) {
+        map[y][x] = 1;
+      } else {
+        const r = seededRandom();
+        if (r < 0.12) map[y][x] = 1;
+        else if (r < 0.16 && idx >= 1) map[y][x] = 3; // kelp
+        else if (r < 0.18 && idx >= 3) map[y][x] = 4; // crystal
+        else if (r < 0.20 && idx === 4) map[y][x] = 5; // vent
+        else map[y][x] = 0;
+      }
+    }
+  }
+
+  // Carve paths to ensure navigability
+  const startX = 2, startY = def.surface ? 2 : Math.floor(mapH / 2);
+  const endX = mapW - 3, endY = Math.floor(mapH / 2);
+  carvePath(startX, startY, endX, endY);
+  carvePath(startX, startY, Math.floor(mapW / 2), mapH - 3);
+  carvePath(Math.floor(mapW / 2), mapH - 3, endX, endY);
+
+  // Add coral decorations
+  for (let y = 1; y < mapH - 1; y++) {
+    for (let x = 1; x < mapW - 1; x++) {
+      if (map[y][x] === 0 && map[y + 1] && map[y + 1][x] === 1 && seededRandom() < 0.25) {
+        map[y][x] = 2;
+      }
+    }
+  }
+
+  // Place exit
+  exitZone = { x: (endX) * TILE, y: endY * TILE, w: TILE * 2, h: TILE * 2 };
+
+  // Place air pockets in deep levels
+  if (!def.surface) {
+    const pocketCount = 3 + idx;
+    for (let i = 0; i < pocketCount; i++) {
+      const ax = Math.floor(seededRandom() * (mapW - 4)) + 2;
+      const ay = Math.floor(seededRandom() * (mapH - 4)) + 2;
+      if (map[ay][ax] === 0) {
+        airPockets.push({ x: ax * TILE + TILE / 2, y: ay * TILE + TILE / 2, used: false, regen: 0 });
+      }
+    }
+  }
+
+  // Place shells (healing)
+  for (let i = 0; i < def.shells; i++) {
+    const sx = Math.floor(seededRandom() * (mapW - 4)) + 2;
+    const sy = Math.floor(seededRandom() * (mapH - 4)) + 2;
+    if (map[sy][sx] === 0) {
+      shells.push({ x: sx * TILE + TILE / 2, y: sy * TILE + TILE / 2, active: true });
+    }
+  }
+
+  // Place enemies
+  for (let i = 0; i < def.enemies; i++) {
+    spawnEnemy(idx);
+  }
+
+  // Place NPCs
+  for (let i = 0; i < def.npcs; i++) {
+    const nx = Math.floor(seededRandom() * (mapW - 6)) + 3;
+    const ny = Math.floor(seededRandom() * (mapH - 4)) + 2;
+    if (map[ny][nx] === 0) {
+      npcs.push({ x: nx * TILE, y: ny * TILE, msg: getNPCMessage(idx, i), showMsg: 0 });
+    }
+  }
+
+  // Place currents in thermal vents level
+  if (idx === 4) {
+    for (let i = 0; i < 5; i++) {
+      const cx = Math.floor(seededRandom() * (mapW - 6)) + 3;
+      const cy = Math.floor(seededRandom() * (mapH - 4)) + 2;
+      currents.push({ x: cx * TILE, y: cy * TILE, w: TILE * 3, h: TILE, dir: seededRandom() < 0.5 ? -1 : 1, str: 120 + seededRandom() * 80, timer: 0, active: true });
+    }
+  }
+
+  // Place crystals for puzzle
+  if (idx === 3) {
+    for (let i = 0; i < 4; i++) {
+      const cx = Math.floor(seededRandom() * (mapW - 6)) + 3;
+      const cy = Math.floor(seededRandom() * (mapH - 4)) + 2;
+      if (map[cy][cx] === 0) {
+        crystals.push({ x: cx * TILE, y: cy * TILE, vx: 0, vy: 0, lit: false });
+      }
+    }
+  }
+
+  // Init player
+  player = {
+    x: startX * TILE, y: startY * TILE,
+    vx: 0, vy: 0,
+    angle: 0, targetAngle: 0,
+    w: 24, h: 12,
+    hp: player.hp || MAX_HP,
+    air: MAX_AIR,
+    charging: false, chargeTimer: 0, chargeCooldown: 0,
+    sonarCooldown: 0,
+    invuln: 0,
+    tailPhase: 0
+  };
+  camera.x = player.x - GW / 2;
+  camera.y = player.y - GH / 2;
+}
+
+function carvePath(x1, y1, x2, y2) {
+  let cx = x1, cy = y1;
+  while (cx !== x2 || cy !== y2) {
+    if (cx >= 0 && cx < mapW && cy >= 0 && cy < mapH) {
+      map[cy][cx] = 0;
+      if (cy > 0) map[cy - 1][cx] = 0;
+      if (cx + 1 < mapW) map[cy][cx + 1] = 0;
+    }
+    if (seededRandom() < 0.6) {
+      cx += cx < x2 ? 1 : cx > x2 ? -1 : 0;
+    } else {
+      cy += cy < y2 ? 1 : cy > y2 ? -1 : 0;
+    }
+  }
+}
+
+function spawnEnemy(levelIdx) {
+  const ex = Math.floor(seededRandom() * (mapW - 6)) + 3;
+  const ey = Math.floor(seededRandom() * (mapH - 4)) + 2;
+  if (map[ey][ex] !== 0) return;
+
+  const types = ['jellyfish', 'shark', 'pufferfish', 'eel', 'octopus', 'drone'];
+  let pool;
+  if (levelIdx <= 1) pool = ['jellyfish', 'pufferfish'];
+  else if (levelIdx <= 3) pool = ['jellyfish', 'shark', 'eel'];
+  else if (levelIdx === 5) pool = ['drone', 'shark', 'eel'];
+  else if (levelIdx === 6) pool = ['shark', 'octopus'];
+  else pool = ['jellyfish', 'shark', 'pufferfish', 'eel', 'octopus'];
+
+  const type = pool[Math.floor(seededRandom() * pool.length)];
+  enemies.push({
+    type, x: ex * TILE, y: ey * TILE,
+    vx: (seededRandom() - 0.5) * 40,
+    vy: (seededRandom() - 0.5) * 30,
+    hp: type === 'shark' ? 3 : type === 'octopus' ? 4 : 1,
+    w: type === 'shark' ? 28 : type === 'octopus' ? 24 : 16,
+    h: type === 'shark' ? 14 : type === 'octopus' ? 24 : 16,
+    stunned: 0, phase: seededRandom() * 6.28,
+    inflated: false, lunging: false, grabbing: false,
+    homeX: ex * TILE, homeY: ey * TILE
+  });
+}
+
+function getNPCMessage(level, idx) {
+  const msgs = [
+    ['Welcome young one! Use SONAR to see hidden paths.', 'The deep trench holds ancient secrets...', 'Follow the current to find the way.'],
+    ['Beware the kelp tangles ahead.', 'Charge through obstacles!'],
+    ['Crystals can redirect light beams.'],
+    ['The reactors still hum with power...', 'Find air pockets to survive the depths.'],
+    ['Something enormous lurks in the dark...'],
+    ['The Hive awaits. Prepare yourself.'],
+    ['Surface to breathe!', 'Hidden caves hold treasures.'],
+    ['The exit glows beyond the coral.']
+  ];
+  const pool = msgs[level] || msgs[0];
+  return pool[idx % pool.length];
+}
+
+// === START GAME ===
+function startGame() {
+  state = 'playing';
+  score = 0;
+  level = 0;
+  player.hp = MAX_HP;
+  generateLevel(0);
+  TAS.particles.clear();
+}
+
+function nextLevel() {
+  level++;
+  if (level >= 8) {
+    state = 'victory';
+    if (score > highScore) { highScore = score; TAS.score.save('eccodeep_hi', score); }
+    return;
+  }
+  generateLevel(level);
+  state = 'levelIntro';
+  frame = 0;
+}
+
+function gameOver() {
+  state = 'gameOver';
+  if (score > highScore) { highScore = score; TAS.score.save('eccodeep_hi', score); }
+}
+
+// === COLLISION WITH MAP ===
+function isSolid(px, py) {
+  const tx = Math.floor(px / TILE);
+  const ty = Math.floor(py / TILE);
+  if (tx < 0 || tx >= mapW || ty < 0 || ty >= mapH) return true;
+  return map[ty][tx] === 1;
+}
+
+function isInWater(px, py) {
+  return py > surfaceY;
+}
+
+// === UPDATE ===
+function update(dt) {
+  frame++;
+  TAS.particles.update(dt);
+  TAS.fx.updateEffects(dt);
+
+  // Ambient bubbles
+  if (frame % 15 === 0 && state === 'playing') {
+    const bx = camera.x + Math.random() * GW;
+    const by = camera.y + Math.random() * GH;
+    if (!isSolid(bx, by)) {
+      bubbles.push({ x: bx, y: by, vy: -20 - Math.random() * 30, size: 1 + Math.random() * 3, life: 3 });
+    }
+  }
+
+  // Update bubbles
+  for (let i = bubbles.length - 1; i >= 0; i--) {
+    bubbles[i].y += bubbles[i].vy * dt;
+    bubbles[i].x += Math.sin(frame * 0.05 + i) * 0.3;
+    bubbles[i].life -= dt;
+    if (bubbles[i].life <= 0 || bubbles[i].y < surfaceY) bubbles.splice(i, 1);
+  }
+
+  // Update sonar pings
+  for (let i = sonarPings.length - 1; i >= 0; i--) {
+    sonarPings[i].radius += 200 * dt;
+    sonarPings[i].alpha -= dt * 1.2;
+    if (sonarPings[i].alpha <= 0) sonarPings.splice(i, 1);
+  }
+
+  if (state === 'title') {
+    if (Object.values(TAS.input.keys).some(Boolean) || TAS.input.touch.a || TAS.input.touch.b) {
+      TAS.audio.ensureAudio();
+      startGame();
+      state = 'levelIntro';
+      frame = 0;
+    }
+    return;
+  }
+
+  if (state === 'levelIntro') {
+    if (frame > 120 || Object.values(TAS.input.keys).some(Boolean) || TAS.input.touch.a) {
+      state = 'playing';
+    }
+    return;
+  }
+
+  if (state === 'gameOver' || state === 'victory') {
+    if (frame > 60 && (Object.values(TAS.input.keys).some(Boolean) || TAS.input.touch.a)) {
+      state = 'title';
+    }
+    return;
+  }
+
+  if (state !== 'playing') return;
+
+  // === PLAYER INPUT ===
+  const keys = TAS.input.keys;
+  const touch = TAS.input.touch;
+  let ax = 0, ay = 0;
+
+  if (keys['ArrowLeft'] || keys['KeyA'] || touch.left) ax -= 1;
+  if (keys['ArrowRight'] || keys['KeyD'] || touch.right) ax += 1;
+  if (keys['ArrowUp'] || keys['KeyW'] || touch.up) ay -= 1;
+  if (keys['ArrowDown'] || keys['KeyS'] || touch.down) ay += 1;
+
+  // Sonar
+  if ((keys['KeyZ'] || keys['Space'] || touch.a) && player.sonarCooldown <= 0) {
+    fireSonar();
+    player.sonarCooldown = SONAR_COOLDOWN;
+  }
+
+  // Charge
+  if ((keys['KeyX'] || keys['Shift'] || touch.b) && player.chargeCooldown <= 0 && !player.charging) {
+    player.charging = true;
+    player.chargeTimer = CHARGE_DURATION;
+    player.chargeCooldown = CHARGE_COOLDOWN;
+    const ca = player.angle;
+    player.vx = Math.cos(ca) * CHARGE_SPEED;
+    player.vy = Math.sin(ca) * CHARGE_SPEED;
+    TAS.audio.playTone(200, 0.2, 'sawtooth', 0.08, 400);
+    TAS.audio.playNoise(0.15, 0.05, 800);
+  }
+
+  // Cooldowns
+  if (player.sonarCooldown > 0) player.sonarCooldown -= dt;
+  if (player.chargeCooldown > 0) player.chargeCooldown -= dt;
+  if (player.invuln > 0) player.invuln -= dt;
+
+  // Charging state
+  if (player.charging) {
+    player.chargeTimer -= dt;
+    if (player.chargeTimer <= 0) player.charging = false;
+    // Trail particles
+    TAS.particles.spawn(player.x, player.y, '#88eeff', 2, 1, { size: 2, gravity: 0 });
+  } else {
+    // Normal movement
+    if (ax !== 0 || ay !== 0) {
+      const len = Math.sqrt(ax * ax + ay * ay);
+      ax /= len; ay /= len;
+      player.vx += ax * PLAYER_ACCEL * dt;
+      player.vy += ay * PLAYER_ACCEL * dt;
+      player.targetAngle = Math.atan2(ay, ax);
+    }
+  }
+
+  // Drag
+  player.vx *= Math.pow(PLAYER_DRAG, dt * 60);
+  player.vy *= Math.pow(PLAYER_DRAG, dt * 60);
+
+  // Speed cap
+  const spd = Math.sqrt(player.vx * player.vx + player.vy * player.vy);
+  if (!player.charging && spd > PLAYER_MAX_SPEED) {
+    player.vx *= PLAYER_MAX_SPEED / spd;
+    player.vy *= PLAYER_MAX_SPEED / spd;
+  }
+
+  // Smooth angle rotation
+  if (spd > 5) {
+    player.targetAngle = Math.atan2(player.vy, player.vx);
+  }
+  let angleDiff = player.targetAngle - player.angle;
+  while (angleDiff > Math.PI) angleDiff -= Math.PI * 2;
+  while (angleDiff < -Math.PI) angleDiff += Math.PI * 2;
+  player.angle += angleDiff * Math.min(1, dt * 8);
+
+  // Move with collision
+  const newX = player.x + player.vx * dt;
+  const newY = player.y + player.vy * dt;
+
+  if (!isSolid(newX, player.y) && !isSolid(newX + player.w, player.y) &&
+      !isSolid(newX, player.y + player.h) && !isSolid(newX + player.w, player.y + player.h)) {
+    player.x = newX;
+  } else {
+    player.vx *= -0.3;
+    if (player.charging) player.charging = false;
+  }
+
+  if (!isSolid(player.x, newY) && !isSolid(player.x + player.w, newY) &&
+      !isSolid(player.x, newY + player.h) && !isSolid(player.x + player.w, newY + player.h)) {
+    player.y = newY;
+  } else {
+    player.vy *= -0.3;
+    if (player.charging) player.charging = false;
+  }
+
+  // Tail animation
+  player.tailPhase += dt * (spd * 0.05 + 3);
+
+  // === AIR MANAGEMENT ===
+  if (isInWater(player.x, player.y)) {
+    player.air -= dt;
+    if (player.air <= 0) {
+      player.air = 0;
+      player.hp--;
+      player.invuln = 1;
+      TAS.fx.flash('#004488', 0.4);
+      if (player.hp <= 0) { gameOver(); return; }
+      player.air = 5; // gasping recovery
+    }
+  } else {
+    // At surface - refill air
+    player.air = Math.min(MAX_AIR, player.air + dt * 8);
+    // Breach particles
+    if (player.vy < -50) {
+      TAS.particles.spawn(player.x + player.w / 2, player.y + player.h, '#ffffff', 5, 3, { size: 2, gravity: 2 });
+      TAS.audio.playNoise(0.3, 0.06, 400);
+    }
+  }
+
+  // Air pockets
+  for (const ap of airPockets) {
+    if (ap.used && ap.regen > 0) { ap.regen -= dt; if (ap.regen <= 0) ap.used = false; }
+    if (!ap.used) {
+      const d = TAS.math.dist(player.x + player.w / 2, player.y + player.h / 2, ap.x, ap.y);
+      if (d < 24) {
+        player.air = MAX_AIR;
+        ap.used = true;
+        ap.regen = 15;
+        TAS.particles.spawn(ap.x, ap.y, '#88ddff', 8, 2, { size: 3, gravity: -1 });
+        TAS.audio.playTone(600, 0.15, 'sine', 0.06);
+        TAS.audio.playTone(800, 0.15, 'sine', 0.04);
+      }
+    }
+  }
+
+  // Healing shells
+  for (const sh of shells) {
+    if (!sh.active) continue;
+    const d = TAS.math.dist(player.x + player.w / 2, player.y + player.h / 2, sh.x, sh.y);
+    if (d < 20) {
+      player.hp = Math.min(MAX_HP, player.hp + 1);
+      sh.active = false;
+      score += 50;
+      TAS.particles.spawn(sh.x, sh.y, '#ff88cc', 6, 2, { size: 3 });
+      TAS.audio.playTone(523, 0.1, 'sine', 0.06);
+      TAS.audio.playTone(659, 0.1, 'sine', 0.06);
+    }
+  }
+
+  // === CURRENTS ===
+  for (const c of currents) {
+    c.timer += dt;
+    c.active = Math.sin(c.timer * 1.5) > -0.3;
+    if (c.active && TAS.hit.rectOverlap(player.x, player.y, player.w, player.h, c.x, c.y, c.w, c.h)) {
+      player.vy += c.dir * c.str * dt;
+    }
+  }
+
+  // === CRYSTALS (pushable) ===
+  for (const cr of crystals) {
+    const d = TAS.math.dist(player.x + player.w / 2, player.y + player.h / 2, cr.x + TILE / 2, cr.y + TILE / 2);
+    if (d < 30 && player.charging) {
+      cr.vx = player.vx * 0.5;
+      cr.vy = player.vy * 0.5;
+      cr.lit = true;
+    }
+    cr.x += cr.vx * dt;
+    cr.y += cr.vy * dt;
+    cr.vx *= 0.95;
+    cr.vy *= 0.95;
+    // Wall stop
+    if (isSolid(cr.x, cr.y) || isSolid(cr.x + TILE, cr.y + TILE)) {
+      cr.vx = 0; cr.vy = 0;
+    }
+  }
+
+  // === ENEMIES ===
+  for (let i = enemies.length - 1; i >= 0; i--) {
+    const e = enemies[i];
+    e.phase += dt * 3;
+
+    if (e.stunned > 0) { e.stunned -= dt; continue; }
+
+    // AI behavior
+    const dist = TAS.math.dist(player.x, player.y, e.x, e.y);
+
+    switch (e.type) {
+      case 'jellyfish':
+        e.x += Math.sin(e.phase) * 20 * dt;
+        e.y += Math.cos(e.phase * 0.7) * 15 * dt;
+        break;
+      case 'shark':
+        if (dist < 180) {
+          const a = TAS.math.angle(e.x, e.y, player.x, player.y);
+          e.vx += Math.cos(a) * 100 * dt;
+          e.vy += Math.sin(a) * 100 * dt;
+        } else {
+          e.vx += (e.homeX - e.x) * 0.5 * dt;
+          e.vy += (e.homeY - e.y) * 0.5 * dt;
+        }
+        e.vx *= 0.98; e.vy *= 0.98;
+        e.x += e.vx * dt;
+        e.y += e.vy * dt;
+        break;
+      case 'pufferfish':
+        if (dist < 80) {
+          e.inflated = true;
+          e.w = 24; e.h = 24;
+        } else {
+          e.inflated = false;
+          e.w = 16; e.h = 16;
+        }
+        e.x += Math.sin(e.phase * 0.5) * 10 * dt;
+        e.y += Math.cos(e.phase * 0.3) * 8 * dt;
+        break;
+      case 'eel':
+        if (dist < 120 && !e.lunging) {
+          e.lunging = true;
+          const a = TAS.math.angle(e.x, e.y, player.x, player.y);
+          e.vx = Math.cos(a) * 200;
+          e.vy = Math.sin(a) * 200;
+        }
+        if (e.lunging) {
+          e.x += e.vx * dt;
+          e.y += e.vy * dt;
+          e.vx *= 0.95; e.vy *= 0.95;
+          if (Math.abs(e.vx) < 10 && Math.abs(e.vy) < 10) e.lunging = false;
+        }
+        break;
+      case 'octopus':
+        e.x += Math.sin(e.phase * 0.4) * 25 * dt;
+        e.y += Math.cos(e.phase * 0.6) * 20 * dt;
+        if (dist < 60) {
+          // Pull player
+          const a = TAS.math.angle(player.x, player.y, e.x, e.y);
+          player.vx += Math.cos(a) * 50 * dt;
+          player.vy += Math.sin(a) * 50 * dt;
+        }
+        break;
+      case 'drone':
+        if (dist < 200) {
+          const a = TAS.math.angle(e.x, e.y, player.x, player.y);
+          e.vx = Math.cos(a) * 60;
+          e.vy = Math.sin(a) * 60;
+        }
+        e.x += e.vx * dt;
+        e.y += e.vy * dt;
+        e.vx *= 0.96; e.vy *= 0.96;
+        break;
+    }
+
+    // Keep enemies in bounds
+    e.x = TAS.math.clamp(e.x, TILE, (mapW - 2) * TILE);
+    e.y = TAS.math.clamp(e.y, TILE, (mapH - 2) * TILE);
+
+    // Player collision with enemy
+    if (player.invuln <= 0 && TAS.hit.rectOverlap(player.x, player.y, player.w, player.h, e.x, e.y, e.w, e.h)) {
+      if (player.charging) {
+        // Damage enemy
+        e.hp--;
+        e.stunned = 1;
+        score += 100;
+        TAS.particles.spawn(e.x + e.w / 2, e.y + e.h / 2, '#ffaa00', 8, 3, { size: 3 });
+        TAS.fx.shake(3, 0.85);
+        TAS.audio.playTone(150, 0.2, 'sawtooth', 0.08);
+        if (e.hp <= 0) {
+          enemies.splice(i, 1);
+          score += 200;
+          TAS.particles.spawn(e.x + e.w / 2, e.y + e.h / 2, '#ff4444', 12, 4, { size: 4, gravity: 1 });
+        }
+      } else {
+        // Player takes damage
+        player.hp--;
+        player.invuln = 1.5;
+        TAS.fx.flash('#ff0000', 0.3);
+        TAS.fx.shake(5, 0.9);
+        TAS.audio.playTone(100, 0.3, 'square', 0.1, 50);
+        // Knockback
+        const ka = TAS.math.angle(e.x, e.y, player.x, player.y);
+        player.vx += Math.cos(ka) * 150;
+        player.vy += Math.sin(ka) * 150;
+        if (player.hp <= 0) { gameOver(); return; }
+      }
+    }
+  }
+
+  // === EXIT CHECK ===
+  if (exitZone && TAS.hit.rectOverlap(player.x, player.y, player.w, player.h, exitZone.x, exitZone.y, exitZone.w, exitZone.h)) {
+    score += 500;
+    TAS.audio.playMelody([[523, 0.1], [659, 0.1], [784, 0.15]], 100);
+    nextLevel();
+  }
+
+  // === CAMERA ===
+  const targetCX = player.x + player.w / 2 - GW / 2;
+  const targetCY = player.y + player.h / 2 - GH / 2;
+  camera.x += (targetCX - camera.x) * Math.min(1, dt * 4);
+  camera.y += (targetCY - camera.y) * Math.min(1, dt * 4);
+  camera.x = TAS.math.clamp(camera.x, 0, mapW * TILE - GW);
+  camera.y = TAS.math.clamp(camera.y, 0, mapH * TILE - GH);
+}
+
+// === SONAR ===
+function fireSonar() {
+  sonarPings.push({
+    x: player.x + player.w / 2,
+    y: player.y + player.h / 2,
+    radius: 10,
+    alpha: 1
+  });
+  TAS.audio.playTone(880, 0.4, 'sine', 0.06, 440);
+  TAS.audio.playTone(660, 0.5, 'sine', 0.03, 330);
+
+  // Stun nearby enemies
+  for (const e of enemies) {
+    const d = TAS.math.dist(player.x, player.y, e.x, e.y);
+    if (d < 120) {
+      e.stunned = 2;
+      TAS.particles.spawn(e.x + e.w / 2, e.y + e.h / 2, '#aaddff', 5, 1.5);
+    }
+  }
+
+  // Trigger NPC messages
+  for (const npc of npcs) {
+    const d = TAS.math.dist(player.x, player.y, npc.x, npc.y);
+    if (d < 150) {
+      npc.showMsg = 4;
+    }
+  }
+
+  score += 10;
+}
+
+// === DRAW ===
+function draw(dt) {
+  // Background gradient
+  const grad = ctx.createLinearGradient(0, 0, 0, GH);
+  if (level <= 1) {
+    grad.addColorStop(0, '#0a2a4a');
+    grad.addColorStop(1, '#041828');
+  } else if (level <= 3) {
+    grad.addColorStop(0, '#061830');
+    grad.addColorStop(1, '#020810');
+  } else if (level === 5) {
+    grad.addColorStop(0, '#1a1a0a');
+    grad.addColorStop(1, '#0a0800');
+  } else if (level === 7) {
+    grad.addColorStop(0, '#1a0a2a');
+    grad.addColorStop(1, '#080018');
+  } else {
+    grad.addColorStop(0, '#081828');
+    grad.addColorStop(1, '#020810');
+  }
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, GW, GH);
+
+  if (state === 'title') {
+    drawTitleScreen();
+    return;
+  }
+
+  if (state === 'levelIntro') {
+    drawLevelIntro();
+    return;
+  }
+
+  if (state === 'gameOver') {
+    TAS.ui.drawGameOver(score, highScore, GW, GH, { frame, extra: 'Level ' + (level + 1) + ': ' + levelName });
+    return;
+  }
+
+  if (state === 'victory') {
+    drawVictory();
+    return;
+  }
+
+  // === GAME RENDER ===
+  ctx.save();
+  TAS.fx.applyShake();
+
+  // Parallax bg layer (far)
+  drawParallaxFar();
+
+  // Camera transform
+  ctx.save();
+  ctx.translate(-camera.x, -camera.y);
+
+  // Draw map
+  drawMap();
+
+  // Draw currents
+  drawCurrents();
+
+  // Draw air pockets
+  drawAirPockets();
+
+  // Draw shells
+  drawShells();
+
+  // Draw crystals
+  drawCrystals();
+
+  // Draw exit
+  drawExit();
+
+  // Draw NPCs
+  drawNPCs();
+
+  // Draw enemies
+  drawEnemies();
+
+  // Draw player
+  drawPlayer();
+
+  // Draw bubbles
+  drawBubbles();
+
+  // Draw sonar pings
+  drawSonarPings();
+
+  // Particles
+  TAS.particles.draw();
+
+  ctx.restore();
+
+  // Darkness overlay
+  if (levelDarkness > 0) {
+    drawDarkness();
+  }
+
+  // Light rays from surface
+  if (surfaceY > 0 && camera.y < TILE * 4) {
+    drawLightRays();
+  }
+
+  // Caustics
+  drawCaustics();
+
+  ctx.restore();
+
+  TAS.fx.drawFlash(GW, GH);
+
+  // HUD
+  drawHUD();
+
+  // Touch controls
+  TAS.input.drawTouchControls(GW, GH);
+}
+
+// === DRAW FUNCTIONS ===
+
+function drawTitleScreen() {
+  // Animated water bg
+  for (let i = 0; i < 8; i++) {
+    const y = GH * 0.3 + Math.sin(frame * 0.02 + i * 0.8) * 20 + i * 30;
+    ctx.globalAlpha = 0.1;
+    ctx.fillStyle = '#2288aa';
+    ctx.beginPath();
+    ctx.ellipse(GW / 2, y, 200, 15, 0, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+
+  // Draw swimming creature
+  const px = GW / 2 + Math.sin(frame * 0.03) * 60;
+  const py = GH * 0.5 + Math.cos(frame * 0.02) * 20;
+  drawBaseling(px, py, Math.sin(frame * 0.03) > 0 ? 0 : Math.PI, frame * 0.1, false);
+
+  // Bubbles
+  for (let i = 0; i < 5; i++) {
+    const bx = GW * 0.2 + i * GW * 0.15;
+    const by = GH - ((frame * 0.5 + i * 50) % GH);
+    ctx.globalAlpha = 0.3;
+    ctx.strokeStyle = '#88ccff';
+    ctx.beginPath();
+    ctx.arc(bx + Math.sin(frame * 0.02 + i) * 10, by, 3 + i, 0, Math.PI * 2);
+    ctx.stroke();
+  }
+  ctx.globalAlpha = 1;
+
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#000';
+  ctx.font = 'bold 28px monospace';
+  ctx.fillText('ECCO OF THE DEEP', GW / 2 + 2, 52);
+  ctx.fillStyle = '#44ddaa';
+  ctx.fillText('ECCO OF THE DEEP', GW / 2, 50);
+
+  ctx.fillStyle = '#6688aa';
+  ctx.font = '12px monospace';
+  ctx.fillText('A Tasern Tale', GW / 2, 72);
+
+  ctx.fillStyle = '#88aacc';
+  ctx.font = '11px monospace';
+  ctx.fillText('Arrows/WASD: Swim | Z/Space: Sonar | X/Shift: Charge', GW / 2, GH - 60);
+
+  const pulse = Math.sin(frame * 0.05) * 0.3 + 0.7;
+  ctx.globalAlpha = pulse;
+  ctx.fillStyle = '#ffdd44';
+  ctx.font = 'bold 14px monospace';
+  ctx.fillText('PRESS ANY KEY TO DIVE', GW / 2, GH - 30);
+  ctx.globalAlpha = 1;
+
+  // High score
+  if (highScore > 0) {
+    ctx.fillStyle = '#666';
+    ctx.font = '10px monospace';
+    ctx.fillText('Best: ' + highScore, GW / 2, GH - 10);
+  }
+}
+
+function drawLevelIntro() {
+  ctx.fillStyle = 'rgba(0,10,20,0.85)';
+  ctx.fillRect(0, 0, GW, GH);
+  ctx.textAlign = 'center';
+
+  ctx.fillStyle = '#44ddaa';
+  ctx.font = 'bold 22px monospace';
+  ctx.fillText('Level ' + (level + 1), GW / 2, GH * 0.35);
+
+  ctx.fillStyle = '#88ccee';
+  ctx.font = '16px monospace';
+  ctx.fillText(levelName, GW / 2, GH * 0.48);
+
+  if (LEVELS[level].dark > 0.5) {
+    ctx.fillStyle = '#aa6644';
+    ctx.font = '11px monospace';
+    ctx.fillText('Use SONAR to see in the dark!', GW / 2, GH * 0.6);
+  }
+  if (!LEVELS[level].surface) {
+    ctx.fillStyle = '#4488aa';
+    ctx.font = '11px monospace';
+    ctx.fillText('Find air pockets to breathe!', GW / 2, GH * 0.68);
+  }
+
+  const pulse = Math.sin(frame * 0.05) * 0.3 + 0.7;
+  ctx.globalAlpha = pulse;
+  ctx.fillStyle = '#ffdd44';
+  ctx.font = '12px monospace';
+  ctx.fillText('Press any key to begin', GW / 2, GH * 0.85);
+  ctx.globalAlpha = 1;
+}
+
+function drawVictory() {
+  ctx.fillStyle = 'rgba(0,10,30,0.9)';
+  ctx.fillRect(0, 0, GW, GH);
+  ctx.textAlign = 'center';
+
+  ctx.fillStyle = '#44ffaa';
+  ctx.font = 'bold 24px monospace';
+  ctx.fillText('VICTORY!', GW / 2, GH * 0.25);
+
+  ctx.fillStyle = '#88ccee';
+  ctx.font = '14px monospace';
+  ctx.fillText('The Deep is safe once more.', GW / 2, GH * 0.4);
+
+  ctx.fillStyle = '#ffdd44';
+  ctx.font = 'bold 16px monospace';
+  ctx.fillText('Score: ' + score, GW / 2, GH * 0.55);
+
+  if (score >= highScore && score > 0) {
+    const pulse = Math.sin(frame * 0.06) * 0.3 + 0.7;
+    ctx.globalAlpha = pulse;
+    ctx.fillStyle = '#ffdd44';
+    ctx.font = 'bold 12px monospace';
+    ctx.fillText('NEW HIGH SCORE!', GW / 2, GH * 0.65);
+    ctx.globalAlpha = 1;
+  }
+
+  const pulse = Math.sin(frame * 0.05) * 0.3 + 0.7;
+  ctx.globalAlpha = pulse;
+  ctx.fillStyle = '#88ccff';
+  ctx.font = '12px monospace';
+  ctx.fillText('Press any key', GW / 2, GH * 0.85);
+  ctx.globalAlpha = 1;
+}
+
+function drawParallaxFar() {
+  // Distant hills / seabed shapes
+  ctx.globalAlpha = 0.15;
+  for (let i = 0; i < 4; i++) {
+    const ox = -(camera.x * 0.1) + i * 200;
+    const oy = GH * 0.6 - camera.y * 0.05;
+    ctx.fillStyle = i % 2 === 0 ? '#224466' : '#1a3355';
+    ctx.beginPath();
+    ctx.ellipse(ox, oy + 50, 150, 60, 0, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  // Mid-distance seaweed
+  for (let i = 0; i < 6; i++) {
+    const ox = -(camera.x * 0.3) + i * 120;
+    const baseY = GH * 0.7 - camera.y * 0.15;
+    const sway = Math.sin(frame * 0.02 + i * 1.5) * 8;
+    ctx.fillStyle = '#1a4422';
+    ctx.fillRect(ox + sway, baseY, 4, 40 + i * 10);
+    ctx.fillRect(ox + 20 + sway * 0.7, baseY + 10, 3, 30 + i * 8);
+  }
+  ctx.globalAlpha = 1;
+}
+
+function drawMap() {
+  const startX = Math.max(0, Math.floor(camera.x / TILE));
+  const startY = Math.max(0, Math.floor(camera.y / TILE));
+  const endX = Math.min(mapW, Math.ceil((camera.x + GW) / TILE) + 1);
+  const endY = Math.min(mapH, Math.ceil((camera.y + GH) / TILE) + 1);
+
+  for (let y = startY; y < endY; y++) {
+    for (let x = startX; x < endX; x++) {
+      const tile = map[y][x];
+      const tx = x * TILE, ty = y * TILE;
+
+      if (tile === 1) {
+        // Wall
+        const shade = ((x + y) % 3 === 0) ? '#2a3a4a' : ((x * y) % 5 === 0) ? '#3a4a5a' : '#1a2a3a';
+        ctx.fillStyle = shade;
+        ctx.fillRect(tx, ty, TILE, TILE);
+        // Edge highlight
+        if (y > 0 && map[y - 1][x] === 0) {
+          ctx.fillStyle = '#4a5a6a';
+          ctx.fillRect(tx, ty, TILE, 2);
+        }
+      } else if (tile === 2) {
+        // Coral
+        const hue = ((x * 7 + y * 13) % 4);
+        const colors = ['#cc4466', '#ff8844', '#dd66aa', '#ffaa22'];
+        ctx.fillStyle = colors[hue];
+        ctx.beginPath();
+        ctx.arc(tx + TILE / 2, ty + TILE * 0.7, 8, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillRect(tx + TILE / 2 - 2, ty + TILE * 0.7, 4, TILE * 0.3);
+        // Additional branches
+        ctx.beginPath();
+        ctx.arc(tx + TILE * 0.3, ty + TILE * 0.8, 5, 0, Math.PI * 2);
+        ctx.fill();
+      } else if (tile === 3) {
+        // Kelp
+        const sway = Math.sin(frame * 0.03 + x * 0.5) * 5;
+        ctx.strokeStyle = '#2a7744';
+        ctx.lineWidth = 3;
+        ctx.beginPath();
+        ctx.moveTo(tx + TILE / 2, ty + TILE);
+        ctx.quadraticCurveTo(tx + TILE / 2 + sway, ty + TILE * 0.5, tx + TILE / 2 + sway * 1.5, ty);
+        ctx.stroke();
+        ctx.lineWidth = 1;
+        // Leaf
+        ctx.fillStyle = '#3a9955';
+        ctx.beginPath();
+        ctx.ellipse(tx + TILE / 2 + sway, ty + TILE * 0.3, 6, 3, sway * 0.1, 0, Math.PI * 2);
+        ctx.fill();
+      } else if (tile === 4) {
+        // Crystal
+        ctx.fillStyle = '#88aaff';
+        ctx.globalAlpha = 0.6 + Math.sin(frame * 0.05 + x + y) * 0.3;
+        ctx.beginPath();
+        ctx.moveTo(tx + TILE / 2, ty);
+        ctx.lineTo(tx + TILE * 0.8, ty + TILE * 0.6);
+        ctx.lineTo(tx + TILE / 2, ty + TILE);
+        ctx.lineTo(tx + TILE * 0.2, ty + TILE * 0.6);
+        ctx.closePath();
+        ctx.fill();
+        ctx.globalAlpha = 1;
+      } else if (tile === 5) {
+        // Vent
+        ctx.fillStyle = '#443322';
+        ctx.fillRect(tx + 8, ty + 16, 16, 16);
+        // Steam
+        if (Math.sin(frame * 0.05 + x) > 0) {
+          ctx.globalAlpha = 0.4;
+          ctx.fillStyle = '#ffaa44';
+          for (let b = 0; b < 3; b++) {
+            const boff = (frame * 2 + b * 20) % 40;
+            ctx.beginPath();
+            ctx.arc(tx + TILE / 2 + Math.sin(frame * 0.1 + b) * 4, ty + 16 - boff, 3 - b * 0.5, 0, Math.PI * 2);
+            ctx.fill();
+          }
+          ctx.globalAlpha = 1;
+        }
+      }
+
+      // Surface water line
+      if (y === 0 && surfaceY > 0) {
+        ctx.fillStyle = '#44aacc';
+        ctx.globalAlpha = 0.4;
+        const waveY = ty + TILE - 4 + Math.sin(frame * 0.04 + x * 0.5) * 3;
+        ctx.fillRect(tx, waveY, TILE, 4);
+        ctx.globalAlpha = 1;
+      }
+    }
+  }
+}
+
+function drawCurrents() {
+  for (const c of currents) {
+    if (!c.active) continue;
+    ctx.globalAlpha = 0.3;
+    ctx.fillStyle = c.dir < 0 ? '#4488ff' : '#ff8844';
+    ctx.fillRect(c.x, c.y, c.w, c.h);
+    // Arrow indicators
+    for (let i = 0; i < 3; i++) {
+      const ax = c.x + (frame * 2 + i * c.w / 3) % c.w;
+      const ay = c.y + c.h / 2;
+      ctx.fillStyle = '#ffffff';
+      ctx.beginPath();
+      ctx.moveTo(ax, ay - 4);
+      ctx.lineTo(ax, ay + 4);
+      ctx.lineTo(ax + 8 * (c.dir < 0 ? -1 : 1), ay);
+      ctx.closePath();
+      ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+  }
+}
+
+function drawAirPockets() {
+  for (const ap of airPockets) {
+    if (ap.used) continue;
+    ctx.globalAlpha = 0.6 + Math.sin(frame * 0.06) * 0.2;
+    ctx.fillStyle = '#aaeeff';
+    ctx.beginPath();
+    ctx.arc(ap.x, ap.y, 10 + Math.sin(frame * 0.04) * 2, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.strokeStyle = '#ffffff';
+    ctx.lineWidth = 1;
+    ctx.stroke();
+    ctx.globalAlpha = 1;
+    // Small bubbles rising from pocket
+    for (let b = 0; b < 2; b++) {
+      const by = ap.y - 15 - ((frame + b * 30) % 40);
+      const bx = ap.x + Math.sin(frame * 0.05 + b) * 5;
+      ctx.globalAlpha = 0.4;
+      ctx.strokeStyle = '#aaeeff';
+      ctx.beginPath();
+      ctx.arc(bx, by, 2, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+    ctx.globalAlpha = 1;
+  }
+}
+
+function drawShells() {
+  for (const sh of shells) {
+    if (!sh.active) continue;
+    const bob = Math.sin(frame * 0.04) * 3;
+    ctx.fillStyle = '#ffaacc';
+    ctx.beginPath();
+    ctx.arc(sh.x, sh.y + bob, 8, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = '#ff88aa';
+    ctx.beginPath();
+    ctx.arc(sh.x - 2, sh.y + bob - 2, 3, 0, Math.PI * 2);
+    ctx.fill();
+    // Sparkle
+    ctx.globalAlpha = Math.abs(Math.sin(frame * 0.08));
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(sh.x + 4, sh.y + bob - 5, 2, 2);
+    ctx.globalAlpha = 1;
+  }
+}
+
+function drawCrystals() {
+  for (const cr of crystals) {
+    ctx.save();
+    ctx.translate(cr.x + TILE / 2, cr.y + TILE / 2);
+    ctx.globalAlpha = cr.lit ? 0.9 : 0.6;
+    ctx.fillStyle = cr.lit ? '#aaddff' : '#6688aa';
+    ctx.beginPath();
+    ctx.moveTo(0, -14);
+    ctx.lineTo(10, 0);
+    ctx.lineTo(0, 14);
+    ctx.lineTo(-10, 0);
+    ctx.closePath();
+    ctx.fill();
+    if (cr.lit) {
+      ctx.strokeStyle = '#ffffff';
+      ctx.lineWidth = 2;
+      ctx.stroke();
+      // Glow
+      ctx.globalAlpha = 0.2;
+      ctx.fillStyle = '#aaddff';
+      ctx.beginPath();
+      ctx.arc(0, 0, 20, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+    ctx.restore();
+  }
+}
+
+function drawExit() {
+  if (!exitZone) return;
+  const pulse = Math.sin(frame * 0.06) * 0.2 + 0.5;
+  ctx.globalAlpha = pulse;
+  ctx.fillStyle = '#44ffaa';
+  ctx.fillRect(exitZone.x, exitZone.y, exitZone.w, exitZone.h);
+  ctx.strokeStyle = '#88ffcc';
+  ctx.lineWidth = 2;
+  ctx.strokeRect(exitZone.x, exitZone.y, exitZone.w, exitZone.h);
+  ctx.globalAlpha = 1;
+  // Arrow
+  ctx.fillStyle = '#ffffff';
+  ctx.font = 'bold 14px monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText('EXIT', exitZone.x + exitZone.w / 2, exitZone.y + exitZone.h / 2 + 5);
+}
+
+function drawNPCs() {
+  for (const npc of npcs) {
+    // Friendly fish
+    ctx.fillStyle = '#44cc88';
+    ctx.beginPath();
+    ctx.ellipse(npc.x + 12, npc.y + 10, 10, 6, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = '#66eebb';
+    ctx.beginPath();
+    ctx.arc(npc.x + 18, npc.y + 8, 2, 0, Math.PI * 2);
+    ctx.fill();
+    // Tail
+    ctx.fillStyle = '#33aa66';
+    ctx.beginPath();
+    ctx.moveTo(npc.x + 2, npc.y + 10);
+    ctx.lineTo(npc.x - 5, npc.y + 4);
+    ctx.lineTo(npc.x - 5, npc.y + 16);
+    ctx.closePath();
+    ctx.fill();
+    // Sonar indicator
+    ctx.globalAlpha = 0.5 + Math.sin(frame * 0.05) * 0.3;
+    ctx.fillStyle = '#88ffcc';
+    ctx.font = '8px monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText('~', npc.x + 12, npc.y - 4);
+    ctx.globalAlpha = 1;
+
+    // Show message
+    if (npc.showMsg > 0) {
+      npc.showMsg -= 1 / 60;
+      ctx.fillStyle = 'rgba(0,20,40,0.85)';
+      const tw = ctx.measureText(npc.msg).width + 12;
+      ctx.fillRect(npc.x + 12 - tw / 2, npc.y - 24, tw, 16);
+      ctx.fillStyle = '#aaeeff';
+      ctx.font = '9px monospace';
+      ctx.textAlign = 'center';
+      ctx.fillText(npc.msg, npc.x + 12, npc.y - 13);
+    }
+  }
+}
+
+function drawEnemies() {
+  for (const e of enemies) {
+    if (e.stunned > 0) {
+      ctx.globalAlpha = 0.5 + Math.sin(frame * 0.3) * 0.3;
+    }
+
+    switch (e.type) {
+      case 'jellyfish':
+        ctx.fillStyle = '#cc44ff';
+        ctx.globalAlpha = (e.stunned > 0 ? 0.4 : 0.7);
+        ctx.beginPath();
+        ctx.ellipse(e.x + e.w / 2, e.y + 6, 8, 6, 0, 0, Math.PI * 2);
+        ctx.fill();
+        // Tentacles
+        ctx.strokeStyle = '#aa33dd';
+        ctx.lineWidth = 1;
+        for (let t = 0; t < 4; t++) {
+          const tx = e.x + 4 + t * 4;
+          ctx.beginPath();
+          ctx.moveTo(tx, e.y + 10);
+          ctx.quadraticCurveTo(tx + Math.sin(frame * 0.08 + t) * 3, e.y + 16, tx, e.y + 22);
+          ctx.stroke();
+        }
+        break;
+
+      case 'shark':
+        ctx.fillStyle = e.stunned > 0 ? '#556677' : '#667788';
+        ctx.beginPath();
+        ctx.ellipse(e.x + e.w / 2, e.y + e.h / 2, 14, 7, Math.atan2(e.vy || 0, e.vx || 1), 0, Math.PI * 2);
+        ctx.fill();
+        // Fin
+        ctx.fillStyle = '#778899';
+        ctx.beginPath();
+        ctx.moveTo(e.x + e.w / 2, e.y);
+        ctx.lineTo(e.x + e.w / 2 - 4, e.y - 8);
+        ctx.lineTo(e.x + e.w / 2 + 6, e.y);
+        ctx.closePath();
+        ctx.fill();
+        // Eye
+        ctx.fillStyle = '#ff4444';
+        ctx.beginPath();
+        ctx.arc(e.x + e.w * 0.7, e.y + e.h * 0.4, 2, 0, Math.PI * 2);
+        ctx.fill();
+        break;
+
+      case 'pufferfish':
+        ctx.fillStyle = e.inflated ? '#ffaa44' : '#ddaa33';
+        const r = e.inflated ? 12 : 8;
+        ctx.beginPath();
+        ctx.arc(e.x + e.w / 2, e.y + e.h / 2, r, 0, Math.PI * 2);
+        ctx.fill();
+        if (e.inflated) {
+          // Spikes
+          ctx.strokeStyle = '#ff6622';
+          ctx.lineWidth = 1.5;
+          for (let s = 0; s < 8; s++) {
+            const sa = s * Math.PI / 4;
+            ctx.beginPath();
+            ctx.moveTo(e.x + e.w / 2 + Math.cos(sa) * r, e.y + e.h / 2 + Math.sin(sa) * r);
+            ctx.lineTo(e.x + e.w / 2 + Math.cos(sa) * (r + 5), e.y + e.h / 2 + Math.sin(sa) * (r + 5));
+            ctx.stroke();
+          }
+        }
+        // Eye
+        ctx.fillStyle = '#222';
+        ctx.beginPath();
+        ctx.arc(e.x + e.w / 2 + 3, e.y + e.h / 2 - 2, 2, 0, Math.PI * 2);
+        ctx.fill();
+        break;
+
+      case 'eel':
+        ctx.strokeStyle = e.stunned > 0 ? '#555533' : '#88aa33';
+        ctx.lineWidth = 4;
+        ctx.beginPath();
+        ctx.moveTo(e.x, e.y + e.h / 2);
+        for (let s = 0; s < 5; s++) {
+          ctx.lineTo(e.x + s * 5, e.y + e.h / 2 + Math.sin(frame * 0.1 + s) * 4);
+        }
+        ctx.stroke();
+        ctx.lineWidth = 1;
+        // Head
+        ctx.fillStyle = '#aacc44';
+        ctx.beginPath();
+        ctx.arc(e.x + e.w, e.y + e.h / 2, 4, 0, Math.PI * 2);
+        ctx.fill();
+        // Eyes
+        ctx.fillStyle = '#ff4400';
+        ctx.beginPath();
+        ctx.arc(e.x + e.w + 2, e.y + e.h / 2 - 1, 1.5, 0, Math.PI * 2);
+        ctx.fill();
+        break;
+
+      case 'octopus':
+        ctx.fillStyle = e.stunned > 0 ? '#664444' : '#884466';
+        ctx.beginPath();
+        ctx.ellipse(e.x + e.w / 2, e.y + 8, 10, 8, 0, 0, Math.PI * 2);
+        ctx.fill();
+        // Tentacles
+        ctx.strokeStyle = '#aa5577';
+        ctx.lineWidth = 2;
+        for (let t = 0; t < 6; t++) {
+          const baseX = e.x + 4 + t * 4;
+          ctx.beginPath();
+          ctx.moveTo(baseX, e.y + 14);
+          ctx.quadraticCurveTo(
+            baseX + Math.sin(frame * 0.06 + t * 1.2) * 8,
+            e.y + 20,
+            baseX + Math.sin(frame * 0.04 + t) * 5,
+            e.y + 28
+          );
+          ctx.stroke();
+        }
+        ctx.lineWidth = 1;
+        // Eyes
+        ctx.fillStyle = '#ffcc00';
+        ctx.beginPath();
+        ctx.arc(e.x + e.w * 0.35, e.y + 6, 3, 0, Math.PI * 2);
+        ctx.arc(e.x + e.w * 0.65, e.y + 6, 3, 0, Math.PI * 2);
+        ctx.fill();
+        break;
+
+      case 'drone':
+        ctx.fillStyle = e.stunned > 0 ? '#444444' : '#667788';
+        ctx.fillRect(e.x + 2, e.y + 2, e.w - 4, e.h - 4);
+        ctx.strokeStyle = '#88aacc';
+        ctx.strokeRect(e.x + 2, e.y + 2, e.w - 4, e.h - 4);
+        // Scanning light
+        ctx.fillStyle = '#ff4444';
+        ctx.globalAlpha = 0.5 + Math.sin(frame * 0.1) * 0.3;
+        ctx.beginPath();
+        ctx.arc(e.x + e.w / 2, e.y + e.h / 2, 3, 0, Math.PI * 2);
+        ctx.fill();
+        // Propeller lines
+        ctx.strokeStyle = '#aaccdd';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(e.x + 2, e.y + e.h);
+        ctx.lineTo(e.x - 3, e.y + e.h + 4);
+        ctx.moveTo(e.x + e.w - 2, e.y + e.h);
+        ctx.lineTo(e.x + e.w + 3, e.y + e.h + 4);
+        ctx.stroke();
+        break;
+    }
+    ctx.globalAlpha = 1;
+  }
+}
+
+function drawBaseling(x, y, angle, tailPhase, invuln) {
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.rotate(angle);
+
+  if (invuln) {
+    ctx.globalAlpha = 0.5 + Math.sin(frame * 0.4) * 0.3;
+  }
+
+  // Body
+  ctx.fillStyle = '#44aadd';
+  ctx.beginPath();
+  ctx.ellipse(0, 0, 12, 6, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Belly
+  ctx.fillStyle = '#88ddff';
+  ctx.beginPath();
+  ctx.ellipse(2, 2, 8, 3, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Dorsal fin
+  ctx.fillStyle = '#3388bb';
+  ctx.beginPath();
+  ctx.moveTo(-2, -6);
+  ctx.lineTo(4, -10);
+  ctx.lineTo(8, -6);
+  ctx.closePath();
+  ctx.fill();
+
+  // Tail
+  const tailSway = Math.sin(tailPhase) * 4;
+  ctx.fillStyle = '#3399cc';
+  ctx.beginPath();
+  ctx.moveTo(-12, 0);
+  ctx.lineTo(-18, -5 + tailSway);
+  ctx.lineTo(-18, 5 + tailSway);
+  ctx.closePath();
+  ctx.fill();
+
+  // Eye
+  ctx.fillStyle = '#ffffff';
+  ctx.beginPath();
+  ctx.arc(8, -2, 3, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = '#112233';
+  ctx.beginPath();
+  ctx.arc(9, -2, 1.5, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Pectoral fins
+  ctx.fillStyle = '#55bbdd';
+  ctx.beginPath();
+  ctx.ellipse(2, 5, 4, 2, Math.sin(tailPhase * 0.5) * 0.3, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.globalAlpha = 1;
+  ctx.restore();
+}
+
+function drawPlayer() {
+  const px = player.x + player.w / 2;
+  const py = player.y + player.h / 2;
+
+  // Charge trail
+  if (player.charging) {
+    ctx.globalAlpha = 0.4;
+    ctx.strokeStyle = '#88eeff';
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.moveTo(px - Math.cos(player.angle) * 20, py - Math.sin(player.angle) * 20);
+    ctx.lineTo(px - Math.cos(player.angle) * 35, py - Math.sin(player.angle) * 35);
+    ctx.stroke();
+    ctx.lineWidth = 1;
+    ctx.globalAlpha = 1;
+  }
+
+  drawBaseling(px, py, player.angle, player.tailPhase, player.invuln > 0);
+
+  // Bubble trail
+  if (Math.abs(player.vx) > 20 || Math.abs(player.vy) > 20) {
+    if (frame % 4 === 0) {
+      bubbles.push({
+        x: px - Math.cos(player.angle) * 14,
+        y: py - Math.sin(player.angle) * 14,
+        vy: -15 - Math.random() * 10,
+        size: 1 + Math.random() * 2,
+        life: 1.5
+      });
+    }
+  }
+}
+
+function drawBubbles() {
+  ctx.strokeStyle = '#88ccee';
+  ctx.lineWidth = 1;
+  for (const b of bubbles) {
+    ctx.globalAlpha = Math.min(b.life, 0.5);
+    ctx.beginPath();
+    ctx.arc(b.x, b.y, b.size, 0, Math.PI * 2);
+    ctx.stroke();
+  }
+  ctx.globalAlpha = 1;
+}
+
+function drawSonarPings() {
+  for (const ping of sonarPings) {
+    ctx.globalAlpha = ping.alpha * 0.6;
+    ctx.strokeStyle = '#88ddff';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.arc(ping.x, ping.y, ping.radius, 0, Math.PI * 2);
+    ctx.stroke();
+    // Inner ring
+    ctx.globalAlpha = ping.alpha * 0.3;
+    ctx.beginPath();
+    ctx.arc(ping.x, ping.y, ping.radius * 0.6, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.lineWidth = 1;
+  }
+  ctx.globalAlpha = 1;
+}
+
+function drawDarkness() {
+  // Radial darkness with player light
+  const px = player.x + player.w / 2 - camera.x;
+  const py = player.y + player.h / 2 - camera.y;
+
+  // Base sonar-revealed radius
+  let lightRadius = 60;
+  // Expand during sonar ping
+  for (const ping of sonarPings) {
+    const pingR = ping.radius - TAS.math.dist(player.x + player.w / 2, player.y + player.h / 2, ping.x, ping.y);
+    if (pingR > 0) lightRadius = Math.max(lightRadius, pingR + 60);
+  }
+
+  const grad = ctx.createRadialGradient(px, py, lightRadius * 0.3, px, py, lightRadius);
+  grad.addColorStop(0, 'rgba(0,5,15,0)');
+  grad.addColorStop(0.7, 'rgba(0,5,15,' + (levelDarkness * 0.7) + ')');
+  grad.addColorStop(1, 'rgba(0,5,15,' + levelDarkness + ')');
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, GW, GH);
+}
+
+function drawLightRays() {
+  ctx.globalAlpha = 0.08;
+  ctx.fillStyle = '#aaeeff';
+  for (let i = 0; i < 5; i++) {
+    const rx = (i * 120 + frame * 0.2) % (GW + 100) - 50;
+    const rw = 20 + Math.sin(frame * 0.01 + i) * 8;
+    ctx.beginPath();
+    ctx.moveTo(rx, 0);
+    ctx.lineTo(rx + rw, 0);
+    ctx.lineTo(rx + rw * 2, GH);
+    ctx.lineTo(rx + rw, GH);
+    ctx.closePath();
+    ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+}
+
+function drawCaustics() {
+  ctx.globalAlpha = 0.04;
+  ctx.strokeStyle = '#88ddff';
+  ctx.lineWidth = 1;
+  for (let i = 0; i < 8; i++) {
+    const cx = (i * 80 + Math.sin(frame * 0.015 + i) * 30) % GW;
+    const cy = (i * 60 + Math.cos(frame * 0.012 + i * 0.7) * 20) % GH;
+    ctx.beginPath();
+    ctx.moveTo(cx, cy);
+    ctx.quadraticCurveTo(cx + 20, cy + Math.sin(frame * 0.02 + i) * 10, cx + 40, cy);
+    ctx.stroke();
+  }
+  ctx.globalAlpha = 1;
+}
+
+function drawHUD() {
+  const barH = 30;
+  ctx.fillStyle = 'rgba(0,10,20,0.75)';
+  ctx.fillRect(0, 0, GW, barH);
+
+  // Score
+  ctx.fillStyle = '#ffdd44';
+  ctx.font = 'bold 11px monospace';
+  ctx.textAlign = 'left';
+  ctx.fillText('SCORE: ' + score, 6, 12);
+
+  // Level
+  ctx.fillStyle = '#88ccff';
+  ctx.textAlign = 'center';
+  ctx.fillText('LV ' + (level + 1), GW / 2, 12);
+
+  // HP Hearts
+  ctx.textAlign = 'right';
+  for (let i = 0; i < MAX_HP; i++) {
+    ctx.fillStyle = i < player.hp ? '#ff4466' : '#333';
+    ctx.beginPath();
+    const hx = GW - 10 - i * 16;
+    // Simple heart shape
+    ctx.arc(hx - 3, 8, 4, 0, Math.PI * 2);
+    ctx.arc(hx + 3, 8, 4, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.beginPath();
+    ctx.moveTo(hx - 7, 9);
+    ctx.lineTo(hx, 16);
+    ctx.lineTo(hx + 7, 9);
+    ctx.closePath();
+    ctx.fill();
+  }
+
+  // Air meter
+  const airW = 80;
+  const airX = GW / 2 - airW / 2;
+  const airY = 18;
+  const airH = 8;
+  ctx.fillStyle = '#222';
+  ctx.fillRect(airX, airY, airW, airH);
+  const airPct = player.air / MAX_AIR;
+  const airColor = airPct > 0.5 ? '#44aaff' : airPct > 0.25 ? '#ffaa44' : '#ff4444';
+  ctx.fillStyle = airColor;
+  ctx.fillRect(airX + 1, airY + 1, (airW - 2) * airPct, airH - 2);
+  ctx.fillStyle = '#88ccff';
+  ctx.font = '7px monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText('AIR', GW / 2, airY + airH - 1);
+
+  // Sonar cooldown indicator
+  if (player.sonarCooldown > 0) {
+    ctx.fillStyle = '#334455';
+    ctx.font = '8px monospace';
+    ctx.textAlign = 'left';
+    ctx.fillText('SON: ' + player.sonarCooldown.toFixed(1), 6, 26);
+  } else {
+    ctx.fillStyle = '#44ffaa';
+    ctx.font = '8px monospace';
+    ctx.textAlign = 'left';
+    ctx.fillText('SON: RDY', 6, 26);
+  }
+
+  // Charge cooldown
+  if (player.chargeCooldown > 0) {
+    ctx.fillStyle = '#334455';
+    ctx.font = '8px monospace';
+    ctx.fillText('CHG: ' + player.chargeCooldown.toFixed(1), 75, 26);
+  } else {
+    ctx.fillStyle = '#88eeff';
+    ctx.font = '8px monospace';
+    ctx.fillText('CHG: RDY', 75, 26);
+  }
+
+  // Mini compass to exit
+  if (exitZone && state === 'playing') {
+    const dx = exitZone.x + exitZone.w / 2 - (player.x + player.w / 2);
+    const dy = exitZone.y + exitZone.h / 2 - (player.y + player.h / 2);
+    const a = Math.atan2(dy, dx);
+    const compassX = GW - 30;
+    const compassY = GH - 30;
+    ctx.strokeStyle = '#44ffaa';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.arc(compassX, compassY, 12, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(compassX, compassY);
+    ctx.lineTo(compassX + Math.cos(a) * 10, compassY + Math.sin(a) * 10);
+    ctx.stroke();
+    ctx.lineWidth = 1;
+    ctx.fillStyle = '#44ffaa';
+    ctx.font = '7px monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText('EXIT', compassX, compassY + 22);
+  }
+}
+
+// === START LOOP ===
+TAS.loop.start(update, draw);
+
+})();
+</script>
+</body>
+</html>

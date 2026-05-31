@@ -1,0 +1,1754 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Duck Tales</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body { width: 100%; height: 100%; overflow: hidden; background: #111; touch-action: none; }
+canvas { display: block; margin: 0 auto; }
+#back-link { position: fixed; bottom: 8px; left: 50%; transform: translateX(-50%); color: #666; font-family: monospace; font-size: 12px; text-decoration: none; z-index: 10; }
+#back-link:hover { color: #aaa; }
+</style>
+</head>
+<body>
+<canvas id="gc"></canvas>
+<a id="back-link" href="/games">Back to Arcade</a>
+<script src="nft-loader.js"></script>
+<script>if(window.NftLoader)NftLoader.gate();</script>
+<script src="tasern-engine.js"></script>
+<script>
+(function(){
+"use strict";
+
+const GW = 384, GH = 256;
+const ctx = TAS.ctx;
+TAS.initCanvas(GW, GH);
+TAS.input.initTouch({ buttons: ['a', 'b'], labels: { a: 'JUMP', b: 'ATK' } });
+
+// === CONSTANTS ===
+const TILE = 16;
+const GRAVITY = 580;
+const JUMP_VEL = -220;
+const POGO_VEL = -260;
+const MOVE_SPEED = 100;
+const MAX_FALL = 320;
+const POGO_BOUNCE_VEL = -280;
+const CANE_RANGE = 20;
+const INVULN_TIME = 1.5;
+const HUD_H = 20;
+
+// === GAME STATE ===
+let state = 'title'; // title, map, playing, boss, gameover, victory
+let score = 0;
+let highScore = TAS.score.load('ducktales_hi');
+let lives = 3;
+let hp = 3;
+let gems = 0;
+let frame = 0;
+let levelTime = 0;
+let currentLevel = -1;
+let levelsCleared = [false, false, false, false, false];
+let camera = { x: 0, y: 0 };
+let mapCursor = 0;
+let deathTimer = 0;
+let victoryTimer = 0;
+
+// === PLAYER ===
+let player = null;
+function createPlayer(x, y) {
+  return {
+    x: x, y: y, w: 12, h: 18,
+    vx: 0, vy: 0,
+    onGround: false,
+    jumping: false,
+    pogoing: false,
+    pogoHeld: false,
+    caneSwing: false,
+    caneTimer: 0,
+    facing: 1,
+    invuln: 0,
+    animFrame: 0,
+    animTimer: 0,
+    walkFrame: 0
+  };
+}
+
+// === LEVELS ===
+const LEVEL_NAMES = ['Amazon Jungle', 'Transylvania', 'Crystal Mines', 'Moon Base', 'Reactor Vault'];
+const LEVEL_COLORS = [
+  { bg: '#0a2a0a', tile: '#2a6e2a', tile2: '#1a4a1a', sky: '#062206', accent: '#4a8' },
+  { bg: '#1a0a2a', tile: '#4a3a5a', tile2: '#2a1a3a', sky: '#0c0418', accent: '#a6c' },
+  { bg: '#1a1a2a', tile: '#5a5a7a', tile2: '#3a3a5a', sky: '#0a0a18', accent: '#8cf' },
+  { bg: '#0a0a1a', tile: '#3a4a6a', tile2: '#1a2a4a', sky: '#020210', accent: '#4af' },
+  { bg: '#2a0a0a', tile: '#6a3a2a', tile2: '#4a1a1a', sky: '#180404', accent: '#f84' }
+];
+
+// Level map data: 24 columns x 16 rows per screen, multiple screens wide
+// 0=air, 1=solid, 2=breakable, 3=spikes, 4=vine, 5=platform(one-way), 6=chest, 7=exit
+let tiles = [];
+let levelW = 0, levelH = 16;
+let enemies = [];
+let collectibles = [];
+let projectiles = [];
+let boss = null;
+let bossDefeated = false;
+
+function generateLevel(idx) {
+  const screens = idx === 4 ? 5 : 4;
+  levelW = 24 * screens;
+  tiles = [];
+  enemies = [];
+  collectibles = [];
+  projectiles = [];
+  boss = null;
+  bossDefeated = false;
+  levelTime = 0;
+
+  // Fill with air
+  for (let y = 0; y < levelH; y++) {
+    tiles[y] = [];
+    for (let x = 0; x < levelW; x++) {
+      tiles[y][x] = 0;
+    }
+  }
+
+  // Ground
+  for (let x = 0; x < levelW; x++) {
+    tiles[15][x] = 1;
+    tiles[14][x] = 1;
+  }
+
+  // Level-specific generation
+  switch(idx) {
+    case 0: genJungle(); break;
+    case 1: genCastle(); break;
+    case 2: genMines(); break;
+    case 3: genMoon(); break;
+    case 4: genReactor(); break;
+  }
+
+  // Place exit at end
+  tiles[13][levelW - 3] = 7;
+
+  // Place boss before exit
+  spawnBoss(idx, (levelW - 10) * TILE, 10 * TILE);
+
+  // Scatter gems throughout
+  for (let s = 0; s < screens; s++) {
+    let placed = 0;
+    for (let attempt = 0; attempt < 60 && placed < 8; attempt++) {
+      let gx = s * 24 + TAS.math.randInt(2, 22);
+      let gy = TAS.math.randInt(3, 12);
+      if (tiles[gy][gx] === 0 && tiles[gy + 1][gx] !== 0) {
+        collectibles.push({ x: gx * TILE + 4, y: gy * TILE + 4, w: 8, h: 8, type: 'gem', collected: false });
+        placed++;
+      }
+    }
+    // Floating gems
+    for (let attempt = 0; attempt < 20 && placed < 12; attempt++) {
+      let gx = s * 24 + TAS.math.randInt(3, 21);
+      let gy = TAS.math.randInt(2, 8);
+      if (tiles[gy][gx] === 0) {
+        collectibles.push({ x: gx * TILE + 4, y: gy * TILE + 4, w: 8, h: 8, type: 'gem', collected: false });
+        placed++;
+      }
+    }
+  }
+
+  // Place treasure chests (1 per screen, hidden)
+  for (let s = 0; s < screens - 1; s++) {
+    let cx = s * 24 + TAS.math.randInt(5, 18);
+    let cy = TAS.math.randInt(3, 7);
+    if (tiles[cy][cx] === 0) {
+      collectibles.push({ x: cx * TILE, y: cy * TILE, w: 16, h: 16, type: 'chest', collected: false, value: (s + 1) * 100 });
+    }
+  }
+
+  // Big treasure at end
+  collectibles.push({ x: (levelW - 5) * TILE, y: 11 * TILE, w: 16, h: 16, type: 'bigGem', collected: false });
+}
+
+function genJungle() {
+  // Platforms, vines, pits
+  for (let s = 0; s < 4; s++) {
+    let base = s * 24;
+    // Jungle platforms
+    for (let i = 0; i < 5; i++) {
+      let px = base + TAS.math.randInt(2, 18);
+      let py = TAS.math.randInt(6, 12);
+      let pw = TAS.math.randInt(3, 6);
+      for (let x = px; x < px + pw && x < base + 23; x++) {
+        tiles[py][x] = 1;
+      }
+    }
+    // Vines
+    for (let i = 0; i < 3; i++) {
+      let vx = base + TAS.math.randInt(3, 20);
+      for (let vy = 2; vy < TAS.math.randInt(6, 11); vy++) {
+        if (tiles[vy][vx] === 0) tiles[vy][vx] = 4;
+      }
+    }
+    // Pits with spikes
+    if (s > 0) {
+      let pitX = base + TAS.math.randInt(5, 15);
+      let pitW = TAS.math.randInt(2, 4);
+      for (let x = pitX; x < pitX + pitW && x < base + 22; x++) {
+        tiles[14][x] = 0;
+        tiles[15][x] = 3;
+      }
+    }
+    // Breakable floors
+    let bx = base + TAS.math.randInt(8, 16);
+    tiles[10][bx] = 2;
+    tiles[10][bx + 1] = 2;
+    // Snakes
+    enemies.push(createEnemy('snake', (base + TAS.math.randInt(4, 20)) * TILE, 13 * TILE - 12));
+    if (s > 1) enemies.push(createEnemy('snake', (base + TAS.math.randInt(4, 20)) * TILE, 13 * TILE - 12));
+  }
+}
+
+function genCastle() {
+  // Chandeliers, mirrors, tight corridors
+  for (let s = 0; s < 4; s++) {
+    let base = s * 24;
+    // Walls/corridors
+    for (let y = 3; y < 8; y++) {
+      tiles[y][base + 1] = 1;
+      if (s < 3) tiles[y][base + 23] = 1;
+    }
+    // Platforms (chandelier-like)
+    for (let i = 0; i < 4; i++) {
+      let px = base + TAS.math.randInt(3, 19);
+      let py = TAS.math.randInt(5, 11);
+      tiles[py][px] = 5;
+      tiles[py][px + 1] = 5;
+      tiles[py][px + 2] = 5;
+    }
+    // Upper walkways
+    for (let x = base + 3; x < base + 21; x += 4) {
+      tiles[4][x] = 1;
+      tiles[4][x + 1] = 1;
+    }
+    // Ghosts and bats
+    enemies.push(createEnemy('ghost', (base + TAS.math.randInt(4, 18)) * TILE, TAS.math.randInt(4, 9) * TILE));
+    enemies.push(createEnemy('bat', (base + TAS.math.randInt(4, 18)) * TILE, TAS.math.randInt(3, 7) * TILE));
+  }
+}
+
+function genMines() {
+  // Crystal formations, collapsing floors, carts
+  for (let s = 0; s < 4; s++) {
+    let base = s * 24;
+    // Sloped terrain
+    for (let i = 0; i < 6; i++) {
+      let px = base + TAS.math.randInt(2, 19);
+      let py = TAS.math.randInt(7, 13);
+      let pw = TAS.math.randInt(2, 5);
+      for (let x = px; x < px + pw && x < base + 23; x++) {
+        tiles[py][x] = 1;
+      }
+    }
+    // Breakable crystal floors
+    for (let i = 0; i < 3; i++) {
+      let bx = base + TAS.math.randInt(4, 20);
+      tiles[11][bx] = 2;
+    }
+    // Spikes in pits
+    if (s > 0) {
+      let sx = base + TAS.math.randInt(6, 14);
+      tiles[14][sx] = 0;
+      tiles[15][sx] = 3;
+      tiles[14][sx + 1] = 0;
+      tiles[15][sx + 1] = 3;
+    }
+    // Robots/miners
+    enemies.push(createEnemy('robot', (base + TAS.math.randInt(5, 19)) * TILE, 13 * TILE - 14));
+    if (s > 1) enemies.push(createEnemy('robot', (base + TAS.math.randInt(5, 19)) * TILE, 13 * TILE - 14));
+  }
+}
+
+function genMoon() {
+  // Low gravity, aliens, UFO platforms
+  for (let s = 0; s < 4; s++) {
+    let base = s * 24;
+    // Floating platforms (more spread due to low grav)
+    for (let i = 0; i < 6; i++) {
+      let px = base + TAS.math.randInt(2, 19);
+      let py = TAS.math.randInt(3, 12);
+      let pw = TAS.math.randInt(2, 4);
+      for (let x = px; x < px + pw && x < base + 23; x++) {
+        tiles[py][x] = 5;
+      }
+    }
+    // Gaps in ground
+    if (s > 0) {
+      let gx = base + TAS.math.randInt(4, 16);
+      let gw = TAS.math.randInt(3, 5);
+      for (let x = gx; x < gx + gw && x < base + 22; x++) {
+        tiles[14][x] = 0;
+        tiles[15][x] = 0;
+      }
+    }
+    // Aliens
+    enemies.push(createEnemy('alien', (base + TAS.math.randInt(4, 18)) * TILE, TAS.math.randInt(5, 10) * TILE));
+    if (s > 0) enemies.push(createEnemy('alien', (base + TAS.math.randInt(4, 18)) * TILE, TAS.math.randInt(5, 10) * TILE));
+  }
+}
+
+function genReactor() {
+  // Hardest: fire traps, complex platforming
+  for (let s = 0; s < 5; s++) {
+    let base = s * 24;
+    // Dense platforms
+    for (let i = 0; i < 7; i++) {
+      let px = base + TAS.math.randInt(2, 19);
+      let py = TAS.math.randInt(4, 13);
+      let pw = TAS.math.randInt(2, 4);
+      for (let x = px; x < px + pw && x < base + 23; x++) {
+        tiles[py][x] = 1;
+      }
+    }
+    // Spike rows
+    for (let i = 0; i < 3; i++) {
+      let sx = base + TAS.math.randInt(3, 19);
+      tiles[13][sx] = 3;
+      if (Math.random() > 0.5) tiles[13][sx + 1] = 3;
+    }
+    // Breakable shortcuts
+    tiles[8][base + 12] = 2;
+    tiles[8][base + 13] = 2;
+    // Robots
+    enemies.push(createEnemy('robot', (base + TAS.math.randInt(4, 18)) * TILE, 13 * TILE - 14));
+    enemies.push(createEnemy('robot', (base + TAS.math.randInt(4, 18)) * TILE, TAS.math.randInt(5, 10) * TILE));
+  }
+}
+
+// === ENEMIES ===
+function createEnemy(type, x, y) {
+  let e = {
+    type: type, x: x, y: y, w: 14, h: 14,
+    vx: 0, vy: 0, alive: true, hp: 1,
+    facing: -1, animTimer: 0, animFrame: 0,
+    startX: x, startY: y, moveTimer: 0
+  };
+  switch(type) {
+    case 'snake': e.w = 16; e.h = 10; e.vx = 30 * (Math.random() > 0.5 ? 1 : -1); break;
+    case 'bat': e.w = 14; e.h = 10; e.moveTimer = Math.random() * 6; break;
+    case 'ghost': e.w = 14; e.h = 16; e.moveTimer = Math.random() * 6; break;
+    case 'alien': e.w = 12; e.h = 16; e.vx = 40 * (Math.random() > 0.5 ? 1 : -1); break;
+    case 'robot': e.w = 14; e.h = 16; e.hp = 2; e.vx = 25 * (Math.random() > 0.5 ? 1 : -1); break;
+  }
+  return e;
+}
+
+function spawnBoss(idx, x, y) {
+  let names = ['King Snake', 'Vampire Lord', 'Crystal Golem', 'UFO Commander', 'Reactor Core'];
+  boss = {
+    type: idx, x: x, y: y, w: 28, h: 28,
+    hp: 5, maxHp: 5, alive: true,
+    vx: 0, vy: 0, phase: 0,
+    timer: 0, attackTimer: 0, flashTimer: 0,
+    name: names[idx], startX: x, startY: y
+  };
+}
+
+// === INPUT HELPERS ===
+function keyLeft() { return TAS.input.keys['ArrowLeft'] || TAS.input.keys['KeyA'] || TAS.input.touch.left; }
+function keyRight() { return TAS.input.keys['ArrowRight'] || TAS.input.keys['KeyD'] || TAS.input.touch.right; }
+function keyUp() { return TAS.input.keys['ArrowUp'] || TAS.input.keys['KeyW'] || TAS.input.touch.up; }
+function keyDown() { return TAS.input.keys['ArrowDown'] || TAS.input.keys['KeyS'] || TAS.input.touch.down; }
+function keyJump() { return TAS.input.keys['Space'] || TAS.input.keys['KeyZ'] || TAS.input.touch.a; }
+function keyAttack() { return TAS.input.keys['KeyX'] || TAS.input.keys['ShiftLeft'] || TAS.input.touch.b; }
+
+let jumpPressed = false;
+let jumpWasPressed = false;
+let attackPressed = false;
+let attackWasPressed = false;
+
+function updateInputEdge() {
+  let jp = keyJump();
+  let ap = keyAttack();
+  jumpPressed = jp && !jumpWasPressed;
+  attackPressed = ap && !attackWasPressed;
+  jumpWasPressed = jp;
+  attackWasPressed = ap;
+}
+
+// === TILE COLLISION ===
+function getTile(tx, ty) {
+  if (tx < 0 || tx >= levelW || ty < 0 || ty >= levelH) return 1;
+  return tiles[ty][tx];
+}
+
+function isSolid(tx, ty) {
+  let t = getTile(tx, ty);
+  return t === 1 || t === 2;
+}
+
+function isOneWay(tx, ty) {
+  return getTile(tx, ty) === 5;
+}
+
+function isSpike(tx, ty) {
+  return getTile(tx, ty) === 3;
+}
+
+function isVine(tx, ty) {
+  return getTile(tx, ty) === 4;
+}
+
+function isExit(tx, ty) {
+  return getTile(tx, ty) === 7;
+}
+
+// === PLAYER PHYSICS ===
+function movePlayer(dt) {
+  let p = player;
+
+  // Horizontal movement
+  p.vx = 0;
+  if (keyLeft()) { p.vx = -MOVE_SPEED; p.facing = -1; }
+  if (keyRight()) { p.vx = MOVE_SPEED; p.facing = 1; }
+
+  // Jump
+  if (jumpPressed && p.onGround && !p.pogoing) {
+    p.vy = JUMP_VEL;
+    p.onGround = false;
+    p.jumping = true;
+    TAS.audio.playTone(280, 0.1, 'square', 0.06);
+  }
+
+  // Pogo mechanic: hold down + jump while in air
+  if (!p.onGround && keyDown() && keyJump()) {
+    p.pogoHeld = true;
+  } else if (p.onGround) {
+    p.pogoHeld = false;
+    p.pogoing = false;
+  }
+
+  if (p.pogoHeld && !p.onGround) {
+    p.pogoing = true;
+  }
+
+  // Cane swing on ground
+  if (attackPressed && p.onGround && !p.caneSwing) {
+    p.caneSwing = true;
+    p.caneTimer = 0.25;
+    TAS.audio.playTone(200, 0.08, 'sawtooth', 0.05, 100);
+  }
+  if (p.caneSwing) {
+    p.caneTimer -= dt;
+    if (p.caneTimer <= 0) p.caneSwing = false;
+  }
+
+  // Gravity (lower on moon)
+  let grav = currentLevel === 3 ? GRAVITY * 0.45 : GRAVITY;
+  p.vy += grav * dt;
+  if (p.vy > MAX_FALL) p.vy = MAX_FALL;
+
+  // Low grav jump boost on moon
+  let jumpMult = currentLevel === 3 ? 1.4 : 1;
+
+  // Move X
+  p.x += p.vx * dt;
+
+  // X collision
+  let left = Math.floor(p.x / TILE);
+  let right = Math.floor((p.x + p.w - 1) / TILE);
+  let top = Math.floor(p.y / TILE);
+  let bot = Math.floor((p.y + p.h - 1) / TILE);
+
+  for (let ty = top; ty <= bot; ty++) {
+    if (isSolid(left, ty) && p.vx < 0) {
+      p.x = (left + 1) * TILE;
+      p.vx = 0;
+    }
+    if (isSolid(right, ty) && p.vx > 0) {
+      p.x = right * TILE - p.w;
+      p.vx = 0;
+    }
+  }
+
+  // Move Y
+  let oldY = p.y;
+  p.y += p.vy * dt;
+  p.onGround = false;
+
+  left = Math.floor(p.x / TILE);
+  right = Math.floor((p.x + p.w - 1) / TILE);
+  top = Math.floor(p.y / TILE);
+  bot = Math.floor((p.y + p.h - 1) / TILE);
+
+  // Falling down
+  if (p.vy >= 0) {
+    for (let tx = left; tx <= right; tx++) {
+      if (isSolid(tx, bot)) {
+        p.y = bot * TILE - p.h;
+        if (p.pogoing) {
+          p.vy = POGO_VEL * jumpMult;
+          p.pogoing = true;
+          TAS.audio.playTone(440, 0.08, 'square', 0.07, 660);
+          TAS.particles.spawn(p.x + p.w / 2, p.y + p.h, '#fff', 3, 1.5);
+        } else {
+          p.vy = 0;
+          p.onGround = true;
+          p.jumping = false;
+        }
+        break;
+      }
+      // One-way platforms: only when falling through from above
+      if (isOneWay(tx, bot) && oldY + p.h <= bot * TILE + 2) {
+        p.y = bot * TILE - p.h;
+        if (p.pogoing) {
+          p.vy = POGO_VEL * jumpMult;
+          TAS.audio.playTone(440, 0.08, 'square', 0.07, 660);
+          TAS.particles.spawn(p.x + p.w / 2, p.y + p.h, '#fff', 3, 1.5);
+        } else {
+          p.vy = 0;
+          p.onGround = true;
+          p.jumping = false;
+        }
+        break;
+      }
+    }
+  }
+
+  // Rising up (head bonk)
+  if (p.vy < 0) {
+    for (let tx = left; tx <= right; tx++) {
+      if (isSolid(tx, top)) {
+        p.y = (top + 1) * TILE;
+        p.vy = 0;
+        break;
+      }
+    }
+  }
+
+  // Vine climbing
+  let centerTX = Math.floor((p.x + p.w / 2) / TILE);
+  let centerTY = Math.floor((p.y + p.h / 2) / TILE);
+  if (isVine(centerTX, centerTY)) {
+    if (keyUp()) { p.vy = -80; p.onGround = false; }
+    else if (keyDown()) { p.vy = 50; }
+    else if (!keyJump()) { p.vy = Math.min(p.vy, 20); }
+  }
+
+  // Spike check
+  for (let tx = left; tx <= right; tx++) {
+    if (isSpike(tx, bot) || isSpike(tx, top)) {
+      hurtPlayer();
+      break;
+    }
+  }
+
+  // Exit check
+  for (let tx = left; tx <= right; tx++) {
+    for (let ty = top; ty <= bot; ty++) {
+      if (isExit(tx, ty) && bossDefeated) {
+        completeLevel();
+        return;
+      }
+    }
+  }
+
+  // Breakable blocks (pogo from above)
+  if (p.pogoing && p.vy >= 0) {
+    let belowTY = Math.floor((p.y + p.h + 2) / TILE);
+    for (let tx = left; tx <= right; tx++) {
+      if (getTile(tx, belowTY) === 2) {
+        tiles[belowTY][tx] = 0;
+        TAS.particles.spawn(tx * TILE + 8, belowTY * TILE + 8, LEVEL_COLORS[currentLevel].tile, 6, 2, { gravity: 3 });
+        TAS.audio.playNoise(0.1, 0.06, 800);
+        score += 5;
+      }
+    }
+  }
+
+  // Pogo on enemies
+  if (p.pogoing && p.vy > 0) {
+    for (let e of enemies) {
+      if (!e.alive) continue;
+      if (TAS.hit.rectOverlap(p.x, p.y + p.h - 4, p.w, 6, e.x, e.y, e.w, e.h)) {
+        e.hp--;
+        if (e.hp <= 0) {
+          e.alive = false;
+          score += 50;
+          TAS.particles.spawn(e.x + e.w / 2, e.y + e.h / 2, '#ff4', 8, 2);
+          TAS.audio.playTone(600, 0.1, 'square', 0.06, 200);
+        }
+        p.vy = POGO_BOUNCE_VEL * (currentLevel === 3 ? 1.3 : 1);
+        TAS.audio.playTone(550, 0.08, 'square', 0.07, 880);
+        break;
+      }
+    }
+  }
+
+  // Boss pogo
+  if (p.pogoing && p.vy > 0 && boss && boss.alive) {
+    if (TAS.hit.rectOverlap(p.x, p.y + p.h - 6, p.w, 8, boss.x, boss.y, boss.w, boss.h)) {
+      boss.hp--;
+      boss.flashTimer = 0.3;
+      p.vy = POGO_BOUNCE_VEL * 1.2;
+      TAS.fx.shake(4, 0.85);
+      TAS.audio.playTone(200, 0.15, 'square', 0.08, 100);
+      TAS.particles.spawn(boss.x + boss.w / 2, boss.y, '#ff0', 10, 3);
+      if (boss.hp <= 0) {
+        boss.alive = false;
+        bossDefeated = true;
+        score += 1000;
+        TAS.fx.shake(8, 0.9);
+        TAS.fx.flash('#fff', 0.5);
+        TAS.audio.playMelody([[523, 0.1], [659, 0.1], [784, 0.15], [1047, 0.2]], 100);
+        TAS.particles.spawn(boss.x + boss.w / 2, boss.y + boss.h / 2, '#ff0', 20, 4);
+      }
+    }
+  }
+
+  // Cane swing hit enemies
+  if (p.caneSwing) {
+    let cx = p.facing > 0 ? p.x + p.w : p.x - CANE_RANGE;
+    for (let e of enemies) {
+      if (!e.alive) continue;
+      if (TAS.hit.rectOverlap(cx, p.y, CANE_RANGE, p.h, e.x, e.y, e.w, e.h)) {
+        e.hp--;
+        if (e.hp <= 0) {
+          e.alive = false;
+          score += 50;
+          TAS.particles.spawn(e.x + e.w / 2, e.y + e.h / 2, '#ff4', 8, 2);
+          TAS.audio.playTone(600, 0.1, 'square', 0.06, 200);
+        }
+      }
+    }
+    // Cane swing breakable blocks
+    let cTileX = Math.floor((cx + CANE_RANGE / 2) / TILE);
+    let cTileY = Math.floor((p.y + p.h / 2) / TILE);
+    if (getTile(cTileX, cTileY) === 2) {
+      tiles[cTileY][cTileX] = 0;
+      TAS.particles.spawn(cTileX * TILE + 8, cTileY * TILE + 8, LEVEL_COLORS[currentLevel].tile, 6, 2, { gravity: 3 });
+      TAS.audio.playNoise(0.1, 0.06, 800);
+      score += 5;
+    }
+  }
+
+  // Invulnerability
+  if (p.invuln > 0) p.invuln -= dt;
+
+  // Fall off screen
+  if (p.y > levelH * TILE + 32) {
+    hurtPlayer();
+    if (hp > 0) {
+      p.x = 2 * TILE;
+      p.y = 10 * TILE;
+      p.vy = 0;
+    }
+  }
+
+  // Animation
+  p.animTimer += dt;
+  if (p.animTimer > 0.15) {
+    p.animTimer = 0;
+    p.walkFrame = (p.walkFrame + 1) % 4;
+  }
+
+  // Camera follow
+  camera.x = TAS.math.clamp(p.x - GW / 2 + p.w / 2, 0, levelW * TILE - GW);
+  camera.y = TAS.math.clamp(p.y - GH / 2, 0, levelH * TILE - GH);
+}
+
+function hurtPlayer() {
+  if (player.invuln > 0) return;
+  hp--;
+  player.invuln = INVULN_TIME;
+  TAS.fx.flash('#f00', 0.3);
+  TAS.fx.shake(5, 0.88);
+  TAS.audio.playTone(150, 0.2, 'sawtooth', 0.08, 80);
+  if (hp <= 0) {
+    lives--;
+    if (lives <= 0) {
+      deathTimer = 2;
+      state = 'gameover';
+      if (score > highScore) {
+        highScore = score;
+        TAS.score.save('ducktales_hi', highScore);
+      }
+      TAS.audio.playMelody([[300, 0.2], [250, 0.2], [200, 0.3], [150, 0.4]], 200);
+    } else {
+      hp = 3;
+      player.x = 2 * TILE;
+      player.y = 10 * TILE;
+      player.vy = 0;
+    }
+  }
+}
+
+function completeLevel() {
+  levelsCleared[currentLevel] = true;
+  let timeBonus = Math.max(0, 300 - Math.floor(levelTime)) * 2;
+  score += timeBonus;
+  if (score > highScore) {
+    highScore = score;
+    TAS.score.save('ducktales_hi', highScore);
+  }
+  TAS.audio.playMelody([[523, 0.1], [587, 0.1], [659, 0.1], [784, 0.1], [1047, 0.2]], 120);
+  // Check if all cleared
+  if (levelsCleared.every(c => c)) {
+    state = 'victory';
+    victoryTimer = 0;
+  } else {
+    state = 'map';
+  }
+}
+
+// === ENEMY UPDATE ===
+function updateEnemies(dt) {
+  for (let e of enemies) {
+    if (!e.alive) continue;
+    e.moveTimer += dt;
+    e.animTimer += dt;
+    if (e.animTimer > 0.2) { e.animTimer = 0; e.animFrame = (e.animFrame + 1) % 2; }
+
+    switch(e.type) {
+      case 'snake':
+      case 'robot':
+        e.x += e.vx * dt;
+        // Turn at edges/walls
+        let eTX = Math.floor((e.x + e.w / 2) / TILE);
+        let eTY = Math.floor((e.y + e.h) / TILE);
+        if (isSolid(Math.floor(e.x / TILE), eTY - 1) || isSolid(Math.floor((e.x + e.w) / TILE), eTY - 1)) {
+          e.vx *= -1;
+        }
+        if (!isSolid(eTX, eTY) && !isOneWay(eTX, eTY)) {
+          e.vx *= -1;
+          e.x += e.vx * dt * 5;
+        }
+        e.facing = e.vx > 0 ? 1 : -1;
+        break;
+      case 'bat':
+        e.x = e.startX + Math.sin(e.moveTimer * 2) * 30;
+        e.y = e.startY + Math.cos(e.moveTimer * 1.5) * 20;
+        break;
+      case 'ghost':
+        e.x = e.startX + Math.sin(e.moveTimer * 1.2) * 40;
+        e.y = e.startY + Math.sin(e.moveTimer * 0.8) * 25;
+        break;
+      case 'alien':
+        e.x += e.vx * dt;
+        let ax = Math.floor((e.x + e.w / 2) / TILE);
+        let ay = Math.floor((e.y + e.h) / TILE);
+        if (isSolid(Math.floor(e.x / TILE), ay - 1) || isSolid(Math.floor((e.x + e.w) / TILE), ay - 1)) {
+          e.vx *= -1;
+        }
+        // Alien floats slightly
+        e.y = e.startY + Math.sin(e.moveTimer * 3) * 8;
+        e.facing = e.vx > 0 ? 1 : -1;
+        break;
+    }
+
+    // Hurt player on contact
+    if (player.invuln <= 0 && TAS.hit.rectOverlap(player.x, player.y, player.w, player.h, e.x, e.y, e.w, e.h)) {
+      // If pogoing, handled in movePlayer. Otherwise, hurt
+      if (!player.pogoing || player.vy <= 0) {
+        hurtPlayer();
+      }
+    }
+  }
+}
+
+// === BOSS UPDATE ===
+function updateBoss(dt) {
+  if (!boss || !boss.alive) return;
+  boss.timer += dt;
+  boss.attackTimer += dt;
+  if (boss.flashTimer > 0) boss.flashTimer -= dt;
+
+  // Boss AI patterns by type
+  let speed = 50 + boss.type * 10;
+  switch(boss.type) {
+    case 0: // King Snake - charges back and forth
+      boss.x = boss.startX + Math.sin(boss.timer * 1.5) * 50;
+      if (boss.attackTimer > 2) {
+        boss.attackTimer = 0;
+        // Charge at player
+        boss.vx = player.x < boss.x ? -120 : 120;
+      }
+      boss.x += boss.vx * dt;
+      boss.vx *= 0.97;
+      break;
+    case 1: // Vampire - teleports, swoops
+      if (boss.attackTimer > 2.5) {
+        boss.attackTimer = 0;
+        boss.x = player.x + (Math.random() > 0.5 ? 40 : -40);
+        boss.y = boss.startY - 30;
+        TAS.particles.spawn(boss.x + boss.w / 2, boss.y + boss.h / 2, '#a4f', 6, 2);
+      }
+      boss.y = boss.startY + Math.sin(boss.timer * 2) * 30 - 20;
+      break;
+    case 2: // Crystal Golem - stomps, shakes
+      boss.x = boss.startX + Math.sin(boss.timer) * 35;
+      if (boss.attackTimer > 1.8) {
+        boss.attackTimer = 0;
+        TAS.fx.shake(3, 0.9);
+      }
+      break;
+    case 3: // UFO - flies overhead, shoots
+      boss.x = boss.startX + Math.sin(boss.timer * 1.2) * 60;
+      boss.y = boss.startY - 40 + Math.sin(boss.timer * 2) * 15;
+      if (boss.attackTimer > 1.5) {
+        boss.attackTimer = 0;
+        projectiles.push({ x: boss.x + boss.w / 2 - 3, y: boss.y + boss.h, w: 6, h: 6, vy: 120, vx: 0, life: 3 });
+      }
+      break;
+    case 4: // Reactor Core - orbits, pulses
+      boss.x = boss.startX + Math.cos(boss.timer * 1.8) * 45;
+      boss.y = boss.startY - 20 + Math.sin(boss.timer * 2.2) * 30;
+      if (boss.attackTimer > 1.2) {
+        boss.attackTimer = 0;
+        let angle = TAS.math.angle(boss.x, boss.y, player.x, player.y);
+        projectiles.push({
+          x: boss.x + boss.w / 2 - 3, y: boss.y + boss.h / 2 - 3,
+          w: 6, h: 6, vx: Math.cos(angle) * 100, vy: Math.sin(angle) * 100, life: 3
+        });
+      }
+      break;
+  }
+
+  // Boss hurts player
+  if (player.invuln <= 0 && TAS.hit.rectOverlap(player.x, player.y, player.w, player.h, boss.x, boss.y, boss.w, boss.h)) {
+    if (!player.pogoing || player.vy <= 0) {
+      hurtPlayer();
+    }
+  }
+}
+
+// === PROJECTILES ===
+function updateProjectiles(dt) {
+  for (let i = projectiles.length - 1; i >= 0; i--) {
+    let p = projectiles[i];
+    p.x += p.vx * dt;
+    p.y += p.vy * dt;
+    p.life -= dt;
+    if (p.life <= 0) { projectiles.splice(i, 1); continue; }
+    // Hit player
+    if (player.invuln <= 0 && TAS.hit.rectOverlap(player.x, player.y, player.w, player.h, p.x, p.y, p.w, p.h)) {
+      hurtPlayer();
+      projectiles.splice(i, 1);
+    }
+  }
+}
+
+// === COLLECTIBLES ===
+function updateCollectibles() {
+  for (let c of collectibles) {
+    if (c.collected) continue;
+    if (TAS.hit.rectOverlap(player.x, player.y, player.w, player.h, c.x, c.y, c.w, c.h)) {
+      c.collected = true;
+      switch(c.type) {
+        case 'gem':
+          gems++;
+          score += 10;
+          TAS.audio.playTone(880, 0.06, 'square', 0.05, 1200);
+          TAS.particles.spawn(c.x + 4, c.y + 4, '#0ff', 4, 1.5);
+          if (gems % 100 === 0) {
+            lives++;
+            TAS.audio.playMelody([[523, 0.08], [659, 0.08], [784, 0.1], [1047, 0.12]], 80);
+          }
+          break;
+        case 'chest':
+          score += c.value;
+          TAS.audio.playMelody([[440, 0.08], [554, 0.08], [659, 0.12]], 100);
+          TAS.particles.spawn(c.x + 8, c.y + 8, '#ff0', 10, 2.5);
+          TAS.fx.flash('#ff0', 0.15);
+          break;
+        case 'bigGem':
+          score += 500;
+          TAS.audio.playMelody([[523, 0.1], [659, 0.1], [784, 0.1], [1047, 0.15]], 100);
+          TAS.particles.spawn(c.x + 8, c.y + 8, '#f0f', 15, 3);
+          TAS.fx.flash('#f0f', 0.2);
+          break;
+      }
+    }
+  }
+}
+
+// === DRAWING ===
+function drawTiles() {
+  let col = LEVEL_COLORS[currentLevel];
+  let startX = Math.floor(camera.x / TILE);
+  let endX = Math.min(startX + Math.ceil(GW / TILE) + 1, levelW);
+  let startY = Math.floor(camera.y / TILE);
+  let endY = Math.min(startY + Math.ceil(GH / TILE) + 1, levelH);
+
+  for (let ty = startY; ty < endY; ty++) {
+    for (let tx = startX; tx < endX; tx++) {
+      let t = getTile(tx, ty);
+      if (t === 0) continue;
+      let dx = tx * TILE - camera.x;
+      let dy = ty * TILE - camera.y;
+
+      switch(t) {
+        case 1: // solid
+          ctx.fillStyle = col.tile;
+          ctx.fillRect(dx, dy, TILE, TILE);
+          ctx.fillStyle = col.tile2;
+          ctx.fillRect(dx, dy, TILE, 2);
+          ctx.fillRect(dx, dy, 2, TILE);
+          break;
+        case 2: // breakable
+          ctx.fillStyle = '#886644';
+          ctx.fillRect(dx, dy, TILE, TILE);
+          ctx.strokeStyle = '#aa8866';
+          ctx.strokeRect(dx + 1, dy + 1, TILE - 2, TILE - 2);
+          // crack marks
+          ctx.strokeStyle = '#554433';
+          ctx.beginPath();
+          ctx.moveTo(dx + 4, dy + 4); ctx.lineTo(dx + 10, dy + 8);
+          ctx.moveTo(dx + 12, dy + 3); ctx.lineTo(dx + 8, dy + 12);
+          ctx.stroke();
+          break;
+        case 3: // spikes
+          ctx.fillStyle = '#cc3333';
+          for (let s = 0; s < 4; s++) {
+            ctx.beginPath();
+            ctx.moveTo(dx + s * 4, dy + TILE);
+            ctx.lineTo(dx + s * 4 + 2, dy + 6);
+            ctx.lineTo(dx + s * 4 + 4, dy + TILE);
+            ctx.fill();
+          }
+          break;
+        case 4: // vine
+          ctx.fillStyle = '#2a8020';
+          ctx.fillRect(dx + 6, dy, 4, TILE);
+          ctx.fillStyle = '#4ab040';
+          if ((ty + tx) % 2 === 0) {
+            ctx.fillRect(dx + 3, dy + 4, 5, 3);
+          } else {
+            ctx.fillRect(dx + 9, dy + 8, 5, 3);
+          }
+          break;
+        case 5: // one-way platform
+          ctx.fillStyle = col.accent;
+          ctx.fillRect(dx, dy, TILE, 4);
+          ctx.fillStyle = col.tile2;
+          ctx.fillRect(dx + 2, dy + 4, 3, 2);
+          ctx.fillRect(dx + 10, dy + 4, 3, 2);
+          break;
+        case 7: // exit
+          ctx.fillStyle = bossDefeated ? '#4f4' : '#444';
+          ctx.fillRect(dx, dy, TILE, TILE);
+          ctx.fillStyle = bossDefeated ? '#8f8' : '#666';
+          ctx.font = '10px monospace';
+          ctx.textAlign = 'center';
+          ctx.fillText('E', dx + 8, dy + 12);
+          break;
+      }
+    }
+  }
+}
+
+function drawPlayer() {
+  let p = player;
+  if (p.invuln > 0 && Math.floor(p.invuln * 10) % 2 === 0) return; // blink
+
+  let dx = p.x - camera.x;
+  let dy = p.y - camera.y;
+  let f = p.facing;
+
+  ctx.save();
+  ctx.translate(dx + p.w / 2, dy + p.h / 2);
+  if (f < 0) ctx.scale(-1, 1);
+
+  // Body
+  ctx.fillStyle = '#4488ff';
+  ctx.fillRect(-5, -2, 10, 12);
+
+  // Head
+  ctx.fillStyle = '#ffcc66';
+  ctx.fillRect(-4, -9, 8, 8);
+
+  // Top hat
+  ctx.fillStyle = '#222';
+  ctx.fillRect(-5, -14, 10, 5);
+  ctx.fillRect(-3, -16, 6, 3);
+
+  // Eyes
+  ctx.fillStyle = '#fff';
+  ctx.fillRect(0, -7, 3, 3);
+  ctx.fillStyle = '#000';
+  ctx.fillRect(1, -6, 2, 2);
+
+  // Beak (duck bill)
+  ctx.fillStyle = '#ff8800';
+  ctx.fillRect(3, -5, 4, 3);
+
+  // Legs
+  ctx.fillStyle = '#ff8800';
+  if (p.onGround && p.vx !== 0) {
+    let lf = p.walkFrame;
+    ctx.fillRect(-3, 10, 3, 4 + (lf % 2 === 0 ? 2 : 0));
+    ctx.fillRect(1, 10, 3, 4 + (lf % 2 === 1 ? 2 : 0));
+  } else {
+    ctx.fillRect(-3, 10, 3, 4);
+    ctx.fillRect(1, 10, 3, 4);
+  }
+
+  // Cane
+  ctx.fillStyle = '#aa6633';
+  if (p.caneSwing) {
+    // Swing animation
+    let swingAngle = (0.25 - p.caneTimer) / 0.25 * Math.PI * 0.7 - 0.3;
+    ctx.save();
+    ctx.translate(4, 2);
+    ctx.rotate(swingAngle);
+    ctx.fillRect(0, -1, 18, 2);
+    ctx.fillStyle = '#cc8844';
+    ctx.fillRect(16, -3, 4, 6);
+    ctx.restore();
+  } else if (p.pogoing && !p.onGround) {
+    // Pogo cane pointing down
+    ctx.fillRect(-1, 5, 2, 16);
+    ctx.fillStyle = '#888';
+    ctx.fillRect(-2, 19, 4, 3);
+  } else {
+    // Held diagonally
+    ctx.save();
+    ctx.translate(3, 4);
+    ctx.rotate(0.4);
+    ctx.fillRect(0, 0, 14, 2);
+    ctx.fillStyle = '#cc8844';
+    ctx.fillRect(12, -2, 3, 5);
+    ctx.restore();
+  }
+
+  ctx.restore();
+}
+
+function drawEnemies() {
+  for (let e of enemies) {
+    if (!e.alive) continue;
+    let dx = e.x - camera.x;
+    let dy = e.y - camera.y;
+    if (dx < -20 || dx > GW + 20 || dy < -20 || dy > GH + 20) continue;
+
+    ctx.save();
+    ctx.translate(dx + e.w / 2, dy + e.h / 2);
+
+    switch(e.type) {
+      case 'snake':
+        ctx.fillStyle = '#44aa22';
+        ctx.fillRect(-8, -3, 16, 6);
+        ctx.fillStyle = '#66cc44';
+        ctx.fillRect(-8, -5, 6, 4);
+        ctx.fillStyle = '#ff0';
+        ctx.fillRect(-6 + (e.facing > 0 ? 8 : 0), -4, 2, 2);
+        // Tongue
+        if (e.animFrame === 0) {
+          ctx.fillStyle = '#f44';
+          ctx.fillRect(e.facing > 0 ? 8 : -11, -1, 3, 1);
+        }
+        break;
+      case 'bat':
+        ctx.fillStyle = '#553366';
+        ctx.fillRect(-3, -3, 6, 8);
+        // Wings
+        let wingSpread = e.animFrame === 0 ? 7 : 4;
+        ctx.fillRect(-wingSpread - 3, -2, wingSpread, 5);
+        ctx.fillRect(3, -2, wingSpread, 5);
+        ctx.fillStyle = '#f44';
+        ctx.fillRect(-2, -1, 1, 1);
+        ctx.fillRect(1, -1, 1, 1);
+        break;
+      case 'ghost':
+        ctx.globalAlpha = 0.7 + Math.sin(e.moveTimer * 4) * 0.2;
+        ctx.fillStyle = '#ddeeff';
+        ctx.beginPath();
+        ctx.arc(0, -2, 7, Math.PI, 0);
+        ctx.lineTo(7, 8);
+        ctx.lineTo(4, 5); ctx.lineTo(1, 8); ctx.lineTo(-2, 5); ctx.lineTo(-5, 8);
+        ctx.lineTo(-7, 5);
+        ctx.closePath();
+        ctx.fill();
+        ctx.fillStyle = '#226';
+        ctx.fillRect(-3, -4, 2, 3);
+        ctx.fillRect(1, -4, 2, 3);
+        ctx.globalAlpha = 1;
+        break;
+      case 'alien':
+        ctx.fillStyle = '#44ff88';
+        ctx.fillRect(-5, -6, 10, 12);
+        ctx.fillStyle = '#22aa44';
+        ctx.beginPath();
+        ctx.arc(0, -7, 5, Math.PI, 0);
+        ctx.fill();
+        ctx.fillStyle = '#000';
+        ctx.fillRect(-4, -5, 3, 4);
+        ctx.fillRect(1, -5, 3, 4);
+        // Antennae
+        ctx.fillStyle = '#ff0';
+        ctx.fillRect(-2, -12, 1, 4);
+        ctx.fillRect(2, -12, 1, 4);
+        break;
+      case 'robot':
+        ctx.fillStyle = '#8888aa';
+        ctx.fillRect(-6, -6, 12, 14);
+        ctx.fillStyle = '#aaaacc';
+        ctx.fillRect(-7, -8, 14, 4);
+        ctx.fillStyle = '#f44';
+        ctx.fillRect(-3, -6, 2, 2);
+        ctx.fillRect(2, -6, 2, 2);
+        // Treads
+        ctx.fillStyle = '#444';
+        ctx.fillRect(-6, 8, 5, 3);
+        ctx.fillRect(1, 8, 5, 3);
+        if (e.hp > 1) {
+          ctx.fillStyle = '#44f';
+          ctx.fillRect(-2, 0, 4, 3);
+        }
+        break;
+    }
+    ctx.restore();
+  }
+}
+
+function drawBoss() {
+  if (!boss || !boss.alive) return;
+  let dx = boss.x - camera.x;
+  let dy = boss.y - camera.y;
+  if (dx < -40 || dx > GW + 40) return;
+
+  ctx.save();
+  ctx.translate(dx + boss.w / 2, dy + boss.h / 2);
+
+  if (boss.flashTimer > 0) {
+    ctx.globalAlpha = 0.5 + Math.sin(boss.flashTimer * 30) * 0.3;
+  }
+
+  switch(boss.type) {
+    case 0: // King Snake
+      ctx.fillStyle = '#228800';
+      ctx.fillRect(-14, -4, 28, 12);
+      ctx.fillStyle = '#44bb22';
+      ctx.fillRect(-14, -10, 12, 10);
+      ctx.fillStyle = '#ff0';
+      ctx.fillRect(-12, -8, 3, 3);
+      ctx.fillRect(-6, -8, 3, 3);
+      // Crown
+      ctx.fillStyle = '#ffd700';
+      ctx.fillRect(-12, -15, 10, 5);
+      ctx.fillRect(-11, -18, 2, 4);
+      ctx.fillRect(-7, -18, 2, 4);
+      ctx.fillRect(-3, -18, 2, 4);
+      break;
+    case 1: // Vampire
+      ctx.fillStyle = '#220033';
+      ctx.fillRect(-10, -8, 20, 20);
+      ctx.fillStyle = '#eeddff';
+      ctx.fillRect(-6, -12, 12, 8);
+      ctx.fillStyle = '#f00';
+      ctx.fillRect(-4, -10, 3, 3);
+      ctx.fillRect(1, -10, 3, 3);
+      // Cape
+      ctx.fillStyle = '#440066';
+      ctx.fillRect(-14, -6, 6, 18);
+      ctx.fillRect(8, -6, 6, 18);
+      // Fangs
+      ctx.fillStyle = '#fff';
+      ctx.fillRect(-3, -4, 2, 3);
+      ctx.fillRect(1, -4, 2, 3);
+      break;
+    case 2: // Crystal Golem
+      ctx.fillStyle = '#6688cc';
+      ctx.fillRect(-12, -10, 24, 24);
+      ctx.fillStyle = '#88aaee';
+      ctx.fillRect(-8, -14, 16, 6);
+      ctx.fillStyle = '#aaccff';
+      ctx.fillRect(-4, -10, 3, 3);
+      ctx.fillRect(2, -10, 3, 3);
+      // Crystal protrusions
+      ctx.fillStyle = '#99ddff';
+      ctx.beginPath();
+      ctx.moveTo(-12, -6); ctx.lineTo(-16, -14); ctx.lineTo(-8, -8);
+      ctx.fill();
+      ctx.beginPath();
+      ctx.moveTo(12, -6); ctx.lineTo(16, -14); ctx.lineTo(8, -8);
+      ctx.fill();
+      break;
+    case 3: // UFO
+      ctx.fillStyle = '#666688';
+      ctx.beginPath();
+      ctx.ellipse(0, 0, 14, 6, 0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = '#8888aa';
+      ctx.beginPath();
+      ctx.arc(0, -4, 8, Math.PI, 0);
+      ctx.fill();
+      // Lights
+      ctx.fillStyle = Math.sin(frame * 0.2) > 0 ? '#0f0' : '#f00';
+      ctx.fillRect(-8, -1, 3, 3);
+      ctx.fillRect(5, -1, 3, 3);
+      ctx.fillStyle = '#ff0';
+      ctx.fillRect(-2, 4, 4, 3);
+      break;
+    case 4: // Reactor Core
+      let pulse = 0.7 + Math.sin(frame * 0.1) * 0.3;
+      ctx.fillStyle = `rgba(255,100,0,${pulse})`;
+      ctx.beginPath();
+      ctx.arc(0, 0, 14, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = '#ff4400';
+      ctx.beginPath();
+      ctx.arc(0, 0, 10, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = '#ffaa00';
+      ctx.beginPath();
+      ctx.arc(0, 0, 6, 0, Math.PI * 2);
+      ctx.fill();
+      // Energy arcs
+      ctx.strokeStyle = '#ff8800';
+      ctx.lineWidth = 1;
+      for (let a = 0; a < 4; a++) {
+        let ang = frame * 0.05 + a * Math.PI / 2;
+        ctx.beginPath();
+        ctx.moveTo(Math.cos(ang) * 10, Math.sin(ang) * 10);
+        ctx.lineTo(Math.cos(ang) * 18, Math.sin(ang) * 18);
+        ctx.stroke();
+      }
+      break;
+  }
+
+  ctx.globalAlpha = 1;
+  ctx.restore();
+
+  // Boss HP bar
+  let barW = 60;
+  let barX = dx + boss.w / 2 - barW / 2;
+  let barY = dy - 12;
+  ctx.fillStyle = '#400';
+  ctx.fillRect(barX, barY, barW, 5);
+  ctx.fillStyle = '#f44';
+  ctx.fillRect(barX, barY, barW * (boss.hp / boss.maxHp), 5);
+  ctx.strokeStyle = '#888';
+  ctx.strokeRect(barX, barY, barW, 5);
+}
+
+function drawProjectiles() {
+  ctx.fillStyle = '#ff4400';
+  for (let p of projectiles) {
+    let dx = p.x - camera.x;
+    let dy = p.y - camera.y;
+    ctx.beginPath();
+    ctx.arc(dx + p.w / 2, dy + p.h / 2, 3, 0, Math.PI * 2);
+    ctx.fill();
+  }
+}
+
+function drawCollectibles() {
+  for (let c of collectibles) {
+    if (c.collected) continue;
+    let dx = c.x - camera.x;
+    let dy = c.y - camera.y;
+    if (dx < -16 || dx > GW + 16) continue;
+
+    switch(c.type) {
+      case 'gem':
+        let bob = Math.sin(frame * 0.08 + c.x * 0.1) * 2;
+        ctx.fillStyle = '#00ffcc';
+        ctx.beginPath();
+        ctx.moveTo(dx + 4, dy + bob);
+        ctx.lineTo(dx + 8, dy + 3 + bob);
+        ctx.lineTo(dx + 4, dy + 7 + bob);
+        ctx.lineTo(dx, dy + 3 + bob);
+        ctx.closePath();
+        ctx.fill();
+        ctx.fillStyle = '#88ffee';
+        ctx.fillRect(dx + 2, dy + 2 + bob, 2, 2);
+        break;
+      case 'chest':
+        ctx.fillStyle = '#886622';
+        ctx.fillRect(dx, dy + 4, 16, 12);
+        ctx.fillStyle = '#aa8844';
+        ctx.fillRect(dx, dy + 4, 16, 4);
+        ctx.fillStyle = '#ffd700';
+        ctx.fillRect(dx + 6, dy + 6, 4, 4);
+        ctx.fillStyle = '#664411';
+        ctx.fillRect(dx + 1, dy + 10, 14, 1);
+        break;
+      case 'bigGem':
+        let bob2 = Math.sin(frame * 0.06) * 3;
+        let glow = 0.4 + Math.sin(frame * 0.1) * 0.2;
+        ctx.globalAlpha = glow;
+        ctx.fillStyle = '#ff44ff';
+        ctx.beginPath();
+        ctx.arc(dx + 8, dy + 8 + bob2, 12, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.globalAlpha = 1;
+        ctx.fillStyle = '#ff00ff';
+        ctx.beginPath();
+        ctx.moveTo(dx + 8, dy + bob2);
+        ctx.lineTo(dx + 14, dy + 5 + bob2);
+        ctx.lineTo(dx + 14, dy + 11 + bob2);
+        ctx.lineTo(dx + 8, dy + 16 + bob2);
+        ctx.lineTo(dx + 2, dy + 11 + bob2);
+        ctx.lineTo(dx + 2, dy + 5 + bob2);
+        ctx.closePath();
+        ctx.fill();
+        ctx.fillStyle = '#ff88ff';
+        ctx.fillRect(dx + 4, dy + 4 + bob2, 3, 3);
+        break;
+    }
+  }
+}
+
+function drawBackground() {
+  let col = LEVEL_COLORS[currentLevel];
+  // Sky gradient
+  ctx.fillStyle = col.sky;
+  ctx.fillRect(0, 0, GW, GH);
+
+  // Parallax bg elements
+  let px = -camera.x * 0.3;
+  ctx.fillStyle = col.bg;
+  for (let i = 0; i < 8; i++) {
+    let bx = (i * 80 + px) % (GW + 80) - 40;
+    let bh = 30 + (i * 17) % 40;
+    ctx.fillRect(bx, GH - bh - 20, 50, bh + 20);
+  }
+
+  // Distant details per level
+  ctx.globalAlpha = 0.3;
+  ctx.fillStyle = col.accent;
+  switch(currentLevel) {
+    case 0: // Jungle trees
+      for (let i = 0; i < 6; i++) {
+        let tx = (i * 100 - camera.x * 0.2) % (GW + 60) - 30;
+        ctx.fillRect(tx + 8, GH - 80, 6, 50);
+        ctx.beginPath();
+        ctx.arc(tx + 11, GH - 80, 18, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      break;
+    case 1: // Castle towers
+      for (let i = 0; i < 4; i++) {
+        let tx = (i * 130 - camera.x * 0.15) % (GW + 80) - 40;
+        ctx.fillRect(tx, GH - 100, 20, 80);
+        ctx.fillRect(tx - 3, GH - 108, 5, 10);
+        ctx.fillRect(tx + 8, GH - 108, 5, 10);
+        ctx.fillRect(tx + 18, GH - 108, 5, 10);
+      }
+      break;
+    case 2: // Crystals
+      for (let i = 0; i < 8; i++) {
+        let tx = (i * 70 - camera.x * 0.25) % (GW + 50) - 25;
+        ctx.beginPath();
+        ctx.moveTo(tx, GH - 20);
+        ctx.lineTo(tx + 6, GH - 50 - i * 5);
+        ctx.lineTo(tx + 12, GH - 20);
+        ctx.fill();
+      }
+      break;
+    case 3: // Stars and planets
+      for (let i = 0; i < 30; i++) {
+        let sx = (i * 37 + 10) % GW;
+        let sy = (i * 23 + 5) % (GH - 40);
+        ctx.fillRect(sx, sy, 1 + (i % 3 === 0 ? 1 : 0), 1);
+      }
+      ctx.beginPath();
+      ctx.arc(GW - 60 - camera.x * 0.05, 40, 20, 0, Math.PI * 2);
+      ctx.fill();
+      break;
+    case 4: // Pipes and vents
+      for (let i = 0; i < 5; i++) {
+        let tx = (i * 110 - camera.x * 0.2) % (GW + 60) - 30;
+        ctx.fillRect(tx, 20, 8, GH - 40);
+        ctx.fillRect(tx - 4, 20 + i * 30, 16, 6);
+      }
+      break;
+  }
+  ctx.globalAlpha = 1;
+}
+
+// === WORLD MAP ===
+function drawMap() {
+  ctx.fillStyle = '#0a0a1a';
+  ctx.fillRect(0, 0, GW, GH);
+
+  // Title
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#ffdd44';
+  ctx.font = 'bold 16px monospace';
+  ctx.fillText('DUCK TALES', GW / 2, 28);
+  ctx.fillStyle = '#888';
+  ctx.font = '9px monospace';
+  ctx.fillText('Select a Level', GW / 2, 42);
+
+  // Level boxes
+  for (let i = 0; i < 5; i++) {
+    let lx = 30 + i * 68;
+    let ly = 70;
+    let selected = i === mapCursor;
+
+    // Box
+    ctx.fillStyle = selected ? LEVEL_COLORS[i].accent : '#222';
+    ctx.fillRect(lx, ly, 56, 80);
+    ctx.strokeStyle = selected ? '#fff' : (levelsCleared[i] ? '#4f4' : '#444');
+    ctx.lineWidth = selected ? 2 : 1;
+    ctx.strokeRect(lx, ly, 56, 80);
+    ctx.lineWidth = 1;
+
+    // Level icon
+    ctx.fillStyle = LEVEL_COLORS[i].tile;
+    ctx.fillRect(lx + 8, ly + 8, 40, 30);
+    ctx.fillStyle = LEVEL_COLORS[i].accent;
+    ctx.font = '18px monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText(String(i + 1), lx + 28, ly + 32);
+
+    // Name
+    ctx.fillStyle = selected ? '#fff' : '#aaa';
+    ctx.font = '7px monospace';
+    ctx.fillText(LEVEL_NAMES[i].split(' ')[0], lx + 28, ly + 54);
+    ctx.fillText(LEVEL_NAMES[i].split(' ')[1] || '', lx + 28, ly + 63);
+
+    // Cleared mark
+    if (levelsCleared[i]) {
+      ctx.fillStyle = '#4f4';
+      ctx.font = 'bold 14px monospace';
+      ctx.fillText('OK', lx + 28, ly + 76);
+    }
+  }
+
+  // Cursor blink
+  if (Math.floor(frame * 0.06) % 2 === 0) {
+    let cx = 30 + mapCursor * 68;
+    ctx.strokeStyle = '#ffdd44';
+    ctx.lineWidth = 2;
+    ctx.strokeRect(cx - 2, 68, 60, 84);
+    ctx.lineWidth = 1;
+  }
+
+  // Instructions
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#888';
+  ctx.font = '9px monospace';
+  ctx.fillText('LEFT/RIGHT to select, JUMP to enter', GW / 2, 180);
+
+  // Score display
+  ctx.fillStyle = '#ffdd44';
+  ctx.font = '10px monospace';
+  ctx.fillText('Score: ' + score + '  Gems: ' + gems + '  Lives: ' + lives, GW / 2, 210);
+  ctx.fillStyle = '#888';
+  ctx.fillText('High Score: ' + highScore, GW / 2, 225);
+
+  // HP hearts
+  ctx.fillStyle = '#f44';
+  ctx.font = '10px monospace';
+  ctx.textAlign = 'left';
+  let hpText = '';
+  for (let i = 0; i < hp; i++) hpText += '\u2665 ';
+  ctx.fillText(hpText, 10, GH - 10);
+}
+
+// === MAIN UPDATE ===
+function update(dt) {
+  frame++;
+  TAS.particles.update(dt);
+  TAS.fx.updateEffects(dt);
+  updateInputEdge();
+
+  switch(state) {
+    case 'title':
+      if (jumpPressed || attackPressed) {
+        TAS.audio.ensureAudio();
+        state = 'map';
+        score = 0;
+        gems = 0;
+        lives = 3;
+        hp = 3;
+        levelsCleared = [false, false, false, false, false];
+        mapCursor = 0;
+      }
+      break;
+
+    case 'map':
+      if (keyLeft() && !prevLeft) {
+        mapCursor = (mapCursor - 1 + 5) % 5;
+        TAS.audio.playTone(300, 0.05, 'square', 0.04);
+      }
+      if (keyRight() && !prevRight) {
+        mapCursor = (mapCursor + 1) % 5;
+        TAS.audio.playTone(300, 0.05, 'square', 0.04);
+      }
+      prevLeft = keyLeft();
+      prevRight = keyRight();
+      if (jumpPressed) {
+        currentLevel = mapCursor;
+        generateLevel(currentLevel);
+        player = createPlayer(2 * TILE, 10 * TILE);
+        camera = { x: 0, y: 0 };
+        state = 'playing';
+        TAS.audio.playTone(440, 0.1, 'square', 0.06, 880);
+      }
+      break;
+
+    case 'playing':
+      levelTime += dt;
+      movePlayer(dt);
+      updateEnemies(dt);
+      updateBoss(dt);
+      updateProjectiles(dt);
+      updateCollectibles();
+      break;
+
+    case 'gameover':
+      deathTimer -= dt;
+      if (deathTimer <= 0 && (jumpPressed || attackPressed)) {
+        state = 'title';
+      }
+      break;
+
+    case 'victory':
+      victoryTimer += dt;
+      if (victoryTimer > 2 && (jumpPressed || attackPressed)) {
+        state = 'title';
+      }
+      break;
+  }
+}
+
+let prevLeft = false;
+let prevRight = false;
+
+// === MAIN DRAW ===
+function draw(dt) {
+  ctx.fillStyle = '#111';
+  ctx.fillRect(0, 0, GW, GH);
+
+  switch(state) {
+    case 'title':
+      drawTitleScreen();
+      break;
+    case 'map':
+      drawMap();
+      break;
+    case 'playing':
+      ctx.save();
+      TAS.fx.applyShake();
+      drawBackground();
+      drawTiles();
+      drawCollectibles();
+      drawEnemies();
+      drawBoss();
+      drawProjectiles();
+      drawPlayer();
+      TAS.particles.draw();
+      ctx.restore();
+      TAS.fx.drawFlash(GW, GH);
+      drawPlayingHUD();
+      TAS.input.drawTouchControls(GW, GH);
+      break;
+    case 'gameover':
+      TAS.ui.drawGameOver(score, highScore, GW, GH, { frame, extra: 'Gems: ' + gems });
+      break;
+    case 'victory':
+      drawVictory();
+      break;
+  }
+}
+
+function drawTitleScreen() {
+  // Background
+  ctx.fillStyle = '#060618';
+  ctx.fillRect(0, 0, GW, GH);
+
+  // Stars
+  for (let i = 0; i < 40; i++) {
+    let sx = (i * 31 + frame * 0.2) % GW;
+    let sy = (i * 17 + 3) % GH;
+    ctx.fillStyle = i % 3 === 0 ? '#ff8' : '#fff';
+    ctx.fillRect(sx, sy, 1, 1);
+  }
+
+  // Title
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#000';
+  ctx.font = 'bold 22px monospace';
+  ctx.fillText('DUCK TALES', GW / 2 + 2, 62);
+  ctx.fillStyle = '#ffdd44';
+  ctx.fillText('DUCK TALES', GW / 2, 60);
+
+  ctx.fillStyle = '#88ccff';
+  ctx.font = '10px monospace';
+  ctx.fillText('Treasure Hunter', GW / 2, 80);
+
+  // Duck character preview
+  ctx.save();
+  ctx.translate(GW / 2, 130);
+  // Body
+  ctx.fillStyle = '#4488ff';
+  ctx.fillRect(-6, -2, 12, 14);
+  // Head
+  ctx.fillStyle = '#ffcc66';
+  ctx.fillRect(-5, -10, 10, 9);
+  // Top hat
+  ctx.fillStyle = '#222';
+  ctx.fillRect(-6, -16, 12, 6);
+  ctx.fillRect(-4, -18, 8, 3);
+  // Eyes
+  ctx.fillStyle = '#fff';
+  ctx.fillRect(0, -8, 4, 3);
+  ctx.fillStyle = '#000';
+  ctx.fillRect(1, -7, 2, 2);
+  // Beak
+  ctx.fillStyle = '#ff8800';
+  ctx.fillRect(4, -6, 5, 3);
+  // Cane
+  ctx.fillStyle = '#aa6633';
+  ctx.save();
+  ctx.translate(4, 5);
+  ctx.rotate(0.4);
+  ctx.fillRect(0, 0, 18, 3);
+  ctx.fillStyle = '#cc8844';
+  ctx.fillRect(15, -2, 5, 7);
+  ctx.restore();
+  // Legs
+  ctx.fillStyle = '#ff8800';
+  ctx.fillRect(-4, 12, 3, 5);
+  ctx.fillRect(1, 12, 3, 5);
+  ctx.restore();
+
+  // Instructions
+  ctx.fillStyle = '#888';
+  ctx.font = '8px monospace';
+  ctx.fillText('Arrows: Move | Z/Space: Jump | X: Cane Swing', GW / 2, 175);
+  ctx.fillText('Hold DOWN + JUMP in air = POGO BOUNCE!', GW / 2, 188);
+  ctx.fillText('Pogo on enemies, break blocks, reach high places', GW / 2, 200);
+
+  // High score
+  if (highScore > 0) {
+    ctx.fillStyle = '#aaa';
+    ctx.font = '9px monospace';
+    ctx.fillText('High Score: ' + highScore, GW / 2, 220);
+  }
+
+  // Start prompt
+  let pulse = Math.sin(frame * 0.05) * 0.3 + 0.7;
+  ctx.globalAlpha = pulse;
+  ctx.fillStyle = '#ffdd44';
+  ctx.font = 'bold 11px monospace';
+  ctx.fillText('PRESS JUMP TO START', GW / 2, GH - 20);
+  ctx.globalAlpha = 1;
+}
+
+function drawPlayingHUD() {
+  // HUD bar
+  ctx.fillStyle = 'rgba(10,5,20,0.75)';
+  ctx.fillRect(0, 0, GW, HUD_H);
+
+  ctx.font = 'bold 10px monospace';
+
+  // Score
+  ctx.fillStyle = '#ffdd44';
+  ctx.textAlign = 'left';
+  ctx.fillText('$' + score, 4, 14);
+
+  // Gems
+  ctx.fillStyle = '#0fc';
+  ctx.textAlign = 'center';
+  ctx.fillText('Gems:' + gems, GW / 2 - 40, 14);
+
+  // Level name
+  ctx.fillStyle = LEVEL_COLORS[currentLevel].accent;
+  ctx.fillText(LEVEL_NAMES[currentLevel], GW / 2 + 40, 14);
+
+  // HP hearts
+  ctx.fillStyle = '#f44';
+  ctx.textAlign = 'right';
+  let hearts = '';
+  for (let i = 0; i < hp; i++) hearts += '\u2665';
+  ctx.fillText(hearts, GW - 30, 14);
+
+  // Lives
+  ctx.fillStyle = '#4f4';
+  ctx.font = '9px monospace';
+  ctx.fillText('x' + lives, GW - 4, 14);
+
+  // Boss indicator
+  if (boss && boss.alive) {
+    ctx.fillStyle = '#f44';
+    ctx.textAlign = 'center';
+    ctx.font = '8px monospace';
+    ctx.fillText('BOSS: ' + boss.name, GW / 2, GH - 8);
+  } else if (bossDefeated) {
+    ctx.fillStyle = '#4f4';
+    ctx.textAlign = 'center';
+    ctx.font = '8px monospace';
+    let pulse = Math.sin(frame * 0.08) > 0 ? '#4f4' : '#ff0';
+    ctx.fillStyle = pulse;
+    ctx.fillText('EXIT OPEN!', GW / 2, GH - 8);
+  }
+
+  // Pogo indicator
+  if (player && player.pogoing) {
+    ctx.fillStyle = '#ff0';
+    ctx.textAlign = 'left';
+    ctx.font = 'bold 8px monospace';
+    ctx.fillText('POGO!', 4, GH - 8);
+  }
+}
+
+function drawVictory() {
+  ctx.fillStyle = '#060618';
+  ctx.fillRect(0, 0, GW, GH);
+
+  // Stars celebration
+  for (let i = 0; i < 50; i++) {
+    let sx = (i * 29 + frame * 0.5) % GW;
+    let sy = (i * 19 + frame * 0.3) % GH;
+    ctx.fillStyle = ['#ff0', '#0ff', '#f0f', '#0f0'][i % 4];
+    ctx.fillRect(sx, sy, 2, 2);
+  }
+
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#ffdd44';
+  ctx.font = 'bold 20px monospace';
+  ctx.fillText('VICTORY!', GW / 2, 60);
+
+  ctx.fillStyle = '#fff';
+  ctx.font = '12px monospace';
+  ctx.fillText('All Treasures Recovered!', GW / 2, 90);
+
+  ctx.fillStyle = '#ffdd44';
+  ctx.font = 'bold 14px monospace';
+  ctx.fillText('Final Score: ' + score, GW / 2, 130);
+
+  ctx.fillStyle = '#0fc';
+  ctx.font = '11px monospace';
+  ctx.fillText('Gems Collected: ' + gems, GW / 2, 155);
+
+  if (score >= highScore && score > 0) {
+    let pulse = Math.sin(frame * 0.08) * 0.3 + 0.7;
+    ctx.globalAlpha = pulse;
+    ctx.fillStyle = '#ff0';
+    ctx.font = 'bold 12px monospace';
+    ctx.fillText('NEW HIGH SCORE!', GW / 2, 180);
+    ctx.globalAlpha = 1;
+  }
+
+  if (victoryTimer > 2) {
+    let pulse = Math.sin(frame * 0.05) * 0.3 + 0.7;
+    ctx.globalAlpha = pulse;
+    ctx.fillStyle = '#88ccff';
+    ctx.font = '10px monospace';
+    ctx.fillText('PRESS ANY KEY', GW / 2, 220);
+    ctx.globalAlpha = 1;
+  }
+}
+
+// === START ===
+TAS.loop.start(update, draw);
+
+})();
+</script>
+</body>
+</html>

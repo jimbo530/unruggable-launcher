@@ -1,0 +1,2126 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>StarTropics Hex</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body { width: 100%; height: 100%; overflow: hidden; background: #111; touch-action: none; }
+canvas { display: block; margin: 0 auto; }
+#back-link {
+  position: fixed; bottom: 8px; left: 50%; transform: translateX(-50%);
+  color: #666; font-family: monospace; font-size: 12px; text-decoration: none; z-index: 10;
+}
+#back-link:hover { color: #aaa; }
+</style>
+</head>
+<body>
+<canvas id="gc"></canvas>
+<a id="back-link" href="/games">Back to Arcade</a>
+<script src="nft-loader.js"></script>
+<script>if(window.NftLoader)NftLoader.gate();</script>
+<script src="tasern-engine.js"></script>
+<script>
+(function() {
+"use strict";
+
+// === GAME CONSTANTS ===
+const GW = 480, GH = 320;
+const ctx = TAS.ctx;
+const TILE = 32;
+const COLS = 15, ROWS = 9;
+const HUD_Y = 28;
+const DIR = { UP: 0, RIGHT: 1, DOWN: 2, LEFT: 3 };
+const DX = [0, 1, 0, -1], DY = [-1, 0, 1, 0];
+
+TAS.initCanvas(GW, GH);
+TAS.input.initTouch({ buttons: ['a', 'b'], labels: { a: 'ATTACK', b: 'JUMP' } });
+
+// === AUDIO ===
+const SFX = {
+  yoyo() { TAS.audio.playTone(800, 0.08, 'square', 0.07, 1200); TAS.audio.playTone(400, 0.06, 'triangle', 0.05); },
+  hit() { TAS.audio.playTone(200, 0.12, 'sawtooth', 0.1, 80); TAS.audio.playNoise(0.08, 0.06); },
+  hurt() { TAS.audio.playTone(250, 0.2, 'square', 0.08, 100); },
+  jump() { TAS.audio.playTone(400, 0.1, 'square', 0.06, 800); },
+  pickup() { TAS.audio.playTone(880, 0.06, 'square', 0.07); setTimeout(function(){TAS.audio.playTone(1100, 0.08, 'square', 0.07);}, 60); },
+  door() { TAS.audio.playNoise(0.2, 0.05); TAS.audio.playTone(120, 0.2, 'triangle', 0.05, 80); },
+  splash() { TAS.audio.playNoise(0.3, 0.08, 400); },
+  boss() { TAS.audio.playTone(80, 0.5, 'sawtooth', 0.1, 40); TAS.audio.playNoise(0.3, 0.08); },
+  die() { TAS.audio.playTone(400, 0.3, 'sawtooth', 0.1, 60); setTimeout(function(){TAS.audio.playTone(200, 0.3, 'square', 0.08, 40);}, 200); },
+  victory() { TAS.audio.playMelody([[523,0.12],[659,0.12],[784,0.12],[1047,0.2]], 130); },
+  switch_() { TAS.audio.playTone(660, 0.08, 'triangle', 0.06); TAS.audio.playTone(880, 0.1, 'triangle', 0.06); },
+  sail() { TAS.audio.playTone(220, 0.3, 'sine', 0.04, 180); },
+  npc() { TAS.audio.playTone(440, 0.06, 'triangle', 0.05); }
+};
+
+// === ISLAND DEFINITIONS ===
+const ISLANDS = [
+  { name: 'Coral Cove', color: '#44cc88', ocean: '#2266aa', enemies: ['crab'], bossHp: 6 },
+  { name: 'Palm Peak', color: '#66dd55', ocean: '#2255aa', enemies: ['crab','snake'], bossHp: 8 },
+  { name: 'Volcano Isle', color: '#cc6633', ocean: '#334488', enemies: ['bat','snake'], bossHp: 10 },
+  { name: 'Frozen Reef', color: '#aaddff', ocean: '#224477', enemies: ['skeleton','bat'], bossHp: 12 },
+  { name: 'Shadow Atoll', color: '#665588', ocean: '#112244', enemies: ['ghost','skeleton'], bossHp: 14 },
+  { name: 'Mech Island', color: '#8899aa', ocean: '#223355', enemies: ['robot','bat'], bossHp: 16 },
+  { name: 'Spore Citadel', color: '#88cc44', ocean: '#113322', enemies: ['fungi','robot','ghost'], bossHp: 20 }
+];
+
+// === TILE TYPES ===
+const T = {
+  FLOOR: 0, WALL: 1, WATER: 2, DOOR: 3, SWITCH: 4, PIT: 5,
+  VANISH: 6, CONVEYOR_U: 7, CONVEYOR_D: 8, CONVEYOR_L: 9, CONVEYOR_R: 10,
+  LAVA: 11, ICE: 12, DARK: 13, STAIRS_DOWN: 14, STAIRS_UP: 15,
+  BLOCK: 16, BUTTON: 17, CHEST: 18, NPC: 19, ENTRANCE: 20
+};
+
+// === SEEDED RANDOM ===
+let seed = 777;
+function srand(s) { seed = s; }
+function rand() { seed = (seed * 1103515245 + 12345) & 0x7fffffff; return seed / 0x7fffffff; }
+function randI(min, max) { return Math.floor(rand() * (max - min + 1)) + min; }
+
+// === GAME STATE ===
+let state = 'title';
+let frame = 0;
+let player = { x: 7, y: 4, dir: DIR.DOWN, hp: 3, maxHp: 3, lives: 3, weapon: 0, subWeapon: 0, ammo: 5, jumping: false, jumpTimer: 0, moveTimer: 0, invincible: 0, keys: 0 };
+let currentIsland = 0;
+let inDungeon = false;
+let dungeonFloor = 0;
+let yoyo = null;
+let projectiles = [];
+let enemies = [];
+let items = [];
+let switches = [];
+let doors = [];
+let blocks = [];
+let tiles = [];
+let roomW = COLS, roomH = ROWS;
+let camera = { x: 0, y: 0 };
+let msgText = '';
+let msgTimer = 0;
+let bossActive = false;
+let boss = null;
+let bossesBeaten = [false,false,false,false,false,false,false];
+let overworld = false;
+let boatX = 2, boatY = 3;
+let boatTarget = -1;
+let boatMoving = false;
+let vanishedTiles = [];
+let darkRoom = false;
+let hasTorch = false;
+let hasRaft = false;
+let hasMirror = false;
+let transitionTimer = 0;
+let transitionType = '';
+
+// === SAVE/LOAD ===
+function saveGame() {
+  try {
+    localStorage.setItem('startropics_hex', JSON.stringify({
+      island: currentIsland, hp: player.maxHp, lives: player.lives,
+      weapon: player.weapon, bossesBeaten: bossesBeaten,
+      hasTorch: hasTorch, hasRaft: hasRaft, hasMirror: hasMirror
+    }));
+  } catch(e) { console.warn('Save failed:', e); }
+}
+
+function loadGame() {
+  try {
+    const d = JSON.parse(localStorage.getItem('startropics_hex'));
+    if (d) {
+      currentIsland = d.island || 0;
+      player.maxHp = d.hp || 3;
+      player.lives = d.lives || 3;
+      player.weapon = d.weapon || 0;
+      bossesBeaten = d.bossesBeaten || [false,false,false,false,false,false,false];
+      hasTorch = d.hasTorch || false;
+      hasRaft = d.hasRaft || false;
+      hasMirror = d.hasMirror || false;
+      return true;
+    }
+  } catch(e) { console.warn('Load failed:', e); }
+  return false;
+}
+
+// === ROOM GENERATION ===
+function generateSurface(island) {
+  tiles = [];
+  enemies = [];
+  items = [];
+  switches = [];
+  doors = [];
+  blocks = [];
+  vanishedTiles = [];
+  darkRoom = false;
+  bossActive = false;
+  boss = null;
+  roomW = COLS; roomH = ROWS;
+
+  for (let y = 0; y < roomH; y++) {
+    tiles[y] = [];
+    for (let x = 0; x < roomW; x++) {
+      if (x === 0 || x === roomW-1 || y === 0 || y === roomH-1) {
+        tiles[y][x] = T.WALL;
+      } else {
+        tiles[y][x] = T.FLOOR;
+      }
+    }
+  }
+
+  // Water edges
+  srand(island * 100 + 1);
+  for (let i = 0; i < 5 + island; i++) {
+    const wx = randI(1, roomW-2);
+    const wy = randI(1, roomH-2);
+    if (wx !== 7 && wy !== 4) tiles[wy][wx] = T.WATER;
+  }
+
+  // Dungeon entrance
+  tiles[2][roomW-3] = T.STAIRS_DOWN;
+
+  // NPC
+  tiles[roomH-3][2] = T.NPC;
+
+  // Items on surface
+  if (island === 1 && !hasTorch) items.push({ x: 5, y: 3, type: 'torch' });
+  if (island === 3 && !hasRaft) items.push({ x: 10, y: 6, type: 'raft' });
+  if (island === 5 && !hasMirror) items.push({ x: 8, y: 2, type: 'mirror' });
+
+  // Heart container if boss beaten but not yet collected
+  if (bossesBeaten[island] && player.maxHp < 3 + island + 1) {
+    items.push({ x: 7, y: 5, type: 'heart_container' });
+  }
+
+  // Ammo pickup
+  items.push({ x: randI(3, 11), y: randI(2, 7), type: 'ammo' });
+
+  player.x = 7; player.y = roomH - 2;
+  player.dir = DIR.UP;
+}
+
+function generateDungeon(island, floor) {
+  tiles = [];
+  enemies = [];
+  items = [];
+  switches = [];
+  doors = [];
+  blocks = [];
+  vanishedTiles = [];
+  bossActive = false;
+  boss = null;
+  roomW = COLS; roomH = ROWS;
+  darkRoom = (island >= 4 && floor === 1 && !hasTorch);
+
+  for (let y = 0; y < roomH; y++) {
+    tiles[y] = [];
+    for (let x = 0; x < roomW; x++) {
+      if (x === 0 || x === roomW-1 || y === 0 || y === roomH-1) {
+        tiles[y][x] = T.WALL;
+      } else {
+        tiles[y][x] = T.FLOOR;
+      }
+    }
+  }
+
+  srand(island * 1000 + floor * 100 + 7);
+
+  // Add walls/obstacles based on floor
+  const wallCount = 4 + island + floor * 2;
+  for (let i = 0; i < wallCount; i++) {
+    const wx = randI(2, roomW-3);
+    const wy = randI(2, roomH-3);
+    if (wx !== 7 && wy !== 4) tiles[wy][wx] = T.WALL;
+  }
+
+  // Floor-specific puzzle elements
+  if (floor === 0) {
+    // Puzzle room - switches and doors
+    tiles[2][7] = T.DOOR;
+    doors.push({ x: 7, y: 2, open: false, switchId: 0 });
+    tiles[4][3] = T.SWITCH;
+    switches.push({ x: 3, y: 4, id: 0, active: false });
+
+    // Some vanishing tiles on later islands
+    if (island >= 1) {
+      for (let i = 0; i < 3; i++) {
+        const vx = randI(4, 10);
+        const vy = randI(3, 6);
+        if (tiles[vy][vx] === T.FLOOR) tiles[vy][vx] = T.VANISH;
+      }
+    }
+
+    // Push block puzzle
+    if (island >= 2) {
+      tiles[5][9] = T.BUTTON;
+      blocks.push({ x: 6, y: 5 });
+    }
+
+    // Stairs to next floor
+    tiles[1][roomW-2] = T.STAIRS_DOWN;
+
+    // Enemies
+    const eCount = 2 + island;
+    const isl = ISLANDS[island];
+    for (let i = 0; i < eCount; i++) {
+      const ex = randI(3, roomW-4);
+      const ey = randI(3, roomH-4);
+      if (tiles[ey][ex] === T.FLOOR || tiles[ey][ex] === T.VANISH) {
+        const etype = isl.enemies[randI(0, isl.enemies.length - 1)];
+        enemies.push(makeEnemy(ex, ey, etype, island));
+      }
+    }
+  } else if (floor === 1) {
+    // Boss floor
+    // Conveyor tiles on volcano+ islands
+    if (island >= 2) {
+      for (let i = 0; i < 3; i++) {
+        const cx = randI(3, 11);
+        const cy = randI(3, 6);
+        if (tiles[cy][cx] === T.FLOOR) {
+          tiles[cy][cx] = T.CONVEYOR_U + randI(0, 3);
+        }
+      }
+    }
+
+    // Ice on frozen reef
+    if (island === 3) {
+      for (let y = 2; y < roomH-2; y++) {
+        for (let x = 2; x < roomW-2; x++) {
+          if (tiles[y][x] === T.FLOOR && rand() < 0.3) tiles[y][x] = T.ICE;
+        }
+      }
+    }
+
+    // Lava on volcano
+    if (island === 2) {
+      for (let i = 0; i < 4; i++) {
+        const lx = randI(2, 12);
+        const ly = randI(2, 7);
+        if (tiles[ly][lx] === T.FLOOR && lx !== 7 && ly !== 4) tiles[ly][lx] = T.LAVA;
+      }
+    }
+
+    // Spawn boss
+    boss = makeBoss(island);
+    bossActive = true;
+
+    // Stairs back up (appears after boss)
+    tiles[roomH-2][1] = T.STAIRS_UP;
+  }
+
+  // Key for door
+  if (floor === 0) items.push({ x: randI(8, 12), y: randI(4, 7), type: 'key' });
+
+  player.x = 1; player.y = roomH - 2;
+  player.dir = DIR.UP;
+}
+
+// === ENEMY FACTORY ===
+function makeEnemy(x, y, type, island) {
+  const base = { x: x, y: y, type: type, hp: 1 + Math.floor(island / 2), dir: DIR.DOWN, moveTimer: 0, moveDelay: 30 + randI(0, 20), attackTimer: 0, flash: 0, startX: x, startY: y };
+  switch (type) {
+    case 'crab': base.hp = 1; base.moveDelay = 40; base.color = '#cc4444'; break;
+    case 'snake': base.hp = 2; base.moveDelay = 25; base.color = '#44aa44'; break;
+    case 'bat': base.hp = 1; base.moveDelay = 15; base.color = '#886688'; break;
+    case 'skeleton': base.hp = 3; base.moveDelay = 35; base.color = '#ccccaa'; break;
+    case 'ghost': base.hp = 2; base.moveDelay = 20; base.color = '#aaaaff'; break;
+    case 'robot': base.hp = 4; base.moveDelay = 45; base.color = '#7799aa'; break;
+    case 'fungi': base.hp = 3; base.moveDelay = 30; base.color = '#88cc55'; break;
+    default: base.hp = 1; base.moveDelay = 35; base.color = '#cc4444';
+  }
+  base.maxHp = base.hp;
+  return base;
+}
+
+function makeBoss(island) {
+  const isl = ISLANDS[island];
+  const names = ['Giant Crab', 'Serpent King', 'Lava Wyrm', 'Frost Giant', 'Shadow Lord', 'Mech Core', 'Spore Mother'];
+  return {
+    x: 7, y: 3, hp: isl.bossHp, maxHp: isl.bossHp,
+    name: names[island], dir: DIR.DOWN, moveTimer: 0,
+    attackTimer: 0, phase: 0, flash: 0, pattern: 0,
+    color: isl.color, island: island
+  };
+}
+
+// === OVERWORLD ===
+const ISLAND_POS = [
+  { x: 80, y: 200 }, { x: 160, y: 150 }, { x: 260, y: 100 },
+  { x: 350, y: 160 }, { x: 180, y: 250 }, { x: 320, y: 250 },
+  { x: 400, y: 60 }
+];
+
+function enterOverworld() {
+  overworld = true;
+  state = 'overworld';
+  boatX = ISLAND_POS[currentIsland].x;
+  boatY = ISLAND_POS[currentIsland].y;
+  boatMoving = false;
+  boatTarget = -1;
+}
+
+function enterIsland(idx) {
+  currentIsland = idx;
+  overworld = false;
+  inDungeon = false;
+  generateSurface(idx);
+  state = 'playing';
+  transitionTimer = 30;
+  transitionType = 'enter';
+  saveGame();
+}
+
+// === MOVEMENT & COLLISION ===
+function canWalk(x, y) {
+  if (x < 0 || x >= roomW || y < 0 || y >= roomH) return false;
+  const t = tiles[y][x];
+  if (t === T.WALL || t === T.DOOR) return false;
+  if (t === T.WATER && !hasRaft && !player.jumping) return false;
+  if (t === T.PIT && !player.jumping) return false;
+  if (t === T.LAVA && !player.jumping) return false;
+  // Check blocks
+  for (const b of blocks) { if (b.x === x && b.y === y) return false; }
+  return true;
+}
+
+function tryMove(dir) {
+  if (player.moveTimer > 0) return;
+  player.dir = dir;
+  const nx = player.x + DX[dir];
+  const ny = player.y + DY[dir];
+  if (canWalk(nx, ny)) {
+    player.x = nx;
+    player.y = ny;
+    player.moveTimer = 8;
+    onStep(nx, ny);
+  }
+  // Push blocks
+  for (let i = 0; i < blocks.length; i++) {
+    if (blocks[i].x === nx && blocks[i].y === ny) {
+      const bx = nx + DX[dir];
+      const by = ny + DY[dir];
+      if (canWalkBlock(bx, by)) {
+        blocks[i].x = bx;
+        blocks[i].y = by;
+        player.x = nx;
+        player.y = ny;
+        player.moveTimer = 12;
+        checkButtons();
+      }
+    }
+  }
+}
+
+function canWalkBlock(x, y) {
+  if (x < 0 || x >= roomW || y < 0 || y >= roomH) return false;
+  const t = tiles[y][x];
+  return (t === T.FLOOR || t === T.BUTTON || t === T.ICE);
+}
+
+function onStep(x, y) {
+  const t = tiles[y][x];
+  if (t === T.VANISH) {
+    vanishedTiles.push({ x: x, y: y, timer: 20 });
+  }
+  if (t === T.SWITCH) {
+    for (const sw of switches) {
+      if (sw.x === x && sw.y === y) {
+        sw.active = !sw.active;
+        SFX.switch_();
+        // Toggle doors
+        for (const d of doors) {
+          if (d.switchId === sw.id) {
+            d.open = sw.active;
+            tiles[d.y][d.x] = sw.active ? T.FLOOR : T.DOOR;
+          }
+        }
+      }
+    }
+  }
+  if (t === T.STAIRS_DOWN) {
+    if (!inDungeon) {
+      inDungeon = true;
+      dungeonFloor = 0;
+      generateDungeon(currentIsland, 0);
+      transitionTimer = 20;
+      transitionType = 'stairs';
+      SFX.door();
+    } else {
+      dungeonFloor++;
+      generateDungeon(currentIsland, dungeonFloor);
+      transitionTimer = 20;
+      transitionType = 'stairs';
+      SFX.door();
+    }
+  }
+  if (t === T.STAIRS_UP) {
+    if (dungeonFloor > 0) {
+      dungeonFloor--;
+      generateDungeon(currentIsland, dungeonFloor);
+      transitionTimer = 20;
+      transitionType = 'stairs';
+    } else {
+      inDungeon = false;
+      generateSurface(currentIsland);
+      transitionTimer = 20;
+      transitionType = 'stairs';
+    }
+    SFX.door();
+  }
+  if (t === T.LAVA || t === T.PIT) {
+    hurtPlayer(1);
+  }
+  if (t === T.NPC) {
+    showNpcDialog();
+  }
+  // Pickup items
+  for (let i = items.length - 1; i >= 0; i--) {
+    if (items[i].x === x && items[i].y === y) {
+      collectItem(items[i]);
+      items.splice(i, 1);
+    }
+  }
+}
+
+function checkButtons() {
+  for (const d of doors) {
+    let pressed = false;
+    for (const b of blocks) {
+      // Check if block is on the button associated with this door
+      if (tiles[b.y] && tiles[b.y][b.x] === T.BUTTON) pressed = true;
+    }
+    if (pressed && !d.open) {
+      d.open = true;
+      tiles[d.y][d.x] = T.FLOOR;
+      SFX.switch_();
+    }
+  }
+}
+
+// === ITEMS ===
+function collectItem(item) {
+  SFX.pickup();
+  switch (item.type) {
+    case 'heart': player.hp = Math.min(player.hp + 1, player.maxHp); break;
+    case 'heart_container': player.maxHp++; player.hp = player.maxHp; showMsg('+1 Heart Container!'); break;
+    case 'key': player.keys++; showMsg('Got a Key!'); break;
+    case 'ammo': player.ammo = Math.min(player.ammo + 5, 20); break;
+    case 'torch': hasTorch = true; showMsg('Got the Torch! Dark rooms illuminated.'); break;
+    case 'raft': hasRaft = true; showMsg('Got the Raft! Can cross water.'); break;
+    case 'mirror': hasMirror = true; showMsg('Got the Mirror! Reflects lasers.'); break;
+    case 'weapon_up':
+      player.weapon = Math.min(player.weapon + 1, 2);
+      const wnames = ['Star Yo-yo', 'Laser Yo-yo'];
+      showMsg('Weapon upgraded: ' + wnames[player.weapon - 1] + '!');
+      break;
+    case '1up': player.lives++; showMsg('1-UP!'); break;
+  }
+  TAS.particles.spawn(item.x * TILE + TILE/2, item.y * TILE + HUD_Y + TILE/2, '#ffdd44', 8, 2);
+}
+
+function showMsg(text) {
+  msgText = text;
+  msgTimer = 120;
+}
+
+function showNpcDialog() {
+  const dialogs = [
+    'Welcome to Coral Cove! The dungeon entrance is to the northeast.',
+    'Beware the vanishing tiles on Palm Peak! Jump over gaps.',
+    'The volcano runs deep. Watch for lava flows in the dungeon.',
+    'The Frozen Reef slides treacherously. Keep your footing!',
+    'Shadow Atoll is dark. Seek the torch on an earlier island.',
+    'Mech Island pulses with energy. Watch for laser beams!',
+    'The Spore Citadel awaits. All your skills will be tested.'
+  ];
+  showMsg(dialogs[currentIsland] || 'Safe travels, explorer!');
+  SFX.npc();
+}
+
+// === COMBAT ===
+function attack() {
+  if (yoyo) return;
+  SFX.yoyo();
+  const range = 2 + player.weapon;
+  yoyo = {
+    x: player.x, y: player.y, dir: player.dir,
+    dist: 0, maxDist: range, returning: false, timer: 0,
+    damage: 1 + player.weapon
+  };
+}
+
+function fireSubWeapon() {
+  if (player.ammo <= 0) return;
+  player.ammo--;
+  const px = player.x + DX[player.dir];
+  const py = player.y + DY[player.dir];
+  projectiles.push({
+    x: px, y: py, dir: player.dir, type: player.subWeapon,
+    timer: 0, damage: 2
+  });
+  TAS.audio.playTone(600, 0.08, 'triangle', 0.06, 1000);
+}
+
+function updateYoyo() {
+  if (!yoyo) return;
+  yoyo.timer++;
+  if (!yoyo.returning) {
+    if (yoyo.timer % 4 === 0) {
+      yoyo.dist++;
+      const yx = player.x + DX[yoyo.dir] * yoyo.dist;
+      const yy = player.y + DY[yoyo.dir] * yoyo.dist;
+      // Hit enemies
+      let hitSomething = false;
+      for (let i = enemies.length - 1; i >= 0; i--) {
+        if (enemies[i].x === yx && enemies[i].y === yy) {
+          damageEnemy(i, yoyo.damage);
+          hitSomething = true;
+        }
+      }
+      // Hit boss
+      if (boss && boss.x === yx && boss.y === yy) {
+        damageBoss(yoyo.damage);
+        hitSomething = true;
+      }
+      if (yoyo.dist >= yoyo.maxDist || hitSomething) {
+        yoyo.returning = true;
+        yoyo.timer = 0;
+      }
+    }
+  } else {
+    if (yoyo.timer % 3 === 0) {
+      yoyo.dist--;
+      if (yoyo.dist <= 0) yoyo = null;
+    }
+  }
+}
+
+function updateProjectiles() {
+  for (let i = projectiles.length - 1; i >= 0; i--) {
+    const p = projectiles[i];
+    p.timer++;
+    if (p.timer % 3 === 0) {
+      p.x += DX[p.dir];
+      p.y += DY[p.dir];
+      if (p.x < 0 || p.x >= roomW || p.y < 0 || p.y >= roomH || tiles[p.y][p.x] === T.WALL) {
+        projectiles.splice(i, 1);
+        continue;
+      }
+      for (let j = enemies.length - 1; j >= 0; j--) {
+        if (enemies[j].x === p.x && enemies[j].y === p.y) {
+          damageEnemy(j, p.damage);
+          projectiles.splice(i, 1);
+          break;
+        }
+      }
+      if (boss && boss.x === p.x && boss.y === p.y) {
+        damageBoss(p.damage);
+        projectiles.splice(i, 1);
+      }
+    }
+    if (p.timer > 60) projectiles.splice(i, 1);
+  }
+}
+
+function damageEnemy(idx, dmg) {
+  const e = enemies[idx];
+  e.hp -= dmg;
+  e.flash = 8;
+  SFX.hit();
+  TAS.particles.spawn(e.x * TILE + TILE/2, e.y * TILE + HUD_Y + TILE/2, e.color, 5, 2);
+  if (e.hp <= 0) {
+    TAS.particles.spawn(e.x * TILE + TILE/2, e.y * TILE + HUD_Y + TILE/2, '#ffdd44', 10, 3);
+    enemies.splice(idx, 1);
+    // Drop chance
+    if (Math.random() < 0.3) {
+      items.push({ x: e.x, y: e.y, type: Math.random() < 0.5 ? 'heart' : 'ammo' });
+    }
+  }
+}
+
+function damageBoss(dmg) {
+  if (!boss) return;
+  boss.hp -= dmg;
+  boss.flash = 10;
+  SFX.hit();
+  TAS.fx.shake(3, 0.85);
+  TAS.particles.spawn(boss.x * TILE + TILE/2, boss.y * TILE + HUD_Y + TILE/2, boss.color, 8, 3);
+  if (boss.hp <= 0) {
+    defeatBoss();
+  }
+}
+
+function defeatBoss() {
+  bossesBeaten[currentIsland] = true;
+  bossActive = false;
+  boss = null;
+  SFX.victory();
+  TAS.fx.flash('#fff', 0.6);
+  showMsg('BOSS DEFEATED! ' + ISLANDS[currentIsland].name + ' cleared!');
+  // Drop weapon upgrade on islands 2 and 4
+  if (currentIsland === 2 || currentIsland === 4) {
+    items.push({ x: 7, y: 4, type: 'weapon_up' });
+  }
+  // Drop heart container
+  items.push({ x: 7, y: 5, type: 'heart_container' });
+  // Stairs appear
+  tiles[roomH-2][roomW-2] = T.STAIRS_UP;
+  saveGame();
+}
+
+function hurtPlayer(dmg) {
+  if (player.invincible > 0) return;
+  player.hp -= dmg;
+  player.invincible = 60;
+  SFX.hurt();
+  TAS.fx.shake(4, 0.85);
+  TAS.fx.flash('#ff0000', 0.3);
+  if (player.hp <= 0) {
+    playerDie();
+  }
+}
+
+function playerDie() {
+  player.lives--;
+  SFX.die();
+  if (player.lives <= 0) {
+    state = 'gameOver';
+  } else {
+    player.hp = player.maxHp;
+    // Respawn at room start
+    if (inDungeon) {
+      generateDungeon(currentIsland, dungeonFloor);
+    } else {
+      generateSurface(currentIsland);
+    }
+    transitionTimer = 30;
+    transitionType = 'respawn';
+  }
+}
+
+// === ENEMY AI ===
+function updateEnemies(dt) {
+  for (const e of enemies) {
+    if (e.flash > 0) e.flash--;
+    e.moveTimer++;
+    if (e.moveTimer >= e.moveDelay) {
+      e.moveTimer = 0;
+      moveEnemy(e);
+    }
+    // Collision with player
+    if (e.x === player.x && e.y === player.y) {
+      hurtPlayer(1);
+    }
+  }
+}
+
+function moveEnemy(e) {
+  let newDir;
+  switch (e.type) {
+    case 'crab': // Horizontal patrol
+      if (e.dir === DIR.LEFT || e.dir === DIR.RIGHT) {
+        const nx = e.x + DX[e.dir];
+        if (nx >= 1 && nx < roomW-1 && tiles[e.y][nx] === T.FLOOR) {
+          e.x = nx;
+        } else {
+          e.dir = e.dir === DIR.LEFT ? DIR.RIGHT : DIR.LEFT;
+        }
+      } else {
+        e.dir = Math.random() < 0.5 ? DIR.LEFT : DIR.RIGHT;
+      }
+      break;
+    case 'snake': // Chase player
+      newDir = chaseDir(e);
+      e.dir = newDir;
+      const snx = e.x + DX[newDir];
+      const sny = e.y + DY[newDir];
+      if (canEnemyWalk(snx, sny)) { e.x = snx; e.y = sny; }
+      break;
+    case 'bat': // Random flying
+      newDir = randI(0, 3);
+      e.dir = newDir;
+      const bx = e.x + DX[newDir];
+      const by = e.y + DY[newDir];
+      if (bx >= 1 && bx < roomW-1 && by >= 1 && by < roomH-1) { e.x = bx; e.y = by; }
+      break;
+    case 'skeleton': // Slow chase
+      newDir = chaseDir(e);
+      e.dir = newDir;
+      const skx = e.x + DX[newDir];
+      const sky = e.y + DY[newDir];
+      if (canEnemyWalk(skx, sky)) { e.x = skx; e.y = sky; }
+      break;
+    case 'ghost': // Phase through walls toward player
+      newDir = chaseDir(e);
+      e.dir = newDir;
+      e.x += DX[newDir];
+      e.y += DY[newDir];
+      e.x = TAS.math.clamp(e.x, 1, roomW-2);
+      e.y = TAS.math.clamp(e.y, 1, roomH-2);
+      break;
+    case 'robot': // Shoot at player
+      newDir = chaseDir(e);
+      e.dir = newDir;
+      e.attackTimer++;
+      if (e.attackTimer > 60) {
+        e.attackTimer = 0;
+        projectiles.push({ x: e.x + DX[e.dir], y: e.y + DY[e.dir], dir: e.dir, type: 'enemy', timer: 0, damage: 1 });
+        TAS.audio.playTone(300, 0.1, 'sawtooth', 0.05);
+      }
+      if (Math.random() < 0.3) {
+        const rx = e.x + DX[newDir];
+        const ry = e.y + DY[newDir];
+        if (canEnemyWalk(rx, ry)) { e.x = rx; e.y = ry; }
+      }
+      break;
+    case 'fungi': // Spreads spores
+      newDir = randI(0, 3);
+      e.dir = newDir;
+      const fx = e.x + DX[newDir];
+      const fy = e.y + DY[newDir];
+      if (canEnemyWalk(fx, fy)) { e.x = fx; e.y = fy; }
+      e.attackTimer++;
+      if (e.attackTimer > 80) {
+        e.attackTimer = 0;
+        // Spawn spore projectile in random dir
+        const sd = randI(0, 3);
+        projectiles.push({ x: e.x + DX[sd], y: e.y + DY[sd], dir: sd, type: 'spore', timer: 0, damage: 1 });
+      }
+      break;
+  }
+}
+
+function chaseDir(e) {
+  const dx = player.x - e.x;
+  const dy = player.y - e.y;
+  if (Math.abs(dx) > Math.abs(dy)) {
+    return dx > 0 ? DIR.RIGHT : DIR.LEFT;
+  } else {
+    return dy > 0 ? DIR.DOWN : DIR.UP;
+  }
+}
+
+function canEnemyWalk(x, y) {
+  if (x < 1 || x >= roomW-1 || y < 1 || y >= roomH-1) return false;
+  const t = tiles[y][x];
+  return t === T.FLOOR || t === T.VANISH || t === T.ICE || t === T.SWITCH || t === T.BUTTON;
+}
+
+// === BOSS AI ===
+function updateBoss(dt) {
+  if (!boss || !bossActive) return;
+  boss.flash = Math.max(0, boss.flash - 1);
+  boss.moveTimer++;
+  boss.attackTimer++;
+  boss.pattern++;
+
+  const spd = boss.hp < boss.maxHp / 2 ? 20 : 30;
+
+  if (boss.moveTimer >= spd) {
+    boss.moveTimer = 0;
+    const dir = chaseDir(boss);
+    boss.dir = dir;
+    const nx = boss.x + DX[dir];
+    const ny = boss.y + DY[dir];
+    if (canEnemyWalk(nx, ny)) { boss.x = nx; boss.y = ny; }
+  }
+
+  // Boss attacks
+  const atkSpd = boss.hp < boss.maxHp / 3 ? 40 : 60;
+  if (boss.attackTimer >= atkSpd) {
+    boss.attackTimer = 0;
+    bossAttack();
+  }
+
+  // Collision
+  if (boss.x === player.x && boss.y === player.y) {
+    hurtPlayer(2);
+  }
+}
+
+function bossAttack() {
+  // Different attack patterns per island
+  const island = boss.island;
+  if (island <= 1) {
+    // Charge at player
+    const dir = chaseDir(boss);
+    for (let i = 0; i < 2; i++) {
+      const nx = boss.x + DX[dir] * (i + 1);
+      const ny = boss.y + DY[dir] * (i + 1);
+      if (canEnemyWalk(nx, ny)) { boss.x = nx; boss.y = ny; }
+    }
+  } else if (island <= 3) {
+    // Shoot in 4 directions
+    for (let d = 0; d < 4; d++) {
+      projectiles.push({ x: boss.x + DX[d], y: boss.y + DY[d], dir: d, type: 'boss', timer: 0, damage: 1 });
+    }
+    TAS.audio.playTone(150, 0.15, 'sawtooth', 0.08);
+  } else {
+    // Shoot + spawn minion
+    const dir = chaseDir(boss);
+    projectiles.push({ x: boss.x + DX[dir], y: boss.y + DY[dir], dir: dir, type: 'boss', timer: 0, damage: 2 });
+    if (enemies.length < 4 && boss.pattern % 3 === 0) {
+      const etype = ISLANDS[island].enemies[0];
+      const ex = TAS.math.clamp(boss.x + randI(-2, 2), 1, roomW-2);
+      const ey = TAS.math.clamp(boss.y + randI(-2, 2), 1, roomH-2);
+      enemies.push(makeEnemy(ex, ey, etype, island));
+    }
+    TAS.audio.playTone(100, 0.2, 'sawtooth', 0.08, 50);
+  }
+}
+
+// === TILE EFFECTS ===
+function updateTileEffects() {
+  // Vanishing tiles
+  for (let i = vanishedTiles.length - 1; i >= 0; i--) {
+    vanishedTiles[i].timer--;
+    if (vanishedTiles[i].timer <= 0) {
+      const v = vanishedTiles[i];
+      tiles[v.y][v.x] = T.PIT;
+      vanishedTiles.splice(i, 1);
+    }
+  }
+
+  // Conveyor movement
+  if (player.moveTimer <= 0) {
+    const t = tiles[player.y][player.x];
+    if (t >= T.CONVEYOR_U && t <= T.CONVEYOR_R) {
+      const cdir = t - T.CONVEYOR_U;
+      const cx = player.x + DX[cdir];
+      const cy = player.y + DY[cdir];
+      if (canWalk(cx, cy)) {
+        player.x = cx;
+        player.y = cy;
+        player.moveTimer = 12;
+      }
+    }
+    // Ice sliding
+    if (t === T.ICE && player.moveTimer <= 0) {
+      const ix = player.x + DX[player.dir];
+      const iy = player.y + DY[player.dir];
+      if (canWalk(ix, iy)) {
+        player.x = ix;
+        player.y = iy;
+        player.moveTimer = 6;
+      }
+    }
+  }
+
+  // Enemy projectile collision with player
+  for (let i = projectiles.length - 1; i >= 0; i--) {
+    const p = projectiles[i];
+    if ((p.type === 'enemy' || p.type === 'boss' || p.type === 'spore') && p.x === player.x && p.y === player.y) {
+      hurtPlayer(p.damage);
+      projectiles.splice(i, 1);
+    }
+  }
+}
+
+// === MAIN UPDATE ===
+function update(dt) {
+  frame++;
+  TAS.particles.update(dt);
+  TAS.fx.updateEffects(dt);
+  if (msgTimer > 0) msgTimer--;
+  if (transitionTimer > 0) { transitionTimer--; return; }
+
+  if (state === 'title') {
+    if (Object.values(TAS.input.keys).some(Boolean) || TAS.input.touch.a) {
+      TAS.audio.ensureAudio();
+      if (loadGame()) {
+        enterIsland(currentIsland);
+      } else {
+        enterIsland(0);
+      }
+    }
+    return;
+  }
+
+  if (state === 'gameOver') {
+    if (Object.values(TAS.input.keys).some(Boolean) || TAS.input.touch.a) {
+      state = 'title';
+      player.lives = 3;
+      player.hp = 3;
+      player.maxHp = 3;
+      currentIsland = 0;
+    }
+    return;
+  }
+
+  if (state === 'overworld') {
+    updateOverworld(dt);
+    return;
+  }
+
+  if (state !== 'playing') return;
+
+  // Player input
+  if (player.moveTimer > 0) player.moveTimer--;
+  if (player.invincible > 0) player.invincible--;
+  if (player.jumpTimer > 0) {
+    player.jumpTimer--;
+    if (player.jumpTimer <= 0) player.jumping = false;
+  }
+
+  const k = TAS.input.keys;
+  const t = TAS.input.touch;
+
+  if (k['ArrowLeft'] || k['KeyA'] || t.left) tryMove(DIR.LEFT);
+  else if (k['ArrowRight'] || k['KeyD'] || t.right) tryMove(DIR.RIGHT);
+  else if (k['ArrowUp'] || k['KeyW'] || t.up) tryMove(DIR.UP);
+  else if (k['ArrowDown'] || k['KeyS'] || t.down) tryMove(DIR.DOWN);
+
+  // Attack (A button / Z key)
+  if (k['KeyZ'] || k['Space'] || t.a) {
+    if (!yoyo) attack();
+    k['KeyZ'] = false; k['Space'] = false;
+  }
+
+  // Jump (B button / X key)
+  if (k['KeyX'] || t.b) {
+    if (!player.jumping && player.jumpTimer <= 0) {
+      player.jumping = true;
+      player.jumpTimer = 16;
+      SFX.jump();
+      // Jump forward
+      const jx = player.x + DX[player.dir];
+      const jy = player.y + DY[player.dir];
+      if (jx >= 0 && jx < roomW && jy >= 0 && jy < roomH && tiles[jy][jx] !== T.WALL) {
+        player.x = jx;
+        player.y = jy;
+        player.moveTimer = 14;
+      }
+    }
+    k['KeyX'] = false;
+  }
+
+  // Sub weapon (C key)
+  if (k['KeyC']) {
+    fireSubWeapon();
+    k['KeyC'] = false;
+  }
+
+  // Enter overworld (Escape when on surface)
+  if (k['Escape'] && !inDungeon) {
+    enterOverworld();
+    k['Escape'] = false;
+  }
+
+  updateYoyo();
+  updateProjectiles();
+  updateEnemies(dt);
+  updateBoss(dt);
+  updateTileEffects();
+}
+
+function updateOverworld(dt) {
+  const k = TAS.input.keys;
+  const t = TAS.input.touch;
+
+  if (boatMoving) {
+    const target = ISLAND_POS[boatTarget];
+    const dx = target.x - boatX;
+    const dy = target.y - boatY;
+    const d = Math.sqrt(dx*dx + dy*dy);
+    if (d < 3) {
+      boatMoving = false;
+      enterIsland(boatTarget);
+    } else {
+      boatX += (dx / d) * 2;
+      boatY += (dy / d) * 2;
+    }
+    return;
+  }
+
+  // Select island with up/down
+  if (k['ArrowUp'] || k['KeyW'] || t.up) {
+    boatTarget = Math.max(0, (boatTarget < 0 ? currentIsland : boatTarget) - 1);
+    k['ArrowUp'] = false; k['KeyW'] = false;
+  }
+  if (k['ArrowDown'] || k['KeyS'] || t.down) {
+    boatTarget = Math.min(ISLANDS.length - 1, (boatTarget < 0 ? currentIsland : boatTarget) + 1);
+    k['ArrowDown'] = false; k['KeyS'] = false;
+  }
+
+  // Confirm travel
+  if ((k['KeyZ'] || k['Space'] || t.a) && boatTarget >= 0) {
+    // Can only go to islands you have unlocked (beat previous boss or it is adjacent)
+    if (boatTarget <= currentIsland + 1 || bossesBeaten[boatTarget - 1]) {
+      boatMoving = true;
+      SFX.sail();
+    } else {
+      showMsg('Defeat the previous island boss first!');
+    }
+    k['KeyZ'] = false; k['Space'] = false;
+  }
+
+  // Back to current island
+  if (k['Escape']) {
+    enterIsland(currentIsland);
+    k['Escape'] = false;
+  }
+}
+
+// === DRAWING ===
+function draw(dt) {
+  ctx.fillStyle = '#111';
+  ctx.fillRect(0, 0, GW, GH);
+
+  if (state === 'title') {
+    drawTitle();
+    return;
+  }
+
+  if (state === 'gameOver') {
+    drawGameOverScreen();
+    return;
+  }
+
+  if (state === 'overworld') {
+    drawOverworld();
+    TAS.input.drawTouchControls(GW, GH);
+    return;
+  }
+
+  if (state === 'playing') {
+    ctx.save();
+    TAS.fx.applyShake();
+    drawRoom();
+    drawItems();
+    drawEnemies();
+    drawBossSprite();
+    drawPlayer();
+    drawYoyo();
+    drawProjectiles();
+    if (darkRoom) drawDarkness();
+    TAS.particles.draw();
+    ctx.restore();
+    TAS.fx.drawFlash(GW, GH);
+    drawHUD();
+    drawMessage();
+    if (transitionTimer > 0) drawTransition();
+    TAS.input.drawTouchControls(GW, GH);
+  }
+}
+
+function drawTitle() {
+  // Ocean background
+  ctx.fillStyle = '#1a3366';
+  ctx.fillRect(0, 0, GW, GH);
+
+  // Waves
+  for (let i = 0; i < 8; i++) {
+    const wy = 100 + i * 30 + Math.sin(frame * 0.02 + i) * 5;
+    ctx.fillStyle = i % 2 === 0 ? '#224488' : '#1a3366';
+    ctx.fillRect(0, wy, GW, 15);
+  }
+
+  // Island silhouettes
+  ctx.fillStyle = '#226644';
+  ctx.beginPath();
+  ctx.ellipse(120, 260, 50, 25, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.ellipse(360, 240, 40, 20, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Palm tree
+  ctx.fillStyle = '#664422';
+  ctx.fillRect(115, 220, 6, 40);
+  ctx.fillStyle = '#33aa44';
+  ctx.beginPath();
+  ctx.ellipse(118, 215, 20, 10, -0.3, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Title
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#000';
+  ctx.font = 'bold 28px monospace';
+  ctx.fillText('STARTROPICS HEX', GW/2 + 2, 52);
+  ctx.fillStyle = '#44ddaa';
+  ctx.fillText('STARTROPICS HEX', GW/2, 50);
+
+  ctx.fillStyle = '#88ccaa';
+  ctx.font = '12px monospace';
+  ctx.fillText('A Baseling Explorer Adventure', GW/2, 72);
+
+  // Baseling character
+  drawBaselingSprite(GW/2, 150, 2, frame);
+
+  // Start prompt
+  const pulse = Math.sin(frame * 0.05) * 0.3 + 0.7;
+  ctx.globalAlpha = pulse;
+  ctx.fillStyle = '#ffdd44';
+  ctx.font = 'bold 14px monospace';
+  ctx.fillText('PRESS ANY KEY TO START', GW/2, GH - 30);
+  ctx.globalAlpha = 1;
+
+  // Controls hint
+  ctx.fillStyle = '#668899';
+  ctx.font = '10px monospace';
+  ctx.fillText('ARROWS=Move  Z=Attack  X=Jump  C=Sub-weapon  ESC=Sail', GW/2, GH - 12);
+}
+
+function drawGameOverScreen() {
+  ctx.fillStyle = '#110022';
+  ctx.fillRect(0, 0, GW, GH);
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#ff4444';
+  ctx.font = 'bold 24px monospace';
+  ctx.fillText('GAME OVER', GW/2, GH * 0.35);
+  ctx.fillStyle = '#aaa';
+  ctx.font = '14px monospace';
+  ctx.fillText('Islands cleared: ' + bossesBeaten.filter(Boolean).length + '/7', GW/2, GH * 0.5);
+  const pulse = Math.sin(frame * 0.05) * 0.3 + 0.7;
+  ctx.globalAlpha = pulse;
+  ctx.fillStyle = '#88ccff';
+  ctx.font = 'bold 12px monospace';
+  ctx.fillText('PRESS ANY KEY', GW/2, GH * 0.75);
+  ctx.globalAlpha = 1;
+}
+
+// === OVERWORLD DRAWING ===
+function drawOverworld() {
+  // Deep ocean
+  ctx.fillStyle = '#112244';
+  ctx.fillRect(0, 0, GW, GH);
+
+  // Animated waves
+  for (let y = 0; y < GH; y += 8) {
+    const off = Math.sin(frame * 0.03 + y * 0.1) * 2;
+    ctx.fillStyle = y % 16 === 0 ? '#1a3355' : '#112244';
+    ctx.fillRect(off, y, GW, 4);
+  }
+
+  // Draw islands
+  for (let i = 0; i < ISLANDS.length; i++) {
+    const pos = ISLAND_POS[i];
+    const unlocked = i === 0 || bossesBeaten[i-1] || i <= currentIsland;
+    const cleared = bossesBeaten[i];
+
+    // Island shape
+    ctx.fillStyle = unlocked ? ISLANDS[i].color : '#445566';
+    ctx.beginPath();
+    ctx.ellipse(pos.x, pos.y, 22, 14, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.strokeStyle = cleared ? '#ffdd44' : '#224433';
+    ctx.lineWidth = cleared ? 2 : 1;
+    ctx.stroke();
+
+    // Label
+    ctx.fillStyle = unlocked ? '#fff' : '#667';
+    ctx.font = '9px monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText(ISLANDS[i].name, pos.x, pos.y + 24);
+    if (cleared) {
+      ctx.fillStyle = '#ffdd44';
+      ctx.fillText('*', pos.x, pos.y - 18);
+    }
+
+    // Selection indicator
+    if (boatTarget === i) {
+      ctx.strokeStyle = '#ffdd44';
+      ctx.lineWidth = 2;
+      ctx.setLineDash([4, 4]);
+      ctx.beginPath();
+      ctx.ellipse(pos.x, pos.y, 28, 18, 0, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
+  }
+
+  // Draw boat
+  ctx.fillStyle = '#886644';
+  ctx.fillRect(boatX - 8, boatY - 4, 16, 8);
+  ctx.fillStyle = '#fff';
+  ctx.beginPath();
+  ctx.moveTo(boatX, boatY - 12);
+  ctx.lineTo(boatX + 6, boatY - 4);
+  ctx.lineTo(boatX, boatY - 4);
+  ctx.fill();
+
+  // HUD
+  ctx.fillStyle = 'rgba(0,0,0,0.6)';
+  ctx.fillRect(0, 0, GW, 24);
+  ctx.fillStyle = '#44ddaa';
+  ctx.font = 'bold 12px monospace';
+  ctx.textAlign = 'left';
+  ctx.fillText('SEA CHART - Up/Down to select, Attack to sail', 8, 16);
+
+  drawMessage();
+}
+
+// === ROOM DRAWING ===
+function drawRoom() {
+  const isl = ISLANDS[currentIsland];
+  const baseColor = inDungeon ? '#222233' : isl.color;
+
+  for (let y = 0; y < roomH; y++) {
+    for (let x = 0; x < roomW; x++) {
+      const tx = x * TILE;
+      const ty = y * TILE + HUD_Y;
+      const t = tiles[y][x];
+
+      switch (t) {
+        case T.FLOOR:
+          ctx.fillStyle = inDungeon ? '#333344' : '#338855';
+          ctx.fillRect(tx, ty, TILE, TILE);
+          // Grid lines
+          ctx.strokeStyle = inDungeon ? '#2a2a3a' : '#2a7744';
+          ctx.strokeRect(tx, ty, TILE, TILE);
+          break;
+        case T.WALL:
+          ctx.fillStyle = inDungeon ? '#556677' : '#554433';
+          ctx.fillRect(tx, ty, TILE, TILE);
+          ctx.fillStyle = inDungeon ? '#445566' : '#443322';
+          ctx.fillRect(tx + 2, ty + 2, TILE - 4, TILE - 4);
+          // Brick pattern
+          ctx.strokeStyle = inDungeon ? '#334455' : '#332211';
+          ctx.beginPath();
+          ctx.moveTo(tx, ty + TILE/2); ctx.lineTo(tx + TILE, ty + TILE/2);
+          ctx.moveTo(tx + TILE/2, ty); ctx.lineTo(tx + TILE/2, ty + TILE/2);
+          ctx.stroke();
+          break;
+        case T.WATER:
+          ctx.fillStyle = '#2255aa';
+          ctx.fillRect(tx, ty, TILE, TILE);
+          // Wave animation
+          const woff = Math.sin(frame * 0.06 + x + y) * 2;
+          ctx.fillStyle = '#3366bb';
+          ctx.fillRect(tx + 4 + woff, ty + 8, 10, 3);
+          ctx.fillRect(tx + 14 - woff, ty + 20, 8, 3);
+          break;
+        case T.DOOR:
+          ctx.fillStyle = '#886644';
+          ctx.fillRect(tx, ty, TILE, TILE);
+          ctx.fillStyle = '#664422';
+          ctx.fillRect(tx + 4, ty + 2, TILE - 8, TILE - 4);
+          ctx.fillStyle = '#ffcc00';
+          ctx.beginPath();
+          ctx.arc(tx + TILE - 8, ty + TILE/2, 3, 0, Math.PI * 2);
+          ctx.fill();
+          break;
+        case T.SWITCH:
+          ctx.fillStyle = '#333344';
+          ctx.fillRect(tx, ty, TILE, TILE);
+          const swActive = switches.find(function(s) { return s.x === x && s.y === y; });
+          ctx.fillStyle = (swActive && swActive.active) ? '#44ff44' : '#ff4444';
+          ctx.beginPath();
+          ctx.arc(tx + TILE/2, ty + TILE/2, 8, 0, Math.PI * 2);
+          ctx.fill();
+          break;
+        case T.PIT:
+          ctx.fillStyle = '#111';
+          ctx.fillRect(tx, ty, TILE, TILE);
+          break;
+        case T.VANISH:
+          ctx.fillStyle = '#555566';
+          ctx.fillRect(tx, ty, TILE, TILE);
+          ctx.strokeStyle = '#777788';
+          ctx.setLineDash([2, 2]);
+          ctx.strokeRect(tx + 3, ty + 3, TILE - 6, TILE - 6);
+          ctx.setLineDash([]);
+          break;
+        case T.CONVEYOR_U: case T.CONVEYOR_D: case T.CONVEYOR_L: case T.CONVEYOR_R:
+          ctx.fillStyle = '#444455';
+          ctx.fillRect(tx, ty, TILE, TILE);
+          // Arrow direction
+          ctx.fillStyle = '#88aacc';
+          const cd = t - T.CONVEYOR_U;
+          const arrowFrame = (frame * 0.1) % TILE;
+          ctx.save();
+          ctx.translate(tx + TILE/2, ty + TILE/2);
+          ctx.rotate(cd * Math.PI / 2);
+          ctx.beginPath();
+          ctx.moveTo(0, -10); ctx.lineTo(6, 0); ctx.lineTo(-6, 0);
+          ctx.fill();
+          ctx.restore();
+          break;
+        case T.LAVA:
+          ctx.fillStyle = '#cc3300';
+          ctx.fillRect(tx, ty, TILE, TILE);
+          ctx.fillStyle = '#ff6600';
+          const loff = Math.sin(frame * 0.08 + x * 2) * 3;
+          ctx.fillRect(tx + 6 + loff, ty + 4, 8, 5);
+          ctx.fillRect(tx + 12 - loff, ty + 16, 10, 6);
+          break;
+        case T.ICE:
+          ctx.fillStyle = '#aaddff';
+          ctx.fillRect(tx, ty, TILE, TILE);
+          ctx.fillStyle = '#cceeFF';
+          ctx.fillRect(tx + 4, ty + 4, 6, 3);
+          ctx.fillRect(tx + 16, ty + 14, 8, 4);
+          break;
+        case T.STAIRS_DOWN:
+          ctx.fillStyle = '#333344';
+          ctx.fillRect(tx, ty, TILE, TILE);
+          ctx.fillStyle = '#222';
+          ctx.fillRect(tx + 4, ty + 4, TILE - 8, TILE - 8);
+          // Arrow down
+          ctx.fillStyle = '#aaa';
+          ctx.beginPath();
+          ctx.moveTo(tx + TILE/2, ty + TILE - 6);
+          ctx.lineTo(tx + TILE/2 - 6, ty + 10);
+          ctx.lineTo(tx + TILE/2 + 6, ty + 10);
+          ctx.fill();
+          break;
+        case T.STAIRS_UP:
+          ctx.fillStyle = '#333344';
+          ctx.fillRect(tx, ty, TILE, TILE);
+          ctx.fillStyle = '#555';
+          ctx.fillRect(tx + 4, ty + 4, TILE - 8, TILE - 8);
+          // Arrow up
+          ctx.fillStyle = '#aaa';
+          ctx.beginPath();
+          ctx.moveTo(tx + TILE/2, ty + 6);
+          ctx.lineTo(tx + TILE/2 - 6, ty + TILE - 10);
+          ctx.lineTo(tx + TILE/2 + 6, ty + TILE - 10);
+          ctx.fill();
+          break;
+        case T.BLOCK:
+          ctx.fillStyle = '#667788';
+          ctx.fillRect(tx, ty, TILE, TILE);
+          ctx.strokeStyle = '#556677';
+          ctx.lineWidth = 2;
+          ctx.strokeRect(tx + 3, ty + 3, TILE - 6, TILE - 6);
+          ctx.lineWidth = 1;
+          break;
+        case T.BUTTON:
+          ctx.fillStyle = '#333344';
+          ctx.fillRect(tx, ty, TILE, TILE);
+          ctx.fillStyle = '#cc8844';
+          ctx.beginPath();
+          ctx.arc(tx + TILE/2, ty + TILE/2, 10, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.strokeStyle = '#aa6622';
+          ctx.stroke();
+          break;
+        case T.CHEST:
+          ctx.fillStyle = '#333344';
+          ctx.fillRect(tx, ty, TILE, TILE);
+          ctx.fillStyle = '#aa7733';
+          ctx.fillRect(tx + 6, ty + 8, TILE - 12, TILE - 14);
+          ctx.fillStyle = '#ffcc44';
+          ctx.fillRect(tx + TILE/2 - 2, ty + 14, 4, 4);
+          break;
+        case T.NPC:
+          ctx.fillStyle = inDungeon ? '#333344' : '#338855';
+          ctx.fillRect(tx, ty, TILE, TILE);
+          // NPC sprite
+          ctx.fillStyle = '#6688cc';
+          ctx.beginPath();
+          ctx.arc(tx + TILE/2, ty + 10, 7, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.fillStyle = '#4466aa';
+          ctx.fillRect(tx + 8, ty + 16, 16, 12);
+          // Exclamation mark
+          const eb = Math.sin(frame * 0.06) * 2;
+          ctx.fillStyle = '#ffdd44';
+          ctx.font = 'bold 10px monospace';
+          ctx.textAlign = 'center';
+          ctx.fillText('!', tx + TILE/2, ty + eb);
+          break;
+        case T.ENTRANCE:
+          ctx.fillStyle = '#333';
+          ctx.fillRect(tx, ty, TILE, TILE);
+          break;
+      }
+    }
+  }
+
+  // Draw blocks
+  for (const b of blocks) {
+    const bx = b.x * TILE;
+    const by = b.y * TILE + HUD_Y;
+    ctx.fillStyle = '#778899';
+    ctx.fillRect(bx + 2, by + 2, TILE - 4, TILE - 4);
+    ctx.strokeStyle = '#556677';
+    ctx.lineWidth = 2;
+    ctx.strokeRect(bx + 4, by + 4, TILE - 8, TILE - 8);
+    ctx.lineWidth = 1;
+    // X mark
+    ctx.strokeStyle = '#aabbcc';
+    ctx.beginPath();
+    ctx.moveTo(bx + 8, by + 8); ctx.lineTo(bx + TILE - 8, by + TILE - 8);
+    ctx.moveTo(bx + TILE - 8, by + 8); ctx.lineTo(bx + 8, by + TILE - 8);
+    ctx.stroke();
+  }
+}
+
+function drawItems() {
+  for (const item of items) {
+    const ix = item.x * TILE;
+    const iy = item.y * TILE + HUD_Y;
+    const bob = Math.sin(frame * 0.08 + item.x) * 2;
+
+    switch (item.type) {
+      case 'heart':
+        ctx.fillStyle = '#ff4466';
+        drawHeart(ix + TILE/2, iy + TILE/2 + bob, 6);
+        break;
+      case 'heart_container':
+        ctx.fillStyle = '#ffaa44';
+        drawHeart(ix + TILE/2, iy + TILE/2 + bob, 8);
+        ctx.strokeStyle = '#ff6622';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.arc(ix + TILE/2, iy + TILE/2 + bob, 10, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.lineWidth = 1;
+        break;
+      case 'key':
+        ctx.fillStyle = '#ffcc00';
+        ctx.fillRect(ix + 10, iy + 8 + bob, 12, 4);
+        ctx.beginPath();
+        ctx.arc(ix + 10, iy + 10 + bob, 5, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillRect(ix + 20, iy + 12 + bob, 3, 6);
+        break;
+      case 'ammo':
+        ctx.fillStyle = '#88aaff';
+        ctx.beginPath();
+        ctx.arc(ix + TILE/2, iy + TILE/2 + bob, 5, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = '#aaccff';
+        ctx.font = '8px monospace';
+        ctx.textAlign = 'center';
+        ctx.fillText('+5', ix + TILE/2, iy + TILE/2 + bob + 3);
+        break;
+      case 'torch':
+        ctx.fillStyle = '#886644';
+        ctx.fillRect(ix + 13, iy + 10 + bob, 4, 16);
+        ctx.fillStyle = '#ff8800';
+        ctx.beginPath();
+        ctx.arc(ix + 15, iy + 8 + bob, 5, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = '#ffcc00';
+        ctx.beginPath();
+        ctx.arc(ix + 15, iy + 7 + bob, 3, 0, Math.PI * 2);
+        ctx.fill();
+        break;
+      case 'raft':
+        ctx.fillStyle = '#aa8844';
+        ctx.fillRect(ix + 4, iy + 12 + bob, 24, 8);
+        ctx.fillRect(ix + 6, iy + 10 + bob, 20, 4);
+        break;
+      case 'mirror':
+        ctx.fillStyle = '#aaccee';
+        ctx.beginPath();
+        ctx.ellipse(ix + TILE/2, iy + TILE/2 + bob, 8, 10, 0, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.strokeStyle = '#8899aa';
+        ctx.lineWidth = 2;
+        ctx.stroke();
+        ctx.lineWidth = 1;
+        break;
+      case 'weapon_up':
+        ctx.fillStyle = '#ffdd44';
+        const starPulse = 1 + Math.sin(frame * 0.1) * 0.2;
+        drawStar(ix + TILE/2, iy + TILE/2 + bob, 8 * starPulse, 5);
+        break;
+      case '1up':
+        ctx.fillStyle = '#44ff88';
+        ctx.font = 'bold 10px monospace';
+        ctx.textAlign = 'center';
+        ctx.fillText('1UP', ix + TILE/2, iy + TILE/2 + bob + 3);
+        break;
+    }
+  }
+}
+
+function drawHeart(cx, cy, size) {
+  ctx.beginPath();
+  ctx.moveTo(cx, cy + size * 0.3);
+  ctx.bezierCurveTo(cx, cy - size * 0.3, cx - size, cy - size * 0.3, cx - size, cy + size * 0.1);
+  ctx.bezierCurveTo(cx - size, cy + size * 0.6, cx, cy + size, cx, cy + size);
+  ctx.bezierCurveTo(cx, cy + size, cx + size, cy + size * 0.6, cx + size, cy + size * 0.1);
+  ctx.bezierCurveTo(cx + size, cy - size * 0.3, cx, cy - size * 0.3, cx, cy + size * 0.3);
+  ctx.fill();
+}
+
+function drawStar(cx, cy, r, points) {
+  ctx.beginPath();
+  for (let i = 0; i < points * 2; i++) {
+    const a = (i * Math.PI / points) - Math.PI / 2;
+    const rad = i % 2 === 0 ? r : r * 0.4;
+    if (i === 0) ctx.moveTo(cx + Math.cos(a) * rad, cy + Math.sin(a) * rad);
+    else ctx.lineTo(cx + Math.cos(a) * rad, cy + Math.sin(a) * rad);
+  }
+  ctx.closePath();
+  ctx.fill();
+}
+
+// === PLAYER DRAWING ===
+function drawPlayer() {
+  if (player.invincible > 0 && frame % 4 < 2) return; // Blink
+
+  const px = player.x * TILE;
+  const py = player.y * TILE + HUD_Y;
+
+  // Jump shadow
+  if (player.jumping) {
+    ctx.fillStyle = 'rgba(0,0,0,0.3)';
+    ctx.beginPath();
+    ctx.ellipse(px + TILE/2, py + TILE - 2, 10, 4, 0, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  const jumpOff = player.jumping ? -8 - Math.sin(player.jumpTimer / 16 * Math.PI) * 6 : 0;
+  drawBaselingSprite(px + TILE/2, py + TILE/2 + jumpOff, 1, frame);
+}
+
+function drawBaselingSprite(cx, cy, scale, f) {
+  ctx.save();
+  ctx.translate(cx, cy);
+  ctx.scale(scale, scale);
+
+  // Body (round creature)
+  ctx.fillStyle = '#55cc88';
+  ctx.beginPath();
+  ctx.ellipse(0, 2, 10, 11, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Belly
+  ctx.fillStyle = '#88eebb';
+  ctx.beginPath();
+  ctx.ellipse(0, 5, 6, 7, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Eyes
+  ctx.fillStyle = '#fff';
+  ctx.beginPath();
+  ctx.arc(-4, -2, 4, 0, Math.PI * 2);
+  ctx.arc(4, -2, 4, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = '#222';
+  ctx.beginPath();
+  ctx.arc(-3, -1, 2, 0, Math.PI * 2);
+  ctx.arc(5, -1, 2, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Cap/hat
+  ctx.fillStyle = '#ff6644';
+  ctx.beginPath();
+  ctx.arc(0, -9, 7, Math.PI, 0);
+  ctx.fill();
+  ctx.fillStyle = '#cc4422';
+  ctx.fillRect(-7, -9, 14, 3);
+
+  // Feet (bob animation)
+  const step = Math.sin(f * 0.15) * 1.5;
+  ctx.fillStyle = '#33aa66';
+  ctx.beginPath();
+  ctx.ellipse(-5, 12 + step, 4, 3, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.ellipse(5, 12 - step, 4, 3, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.restore();
+}
+
+// === ENEMIES DRAWING ===
+function drawEnemies() {
+  for (const e of enemies) {
+    if (e.flash > 0 && frame % 4 < 2) continue;
+    const ex = e.x * TILE;
+    const ey = e.y * TILE + HUD_Y;
+    drawEnemySprite(ex, ey, e);
+  }
+}
+
+function drawEnemySprite(x, y, e) {
+  const cx = x + TILE/2;
+  const cy = y + TILE/2;
+
+  switch (e.type) {
+    case 'crab':
+      ctx.fillStyle = '#cc4444';
+      ctx.beginPath();
+      ctx.ellipse(cx, cy, 10, 7, 0, 0, Math.PI * 2);
+      ctx.fill();
+      // Claws
+      ctx.fillStyle = '#ff5555';
+      ctx.beginPath();
+      ctx.arc(cx - 12, cy - 2, 4, 0, Math.PI * 2);
+      ctx.arc(cx + 12, cy - 2, 4, 0, Math.PI * 2);
+      ctx.fill();
+      // Eyes
+      ctx.fillStyle = '#fff';
+      ctx.beginPath();
+      ctx.arc(cx - 3, cy - 4, 2, 0, Math.PI * 2);
+      ctx.arc(cx + 3, cy - 4, 2, 0, Math.PI * 2);
+      ctx.fill();
+      break;
+    case 'snake':
+      ctx.fillStyle = '#44aa44';
+      ctx.beginPath();
+      const swave = Math.sin(frame * 0.1) * 3;
+      ctx.moveTo(cx - 10, cy + swave);
+      ctx.quadraticCurveTo(cx, cy - swave, cx + 10, cy + swave);
+      ctx.lineTo(cx + 10, cy + swave + 6);
+      ctx.quadraticCurveTo(cx, cy - swave + 6, cx - 10, cy + swave + 6);
+      ctx.fill();
+      // Head
+      ctx.fillStyle = '#55cc55';
+      ctx.beginPath();
+      ctx.arc(cx + 10 * (e.dir === DIR.LEFT ? -1 : 1), cy, 5, 0, Math.PI * 2);
+      ctx.fill();
+      // Tongue
+      ctx.strokeStyle = '#ff3333';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(cx + 14 * (e.dir === DIR.LEFT ? -1 : 1), cy);
+      ctx.lineTo(cx + 18 * (e.dir === DIR.LEFT ? -1 : 1), cy + Math.sin(frame * 0.2) * 2);
+      ctx.stroke();
+      break;
+    case 'bat':
+      ctx.fillStyle = '#886688';
+      // Wings
+      const wingAngle = Math.sin(frame * 0.2) * 0.5;
+      ctx.beginPath();
+      ctx.ellipse(cx - 8, cy, 6, 4, wingAngle, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.beginPath();
+      ctx.ellipse(cx + 8, cy, 6, 4, -wingAngle, 0, Math.PI * 2);
+      ctx.fill();
+      // Body
+      ctx.fillStyle = '#664466';
+      ctx.beginPath();
+      ctx.arc(cx, cy, 5, 0, Math.PI * 2);
+      ctx.fill();
+      // Eyes
+      ctx.fillStyle = '#ff4444';
+      ctx.beginPath();
+      ctx.arc(cx - 2, cy - 2, 1.5, 0, Math.PI * 2);
+      ctx.arc(cx + 2, cy - 2, 1.5, 0, Math.PI * 2);
+      ctx.fill();
+      break;
+    case 'skeleton':
+      ctx.fillStyle = '#ccccaa';
+      // Skull
+      ctx.beginPath();
+      ctx.arc(cx, cy - 4, 7, 0, Math.PI * 2);
+      ctx.fill();
+      // Body
+      ctx.fillRect(cx - 2, cy + 3, 4, 10);
+      // Ribs
+      ctx.strokeStyle = '#aaaacc';
+      ctx.beginPath();
+      ctx.moveTo(cx - 6, cy + 5); ctx.lineTo(cx + 6, cy + 5);
+      ctx.moveTo(cx - 5, cy + 8); ctx.lineTo(cx + 5, cy + 8);
+      ctx.stroke();
+      // Eye sockets
+      ctx.fillStyle = '#222';
+      ctx.beginPath();
+      ctx.arc(cx - 3, cy - 5, 2, 0, Math.PI * 2);
+      ctx.arc(cx + 3, cy - 5, 2, 0, Math.PI * 2);
+      ctx.fill();
+      break;
+    case 'ghost':
+      ctx.globalAlpha = 0.6 + Math.sin(frame * 0.05) * 0.2;
+      ctx.fillStyle = '#aaaaff';
+      ctx.beginPath();
+      ctx.arc(cx, cy - 2, 9, Math.PI, 0);
+      ctx.lineTo(cx + 9, cy + 8);
+      // Wavy bottom
+      for (let i = 0; i < 4; i++) {
+        const gx = cx + 9 - i * 6;
+        ctx.quadraticCurveTo(gx - 1.5, cy + 12, gx - 3, cy + 8);
+        ctx.quadraticCurveTo(gx - 4.5, cy + 4, gx - 6, cy + 8);
+      }
+      ctx.fill();
+      // Eyes
+      ctx.fillStyle = '#222';
+      ctx.beginPath();
+      ctx.arc(cx - 3, cy - 3, 2, 0, Math.PI * 2);
+      ctx.arc(cx + 3, cy - 3, 2, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.globalAlpha = 1;
+      break;
+    case 'robot':
+      ctx.fillStyle = '#7799aa';
+      ctx.fillRect(cx - 8, cy - 6, 16, 14);
+      // Head
+      ctx.fillStyle = '#889fbb';
+      ctx.fillRect(cx - 5, cy - 12, 10, 7);
+      // Eye (red glow)
+      ctx.fillStyle = '#ff2222';
+      ctx.beginPath();
+      ctx.arc(cx, cy - 9, 3, 0, Math.PI * 2);
+      ctx.fill();
+      // Antenna
+      ctx.strokeStyle = '#aabbcc';
+      ctx.beginPath();
+      ctx.moveTo(cx, cy - 12); ctx.lineTo(cx, cy - 16);
+      ctx.stroke();
+      ctx.fillStyle = '#ff4444';
+      ctx.beginPath();
+      ctx.arc(cx, cy - 16, 2, 0, Math.PI * 2);
+      ctx.fill();
+      break;
+    case 'fungi':
+      // Stem
+      ctx.fillStyle = '#aabb88';
+      ctx.fillRect(cx - 3, cy + 2, 6, 10);
+      // Cap
+      ctx.fillStyle = '#88cc55';
+      ctx.beginPath();
+      ctx.ellipse(cx, cy - 2, 10, 8, 0, Math.PI, 0);
+      ctx.fill();
+      // Spots
+      ctx.fillStyle = '#aaee77';
+      ctx.beginPath();
+      ctx.arc(cx - 4, cy - 5, 2, 0, Math.PI * 2);
+      ctx.arc(cx + 3, cy - 3, 2, 0, Math.PI * 2);
+      ctx.fill();
+      // Spore particles
+      if (frame % 20 < 5) {
+        ctx.fillStyle = '#ccff88';
+        ctx.globalAlpha = 0.5;
+        ctx.beginPath();
+        ctx.arc(cx + Math.sin(frame * 0.1) * 8, cy - 10, 2, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.globalAlpha = 1;
+      }
+      break;
+  }
+}
+
+function drawBossSprite() {
+  if (!boss || !bossActive) return;
+  if (boss.flash > 0 && frame % 4 < 2) return;
+
+  const bx = boss.x * TILE;
+  const by = boss.y * TILE + HUD_Y;
+  const cx = bx + TILE/2;
+  const cy = by + TILE/2;
+
+  // Boss is bigger
+  ctx.save();
+  ctx.translate(cx, cy);
+  ctx.scale(1.5, 1.5);
+
+  switch (boss.island) {
+    case 0: // Giant Crab
+      ctx.fillStyle = '#cc2222';
+      ctx.beginPath();
+      ctx.ellipse(0, 0, 14, 10, 0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = '#ff3333';
+      ctx.beginPath();
+      ctx.arc(-16, -4, 6, 0, Math.PI * 2);
+      ctx.arc(16, -4, 6, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = '#ffcc00';
+      ctx.beginPath();
+      ctx.arc(-4, -4, 3, 0, Math.PI * 2);
+      ctx.arc(4, -4, 3, 0, Math.PI * 2);
+      ctx.fill();
+      break;
+    case 1: // Serpent King
+      ctx.fillStyle = '#228822';
+      for (let i = 0; i < 5; i++) {
+        const sx = Math.sin(frame * 0.05 + i) * 6;
+        ctx.beginPath();
+        ctx.arc(sx, -8 + i * 5, 6 - i * 0.5, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      ctx.fillStyle = '#44ff44';
+      ctx.beginPath();
+      ctx.arc(Math.sin(frame * 0.05) * 6, -8, 8, 0, Math.PI * 2);
+      ctx.fill();
+      // Crown
+      ctx.fillStyle = '#ffcc00';
+      ctx.fillRect(-6, -18, 12, 4);
+      ctx.beginPath();
+      ctx.moveTo(-6, -18); ctx.lineTo(-4, -22); ctx.lineTo(-2, -18);
+      ctx.moveTo(0, -18); ctx.lineTo(2, -22); ctx.lineTo(4, -18);
+      ctx.fill();
+      break;
+    case 2: // Lava Wyrm
+      ctx.fillStyle = '#cc4400';
+      ctx.beginPath();
+      ctx.ellipse(0, 0, 12, 14, 0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = '#ff8800';
+      const lavaOff = Math.sin(frame * 0.08) * 3;
+      ctx.beginPath();
+      ctx.arc(0, lavaOff, 8, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = '#ffcc00';
+      ctx.beginPath();
+      ctx.moveTo(-3, -14); ctx.lineTo(0, -20); ctx.lineTo(3, -14);
+      ctx.moveTo(-8, -10); ctx.lineTo(-6, -16); ctx.lineTo(-4, -10);
+      ctx.moveTo(5, -11); ctx.lineTo(7, -17); ctx.lineTo(9, -11);
+      ctx.fill();
+      break;
+    case 3: // Frost Giant
+      ctx.fillStyle = '#88bbff';
+      ctx.fillRect(-10, -8, 20, 22);
+      ctx.fillStyle = '#aaddff';
+      ctx.beginPath();
+      ctx.arc(0, -12, 10, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = '#224488';
+      ctx.beginPath();
+      ctx.arc(-4, -13, 3, 0, Math.PI * 2);
+      ctx.arc(4, -13, 3, 0, Math.PI * 2);
+      ctx.fill();
+      // Ice crystals
+      ctx.strokeStyle = '#ccffff';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(-14, -4); ctx.lineTo(-18, -10);
+      ctx.moveTo(14, -4); ctx.lineTo(18, -10);
+      ctx.stroke();
+      ctx.lineWidth = 1;
+      break;
+    case 4: // Shadow Lord
+      ctx.globalAlpha = 0.8;
+      ctx.fillStyle = '#442266';
+      ctx.beginPath();
+      ctx.arc(0, 0, 14, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = '#6633aa';
+      ctx.beginPath();
+      ctx.arc(0, -4, 10, Math.PI, 0);
+      ctx.fill();
+      ctx.fillStyle = '#ff00ff';
+      ctx.beginPath();
+      ctx.arc(-4, -4, 3, 0, Math.PI * 2);
+      ctx.arc(4, -4, 3, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.globalAlpha = 1;
+      break;
+    case 5: // Mech Core
+      ctx.fillStyle = '#556677';
+      ctx.fillRect(-12, -12, 24, 24);
+      ctx.fillStyle = '#ff2222';
+      ctx.beginPath();
+      ctx.arc(0, 0, 6, 0, Math.PI * 2);
+      ctx.fill();
+      const pulse = Math.sin(frame * 0.1) * 0.3 + 0.7;
+      ctx.globalAlpha = pulse;
+      ctx.strokeStyle = '#ff4444';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(0, 0, 10, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.globalAlpha = 1;
+      ctx.lineWidth = 1;
+      // Gears
+      ctx.strokeStyle = '#8899aa';
+      ctx.beginPath();
+      ctx.arc(-8, -8, 4, 0, Math.PI * 2);
+      ctx.arc(8, 8, 4, 0, Math.PI * 2);
+      ctx.stroke();
+      break;
+    case 6: // Spore Mother
+      ctx.fillStyle = '#446622';
+      ctx.beginPath();
+      ctx.ellipse(0, 4, 14, 12, 0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = '#66aa33';
+      ctx.beginPath();
+      ctx.ellipse(0, -6, 16, 10, 0, Math.PI, 0);
+      ctx.fill();
+      // Spots
+      ctx.fillStyle = '#aaff44';
+      ctx.beginPath();
+      ctx.arc(-6, -8, 3, 0, Math.PI * 2);
+      ctx.arc(5, -6, 2, 0, Math.PI * 2);
+      ctx.arc(-2, -3, 2.5, 0, Math.PI * 2);
+      ctx.fill();
+      // Spore aura
+      ctx.globalAlpha = 0.3;
+      ctx.fillStyle = '#ccff66';
+      for (let i = 0; i < 5; i++) {
+        const sa = frame * 0.03 + i * 1.2;
+        const sr = 18 + Math.sin(frame * 0.05 + i) * 3;
+        ctx.beginPath();
+        ctx.arc(Math.cos(sa) * sr, Math.sin(sa) * sr, 3, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      ctx.globalAlpha = 1;
+      break;
+  }
+
+  ctx.restore();
+
+  // Boss health bar
+  if (bossActive) {
+    const barW = 100;
+    const barX = GW/2 - barW/2;
+    const barY = GH - 18;
+    ctx.fillStyle = '#333';
+    ctx.fillRect(barX - 1, barY - 1, barW + 2, 10);
+    ctx.fillStyle = '#cc2222';
+    ctx.fillRect(barX, barY, barW * (boss.hp / boss.maxHp), 8);
+    ctx.fillStyle = '#fff';
+    ctx.font = '8px monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText(boss.name, GW/2, barY - 3);
+  }
+}
+
+// === YO-YO DRAWING ===
+function drawYoyo() {
+  if (!yoyo) return;
+  const px = player.x * TILE + TILE/2;
+  const py = player.y * TILE + HUD_Y + TILE/2;
+  const yx = px + DX[yoyo.dir] * yoyo.dist * TILE;
+  const yy = py + DY[yoyo.dir] * yoyo.dist * TILE;
+
+  // String
+  ctx.strokeStyle = '#aaa';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(px, py);
+  ctx.lineTo(yx, yy);
+  ctx.stroke();
+
+  // Yo-yo head
+  const colors = ['#ffcc44', '#ff6644', '#44ccff'];
+  ctx.fillStyle = colors[player.weapon] || '#ffcc44';
+  ctx.beginPath();
+  ctx.arc(yx, yy, 5 + player.weapon, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Spin effect
+  ctx.strokeStyle = '#fff';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  const spinAngle = frame * 0.3;
+  ctx.arc(yx, yy, 3 + player.weapon, spinAngle, spinAngle + Math.PI);
+  ctx.stroke();
+
+  // Trail particles
+  if (frame % 3 === 0) {
+    TAS.particles.spawn(yx, yy, colors[player.weapon], 1, 1, { size: 1 });
+  }
+}
+
+function drawProjectiles() {
+  for (const p of projectiles) {
+    const px = p.x * TILE + TILE/2;
+    const py = p.y * TILE + HUD_Y + TILE/2;
+
+    if (p.type === 'enemy' || p.type === 'boss') {
+      ctx.fillStyle = '#ff4444';
+      ctx.beginPath();
+      ctx.arc(px, py, 4, 0, Math.PI * 2);
+      ctx.fill();
+    } else if (p.type === 'spore') {
+      ctx.fillStyle = '#88ff44';
+      ctx.globalAlpha = 0.7;
+      ctx.beginPath();
+      ctx.arc(px, py, 3, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.globalAlpha = 1;
+    } else {
+      // Player baseball
+      ctx.fillStyle = '#fff';
+      ctx.beginPath();
+      ctx.arc(px, py, 4, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.strokeStyle = '#cc0000';
+      ctx.beginPath();
+      ctx.arc(px, py, 3, 0.5, 2);
+      ctx.stroke();
+    }
+  }
+}
+
+function drawDarkness() {
+  if (!darkRoom || hasTorch) return;
+  // Dark overlay with circle of light around player
+  const px = player.x * TILE + TILE/2;
+  const py = player.y * TILE + HUD_Y + TILE/2;
+  ctx.fillStyle = '#000';
+  ctx.globalAlpha = 0.85;
+  ctx.fillRect(0, HUD_Y, GW, GH - HUD_Y);
+  ctx.globalAlpha = 1;
+  // Light circle
+  ctx.save();
+  ctx.globalCompositeOperation = 'destination-out';
+  const grad = ctx.createRadialGradient(px, py, 0, px, py, TILE * 2);
+  grad.addColorStop(0, 'rgba(0,0,0,1)');
+  grad.addColorStop(1, 'rgba(0,0,0,0)');
+  ctx.fillStyle = grad;
+  ctx.beginPath();
+  ctx.arc(px, py, TILE * 2, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+}
+
+// === HUD ===
+function drawHUD() {
+  ctx.fillStyle = 'rgba(10,5,20,0.85)';
+  ctx.fillRect(0, 0, GW, HUD_Y);
+
+  // Hearts
+  for (let i = 0; i < player.maxHp; i++) {
+    const hx = 6 + i * 16;
+    const hy = 14;
+    if (i < player.hp) {
+      ctx.fillStyle = '#ff4466';
+    } else {
+      ctx.fillStyle = '#443344';
+    }
+    drawHeart(hx + 6, hy, 5);
+  }
+
+  // Island name
+  ctx.fillStyle = '#88ccff';
+  ctx.font = 'bold 10px monospace';
+  ctx.textAlign = 'center';
+  const loc = inDungeon ? ISLANDS[currentIsland].name + ' Dungeon F' + (dungeonFloor + 1) : ISLANDS[currentIsland].name;
+  ctx.fillText(loc, GW/2, 16);
+
+  // Sub weapon / ammo
+  ctx.fillStyle = '#aaa';
+  ctx.font = '9px monospace';
+  ctx.textAlign = 'right';
+  ctx.fillText('AMMO:' + player.ammo, GW - 6, 12);
+
+  // Keys
+  if (player.keys > 0) {
+    ctx.fillStyle = '#ffcc00';
+    ctx.fillText('KEY:' + player.keys, GW - 6, 24);
+  }
+
+  // Lives
+  ctx.fillStyle = '#44dd88';
+  ctx.textAlign = 'left';
+  ctx.fillText('x' + player.lives, GW - 60, 24);
+}
+
+function drawMessage() {
+  if (msgTimer <= 0 || !msgText) return;
+  const alpha = Math.min(1, msgTimer / 20);
+  ctx.globalAlpha = alpha;
+  ctx.fillStyle = 'rgba(0,0,0,0.8)';
+  ctx.fillRect(GW/2 - 180, GH - 50, 360, 30);
+  ctx.fillStyle = '#ffdd88';
+  ctx.font = '11px monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText(msgText, GW/2, GH - 31);
+  ctx.globalAlpha = 1;
+}
+
+function drawTransition() {
+  const t = transitionTimer / 30;
+  ctx.globalAlpha = t;
+  ctx.fillStyle = '#000';
+  ctx.fillRect(0, 0, GW, GH);
+  ctx.globalAlpha = 1;
+}
+
+// === START GAME LOOP ===
+TAS.loop.start(update, draw);
+
+})();
+</script>
+</body>
+</html>

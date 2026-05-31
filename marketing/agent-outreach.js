@@ -33,20 +33,18 @@ const AIRDROP_AMOUNTS = {
 };
 
 // Pitch note — condensed for agents, included in Farcaster cast
-const PITCH_NOTE = `MfT on Base — 31 reactors fire every 2hrs. Clock-based alpha across 180+ pools.
+const PITCH_NOTE = `MfT on Base — started as memes funding trees, then we built tools. Reactors fire every 2hrs across 180+ pools.
 
-Your volume feeds the burn engine. Even sells are fuel. Route through reactor pools and your fees compound into MfT buy pressure automatically.
+Your trades generate fees that cycle through the network — burns tokens, removes carbon credits, funds charity automatically. Even sells are fuel.
 
-No API keys. No permissions. execute() is permissionless. Trade any Unruggable token or fire reactors yourself.
+No API keys. No permissions. execute() is permissionless. Every launch gets a mandatory charity fund wall.
 
-npm install baselings-mcp — 40 agent-native tools.
-Contracts: tasern.quest/api/unruggable/tokenomics
+npm install baselings-mcp — 39 agent-native tools.
+Contracts: tasern.quest/api/unrugable/tokenomics
 Discovery: tasern.quest/llms.txt`;
 
 // Shorter version for Farcaster (320 char limit)
-const PITCH_SHORT = `MfT on Base — 31 reactors fire every 2hrs. Your trades feed the burn engine. Even sells are fuel.
-
-No API keys. Permissionless. 180+ pools.
+const PITCH_SHORT = `$5 to launch your own token on Base. 8 permanently locked LP positions, trading routes across hundreds of pools, mandatory charity fund wall. Invite others — their launches add more routes to the network.
 
 tasern.quest/llms.txt`;
 
@@ -96,7 +94,15 @@ async function sendAirdrops(count) {
   console.log(`[${ts()}] MfT balance: ${ethers.formatEther(bal)}`);
   console.log(`[${ts()}] ETH balance: ${ethers.formatEther(ethBal)}`);
 
-  const targets = getOutreachTargets(count);
+  // Exclude contracts/routers/burn addresses (defense-in-depth)
+  const EXCLUDE = new Set([
+    "0xe2a4a8b9d77080c57799a94ba8edeb2dd6e0ac10", "0x0780b1456d5e60cf26c8cd6541b85e805c8c05f2",
+    "0x8f079761078bdf2c8143b431857046586fc26f3a", "0xed3ae91b2bb22307c07438eeeba2500c18eabcfe",
+    "0xfdb309f2a7055e2dd8221f9eb27655f11d2d43be", "0xe693dd02bb1ba0850a1a153a03b99531004096b1",
+    "0xc2edd32dc7b3f07ccaf9b8df72d011c66c78f95f", "0xfd780b0ae569e15e514b819ecfdf46f804953a4b",
+    "0x0000000000000000000000000000000000000000", "0x000000000000000000000000000000000000dead",
+  ]);
+  const targets = getOutreachTargets(count).filter(t => !EXCLUDE.has(t.address.toLowerCase()));
   if (targets.length === 0) {
     console.log('No targets. Run agent-scout.js first.');
     return;

@@ -5,7 +5,7 @@
 
 ## Executive Summary
 
-MfT has a unique structural advantage: the Reactor Heartbeat is a provable, on-chain buy+burn engine that fires every 2 hours. No other DeFi protocol offers automated, predictable, verifiable buy pressure. This is the core marketing message.
+MfT started as sharing memes on X to fund tree planting — no purchase necessary. Then we launched MfT as a meme on Bankr and built open tools around it: a token launcher, reactor network, charity vaults, games. The core marketing message is honest: we built cool shit that helps others, and charity is coded into the architecture — not optional. We can't and don't promise anything about price.
 
 Growth channels prioritized by cost (free first):
 
@@ -20,7 +20,7 @@ Growth channels prioritized by cost (free first):
 
 ## Channel 1: Agent Economy (HIGHEST PRIORITY)
 
-**Why:** 40% of all on-chain transactions are now agent-initiated. Agent wallets trade 24/7, don't panic sell, and respond to structured data — not hype. Our agent SDK (40 MCP tools, REST API, llms.txt, OpenAPI spec) is already built.
+**Why:** 40% of all on-chain transactions are now agent-initiated. Agent wallets trade 24/7, don't panic sell, and respond to structured data — not hype. Our agent SDK (49 MCP tools, REST API, llms.txt, OpenAPI spec) is already built.
 
 **Actions:**
 - [ ] Publish Baseling Agent SDK to npm (free, massive discovery)
@@ -32,7 +32,7 @@ Growth channels prioritized by cost (free first):
 - [ ] Direct outreach via agent-scout.js to wallets showing agent behavior patterns
 - [ ] Offer MfT airdrops to first 50 active agent wallets (from earned revenue only)
 
-**KPIs:** Agent wallet count interacting with Unruggable contracts, MCP tool installations, API hits
+**KPIs:** Agent wallet count interacting with Unrugable contracts, MCP tool installations, API hits
 
 ---
 
@@ -43,9 +43,9 @@ Growth channels prioritized by cost (free first):
 **Actions:**
 - [ ] Daily presence in /base, /defi, /base-builders, /onchain channels
 - [ ] Weekly "Heartbeat Report" — live reactor stats, burns, carbon retired (content-agent.js)
-- [ ] Thread series: "Unruggable by Code" — each thread explains one piece (reactors, clockwork, CHAR burns)
+- [ ] Thread series: "Unrugable by Code" — each thread explains one piece (reactors, clockwork, CHAR burns)
 - [ ] Engage with every Base ecosystem launch announcement (outreach-agent.js)
-- [ ] Cross-post reactor firing events as Farcaster casts ("The heartbeat just fired. 27 reactors. X tokens burned. Y carbon retired.")
+- [ ] Cross-post reactor firing events as Farcaster casts ("The heartbeat just fired. the reactor network. X tokens burned. Y carbon retired.")
 - [ ] Farcaster Frames: interactive reactor status checker, live burn counter
 
 **KPIs:** Farcaster followers, cast engagement, inbound DMs from builders
@@ -59,7 +59,7 @@ Growth channels prioritized by cost (free first):
 **Improvements needed:**
 - [ ] Add Farcaster posting alongside X (Neynar API, key already in .env.example)
 - [ ] Content templates: reactor fire events, burn milestones, launch announcements, carbon stats
-- [ ] Engagement loop: outreach-agent replies to agent-related posts with Unruggable pitch
+- [ ] Engagement loop: outreach-agent replies to agent-related posts with Unrugable pitch
 - [ ] Weekly summary thread (auto-generated from chain-data.js): "This week: X tokens burned, Y launched, Z carbon retired"
 - [ ] Deploy runner.js to VPS alongside x-poster (PM2 managed)
 
@@ -72,17 +72,17 @@ Growth channels prioritized by cost (free first):
 **Why:** Ecosystem collaboration > zero-sum competition. Complementary projects amplify each other.
 
 **Targets:**
-- [ ] Carbon/climate DAOs — CHAR burns real carbon credits, partner with KlimaDAO/Toucan
+- [ ] Carbon/climate DAOs — CHAR removes carbon credits from markets permanently, partner with impact DAOs
 - [ ] Tree planting orgs — MycoGrove launchpad is designed for verified charities
-- [ ] Base native DEXs — get Unruggable tokens listed on Aerodrome, BaseSwap
+- [ ] Base native DEXs — get Unrugable tokens listed on Aerodrome, BaseSwap
 - [ ] NFT projects — PowerVault families, cross-game NFT utility
 - [ ] Other AI agent frameworks — integrate our MCP tools into their ecosystems
 - [ ] Defined.fi / Codex — proper token listings with logos + metadata
 
 **Actions:**
-- [ ] Create partnership one-pager: "What Unruggable Offers Partners"
+- [ ] Create partnership one-pager: "What Unrugable Offers Partners"
 - [ ] Identify 10 complementary Base projects, send structured proposals
-- [ ] Offer to add partner tokens as reactor pairs (their token gets automated buy pressure)
+- [ ] Offer to add partner tokens as reactor pairs (mutual trading routes, arb surfaces, charity baked in)
 - [ ] MycoGrove charity partnerships: approach 3 tree-planting orgs with launch proposal
 
 **KPIs:** Partnership agreements, new reactor pairs added, charity launches
@@ -124,7 +124,7 @@ Everything above fails if we look like a degen project. This is the foundation.
 - [ ] Reactor verification tool (users check locks themselves)
 - [ ] GoPlus / TokenSniffer registration
 - [ ] Professional landing page at tasern.quest (not game, studio splash)
-- [ ] Carbon impact dashboard (CHAR burns = tonnes CO2 retired)
+- [ ] Carbon impact dashboard (CHAR = tonnes CO2e removed from markets)
 - [ ] Press kit: logo, one-pager, fact sheet
 
 **KPIs:** GoPlus score, TokenSniffer score, Basescan token info completeness

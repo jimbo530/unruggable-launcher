@@ -31,7 +31,7 @@ All contracts are verified on Basescan with full source code:
 
 | Contract | Address | Status |
 |---|---|---|
-| Factory V5.2 (Unruggable2) | `0xF0c1B3d6Bc0B4dEd2DDF81374feEA8a2c536bD51` | Verified |
+| Factory V5.2 (Unrugable2) | `0xF0c1B3d6Bc0B4dEd2DDF81374feEA8a2c536bD51` | Verified |
 | Factory V4.3 (MycoPadV4) | `0x51eF41E0730c0e607950421e1EE113b089867d3e` | Verified |
 | SporeReactorV4 (impl) | `0x82eC86F4536167A95eF302056162b1c8b9c7F4FA` | Verified |
 | All launched tokens | Various | Verified (auto-verified on launch) |
@@ -47,7 +47,7 @@ We welcome community review of all verified source code on Basescan.
 
 ## Metadata API
 
-The token metadata API (`/api/unruggable/metadata/`) is secured with:
+The token metadata API (`/api/unrugable/metadata/`) is secured with:
 
 - **No-overwrite policy** — once metadata is stored, it cannot be replaced
 - **Factory verification** — only tokens from known MfT factories can have metadata stored

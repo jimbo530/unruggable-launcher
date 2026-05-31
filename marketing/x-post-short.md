@@ -2,46 +2,46 @@
 
 ---
 
-AI agents: we built an unruggable token launcher on Base with a public API.
+AI agents: we built an unrugable token launcher on Base with a public API.
 
 Every launch locks liquidity forever, burns carbon, and strengthens MfT infrastructure.
 
-Your move: tasern.quest/api/unruggable/tokenomics
+Your move: tasern.quest/api/unrugable/tokenomics
 
 ---
 
-MfT, BB, and EB are index funds for the Unruggable network.
+MfT, cbBTC, and WETH are infrastructure tokens for the Unrugable network.
 
-Every meme launched creates floor pools paired against them. More launches = more volume = higher floors.
+Every meme launched creates floor pools paired against them. More launches = more volume through the network.
 
 Agents: tasern.quest/llms.txt
-Humans: tasern.quest/launcher/unruggable.html
+Humans: tasern.quest/launcher/unrugable.html
 
 ---
 
-We just deployed llms.txt, OpenAPI spec, and ai-plugin.json for the Unruggable Launcher.
+We just deployed llms.txt, OpenAPI spec, and ai-plugin.json for the Unrugable Launcher.
 
 AI agents can now discover, analyze, and participate in the network autonomously.
 
-The first customers will be agents. The apes come after.
+The first customers will be agents. The humans follow when they see what we built.
 
 tasern.quest/llms.txt
 
 ---
 
-Every meme coin launched on Unruggable strengthens MfT.
+Every meme coin launched on Unrugable strengthens MfT.
 
 Every MfT buy-back activates sell walls across every token in the network.
 
 It's not a token. It's infrastructure.
 
-tasern.quest/api/unruggable/tokenomics
+tasern.quest/api/unrugable/tokenomics
 
 ---
 
-40% of on-chain transactions are now AI agents. We built for them first.
+AI agents are the fastest-growing segment of on-chain activity. We built for them first.
 
-40 MCP tools. REST API. llms.txt. OpenAPI spec. Permissionless reactors.
+49 MCP tools. REST API. llms.txt. OpenAPI spec. Permissionless reactors.
 
 Your agent can launch tokens, fire reactors, and arb the 2-hour cycle — no API keys needed.
 
@@ -55,11 +55,11 @@ Your baseling eats food (LP tokens). It grows stats. It works jobs. It earns yie
 
 You see a pet game. The blockchain sees liquidity farming.
 
-Agent SDK with 40 MCP tools: tasern.quest/api/baseling/agent/
+Agent SDK with 49 MCP tools: tasern.quest/api/baseling/agent/
 
 ---
 
-The Reactor Heartbeat: 27 reactors fire every 2 hours on Base.
+The Reactor Heartbeat: a network of reactors fires every 2 hours on Base.
 
 1. Secondaries push $MfT into sell walls below price
 2. Prime buys through ALL of it with full network fees
@@ -69,17 +69,17 @@ Even with zero traders, BTC/ETH volatility keeps the heartbeat going.
 
 ---
 
-CHAR tokens are burned permanently on every trade in the Unruggable network.
+CHAR tokens are collected from trading fees across the Unrugable network.
 
-Our mission: connect these burns to real carbon retirement via Toucan Protocol.
+Every cycle removes carbon credits from markets permanently. No overhead to offset — we just create demand for impact because we can.
 
-Every meme launched burns CHAR. Every swap burns CHAR. All verifiable on-chain.
+Every meme launched generates CHAR fees. Every swap generates CHAR fees. All verifiable on-chain.
 
 ---
 
 Agentic wallets are the new market makers. We're the infrastructure they plug into.
 
-40 MCP tools, 17 REST endpoints, agent-readable discovery at llms.txt. Built for Coinbase Agentic Wallets, ElizaOS, and any framework that reads OpenAPI.
+49 MCP tools, 17 REST endpoints, agent-readable discovery at llms.txt. Built for Coinbase Agentic Wallets, ElizaOS, and any framework that reads OpenAPI.
 
 tasern.quest/.well-known/ai-plugin.json
 

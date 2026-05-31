@@ -1,0 +1,1661 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Pirates of Tasern</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body { width: 100%; height: 100%; overflow: hidden; background: #111; touch-action: none; }
+canvas { display: block; margin: 0 auto; }
+#back-link {
+  position: fixed; bottom: 8px; left: 50%; transform: translateX(-50%);
+  color: #666; font-family: monospace; font-size: 12px; text-decoration: none; z-index: 10;
+}
+#back-link:hover { color: #aaa; }
+</style>
+</head>
+<body>
+<canvas id="gc"></canvas>
+<a id="back-link" href="/games">Back to Arcade</a>
+<script src="nft-loader.js"></script>
+<script>if(window.NftLoader)NftLoader.gate();</script>
+<script src="tasern-engine.js"></script>
+<script>
+(function() {
+"use strict";
+
+// === GAME CONSTANTS ===
+const GW = 480, GH = 320;
+const ctx = TAS.ctx;
+TAS.initCanvas(GW, GH);
+TAS.input.initTouch({ buttons: ['a', 'b'], labels: { a: 'FIRE', b: 'ACTION' } });
+
+const { keys, touch } = TAS.input;
+const { lerp, clamp, randRange, randInt, dist, angle } = TAS.math;
+
+// === SAVE KEY ===
+const SAVE_KEY = 'pirates_tasern_save';
+
+// === WORLD GENERATION ===
+const MAP_W = 2400, MAP_H = 2400;
+const PORTS = [
+  { name: 'Kardov\'s Gate', x: 400, y: 400, type: 'forge', color: '#cc4444' },
+  { name: 'Sporehaven', x: 1800, y: 300, type: 'forest', color: '#44aa44' },
+  { name: 'Irondeep', x: 2100, y: 1200, type: 'mine', color: '#8888cc' },
+  { name: 'Greenhollow', x: 300, y: 1400, type: 'farm', color: '#88cc44' },
+  { name: 'Driftwood Bay', x: 1200, y: 2000, type: 'forest', color: '#338844' },
+  { name: 'Ashport', x: 2000, y: 2000, type: 'forge', color: '#cc6644' },
+  { name: 'Coral Reach', x: 600, y: 2100, type: 'farm', color: '#44cc88' },
+  { name: 'Stormwatch', x: 1200, y: 600, type: 'mine', color: '#6666aa' }
+];
+
+const GOODS = ['Spores', 'Tokens', 'Food', 'Weapons'];
+const GOOD_COLORS = ['#44dd88', '#ddaa44', '#dd8844', '#dd4444'];
+const PRODUCE_MAP = { forest: 'Spores', mine: 'Tokens', farm: 'Food', forge: 'Weapons' };
+
+const SHIP_TYPES = [
+  { name: 'Sloop', speed: 3.0, cannons: 4, hull: 40, cargo: 20, crew: 15, cost: 0 },
+  { name: 'Brigantine', speed: 2.2, cannons: 8, hull: 80, cargo: 40, crew: 30, cost: 2000 },
+  { name: 'Galleon', speed: 1.5, cannons: 16, hull: 150, cargo: 80, crew: 60, cost: 5000 }
+];
+
+// Islands (non-port landmasses for treasure)
+const ISLANDS = [];
+for (let i = 0; i < 20; i++) {
+  ISLANDS.push({
+    x: 200 + Math.random() * (MAP_W - 400),
+    y: 200 + Math.random() * (MAP_H - 400),
+    r: 20 + Math.random() * 30,
+    hasTreasure: i < 5,
+    treasureId: i < 5 ? i : -1
+  });
+}
+// Push islands away from ports
+for (const isl of ISLANDS) {
+  for (const p of PORTS) {
+    if (dist(isl.x, isl.y, p.x, p.y) < 120) {
+      isl.x += 150;
+      isl.y += 150;
+    }
+  }
+}
+
+// === GAME STATE ===
+let state = 'title'; // title, sailing, port, combat, duel, gameOver, victory
+let frame = 0;
+let camX = 0, camY = 0;
+
+// Player state
+let player = {};
+let enemies = [];
+let cannonballs = [];
+let day = 1;
+let weatherTimer = 0;
+let weather = 'clear'; // clear, wind, storm
+let windDir = 0; // radians
+let windForce = 1;
+let stormAlpha = 0;
+
+// Combat state
+let combatEnemy = null;
+let combatAngle = 0;
+let combatDist = 150;
+let combatCooldown = 0;
+let combatBalls = [];
+let playerAimAngle = 0;
+let enemyHP = 0;
+let playerCombatHP = 0;
+
+// Duel state
+let duelEnemy = null;
+let duelPlayerHP = 0;
+let duelEnemyHP = 0;
+let duelPlayerStance = 1; // 0=high,1=mid,2=low
+let duelEnemyStance = 1;
+let duelPlayerAttack = -1;
+let duelEnemyAttack = -1;
+let duelTimer = 0;
+let duelText = '';
+let duelCooldown = 0;
+
+// Port state
+let currentPort = null;
+let portMenu = 0; // 0=main, 1=buy, 2=sell, 3=ship, 4=tavern
+let portCursor = 0;
+let portPrices = [];
+let menuCooldown = 0;
+
+// Messages
+let messages = [];
+let msgTimer = 0;
+
+function addMessage(text) {
+  messages.unshift(text);
+  if (messages.length > 3) messages.pop();
+  msgTimer = 3;
+}
+
+// === INITIALIZATION ===
+function initGame() {
+  player = {
+    x: PORTS[0].x, y: PORTS[0].y + 80,
+    dir: 0, speed: 0,
+    shipType: 0,
+    hull: SHIP_TYPES[0].hull,
+    maxHull: SHIP_TYPES[0].hull,
+    cannons: SHIP_TYPES[0].cannons,
+    cargo: [0, 0, 0, 0], // Spores, Tokens, Food, Weapons
+    cargoMax: SHIP_TYPES[0].cargo,
+    crew: 10,
+    crewMax: SHIP_TYPES[0].crew,
+    gold: 100,
+    morale: 100,
+    reputation: 0, // -100 pirate to +100 privateer
+    treasures: [false, false, false, false, false],
+    treasureMaps: [false, false, false, false, false]
+  };
+  day = 1;
+  enemies = [];
+  cannonballs = [];
+  weather = 'clear';
+  windDir = Math.random() * Math.PI * 2;
+  windForce = 1;
+  messages = [];
+  spawnEnemies();
+  addMessage('Set sail from Kardov\'s Gate!');
+}
+
+function spawnEnemies() {
+  enemies = [];
+  for (let i = 0; i < 6; i++) {
+    enemies.push({
+      x: 300 + Math.random() * (MAP_W - 600),
+      y: 300 + Math.random() * (MAP_H - 600),
+      dir: Math.random() * Math.PI * 2,
+      speed: 1 + Math.random(),
+      shipType: randInt(0, 2),
+      hull: SHIP_TYPES[randInt(0, 1)].hull,
+      aggressive: Math.random() < 0.4,
+      patrol: Math.random() * Math.PI * 2,
+      gold: randInt(50, 300),
+      cargo: [randInt(0, 5), randInt(0, 5), randInt(0, 5), randInt(0, 5)]
+    });
+  }
+}
+
+// === SAVE / LOAD ===
+function saveGame() {
+  try {
+    const data = { player, day, weather, windDir };
+    localStorage.setItem(SAVE_KEY, JSON.stringify(data));
+  } catch(e) { addMessage('Save failed: ' + e.message); }
+}
+
+function loadGame() {
+  try {
+    const raw = localStorage.getItem(SAVE_KEY);
+    if (!raw) return false;
+    const data = JSON.parse(raw);
+    player = data.player;
+    day = data.day;
+    weather = data.weather || 'clear';
+    windDir = data.windDir || 0;
+    spawnEnemies();
+    return true;
+  } catch(e) { return false; }
+}
+
+// === PORT PRICES ===
+function generatePrices(port) {
+  const prices = [];
+  for (let i = 0; i < 4; i++) {
+    let base = 20 + randInt(5, 15);
+    if (PRODUCE_MAP[port.type] === GOODS[i]) base = randInt(5, 12); // cheap locally
+    else if (Math.random() < 0.3) base = randInt(30, 50); // demand spike
+    prices.push(base);
+  }
+  return prices;
+}
+
+// === SAILING UPDATE ===
+function updateSailing(dt) {
+  // Weather
+  weatherTimer -= dt;
+  if (weatherTimer <= 0) {
+    weatherTimer = randRange(15, 40);
+    const r = Math.random();
+    if (r < 0.5) weather = 'clear';
+    else if (r < 0.8) { weather = 'wind'; windDir = Math.random() * Math.PI * 2; windForce = 1.5; }
+    else { weather = 'storm'; windForce = 0.5; addMessage('Storm brewing!'); }
+  }
+
+  // Storm damage
+  if (weather === 'storm') {
+    stormAlpha = Math.min(0.3, stormAlpha + dt * 0.5);
+    if (Math.random() < dt * 0.1) {
+      player.hull -= 1;
+      if (player.hull <= 0) { state = 'gameOver'; return; }
+    }
+  } else {
+    stormAlpha = Math.max(0, stormAlpha - dt * 0.5);
+  }
+
+  // Wind bonus/penalty
+  let windMod = 1;
+  if (weather !== 'clear') {
+    const angleDiff = Math.abs(player.dir - windDir);
+    const normDiff = angleDiff > Math.PI ? Math.PI * 2 - angleDiff : angleDiff;
+    windMod = weather === 'wind' ? (normDiff < Math.PI / 2 ? 1.5 : 0.6) : 0.5;
+  }
+
+  // Movement
+  const shipSpeed = SHIP_TYPES[player.shipType].speed;
+  let accel = 0;
+  if (keys['ArrowUp'] || keys['KeyW'] || touch.up) accel = 1;
+  if (keys['ArrowDown'] || keys['KeyS'] || touch.down) accel = -0.3;
+  player.speed = clamp(player.speed + accel * dt * 3, 0, shipSpeed * windMod);
+  if (!accel) player.speed *= 0.97;
+
+  // Turning
+  let turn = 0;
+  if (keys['ArrowLeft'] || keys['KeyA'] || touch.left) turn = -1;
+  if (keys['ArrowRight'] || keys['KeyD'] || touch.right) turn = 1;
+  player.dir += turn * dt * 2.5;
+
+  // Apply movement
+  player.x += Math.cos(player.dir) * player.speed * 60 * dt;
+  player.y += Math.sin(player.dir) * player.speed * 60 * dt;
+  player.x = clamp(player.x, 30, MAP_W - 30);
+  player.y = clamp(player.y, 30, MAP_H - 30);
+
+  // Day counter (1 day per 30 seconds of sailing)
+  if (frame % 1800 === 0 && frame > 0) {
+    day++;
+    player.morale -= 2;
+    // Feed crew
+    if (player.cargo[2] > 0) { player.cargo[2]--; player.morale = Math.min(100, player.morale + 5); }
+    else { player.morale -= 5; addMessage('Crew hungry! Morale drops.'); }
+    if (player.morale <= 0) { addMessage('MUTINY! Crew throws you overboard!'); state = 'gameOver'; return; }
+    if (day > 365) { state = 'gameOver'; addMessage('365 days passed!'); return; }
+  }
+
+  // Check port proximity
+  for (const p of PORTS) {
+    if (dist(player.x, player.y, p.x, p.y) < 50) {
+      if (keys['KeyE'] || keys['Enter'] || touch.b) {
+        enterPort(p);
+        return;
+      }
+    }
+  }
+
+  // Check island proximity (treasure)
+  for (const isl of ISLANDS) {
+    if (dist(player.x, player.y, isl.x, isl.y) < isl.r + 20) {
+      if (isl.hasTreasure && player.treasureMaps[isl.treasureId] && !player.treasures[isl.treasureId]) {
+        if (keys['KeyE'] || keys['Enter'] || touch.b) {
+          player.treasures[isl.treasureId] = true;
+          const loot = randInt(500, 2000);
+          player.gold += loot;
+          addMessage('TREASURE FOUND! +' + loot + ' gold!');
+          TAS.audio.playTone(600, 0.3, 'square', 0.1);
+          TAS.audio.playTone(800, 0.3, 'square', 0.08);
+          TAS.fx.flash('#ffdd44', 0.4);
+          // Check victory
+          if (player.treasures.every(t => t)) { state = 'victory'; return; }
+        }
+      }
+    }
+  }
+
+  // Enemy AI
+  for (let i = enemies.length - 1; i >= 0; i--) {
+    const e = enemies[i];
+    // Patrol movement
+    e.patrol += dt * 0.3;
+    const patrolX = e.x + Math.cos(e.patrol) * 100;
+    const patrolY = e.y + Math.sin(e.patrol) * 100;
+    e.dir = angle(e.x, e.y, patrolX, patrolY);
+
+    // Chase player if aggressive and close
+    const d = dist(e.x, e.y, player.x, player.y);
+    if (e.aggressive && d < 250) {
+      e.dir = angle(e.x, e.y, player.x, player.y);
+      e.speed = 1.5;
+    }
+
+    e.x += Math.cos(e.dir) * e.speed * 40 * dt;
+    e.y += Math.sin(e.dir) * e.speed * 40 * dt;
+    e.x = clamp(e.x, 50, MAP_W - 50);
+    e.y = clamp(e.y, 50, MAP_H - 50);
+
+    // Collision with player = combat
+    if (d < 35) {
+      enterCombat(e, i);
+      return;
+    }
+  }
+
+  // Fire cannon at nearby enemies
+  if (keys['Space'] || touch.a) {
+    if (cannonballs.length < player.cannons / 2) {
+      cannonballs.push({
+        x: player.x, y: player.y,
+        vx: Math.cos(player.dir) * 5,
+        vy: Math.sin(player.dir) * 5,
+        life: 60
+      });
+      TAS.audio.playTone(100, 0.2, 'sawtooth', 0.15, 50);
+      TAS.particles.spawn(player.x, player.y, '#888', 5, 2);
+    }
+  }
+
+  // Update cannonballs
+  for (let i = cannonballs.length - 1; i >= 0; i--) {
+    const b = cannonballs[i];
+    b.x += b.vx;
+    b.y += b.vy;
+    b.life--;
+    if (b.life <= 0) { cannonballs.splice(i, 1); continue; }
+    // Hit enemy
+    for (let j = enemies.length - 1; j >= 0; j--) {
+      if (dist(b.x, b.y, enemies[j].x, enemies[j].y) < 25) {
+        enemies[j].hull -= 10;
+        TAS.particles.spawn(enemies[j].x, enemies[j].y, '#ff8844', 8, 3);
+        TAS.fx.shake(3, 0.9);
+        cannonballs.splice(i, 1);
+        if (enemies[j].hull <= 0) {
+          player.gold += enemies[j].gold;
+          addMessage('Ship sunk! +' + enemies[j].gold + ' gold');
+          enemies.splice(j, 1);
+          if (enemies.length < 3) spawnEnemies();
+        }
+        break;
+      }
+    }
+  }
+
+  // Camera
+  camX = player.x - GW / 2;
+  camY = player.y - GH / 2;
+  camX = clamp(camX, 0, MAP_W - GW);
+  camY = clamp(camY, 0, MAP_H - GH);
+
+  // Victory check
+  if (player.gold >= 10000) { state = 'victory'; }
+}
+
+// === PORT ===
+function enterPort(port) {
+  state = 'port';
+  currentPort = port;
+  portMenu = 0;
+  portCursor = 0;
+  portPrices = generatePrices(port);
+  menuCooldown = 0.3;
+  player.hull = Math.min(player.maxHull, player.hull + 5); // minor repair on dock
+  saveGame();
+  // Chance of treasure map
+  if (Math.random() < 0.2) {
+    for (let i = 0; i < 5; i++) {
+      if (!player.treasureMaps[i]) {
+        player.treasureMaps[i] = true;
+        addMessage('Found a treasure map!');
+        break;
+      }
+    }
+  }
+}
+
+function updatePort(dt) {
+  menuCooldown -= dt;
+  if (menuCooldown > 0) return;
+
+  const up = keys['ArrowUp'] || keys['KeyW'] || touch.up;
+  const down = keys['ArrowDown'] || keys['KeyS'] || touch.down;
+  const action = keys['Enter'] || keys['KeyE'] || keys['Space'] || touch.a;
+  const back = keys['Escape'] || keys['Backspace'] || touch.b;
+
+  if (portMenu === 0) {
+    // Main menu: Buy, Sell, Shipyard, Tavern, Set Sail
+    const opts = 5;
+    if (up) { portCursor = (portCursor - 1 + opts) % opts; menuCooldown = 0.15; }
+    if (down) { portCursor = (portCursor + 1) % opts; menuCooldown = 0.15; }
+    if (action) {
+      menuCooldown = 0.2;
+      if (portCursor === 0) { portMenu = 1; portCursor = 0; } // Buy
+      else if (portCursor === 1) { portMenu = 2; portCursor = 0; } // Sell
+      else if (portCursor === 2) { portMenu = 3; portCursor = 0; } // Shipyard
+      else if (portCursor === 3) { portMenu = 4; portCursor = 0; } // Tavern
+      else { state = 'sailing'; day++; } // Set sail
+    }
+  } else if (portMenu === 1) {
+    // Buy goods
+    if (up) { portCursor = (portCursor - 1 + 4) % 4; menuCooldown = 0.15; }
+    if (down) { portCursor = (portCursor + 1) % 4; menuCooldown = 0.15; }
+    if (action) {
+      menuCooldown = 0.15;
+      const price = portPrices[portCursor];
+      const totalCargo = player.cargo.reduce((a, b) => a + b, 0);
+      if (player.gold >= price && totalCargo < player.cargoMax) {
+        player.gold -= price;
+        player.cargo[portCursor]++;
+        TAS.audio.playTone(400, 0.1, 'square', 0.05);
+      } else {
+        TAS.audio.playTone(150, 0.1, 'square', 0.08);
+      }
+    }
+    if (back) { portMenu = 0; portCursor = 0; menuCooldown = 0.2; }
+  } else if (portMenu === 2) {
+    // Sell goods
+    if (up) { portCursor = (portCursor - 1 + 4) % 4; menuCooldown = 0.15; }
+    if (down) { portCursor = (portCursor + 1) % 4; menuCooldown = 0.15; }
+    if (action) {
+      menuCooldown = 0.15;
+      if (player.cargo[portCursor] > 0) {
+        const sellPrice = Math.floor(portPrices[portCursor] * 1.2);
+        player.gold += sellPrice;
+        player.cargo[portCursor]--;
+        TAS.audio.playTone(500, 0.1, 'square', 0.05);
+      } else {
+        TAS.audio.playTone(150, 0.1, 'square', 0.08);
+      }
+    }
+    if (back) { portMenu = 0; portCursor = 0; menuCooldown = 0.2; }
+  } else if (portMenu === 3) {
+    // Shipyard: repair, buy ship, hire crew
+    const opts = 4;
+    if (up) { portCursor = (portCursor - 1 + opts) % opts; menuCooldown = 0.15; }
+    if (down) { portCursor = (portCursor + 1) % opts; menuCooldown = 0.15; }
+    if (action) {
+      menuCooldown = 0.2;
+      if (portCursor === 0) {
+        // Repair (5 gold per HP)
+        const dmg = player.maxHull - player.hull;
+        const cost = Math.min(dmg * 5, player.gold);
+        const repaired = Math.floor(cost / 5);
+        player.hull += repaired;
+        player.gold -= repaired * 5;
+        if (repaired > 0) { addMessage('Repaired ' + repaired + ' hull.'); TAS.audio.playTone(300, 0.1, 'triangle', 0.05); }
+      } else if (portCursor === 1 || portCursor === 2) {
+        // Buy brigantine (1) or galleon (2)
+        const idx = portCursor;
+        const ship = SHIP_TYPES[idx];
+        if (player.gold >= ship.cost && player.shipType < idx) {
+          player.gold -= ship.cost;
+          player.shipType = idx;
+          player.maxHull = ship.hull;
+          player.hull = ship.hull;
+          player.cannons = ship.cannons;
+          player.cargoMax = ship.cargo;
+          player.crewMax = ship.crew;
+          addMessage('Purchased ' + ship.name + '!');
+          TAS.audio.playTone(600, 0.2, 'square', 0.08);
+        } else {
+          TAS.audio.playTone(150, 0.1, 'square', 0.08);
+        }
+      } else if (portCursor === 3) {
+        // Hire crew (10 gold each)
+        if (player.gold >= 10 && player.crew < player.crewMax) {
+          player.gold -= 10;
+          player.crew++;
+          TAS.audio.playTone(350, 0.1, 'triangle', 0.05);
+        }
+      }
+    }
+    if (back) { portMenu = 0; portCursor = 0; menuCooldown = 0.2; }
+  } else if (portMenu === 4) {
+    // Tavern: rumors, pay crew, recruit
+    const opts = 3;
+    if (up) { portCursor = (portCursor - 1 + opts) % opts; menuCooldown = 0.15; }
+    if (down) { portCursor = (portCursor + 1) % opts; menuCooldown = 0.15; }
+    if (action) {
+      menuCooldown = 0.2;
+      if (portCursor === 0) {
+        // Hear rumor (potential treasure map)
+        if (player.gold >= 20) {
+          player.gold -= 20;
+          let found = false;
+          for (let i = 0; i < 5; i++) {
+            if (!player.treasureMaps[i]) {
+              player.treasureMaps[i] = true;
+              addMessage('Rumor reveals treasure location!');
+              found = true;
+              TAS.audio.playTone(500, 0.15, 'triangle', 0.06);
+              break;
+            }
+          }
+          if (!found) addMessage('No new rumors to hear.');
+        }
+      } else if (portCursor === 1) {
+        // Pay crew (boosts morale)
+        const cost = player.crew * 2;
+        if (player.gold >= cost) {
+          player.gold -= cost;
+          player.morale = Math.min(100, player.morale + 20);
+          addMessage('Crew paid! Morale up!');
+          TAS.audio.playTone(400, 0.15, 'triangle', 0.06);
+        }
+      } else if (portCursor === 2) {
+        // Buy round of drinks
+        if (player.gold >= 10) {
+          player.gold -= 10;
+          player.morale = Math.min(100, player.morale + 10);
+          addMessage('Drinks all around!');
+        }
+      }
+    }
+    if (back) { portMenu = 0; portCursor = 0; menuCooldown = 0.2; }
+  }
+}
+
+// === COMBAT ===
+function enterCombat(enemy, idx) {
+  state = 'combat';
+  combatEnemy = enemy;
+  combatEnemy._idx = idx;
+  combatAngle = 0;
+  combatDist = 150;
+  combatCooldown = 0;
+  combatBalls = [];
+  playerAimAngle = 0;
+  enemyHP = enemy.hull;
+  playerCombatHP = player.hull;
+  addMessage('ENEMY SHIP AHEAD!');
+  TAS.audio.playTone(200, 0.3, 'sawtooth', 0.1, 100);
+}
+
+function updateCombat(dt) {
+  combatAngle += dt * 0.5;
+  combatCooldown -= dt;
+
+  // Aim with up/down
+  if (keys['ArrowUp'] || keys['KeyW'] || touch.up) playerAimAngle -= dt * 2;
+  if (keys['ArrowDown'] || keys['KeyS'] || touch.down) playerAimAngle += dt * 2;
+  playerAimAngle = clamp(playerAimAngle, -0.8, 0.8);
+
+  // Move closer/farther
+  if (keys['ArrowLeft'] || keys['KeyA'] || touch.left) combatDist = Math.min(200, combatDist + dt * 60);
+  if (keys['ArrowRight'] || keys['KeyD'] || touch.right) combatDist = Math.max(60, combatDist - dt * 60);
+
+  // Fire
+  if ((keys['Space'] || touch.a) && combatCooldown <= 0) {
+    combatCooldown = 0.8;
+    combatBalls.push({
+      x: GW / 4, y: GH / 2,
+      vx: 4 + Math.random(),
+      vy: playerAimAngle * 3,
+      isPlayer: true, life: 80
+    });
+    TAS.audio.playTone(80, 0.25, 'sawtooth', 0.12, 40);
+    TAS.particles.spawn(GW / 4 + 20, GH / 2, '#aaa', 6, 2);
+  }
+
+  // Enemy fires
+  if (Math.random() < dt * 0.8) {
+    combatBalls.push({
+      x: GW * 3 / 4, y: GH / 2 + randRange(-40, 40),
+      vx: -(3 + Math.random()),
+      vy: randRange(-1, 1),
+      isPlayer: false, life: 80
+    });
+    TAS.audio.playTone(90, 0.2, 'sawtooth', 0.08, 45);
+  }
+
+  // Update cannonballs
+  for (let i = combatBalls.length - 1; i >= 0; i--) {
+    const b = combatBalls[i];
+    b.x += b.vx;
+    b.y += b.vy;
+    b.vy += 0.05; // gravity
+    b.life--;
+    if (b.life <= 0) { combatBalls.splice(i, 1); continue; }
+
+    // Hit check
+    if (b.isPlayer && b.x > GW * 3 / 4 - 30 && Math.abs(b.y - GH / 2) < 40) {
+      enemyHP -= 8 + randInt(0, 4);
+      TAS.particles.spawn(b.x, b.y, '#ff6633', 10, 3);
+      TAS.fx.shake(4, 0.85);
+      TAS.audio.playTone(150, 0.15, 'square', 0.1);
+      combatBalls.splice(i, 1);
+      if (enemyHP <= 0) {
+        // Enemy destroyed
+        player.gold += combatEnemy.gold;
+        addMessage('Victory! +' + combatEnemy.gold + ' gold!');
+        player.hull = playerCombatHP;
+        enemies.splice(combatEnemy._idx, 1);
+        if (enemies.length < 3) spawnEnemies();
+        state = 'sailing';
+        TAS.fx.flash('#ffaa00', 0.3);
+        return;
+      }
+    } else if (!b.isPlayer && b.x < GW / 4 + 30 && Math.abs(b.y - GH / 2) < 40) {
+      playerCombatHP -= 5 + randInt(0, 3);
+      TAS.particles.spawn(b.x, b.y, '#ff4444', 8, 2);
+      TAS.fx.shake(3, 0.9);
+      combatBalls.splice(i, 1);
+      if (playerCombatHP <= 0) {
+        state = 'gameOver';
+        addMessage('Your ship was sunk!');
+        return;
+      }
+    }
+  }
+
+  // Board (close range + action)
+  if (combatDist < 80 && (keys['KeyE'] || touch.b)) {
+    enterDuel();
+  }
+
+  // Flee
+  if (keys['Escape'] || keys['Backspace']) {
+    state = 'sailing';
+    player.hull = playerCombatHP;
+    player.x += 100;
+    addMessage('Fled from battle!');
+  }
+}
+
+// === DUEL ===
+function enterDuel() {
+  state = 'duel';
+  duelPlayerHP = 100;
+  duelEnemyHP = 80 + combatEnemy.shipType * 20;
+  duelPlayerStance = 1;
+  duelEnemyStance = 1;
+  duelPlayerAttack = -1;
+  duelEnemyAttack = -1;
+  duelTimer = 0;
+  duelText = 'BOARDING! En garde!';
+  duelCooldown = 1;
+  TAS.audio.playTone(400, 0.2, 'sawtooth', 0.08);
+}
+
+function updateDuel(dt) {
+  duelTimer += dt;
+  duelCooldown -= dt;
+  if (duelCooldown > 0) return;
+
+  // Stance
+  if (keys['ArrowUp'] || keys['KeyW'] || touch.up) { duelPlayerStance = 0; }
+  if (keys['ArrowDown'] || keys['KeyS'] || touch.down) { duelPlayerStance = 2; }
+  if (!keys['ArrowUp'] && !keys['KeyW'] && !touch.up && !keys['ArrowDown'] && !keys['KeyS'] && !touch.down) {
+    duelPlayerStance = 1;
+  }
+
+  // Attack
+  if ((keys['Space'] || touch.a) && duelPlayerAttack < 0) {
+    duelPlayerAttack = duelPlayerStance;
+    duelEnemyStance = randInt(0, 2);
+    duelEnemyAttack = randInt(0, 2);
+
+    // Resolve
+    let playerHit = duelPlayerAttack !== duelEnemyStance;
+    let enemyHit = duelEnemyAttack !== duelPlayerStance;
+
+    if (playerHit) {
+      duelEnemyHP -= 15 + randInt(0, 10);
+      duelText = 'Your blade strikes!';
+      TAS.audio.playTone(600, 0.1, 'square', 0.08);
+      TAS.particles.spawn(GW * 3 / 4, GH / 2, '#ffdd44', 8, 3);
+    } else {
+      duelText = 'Blocked!';
+      TAS.audio.playTone(200, 0.1, 'triangle', 0.06);
+    }
+
+    if (enemyHit) {
+      duelPlayerHP -= 10 + randInt(0, 8);
+      duelText += ' Enemy cuts you!';
+      TAS.audio.playTone(300, 0.1, 'sawtooth', 0.08);
+      TAS.fx.shake(3, 0.9);
+    } else {
+      duelText += ' You parry!';
+    }
+
+    duelCooldown = 0.6;
+    duelPlayerAttack = -1;
+    duelEnemyAttack = -1;
+
+    // Check end
+    if (duelEnemyHP <= 0) {
+      addMessage('Captain defeated! Ship captured!');
+      player.gold += combatEnemy.gold;
+      // Salvage cargo
+      for (let i = 0; i < 4; i++) player.cargo[i] = Math.min(player.cargoMax, player.cargo[i] + combatEnemy.cargo[i]);
+      player.hull = playerCombatHP;
+      player.reputation -= 5;
+      enemies.splice(combatEnemy._idx, 1);
+      if (enemies.length < 3) spawnEnemies();
+      state = 'sailing';
+      TAS.fx.flash('#44ff88', 0.3);
+      return;
+    }
+    if (duelPlayerHP <= 0) {
+      state = 'gameOver';
+      addMessage('Thrown overboard! Game Over.');
+      return;
+    }
+  }
+}
+
+// === DRAWING FUNCTIONS ===
+
+function drawOcean() {
+  // Base ocean
+  ctx.fillStyle = '#1a3355';
+  ctx.fillRect(0, 0, GW, GH);
+
+  // Wave lines
+  const t = frame * 0.02;
+  ctx.strokeStyle = '#224466';
+  ctx.lineWidth = 1;
+  for (let y = -20; y < GH + 20; y += 30) {
+    ctx.beginPath();
+    for (let x = 0; x < GW; x += 10) {
+      const wx = x + camX;
+      const wy = y + Math.sin((wx + t * 30) * 0.02) * 8 + Math.cos((wx * 0.5 + t * 20) * 0.01) * 4;
+      if (x === 0) ctx.moveTo(x, wy);
+      else ctx.lineTo(x, wy);
+    }
+    ctx.stroke();
+  }
+
+  // Wind particles
+  if (weather !== 'clear') {
+    ctx.globalAlpha = 0.3;
+    for (let i = 0; i < 15; i++) {
+      const px = ((frame * 3 + i * 97) % (GW + 100)) - 50;
+      const py = ((frame * 1.5 + i * 53) % GH);
+      ctx.fillStyle = weather === 'storm' ? '#6688aa' : '#88bbdd';
+      ctx.fillRect(px, py, weather === 'storm' ? 12 : 6, 1);
+    }
+    ctx.globalAlpha = 1;
+  }
+}
+
+function drawIslands() {
+  for (const isl of ISLANDS) {
+    const sx = isl.x - camX;
+    const sy = isl.y - camY;
+    if (sx < -50 || sx > GW + 50 || sy < -50 || sy > GH + 50) continue;
+
+    // Island shape
+    ctx.fillStyle = '#3a6633';
+    ctx.beginPath();
+    ctx.arc(sx, sy, isl.r, 0, Math.PI * 2);
+    ctx.fill();
+    // Sand ring
+    ctx.strokeStyle = '#ccbb66';
+    ctx.lineWidth = 3;
+    ctx.stroke();
+    // Palm tree
+    ctx.fillStyle = '#664422';
+    ctx.fillRect(sx - 2, sy - isl.r * 0.5 - 12, 4, 12);
+    ctx.fillStyle = '#228833';
+    ctx.beginPath();
+    ctx.arc(sx, sy - isl.r * 0.5 - 15, 8, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Treasure sparkle
+    if (isl.hasTreasure && player.treasureMaps[isl.treasureId] && !player.treasures[isl.treasureId]) {
+      ctx.fillStyle = '#ffdd44';
+      const sparkle = Math.sin(frame * 0.1) * 3 + 5;
+      ctx.beginPath();
+      ctx.arc(sx, sy + 5, sparkle, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+}
+
+function drawPorts() {
+  for (const p of PORTS) {
+    const sx = p.x - camX;
+    const sy = p.y - camY;
+    if (sx < -60 || sx > GW + 60 || sy < -60 || sy > GH + 60) continue;
+
+    // Port dock
+    ctx.fillStyle = '#554433';
+    ctx.fillRect(sx - 20, sy - 15, 40, 30);
+    // Buildings
+    ctx.fillStyle = p.color;
+    ctx.fillRect(sx - 12, sy - 20, 10, 15);
+    ctx.fillRect(sx + 2, sy - 18, 10, 13);
+    ctx.fillStyle = '#332211';
+    ctx.fillRect(sx - 14, sy - 5, 28, 10);
+    // Flag
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(sx, sy - 28, 1, 12);
+    ctx.fillStyle = p.color;
+    ctx.fillRect(sx + 1, sy - 28, 8, 5);
+
+    // Name (when close)
+    if (dist(player.x, player.y, p.x, p.y) < 120) {
+      ctx.fillStyle = '#ffffff';
+      ctx.font = '9px monospace';
+      ctx.textAlign = 'center';
+      ctx.fillText(p.name, sx, sy + 28);
+      if (dist(player.x, player.y, p.x, p.y) < 50) {
+        ctx.fillStyle = '#ffdd44';
+        ctx.fillText('[ACTION to dock]', sx, sy + 38);
+      }
+    }
+  }
+}
+
+function drawShip(x, y, dir, type, color, damaged) {
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.rotate(dir);
+
+  const sizes = [
+    { l: 22, w: 8 },
+    { l: 30, w: 11 },
+    { l: 38, w: 14 }
+  ];
+  const s = sizes[type] || sizes[0];
+
+  // Hull
+  ctx.fillStyle = color || '#8B4513';
+  ctx.beginPath();
+  ctx.moveTo(s.l / 2, 0);
+  ctx.lineTo(-s.l / 2, -s.w / 2);
+  ctx.lineTo(-s.l / 2, s.w / 2);
+  ctx.closePath();
+  ctx.fill();
+  ctx.strokeStyle = '#222';
+  ctx.lineWidth = 1;
+  ctx.stroke();
+
+  // Mast + sail
+  ctx.fillStyle = '#ddd';
+  ctx.fillRect(-2, -s.w * 0.8, 4, s.w * 1.6);
+  // Sail
+  ctx.fillStyle = damaged ? '#999' : '#eee';
+  ctx.beginPath();
+  ctx.moveTo(0, -s.w * 0.7);
+  ctx.quadraticCurveTo(8, 0, 0, s.w * 0.7);
+  ctx.lineTo(0, -s.w * 0.7);
+  ctx.fill();
+
+  // Damage marks
+  if (damaged) {
+    ctx.fillStyle = '#442200';
+    ctx.fillRect(-5, -2, 3, 3);
+    ctx.fillRect(3, 1, 2, 2);
+  }
+
+  ctx.restore();
+}
+
+function drawEnemies() {
+  for (const e of enemies) {
+    const sx = e.x - camX;
+    const sy = e.y - camY;
+    if (sx < -40 || sx > GW + 40 || sy < -40 || sy > GH + 40) continue;
+    const dmg = e.hull < SHIP_TYPES[e.shipType].hull * 0.5;
+    drawShip(sx, sy, e.dir, e.shipType, e.aggressive ? '#551111' : '#553322', dmg);
+    // Skull flag for aggressive
+    if (e.aggressive) {
+      ctx.fillStyle = '#ffffff';
+      ctx.font = '8px monospace';
+      ctx.textAlign = 'center';
+      ctx.fillText('\u2620', sx, sy - 15);
+    }
+  }
+}
+
+function drawCannonballs() {
+  ctx.fillStyle = '#222';
+  for (const b of cannonballs) {
+    const sx = b.x - camX;
+    const sy = b.y - camY;
+    ctx.beginPath();
+    ctx.arc(sx, sy, 3, 0, Math.PI * 2);
+    ctx.fill();
+  }
+}
+
+function drawMinimap() {
+  const mmW = 80, mmH = 80;
+  const mx = GW - mmW - 5, my = GH - mmH - 5;
+  ctx.fillStyle = 'rgba(10,20,40,0.8)';
+  ctx.fillRect(mx, my, mmW, mmH);
+  ctx.strokeStyle = '#446688';
+  ctx.strokeRect(mx, my, mmW, mmH);
+
+  // Ports
+  for (const p of PORTS) {
+    const px = mx + (p.x / MAP_W) * mmW;
+    const py = my + (p.y / MAP_H) * mmH;
+    ctx.fillStyle = p.color;
+    ctx.fillRect(px - 1, py - 1, 3, 3);
+  }
+
+  // Islands with treasure maps
+  for (const isl of ISLANDS) {
+    if (isl.hasTreasure && player.treasureMaps[isl.treasureId] && !player.treasures[isl.treasureId]) {
+      const px = mx + (isl.x / MAP_W) * mmW;
+      const py = my + (isl.y / MAP_H) * mmH;
+      ctx.fillStyle = '#ffdd44';
+      ctx.fillRect(px - 1, py - 1, 3, 3);
+    }
+  }
+
+  // Player
+  const ppx = mx + (player.x / MAP_W) * mmW;
+  const ppy = my + (player.y / MAP_H) * mmH;
+  ctx.fillStyle = '#44ff88';
+  ctx.fillRect(ppx - 2, ppy - 2, 4, 4);
+
+  // Enemies
+  ctx.fillStyle = '#ff4444';
+  for (const e of enemies) {
+    const ex = mx + (e.x / MAP_W) * mmW;
+    const ey = my + (e.y / MAP_H) * mmH;
+    ctx.fillRect(ex - 1, ey - 1, 2, 2);
+  }
+}
+
+function drawSailingHUD() {
+  // Top bar
+  ctx.fillStyle = 'rgba(10,5,20,0.75)';
+  ctx.fillRect(0, 0, GW, 28);
+
+  ctx.font = 'bold 11px monospace';
+  ctx.textAlign = 'left';
+  ctx.fillStyle = '#ffdd44';
+  ctx.fillText('GOLD: ' + player.gold, 5, 12);
+
+  ctx.fillStyle = '#88ccff';
+  ctx.textAlign = 'center';
+  ctx.fillText('Day ' + day + '/365', GW / 2, 12);
+
+  ctx.textAlign = 'right';
+  ctx.fillStyle = player.hull < player.maxHull * 0.3 ? '#ff4444' : '#44dd88';
+  ctx.fillText('HULL: ' + player.hull + '/' + player.maxHull, GW - 5, 12);
+
+  // Second row
+  ctx.font = '9px monospace';
+  ctx.textAlign = 'left';
+  ctx.fillStyle = '#aaa';
+  ctx.fillText(SHIP_TYPES[player.shipType].name + ' | Crew: ' + player.crew, 5, 24);
+
+  ctx.textAlign = 'center';
+  // Morale bar
+  const moralColor = player.morale > 50 ? '#44dd88' : player.morale > 25 ? '#ddaa44' : '#dd4444';
+  ctx.fillStyle = '#333';
+  ctx.fillRect(GW / 2 - 40, 18, 80, 6);
+  ctx.fillStyle = moralColor;
+  ctx.fillRect(GW / 2 - 40, 18, 80 * (player.morale / 100), 6);
+
+  ctx.textAlign = 'right';
+  ctx.fillStyle = '#aaa';
+  const windStr = weather === 'clear' ? 'Calm' : weather === 'wind' ? 'Windy' : 'STORM';
+  ctx.fillText(windStr, GW - 5, 24);
+
+  // Wind direction arrow
+  if (weather !== 'clear') {
+    const wx = GW - 30, wy = 20;
+    ctx.save();
+    ctx.translate(wx, wy);
+    ctx.rotate(windDir);
+    ctx.strokeStyle = '#88ccff';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(-6, 0);
+    ctx.lineTo(6, 0);
+    ctx.lineTo(3, -3);
+    ctx.moveTo(6, 0);
+    ctx.lineTo(3, 3);
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  // Treasures found
+  ctx.textAlign = 'left';
+  ctx.font = '8px monospace';
+  const found = player.treasures.filter(t => t).length;
+  ctx.fillStyle = '#ffdd44';
+  ctx.fillText('Maps: ' + player.treasureMaps.filter(m => m).length + '/5  Treasures: ' + found + '/5', 5, GH - 5);
+
+  // Messages
+  if (messages.length > 0) {
+    ctx.font = '9px monospace';
+    ctx.textAlign = 'center';
+    for (let i = 0; i < Math.min(messages.length, 2); i++) {
+      ctx.fillStyle = i === 0 ? '#ffffff' : '#888888';
+      ctx.fillText(messages[i], GW / 2, GH - 30 + i * 12);
+    }
+  }
+}
+
+function drawPortScreen() {
+  // Background
+  ctx.fillStyle = '#1a1a2e';
+  ctx.fillRect(0, 0, GW, GH);
+
+  // Port illustration
+  ctx.fillStyle = '#2a2a3e';
+  ctx.fillRect(0, 0, GW, 80);
+  // Water
+  ctx.fillStyle = '#1a3355';
+  ctx.fillRect(0, 60, GW, 20);
+  // Dock
+  ctx.fillStyle = '#554433';
+  ctx.fillRect(GW / 2 - 60, 50, 120, 20);
+  // Buildings
+  ctx.fillStyle = currentPort.color;
+  ctx.fillRect(GW / 2 - 50, 20, 20, 35);
+  ctx.fillRect(GW / 2 - 20, 25, 25, 30);
+  ctx.fillRect(GW / 2 + 15, 22, 18, 33);
+
+  // Port name
+  ctx.fillStyle = '#ffffff';
+  ctx.font = 'bold 14px monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText(currentPort.name, GW / 2, 100);
+  ctx.font = '10px monospace';
+  ctx.fillStyle = '#888';
+  ctx.fillText('Known for: ' + PRODUCE_MAP[currentPort.type], GW / 2, 115);
+
+  // Gold display
+  ctx.fillStyle = '#ffdd44';
+  ctx.font = 'bold 11px monospace';
+  ctx.textAlign = 'right';
+  ctx.fillText('Gold: ' + player.gold, GW - 10, 100);
+  ctx.fillStyle = '#aaa';
+  ctx.font = '9px monospace';
+  ctx.fillText('Cargo: ' + player.cargo.reduce((a, b) => a + b, 0) + '/' + player.cargoMax, GW - 10, 112);
+
+  // Menu
+  const menuX = 40, menuY = 130;
+  ctx.textAlign = 'left';
+  ctx.font = '11px monospace';
+
+  if (portMenu === 0) {
+    const items = ['Buy Goods', 'Sell Goods', 'Shipyard', 'Tavern', 'Set Sail'];
+    for (let i = 0; i < items.length; i++) {
+      ctx.fillStyle = i === portCursor ? '#ffdd44' : '#aaaaaa';
+      ctx.fillText((i === portCursor ? '> ' : '  ') + items[i], menuX, menuY + i * 20);
+    }
+  } else if (portMenu === 1) {
+    ctx.fillStyle = '#88ccff';
+    ctx.fillText('-- BUY GOODS --', menuX, menuY - 10);
+    for (let i = 0; i < 4; i++) {
+      ctx.fillStyle = i === portCursor ? '#ffdd44' : '#aaaaaa';
+      const own = player.cargo[i];
+      ctx.fillText((i === portCursor ? '> ' : '  ') + GOODS[i] + '  $' + portPrices[i] + '  (own: ' + own + ')', menuX, menuY + 10 + i * 20);
+    }
+    ctx.fillStyle = '#666';
+    ctx.fillText('[ACTION=back]', menuX, menuY + 100);
+  } else if (portMenu === 2) {
+    ctx.fillStyle = '#88ccff';
+    ctx.fillText('-- SELL GOODS --', menuX, menuY - 10);
+    for (let i = 0; i < 4; i++) {
+      ctx.fillStyle = i === portCursor ? '#ffdd44' : '#aaaaaa';
+      const sellPrice = Math.floor(portPrices[i] * 1.2);
+      ctx.fillText((i === portCursor ? '> ' : '  ') + GOODS[i] + '  $' + sellPrice + '  (own: ' + player.cargo[i] + ')', menuX, menuY + 10 + i * 20);
+    }
+    ctx.fillStyle = '#666';
+    ctx.fillText('[ACTION=back]', menuX, menuY + 100);
+  } else if (portMenu === 3) {
+    ctx.fillStyle = '#88ccff';
+    ctx.fillText('-- SHIPYARD --', menuX, menuY - 10);
+    const dmg = player.maxHull - player.hull;
+    const items = [
+      'Repair Hull (' + dmg + ' dmg, ' + (dmg * 5) + 'g)',
+      'Buy Brigantine (2000g)',
+      'Buy Galleon (5000g)',
+      'Hire Crew (10g each)'
+    ];
+    for (let i = 0; i < items.length; i++) {
+      ctx.fillStyle = i === portCursor ? '#ffdd44' : '#aaaaaa';
+      ctx.fillText((i === portCursor ? '> ' : '  ') + items[i], menuX, menuY + 10 + i * 20);
+    }
+    ctx.fillStyle = '#aaa';
+    ctx.font = '9px monospace';
+    ctx.fillText('Ship: ' + SHIP_TYPES[player.shipType].name + ' | Hull: ' + player.hull + '/' + player.maxHull, menuX, menuY + 100);
+    ctx.fillStyle = '#666';
+    ctx.fillText('[ACTION=back]', menuX, menuY + 115);
+  } else if (portMenu === 4) {
+    ctx.fillStyle = '#88ccff';
+    ctx.fillText('-- TAVERN --', menuX, menuY - 10);
+    const items = ['Hear Rumors (20g)', 'Pay Crew (' + (player.crew * 2) + 'g)', 'Buy Drinks (10g)'];
+    for (let i = 0; i < items.length; i++) {
+      ctx.fillStyle = i === portCursor ? '#ffdd44' : '#aaaaaa';
+      ctx.fillText((i === portCursor ? '> ' : '  ') + items[i], menuX, menuY + 10 + i * 20);
+    }
+    ctx.fillStyle = '#aaa';
+    ctx.font = '9px monospace';
+    ctx.fillText('Morale: ' + player.morale + '%', menuX, menuY + 90);
+    ctx.fillStyle = '#666';
+    ctx.fillText('[ACTION=back]', menuX, menuY + 105);
+  }
+
+  // Cargo summary at bottom
+  ctx.fillStyle = '#333';
+  ctx.fillRect(0, GH - 35, GW, 35);
+  ctx.font = '9px monospace';
+  ctx.textAlign = 'center';
+  for (let i = 0; i < 4; i++) {
+    ctx.fillStyle = GOOD_COLORS[i];
+    ctx.fillText(GOODS[i] + ': ' + player.cargo[i], 60 + i * 100, GH - 15);
+  }
+}
+
+function drawCombatScreen() {
+  // Ocean background
+  ctx.fillStyle = '#1a3355';
+  ctx.fillRect(0, 0, GW, GH);
+
+  // Waves
+  ctx.strokeStyle = '#224466';
+  ctx.lineWidth = 1;
+  for (let y = 0; y < GH; y += 40) {
+    ctx.beginPath();
+    for (let x = 0; x < GW; x += 8) {
+      const wy = y + Math.sin((x + frame * 2) * 0.03) * 5;
+      if (x === 0) ctx.moveTo(x, wy);
+      else ctx.lineTo(x, wy);
+    }
+    ctx.stroke();
+  }
+
+  // Player ship (left side)
+  ctx.save();
+  ctx.translate(GW / 4, GH / 2);
+  // Ship body
+  ctx.fillStyle = '#8B4513';
+  ctx.beginPath();
+  ctx.moveTo(30, 0);
+  ctx.lineTo(-25, -18);
+  ctx.lineTo(-30, -15);
+  ctx.lineTo(-30, 15);
+  ctx.lineTo(-25, 18);
+  ctx.closePath();
+  ctx.fill();
+  ctx.strokeStyle = '#442200';
+  ctx.lineWidth = 2;
+  ctx.stroke();
+  // Mast
+  ctx.fillStyle = '#eee';
+  ctx.fillRect(-5, -30, 3, 60);
+  // Sail
+  ctx.fillStyle = '#ddd';
+  ctx.beginPath();
+  ctx.moveTo(-3, -25);
+  ctx.quadraticCurveTo(15, 0, -3, 25);
+  ctx.lineTo(-3, -25);
+  ctx.fill();
+  // Cannons
+  ctx.fillStyle = '#333';
+  for (let i = 0; i < Math.min(player.cannons, 6); i++) {
+    ctx.fillRect(-15 + i * 8, -20, 3, 4);
+    ctx.fillRect(-15 + i * 8, 16, 3, 4);
+  }
+  ctx.restore();
+
+  // Enemy ship (right side)
+  const ey = GH / 2 + Math.sin(combatAngle) * 20;
+  ctx.save();
+  ctx.translate(GW * 3 / 4, ey);
+  ctx.scale(-1, 1);
+  ctx.fillStyle = '#551111';
+  ctx.beginPath();
+  ctx.moveTo(30, 0);
+  ctx.lineTo(-25, -18);
+  ctx.lineTo(-30, -15);
+  ctx.lineTo(-30, 15);
+  ctx.lineTo(-25, 18);
+  ctx.closePath();
+  ctx.fill();
+  ctx.strokeStyle = '#330000';
+  ctx.lineWidth = 2;
+  ctx.stroke();
+  ctx.fillStyle = '#aaa';
+  ctx.fillRect(-5, -28, 3, 56);
+  ctx.fillStyle = '#bb8888';
+  ctx.beginPath();
+  ctx.moveTo(-3, -22);
+  ctx.quadraticCurveTo(12, 0, -3, 22);
+  ctx.lineTo(-3, -22);
+  ctx.fill();
+  ctx.restore();
+
+  // Aim line
+  ctx.strokeStyle = 'rgba(255,200,0,0.4)';
+  ctx.lineWidth = 1;
+  ctx.setLineDash([4, 4]);
+  ctx.beginPath();
+  ctx.moveTo(GW / 4 + 30, GH / 2);
+  ctx.lineTo(GW / 4 + 150, GH / 2 + playerAimAngle * 100);
+  ctx.stroke();
+  ctx.setLineDash([]);
+
+  // Cannonballs
+  for (const b of combatBalls) {
+    ctx.fillStyle = '#222';
+    ctx.beginPath();
+    ctx.arc(b.x, b.y, 4, 0, Math.PI * 2);
+    ctx.fill();
+    // Trail
+    ctx.fillStyle = 'rgba(100,100,100,0.3)';
+    ctx.beginPath();
+    ctx.arc(b.x - b.vx * 2, b.y - b.vy * 2, 2, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  // HP bars
+  ctx.fillStyle = '#333';
+  ctx.fillRect(30, 20, 120, 10);
+  ctx.fillRect(GW - 150, 20, 120, 10);
+  ctx.fillStyle = '#44dd88';
+  ctx.fillRect(30, 20, 120 * (playerCombatHP / player.maxHull), 10);
+  ctx.fillStyle = '#dd4444';
+  ctx.fillRect(GW - 150, 20, 120 * (enemyHP / combatEnemy.hull), 10);
+
+  ctx.font = '9px monospace';
+  ctx.textAlign = 'left';
+  ctx.fillStyle = '#fff';
+  ctx.fillText('YOUR SHIP', 30, 16);
+  ctx.textAlign = 'right';
+  ctx.fillText('ENEMY ' + SHIP_TYPES[combatEnemy.shipType].name.toUpperCase(), GW - 30, 16);
+
+  // Instructions
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#888';
+  ctx.font = '8px monospace';
+  ctx.fillText('UP/DOWN=aim  FIRE=cannon  LEFT/RIGHT=distance  ACTION=board (close range)', GW / 2, GH - 10);
+
+  // Distance indicator
+  ctx.fillStyle = combatDist < 80 ? '#44ff88' : '#aaa';
+  ctx.fillText('Range: ' + Math.floor(combatDist) + (combatDist < 80 ? ' [BOARD READY]' : ''), GW / 2, GH - 25);
+}
+
+function drawDuelScreen() {
+  // Deck background
+  ctx.fillStyle = '#3a2a1a';
+  ctx.fillRect(0, 0, GW, GH);
+
+  // Planks
+  ctx.strokeStyle = '#2a1a0a';
+  ctx.lineWidth = 1;
+  for (let y = 0; y < GH; y += 20) {
+    ctx.beginPath();
+    ctx.moveTo(0, y);
+    ctx.lineTo(GW, y);
+    ctx.stroke();
+  }
+
+  // Railing
+  ctx.fillStyle = '#554433';
+  ctx.fillRect(0, 0, GW, 30);
+  ctx.fillRect(0, GH - 20, GW, 20);
+  // Ocean visible behind railing
+  ctx.fillStyle = '#1a3355';
+  ctx.fillRect(0, 0, GW, 15);
+
+  // Player (left side)
+  drawDuelist(GW / 4, GH / 2, duelPlayerStance, '#44aa88', false);
+  // Enemy (right side)
+  drawDuelist(GW * 3 / 4, GH / 2, duelEnemyStance, '#aa4444', true);
+
+  // Stance indicators
+  ctx.font = '10px monospace';
+  ctx.textAlign = 'center';
+  const stanceNames = ['HIGH', 'MID', 'LOW'];
+  ctx.fillStyle = '#88ffaa';
+  ctx.fillText('You: ' + stanceNames[duelPlayerStance], GW / 4, GH - 40);
+  ctx.fillStyle = '#ff8888';
+  ctx.fillText('Foe: ' + stanceNames[duelEnemyStance], GW * 3 / 4, GH - 40);
+
+  // HP bars
+  ctx.fillStyle = '#333';
+  ctx.fillRect(30, 30, 120, 12);
+  ctx.fillRect(GW - 150, 30, 120, 12);
+  ctx.fillStyle = '#44dd88';
+  ctx.fillRect(30, 30, 120 * Math.max(0, duelPlayerHP / 100), 12);
+  ctx.fillStyle = '#dd4444';
+  ctx.fillRect(GW - 150, 30, 120 * Math.max(0, duelEnemyHP / (80 + combatEnemy.shipType * 20)), 12);
+
+  ctx.font = 'bold 10px monospace';
+  ctx.textAlign = 'left';
+  ctx.fillStyle = '#fff';
+  ctx.fillText('YOU', 30, 28);
+  ctx.textAlign = 'right';
+  ctx.fillText('CAPTAIN', GW - 30, 28);
+
+  // Duel text
+  if (duelText) {
+    ctx.textAlign = 'center';
+    ctx.fillStyle = '#ffdd44';
+    ctx.font = 'bold 12px monospace';
+    ctx.fillText(duelText, GW / 2, 60);
+  }
+
+  // Instructions
+  ctx.fillStyle = '#888';
+  ctx.font = '8px monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText('UP=high  DOWN=low  (none)=mid  FIRE=attack', GW / 2, GH - 5);
+}
+
+function drawDuelist(x, y, stance, color, flipped) {
+  ctx.save();
+  ctx.translate(x, y);
+  if (flipped) ctx.scale(-1, 1);
+
+  // Body
+  ctx.fillStyle = color;
+  ctx.fillRect(-8, -20, 16, 35);
+
+  // Head
+  ctx.fillStyle = '#dda';
+  ctx.beginPath();
+  ctx.arc(0, -28, 10, 0, Math.PI * 2);
+  ctx.fill();
+  // Hat
+  ctx.fillStyle = '#333';
+  ctx.fillRect(-12, -38, 24, 8);
+  ctx.fillRect(-6, -44, 12, 8);
+
+  // Legs
+  ctx.fillStyle = '#443322';
+  ctx.fillRect(-6, 15, 5, 18);
+  ctx.fillRect(1, 15, 5, 18);
+
+  // Sword arm based on stance
+  ctx.strokeStyle = '#ccc';
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  if (stance === 0) { // high
+    ctx.moveTo(10, -15);
+    ctx.lineTo(30, -30);
+    ctx.lineTo(45, -35);
+  } else if (stance === 1) { // mid
+    ctx.moveTo(10, -5);
+    ctx.lineTo(30, -5);
+    ctx.lineTo(45, -5);
+  } else { // low
+    ctx.moveTo(10, 5);
+    ctx.lineTo(30, 15);
+    ctx.lineTo(45, 25);
+  }
+  ctx.stroke();
+  // Sword tip
+  ctx.fillStyle = '#fff';
+  if (stance === 0) ctx.fillRect(43, -37, 4, 4);
+  else if (stance === 1) ctx.fillRect(43, -7, 4, 4);
+  else ctx.fillRect(43, 23, 4, 4);
+
+  ctx.restore();
+}
+
+// === MAIN UPDATE ===
+function update(dt) {
+  frame++;
+  TAS.particles.update(dt);
+  TAS.fx.updateEffects(dt);
+
+  if (state === 'title') {
+    if (Object.values(keys).some(Boolean) || touch.a || touch.b) {
+      TAS.audio.ensureAudio();
+      if (!loadGame()) initGame();
+      else addMessage('Game loaded!');
+      state = 'sailing';
+    }
+    return;
+  }
+
+  if (state === 'gameOver' || state === 'victory') {
+    if (Object.values(keys).some(Boolean) || touch.a) {
+      try { localStorage.removeItem(SAVE_KEY); } catch(e) { /* non-critical */ }
+      state = 'title';
+    }
+    return;
+  }
+
+  if (state === 'sailing') updateSailing(dt);
+  else if (state === 'port') updatePort(dt);
+  else if (state === 'combat') updateCombat(dt);
+  else if (state === 'duel') updateDuel(dt);
+}
+
+// === MAIN DRAW ===
+function draw(dt) {
+  ctx.fillStyle = '#111';
+  ctx.fillRect(0, 0, GW, GH);
+
+  if (state === 'title') {
+    drawTitleScreen();
+    TAS.input.drawTouchControls(GW, GH);
+    return;
+  }
+
+  if (state === 'gameOver') {
+    drawGameOverScreen();
+    TAS.input.drawTouchControls(GW, GH);
+    return;
+  }
+
+  if (state === 'victory') {
+    drawVictoryScreen();
+    TAS.input.drawTouchControls(GW, GH);
+    return;
+  }
+
+  ctx.save();
+  TAS.fx.applyShake();
+
+  if (state === 'sailing') {
+    drawOcean();
+    drawIslands();
+    drawPorts();
+    drawEnemies();
+    drawCannonballs();
+    // Player ship
+    const px = player.x - camX;
+    const py = player.y - camY;
+    drawShip(px, py, player.dir, player.shipType, '#8B4513', player.hull < player.maxHull * 0.3);
+    // Wake particles
+    if (player.speed > 0.5) {
+      const wx = px - Math.cos(player.dir) * 15;
+      const wy = py - Math.sin(player.dir) * 15;
+      if (frame % 3 === 0) TAS.particles.spawn(wx, wy, '#88bbdd', 1, 0.5, { size: 1, gravity: 0 });
+    }
+    TAS.particles.draw();
+    drawMinimap();
+    drawSailingHUD();
+  } else if (state === 'port') {
+    drawPortScreen();
+  } else if (state === 'combat') {
+    drawCombatScreen();
+    TAS.particles.draw();
+  } else if (state === 'duel') {
+    drawDuelScreen();
+    TAS.particles.draw();
+  }
+
+  ctx.restore();
+  TAS.fx.drawFlash(GW, GH);
+
+  // Storm overlay
+  if (stormAlpha > 0 && state === 'sailing') {
+    ctx.globalAlpha = stormAlpha;
+    ctx.fillStyle = '#223344';
+    ctx.fillRect(0, 0, GW, GH);
+    // Lightning flash
+    if (Math.random() < 0.005) {
+      ctx.fillStyle = '#ffffff';
+      ctx.globalAlpha = 0.5;
+      ctx.fillRect(0, 0, GW, GH);
+      TAS.audio.playNoise(0.3, 0.1, 200);
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  TAS.input.drawTouchControls(GW, GH);
+}
+
+function drawTitleScreen() {
+  // Ocean background
+  ctx.fillStyle = '#0a1a2a';
+  ctx.fillRect(0, 0, GW, GH);
+
+  // Waves
+  ctx.strokeStyle = '#1a3355';
+  ctx.lineWidth = 2;
+  for (let y = 80; y < GH; y += 25) {
+    ctx.beginPath();
+    for (let x = 0; x < GW; x += 8) {
+      const wy = y + Math.sin((x + frame * 1.5) * 0.03) * 6;
+      if (x === 0) ctx.moveTo(x, wy);
+      else ctx.lineTo(x, wy);
+    }
+    ctx.stroke();
+  }
+
+  // Ship silhouette
+  ctx.save();
+  ctx.translate(GW / 2, GH * 0.55 + Math.sin(frame * 0.03) * 5);
+  ctx.fillStyle = '#1a1a1a';
+  ctx.beginPath();
+  ctx.moveTo(50, 0);
+  ctx.lineTo(-40, -20);
+  ctx.lineTo(-50, -15);
+  ctx.lineTo(-50, 15);
+  ctx.lineTo(-40, 20);
+  ctx.closePath();
+  ctx.fill();
+  ctx.fillRect(-5, -45, 4, 60);
+  ctx.fillStyle = '#222';
+  ctx.beginPath();
+  ctx.moveTo(-3, -40);
+  ctx.quadraticCurveTo(20, 0, -3, 30);
+  ctx.lineTo(-3, -40);
+  ctx.fill();
+  ctx.restore();
+
+  // Title
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#000';
+  ctx.font = 'bold 22px monospace';
+  ctx.fillText('PIRATES OF TASERN', GW / 2 + 2, GH * 0.18 + 2);
+  ctx.fillStyle = '#ffdd44';
+  ctx.fillText('PIRATES OF TASERN', GW / 2, GH * 0.18);
+
+  ctx.fillStyle = '#88aacc';
+  ctx.font = '10px monospace';
+  ctx.fillText('Sail, Trade, Fight, Plunder', GW / 2, GH * 0.25);
+
+  // Instructions
+  ctx.fillStyle = '#666';
+  ctx.font = '9px monospace';
+  ctx.fillText('Arrows=Sail  FIRE=Cannon  ACTION=Interact', GW / 2, GH * 0.72);
+  ctx.fillText('Win: 10,000 gold OR find all 5 treasures', GW / 2, GH * 0.78);
+
+  // Start prompt
+  const pulse = Math.sin(frame * 0.05) * 0.3 + 0.7;
+  ctx.globalAlpha = pulse;
+  ctx.fillStyle = '#ffdd44';
+  ctx.font = 'bold 12px monospace';
+  ctx.fillText('PRESS ANY KEY TO SET SAIL', GW / 2, GH * 0.9);
+  ctx.globalAlpha = 1;
+}
+
+function drawGameOverScreen() {
+  ctx.fillStyle = '#0a0a1a';
+  ctx.fillRect(0, 0, GW, GH);
+
+  // Sinking ship
+  ctx.save();
+  ctx.translate(GW / 2, GH * 0.4);
+  ctx.rotate(0.3);
+  ctx.fillStyle = '#442200';
+  ctx.beginPath();
+  ctx.moveTo(30, 0);
+  ctx.lineTo(-20, -12);
+  ctx.lineTo(-25, -10);
+  ctx.lineTo(-25, 10);
+  ctx.lineTo(-20, 12);
+  ctx.closePath();
+  ctx.fill();
+  ctx.fillStyle = '#333';
+  ctx.fillRect(-3, -20, 3, 25);
+  ctx.restore();
+
+  // Water covering
+  ctx.fillStyle = '#1a3355';
+  ctx.fillRect(0, GH * 0.45, GW, GH * 0.55);
+
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#ff4444';
+  ctx.font = 'bold 20px monospace';
+  ctx.fillText('GAME OVER', GW / 2, GH * 0.2);
+
+  ctx.fillStyle = '#ffffff';
+  ctx.font = '11px monospace';
+  if (messages.length > 0) ctx.fillText(messages[0], GW / 2, GH * 0.6);
+  ctx.fillStyle = '#ffdd44';
+  ctx.fillText('Gold: ' + player.gold + '  Days: ' + day, GW / 2, GH * 0.7);
+
+  const treasures = player.treasures.filter(t => t).length;
+  ctx.fillText('Treasures: ' + treasures + '/5', GW / 2, GH * 0.77);
+
+  const pulse = Math.sin(frame * 0.05) * 0.3 + 0.7;
+  ctx.globalAlpha = pulse;
+  ctx.fillStyle = '#88ccff';
+  ctx.font = 'bold 11px monospace';
+  ctx.fillText('PRESS ANY KEY', GW / 2, GH * 0.9);
+  ctx.globalAlpha = 1;
+}
+
+function drawVictoryScreen() {
+  ctx.fillStyle = '#1a1a0a';
+  ctx.fillRect(0, 0, GW, GH);
+
+  // Fireworks
+  if (frame % 20 === 0) {
+    TAS.particles.spawn(randRange(50, GW - 50), randRange(30, GH / 2), '#ffdd44', 15, 3, { gravity: 0.05 });
+  }
+  if (frame % 35 === 0) {
+    TAS.particles.spawn(randRange(50, GW - 50), randRange(30, GH / 2), '#ff4488', 12, 2.5, { gravity: 0.04 });
+  }
+  TAS.particles.draw();
+
+  ctx.textAlign = 'center';
+  const pulse = Math.sin(frame * 0.04) * 0.2 + 0.8;
+  ctx.globalAlpha = pulse;
+  ctx.fillStyle = '#ffdd44';
+  ctx.font = 'bold 20px monospace';
+  ctx.fillText('VICTORY!', GW / 2, GH * 0.2);
+  ctx.globalAlpha = 1;
+
+  ctx.fillStyle = '#ffffff';
+  ctx.font = '12px monospace';
+  ctx.fillText('The seas of Tasern are yours!', GW / 2, GH * 0.35);
+
+  ctx.fillStyle = '#ffdd44';
+  ctx.font = '11px monospace';
+  ctx.fillText('Final Gold: ' + player.gold, GW / 2, GH * 0.5);
+  ctx.fillText('Days Sailed: ' + day, GW / 2, GH * 0.57);
+  ctx.fillText('Ship: ' + SHIP_TYPES[player.shipType].name, GW / 2, GH * 0.64);
+  const treasures = player.treasures.filter(t => t).length;
+  ctx.fillText('Treasures: ' + treasures + '/5', GW / 2, GH * 0.71);
+
+  const p2 = Math.sin(frame * 0.05) * 0.3 + 0.7;
+  ctx.globalAlpha = p2;
+  ctx.fillStyle = '#88ccff';
+  ctx.font = 'bold 11px monospace';
+  ctx.fillText('PRESS ANY KEY FOR NEW GAME', GW / 2, GH * 0.9);
+  ctx.globalAlpha = 1;
+}
+
+// === START GAME LOOP ===
+TAS.loop.start(update, draw);
+
+})();
+</script>
+</body>
+</html>

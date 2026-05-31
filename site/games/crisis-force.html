@@ -1,0 +1,1764 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Crisis Force</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body { width: 100%; height: 100%; overflow: hidden; background: #000; touch-action: none; }
+canvas { display: block; margin: 0 auto; }
+#back-link { position: fixed; bottom: 8px; left: 50%; transform: translateX(-50%); color: #666; font-family: monospace; font-size: 12px; text-decoration: none; z-index: 10; }
+#back-link:hover { color: #aaa; }
+</style>
+</head>
+<body>
+<canvas id="gc"></canvas>
+<a id="back-link" href="/games">Back to Arcade</a>
+<script src="nft-loader.js"></script>
+<script>if(window.NftLoader)NftLoader.gate();</script>
+<script src="tasern-engine.js"></script>
+<script>
+(function(){
+"use strict";
+
+// ============================================================
+// CONSTANTS
+// ============================================================
+const GW = 320, GH = 480;
+const ctx = TAS.ctx;
+TAS.initCanvas(GW, GH);
+TAS.input.initTouch({ buttons: ['a', 'b'], labels: { a: 'FIRE', b: 'FORM' } });
+
+const FORMS = { SPEED: 0, POWER: 1, SHIELD: 2 };
+const FORM_NAMES = ['SPEED', 'POWER', 'SHIELD'];
+const FORM_COLORS = ['#00ffcc', '#ff4488', '#4488ff'];
+const STAGE_COUNT = 7;
+const STAGE_LENGTH = 2400; // frames per stage before boss
+const MAX_LIVES = 3;
+const MAX_BOMBS = 2;
+const INVULN_TIME = 120;
+const MEGA_MAX = 100;
+
+// Stage definitions
+const STAGES = [
+  { name: 'Tasern City', bgTop: '#0a0a2a', bgBot: '#1a0a1a', accent: '#3344aa', groundColor: '#222244' },
+  { name: 'Dark Ocean', bgTop: '#001122', bgBot: '#000811', accent: '#114466', groundColor: '#0a2233' },
+  { name: 'Volcanic Reach', bgTop: '#1a0800', bgBot: '#0a0400', accent: '#883311', groundColor: '#331100' },
+  { name: 'Sky Fortress', bgTop: '#101830', bgBot: '#080c18', accent: '#4466aa', groundColor: '#2a3355' },
+  { name: 'Spore Hive', bgTop: '#0a1a0a', bgBot: '#041004', accent: '#33aa44', groundColor: '#1a3322' },
+  { name: 'Crystal Dimension', bgTop: '#1a0a2a', bgBot: '#0a0418', accent: '#aa44cc', groundColor: '#331155' },
+  { name: 'Mothership', bgTop: '#0a0a0a', bgBot: '#000000', accent: '#cc2244', groundColor: '#1a0a0a' }
+];
+
+// ============================================================
+// GAME STATE
+// ============================================================
+let state = 'title';
+let score = 0;
+let highScore = TAS.score.load('crisisforce_hi');
+let lives = MAX_LIVES;
+let bombs = MAX_BOMBS;
+let stage = 0;
+let frame = 0;
+let stageTimer = 0;
+let bossActive = false;
+let bossSpawned = false;
+let stageCleared = false;
+let stageClearTimer = 0;
+let stageIntroTimer = 0;
+let gameOverTimer = 0;
+
+// Player state
+let px, py;
+let currentForm = FORMS.SPEED;
+let formLevels = [1, 1, 1]; // weapon level per form (1-3)
+let megaMeter = 0;
+let megaActive = 0;
+let invuln = 0;
+let hp = 3;
+let fireTimer = 0;
+let formSwitchCooldown = 0;
+let shieldAngle = 0;
+let streakMultiplier = 1;
+let streakCount = 0;
+let bombFlash = 0;
+
+// Object pools
+let pBullets = [];
+let eBullets = [];
+let enemies = [];
+let powerups = [];
+let explosions = [];
+let bgElements = [];
+let boss = null;
+
+// Scroll
+let scrollY = 0;
+let scrollSpeed = 1.5;
+
+// Input tracking
+let lastBPress = false;
+let fireHeld = false;
+
+// ============================================================
+// UTILITY
+// ============================================================
+function rng(min, max) { return min + Math.random() * (max - min); }
+function rngInt(min, max) { return Math.floor(rng(min, max + 1)); }
+function clamp(v, lo, hi) { return v < lo ? lo : v > hi ? hi : v; }
+function dist(x1, y1, x2, y2) { const dx = x2-x1, dy = y2-y1; return Math.sqrt(dx*dx+dy*dy); }
+function angleTo(x1, y1, x2, y2) { return Math.atan2(y2-y1, x2-x1); }
+
+// ============================================================
+// AUDIO HELPERS
+// ============================================================
+function sfxShoot() { TAS.audio.playTone(800 + currentForm * 200, 0.05, 'square', 0.04, 400); }
+function sfxHit() { TAS.audio.playTone(200, 0.15, 'sawtooth', 0.08, 50); }
+function sfxExplode() { TAS.audio.playNoise(0.2, 0.08, 800); }
+function sfxBigExplode() { TAS.audio.playNoise(0.4, 0.12, 400); }
+function sfxPowerup() { TAS.audio.playTone(880, 0.08, 'sine', 0.06, 1760); }
+function sfxTransform() { TAS.audio.playTone(440, 0.1, 'sawtooth', 0.06, 880); TAS.audio.playTone(660, 0.1, 'square', 0.04, 1320); }
+function sfxMega() { TAS.audio.playTone(220, 0.3, 'sawtooth', 0.1, 110); TAS.audio.playNoise(0.5, 0.1, 2000); }
+function sfxBomb() { TAS.audio.playNoise(0.6, 0.12, 300); TAS.audio.playTone(100, 0.4, 'sine', 0.08, 30); }
+function sfxDie() { TAS.audio.playTone(300, 0.3, 'sawtooth', 0.1, 50); TAS.audio.playNoise(0.4, 0.1, 600); }
+
+// ============================================================
+// GAME INIT
+// ============================================================
+function startGame() {
+  state = 'playing';
+  score = 0;
+  lives = MAX_LIVES;
+  bombs = MAX_BOMBS;
+  hp = 3;
+  stage = 0;
+  stageTimer = 0;
+  frame = 0;
+  currentForm = FORMS.SPEED;
+  formLevels = [1, 1, 1];
+  megaMeter = 0;
+  megaActive = 0;
+  invuln = 60;
+  streakMultiplier = 1;
+  streakCount = 0;
+  px = GW / 2;
+  py = GH - 80;
+  pBullets = [];
+  eBullets = [];
+  enemies = [];
+  powerups = [];
+  explosions = [];
+  bgElements = [];
+  boss = null;
+  bossActive = false;
+  bossSpawned = false;
+  stageCleared = false;
+  stageClearTimer = 0;
+  stageIntroTimer = 120;
+  bombFlash = 0;
+  TAS.particles.clear();
+  initBgElements();
+}
+
+function initBgElements() {
+  bgElements = [];
+  for (let i = 0; i < 40; i++) {
+    bgElements.push({
+      x: rng(0, GW),
+      y: rng(0, GH),
+      speed: rng(0.3, 1.5),
+      size: rng(1, 3),
+      bright: rng(0.3, 1)
+    });
+  }
+}
+
+// ============================================================
+// PLAYER SHIP DRAWING
+// ============================================================
+function drawShip(x, y, form, flash) {
+  ctx.save();
+  ctx.translate(x, y);
+
+  const glow = Math.sin(frame * 0.1) * 0.2 + 0.8;
+  const baseColor = FORM_COLORS[form];
+
+  if (flash && frame % 4 < 2) {
+    ctx.globalAlpha = 0.5;
+  }
+
+  if (form === FORMS.SPEED) {
+    // Sleek narrow ship
+    ctx.fillStyle = baseColor;
+    ctx.beginPath();
+    ctx.moveTo(0, -14);
+    ctx.lineTo(-6, 8);
+    ctx.lineTo(-3, 12);
+    ctx.lineTo(3, 12);
+    ctx.lineTo(6, 8);
+    ctx.closePath();
+    ctx.fill();
+    // Engine glow
+    ctx.fillStyle = '#ffff00';
+    ctx.globalAlpha = glow * 0.8;
+    ctx.beginPath();
+    ctx.moveTo(-2, 12);
+    ctx.lineTo(2, 12);
+    ctx.lineTo(0, 12 + 6 + Math.sin(frame * 0.3) * 3);
+    ctx.fill();
+    ctx.globalAlpha = 1;
+    // Wing tips
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(-7, 4, 2, 2);
+    ctx.fillRect(5, 4, 2, 2);
+  } else if (form === FORMS.POWER) {
+    // Wide aggressive ship
+    ctx.fillStyle = baseColor;
+    ctx.beginPath();
+    ctx.moveTo(0, -12);
+    ctx.lineTo(-12, 4);
+    ctx.lineTo(-14, 10);
+    ctx.lineTo(-8, 12);
+    ctx.lineTo(-3, 8);
+    ctx.lineTo(3, 8);
+    ctx.lineTo(8, 12);
+    ctx.lineTo(14, 10);
+    ctx.lineTo(12, 4);
+    ctx.closePath();
+    ctx.fill();
+    // Cannons
+    ctx.fillStyle = '#ffaa44';
+    ctx.fillRect(-14, 6, 3, 6);
+    ctx.fillRect(11, 6, 3, 6);
+    // Engine
+    ctx.fillStyle = '#ff6600';
+    ctx.globalAlpha = glow * 0.8;
+    ctx.fillRect(-4, 10, 8, 3 + Math.sin(frame * 0.2) * 2);
+    ctx.globalAlpha = 1;
+  } else {
+    // Bulky shield ship
+    ctx.fillStyle = baseColor;
+    ctx.beginPath();
+    ctx.moveTo(0, -10);
+    ctx.lineTo(-10, 0);
+    ctx.lineTo(-12, 10);
+    ctx.lineTo(-6, 14);
+    ctx.lineTo(6, 14);
+    ctx.lineTo(12, 10);
+    ctx.lineTo(10, 0);
+    ctx.closePath();
+    ctx.fill();
+    // Shield panels
+    ctx.strokeStyle = '#88ccff';
+    ctx.lineWidth = 2;
+    ctx.globalAlpha = 0.6 + Math.sin(frame * 0.08) * 0.3;
+    ctx.beginPath();
+    ctx.arc(0, 2, 16, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.globalAlpha = 1;
+    // Rotating barrier
+    shieldAngle += 0.05;
+    for (let i = 0; i < 4; i++) {
+      const a = shieldAngle + (Math.PI * 2 / 4) * i;
+      const sx = Math.cos(a) * 20;
+      const sy = Math.sin(a) * 20;
+      ctx.fillStyle = '#88ddff';
+      ctx.globalAlpha = 0.7;
+      ctx.beginPath();
+      ctx.arc(sx, sy, 3, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+    // Engine
+    ctx.fillStyle = '#4466ff';
+    ctx.globalAlpha = glow * 0.7;
+    ctx.fillRect(-3, 14, 6, 3);
+    ctx.globalAlpha = 1;
+  }
+
+  ctx.restore();
+}
+
+// ============================================================
+// PLAYER SHOOTING
+// ============================================================
+function getFireRate() {
+  const base = currentForm === FORMS.SPEED ? 5 : currentForm === FORMS.POWER ? 8 : 10;
+  return Math.max(3, base - formLevels[currentForm]);
+}
+
+function getPlayerSpeed() {
+  if (currentForm === FORMS.SPEED) return 4.5;
+  if (currentForm === FORMS.POWER) return 3.0;
+  return 2.2;
+}
+
+function fireWeapon() {
+  const lv = formLevels[currentForm];
+  sfxShoot();
+
+  if (currentForm === FORMS.SPEED) {
+    // Focused forward shot
+    pBullets.push({ x: px, y: py - 16, vx: 0, vy: -8, w: 3, h: 10, dmg: 2, color: '#00ffcc' });
+    if (lv >= 2) {
+      pBullets.push({ x: px - 6, y: py - 12, vx: -0.5, vy: -7.5, w: 2, h: 8, dmg: 1, color: '#00ddaa' });
+      pBullets.push({ x: px + 6, y: py - 12, vx: 0.5, vy: -7.5, w: 2, h: 8, dmg: 1, color: '#00ddaa' });
+    }
+    if (lv >= 3) {
+      pBullets.push({ x: px, y: py - 18, vx: 0, vy: -9, w: 4, h: 14, dmg: 3, color: '#aaffee' });
+    }
+  } else if (currentForm === FORMS.POWER) {
+    // Wide spread + rear
+    const spread = lv >= 2 ? 5 : 3;
+    for (let i = 0; i < spread; i++) {
+      const angle = -Math.PI/2 + (i - (spread-1)/2) * 0.2;
+      pBullets.push({ x: px, y: py - 10, vx: Math.cos(angle) * 6, vy: Math.sin(angle) * 6, w: 4, h: 4, dmg: 1.5, color: '#ff4488' });
+    }
+    // Rear guns
+    if (lv >= 2) {
+      pBullets.push({ x: px - 10, y: py + 8, vx: -1, vy: 5, w: 3, h: 3, dmg: 1, color: '#ff8844' });
+      pBullets.push({ x: px + 10, y: py + 8, vx: 1, vy: 5, w: 3, h: 3, dmg: 1, color: '#ff8844' });
+    }
+    if (lv >= 3) {
+      // Homing missiles
+      if (frame % 20 === 0) {
+        pBullets.push({ x: px - 12, y: py, vx: -2, vy: -4, w: 3, h: 6, dmg: 3, color: '#ffcc00', homing: true });
+        pBullets.push({ x: px + 12, y: py, vx: 2, vy: -4, w: 3, h: 6, dmg: 3, color: '#ffcc00', homing: true });
+      }
+    }
+  } else {
+    // Shield form: slower pulse shots
+    pBullets.push({ x: px, y: py - 12, vx: 0, vy: -5, w: 6, h: 6, dmg: 2, color: '#4488ff' });
+    if (lv >= 2) {
+      pBullets.push({ x: px - 12, y: py, vx: -3, vy: -3, w: 4, h: 4, dmg: 1.5, color: '#6688ff' });
+      pBullets.push({ x: px + 12, y: py, vx: 3, vy: -3, w: 4, h: 4, dmg: 1.5, color: '#6688ff' });
+    }
+    if (lv >= 3) {
+      pBullets.push({ x: px, y: py - 14, vx: 0, vy: -6, w: 8, h: 8, dmg: 4, color: '#aaccff' });
+    }
+  }
+}
+
+// ============================================================
+// MEGA ATTACK
+// ============================================================
+function fireMega() {
+  if (megaMeter < MEGA_MAX) return;
+  megaMeter = 0;
+  megaActive = 90; // frames
+  sfxMega();
+  TAS.fx.flash('#ffffff', 0.5);
+  TAS.fx.shake(8, 0.92);
+}
+
+function updateMega(dt) {
+  if (megaActive <= 0) return;
+  megaActive--;
+
+  if (currentForm === FORMS.SPEED) {
+    // Giant piercing laser
+    for (let e of enemies) {
+      if (Math.abs(e.x - px) < 30) {
+        e.hp -= 0.5;
+      }
+    }
+    if (boss && Math.abs(boss.x - px) < 40) boss.hp -= 0.8;
+  } else if (currentForm === FORMS.POWER) {
+    // Screen explosion
+    for (let e of enemies) {
+      e.hp -= 0.3;
+    }
+    if (boss) boss.hp -= 0.4;
+    eBullets = [];
+  } else {
+    // Invincibility + damage aura
+    invuln = Math.max(invuln, 5);
+    for (let e of enemies) {
+      if (dist(px, py, e.x, e.y) < 80) e.hp -= 0.4;
+    }
+    if (boss && dist(px, py, boss.x, boss.y) < 100) boss.hp -= 0.3;
+    eBullets = eBullets.filter(b => dist(px, py, b.x, b.y) > 60);
+  }
+}
+
+function drawMega() {
+  if (megaActive <= 0) return;
+  const alpha = megaActive / 90;
+
+  if (currentForm === FORMS.SPEED) {
+    // Vertical laser beam
+    const w = 20 + Math.sin(frame * 0.5) * 8;
+    ctx.globalAlpha = alpha * 0.8;
+    ctx.fillStyle = '#00ffcc';
+    ctx.fillRect(px - w/2, 0, w, py - 14);
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(px - w/4, 0, w/2, py - 14);
+    ctx.globalAlpha = 1;
+  } else if (currentForm === FORMS.POWER) {
+    // Expanding explosion rings
+    const radius = (90 - megaActive) * 4;
+    ctx.globalAlpha = alpha * 0.6;
+    ctx.strokeStyle = '#ff4488';
+    ctx.lineWidth = 6;
+    ctx.beginPath();
+    ctx.arc(px, py, radius, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.strokeStyle = '#ffcc00';
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.arc(px, py, radius * 0.7, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.globalAlpha = 1;
+  } else {
+    // Shield aura
+    ctx.globalAlpha = alpha * 0.5;
+    ctx.fillStyle = '#4488ff';
+    ctx.beginPath();
+    ctx.arc(px, py, 60 + Math.sin(frame * 0.2) * 10, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.strokeStyle = '#aaccff';
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.arc(px, py, 70, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.globalAlpha = 1;
+  }
+}
+
+// ============================================================
+// ENEMIES
+// ============================================================
+function spawnEnemy(type, x, y, opts) {
+  opts = opts || {};
+  const e = { type, x, y, hp: 1, maxHp: 1, vx: 0, vy: 1, w: 12, h: 12, fireTimer: 0, fireRate: 60, age: 0, phase: 0 };
+
+  switch (type) {
+    case 'drone':
+      e.hp = e.maxHp = 2; e.vy = 1.5; e.w = 10; e.h = 10; e.fireRate = 90; break;
+    case 'spinner':
+      e.hp = e.maxHp = 4; e.w = 14; e.h = 14; e.vy = 0.8; e.fireRate = 45; break;
+    case 'blade':
+      e.hp = e.maxHp = 3; e.w = 16; e.h = 8; e.vy = 2; e.vx = opts.vx || 0; break;
+    case 'turret':
+      e.hp = e.maxHp = 6; e.w = 16; e.h = 16; e.vy = 0.5; e.fireRate = 30; break;
+    case 'fungal':
+      e.hp = e.maxHp = 3; e.w = 12; e.h = 14; e.vy = 1.2; e.fireRate = 70; break;
+    case 'heavy':
+      e.hp = e.maxHp = 8; e.w = 20; e.h = 20; e.vy = 0.6; e.fireRate = 25; break;
+    case 'snake':
+      e.hp = e.maxHp = 2; e.w = 8; e.h = 8; e.vy = 1.8; e.phase = opts.phase || 0; break;
+    case 'midboss':
+      e.hp = e.maxHp = 40; e.w = 40; e.h = 30; e.vy = 0.3; e.fireRate = 20; break;
+  }
+  enemies.push(e);
+}
+
+function updateEnemies(dt) {
+  const m = dt * 60;
+  for (let i = enemies.length - 1; i >= 0; i--) {
+    const e = enemies[i];
+    e.age++;
+    e.x += e.vx * m;
+    e.y += e.vy * m;
+
+    // Movement patterns
+    if (e.type === 'snake') {
+      e.x += Math.sin((e.age + e.phase) * 0.05) * 2;
+    } else if (e.type === 'spinner') {
+      e.x += Math.sin(e.age * 0.03) * 1.5;
+    } else if (e.type === 'midboss') {
+      e.x = GW/2 + Math.sin(e.age * 0.02) * 80;
+      if (e.y > 60) e.vy = 0;
+    }
+
+    // Firing
+    e.fireTimer++;
+    if (e.fireTimer >= e.fireRate && e.y > 0 && e.y < GH - 30) {
+      e.fireTimer = 0;
+      enemyFire(e);
+    }
+
+    // Remove offscreen
+    if (e.y > GH + 30 || e.x < -30 || e.x > GW + 30) {
+      enemies.splice(i, 1);
+      continue;
+    }
+
+    // Death check
+    if (e.hp <= 0) {
+      spawnExplosion(e.x, e.y, e.w);
+      score += getEnemyScore(e.type) * streakMultiplier;
+      streakCount++;
+      if (streakCount % 10 === 0 && streakMultiplier < 8) streakMultiplier++;
+      megaMeter = Math.min(MEGA_MAX, megaMeter + (e.type === 'midboss' ? 20 : 3));
+      // Chance to drop powerup
+      if (Math.random() < 0.12 || e.type === 'midboss') {
+        spawnPowerup(e.x, e.y);
+      }
+      enemies.splice(i, 1);
+    }
+  }
+}
+
+function getEnemyScore(type) {
+  switch (type) {
+    case 'drone': return 100;
+    case 'spinner': return 200;
+    case 'blade': return 150;
+    case 'turret': return 300;
+    case 'fungal': return 180;
+    case 'heavy': return 400;
+    case 'snake': return 80;
+    case 'midboss': return 2000;
+    default: return 100;
+  }
+}
+
+function enemyFire(e) {
+  const a = angleTo(e.x, e.y, px, py);
+  const speed = 3 + stage * 0.3;
+
+  if (e.type === 'turret' || e.type === 'heavy') {
+    // 3-way spread
+    for (let i = -1; i <= 1; i++) {
+      const sa = a + i * 0.25;
+      eBullets.push({ x: e.x, y: e.y, vx: Math.cos(sa) * speed, vy: Math.sin(sa) * speed, r: 3, color: '#ff6644' });
+    }
+  } else if (e.type === 'spinner') {
+    // Ring shot
+    for (let i = 0; i < 6; i++) {
+      const sa = (Math.PI * 2 / 6) * i + e.age * 0.02;
+      eBullets.push({ x: e.x, y: e.y, vx: Math.cos(sa) * 2.5, vy: Math.sin(sa) * 2.5, r: 2, color: '#ffaa00' });
+    }
+  } else if (e.type === 'midboss') {
+    // Dense pattern
+    const pattern = (e.age % 180 < 60) ? 'aimed' : (e.age % 180 < 120) ? 'spiral' : 'spread';
+    if (pattern === 'aimed') {
+      eBullets.push({ x: e.x, y: e.y, vx: Math.cos(a) * speed, vy: Math.sin(a) * speed, r: 4, color: '#ff2244' });
+      eBullets.push({ x: e.x-15, y: e.y, vx: Math.cos(a) * speed*0.9, vy: Math.sin(a) * speed*0.9, r: 3, color: '#ff4466' });
+      eBullets.push({ x: e.x+15, y: e.y, vx: Math.cos(a) * speed*0.9, vy: Math.sin(a) * speed*0.9, r: 3, color: '#ff4466' });
+    } else if (pattern === 'spiral') {
+      for (let i = 0; i < 3; i++) {
+        const sa = e.age * 0.08 + (Math.PI * 2 / 3) * i;
+        eBullets.push({ x: e.x, y: e.y, vx: Math.cos(sa) * 3, vy: Math.sin(sa) * 3, r: 3, color: '#ccaa00' });
+      }
+    } else {
+      for (let i = 0; i < 8; i++) {
+        const sa = (Math.PI * 2 / 8) * i;
+        eBullets.push({ x: e.x, y: e.y, vx: Math.cos(sa) * 2.5, vy: Math.sin(sa) * 2.5, r: 2, color: '#ff8844' });
+      }
+    }
+  } else {
+    // Single aimed shot
+    eBullets.push({ x: e.x, y: e.y, vx: Math.cos(a) * speed, vy: Math.sin(a) * speed, r: 2, color: '#ff4444' });
+  }
+}
+
+function drawEnemies() {
+  for (const e of enemies) {
+    ctx.save();
+    ctx.translate(e.x, e.y);
+    const hpRatio = e.hp / e.maxHp;
+    const flash = (e.hp < e.maxHp && frame % 4 < 2) ? 0.5 : 0;
+
+    if (e.type === 'drone') {
+      ctx.fillStyle = flash ? '#fff' : '#88ff44';
+      ctx.beginPath();
+      ctx.moveTo(0, -6); ctx.lineTo(-6, 4); ctx.lineTo(6, 4);
+      ctx.closePath(); ctx.fill();
+    } else if (e.type === 'spinner') {
+      ctx.rotate(e.age * 0.08);
+      ctx.fillStyle = flash ? '#fff' : '#ffaa00';
+      ctx.fillRect(-7, -7, 14, 14);
+      ctx.fillStyle = '#ff6600';
+      ctx.fillRect(-4, -4, 8, 8);
+    } else if (e.type === 'blade') {
+      ctx.rotate(e.age * 0.15);
+      ctx.fillStyle = flash ? '#fff' : '#cc44cc';
+      ctx.beginPath();
+      for (let i = 0; i < 4; i++) {
+        const a = (Math.PI/2) * i;
+        ctx.lineTo(Math.cos(a)*8, Math.sin(a)*8);
+        ctx.lineTo(Math.cos(a + Math.PI/4)*4, Math.sin(a + Math.PI/4)*4);
+      }
+      ctx.closePath(); ctx.fill();
+    } else if (e.type === 'turret') {
+      ctx.fillStyle = flash ? '#fff' : '#666688';
+      ctx.fillRect(-8, -8, 16, 16);
+      ctx.fillStyle = '#ff4444';
+      const a = angleTo(0, 0, px - e.x, py - e.y);
+      ctx.fillRect(-2, -2, 12, 4);
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+    } else if (e.type === 'fungal') {
+      ctx.fillStyle = flash ? '#fff' : '#44aa66';
+      ctx.beginPath(); ctx.arc(0, 0, 7, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = '#22cc44';
+      ctx.beginPath(); ctx.arc(-3, -3, 3, 0, Math.PI * 2); ctx.fill();
+      ctx.beginPath(); ctx.arc(3, -2, 2, 0, Math.PI * 2); ctx.fill();
+    } else if (e.type === 'heavy') {
+      ctx.fillStyle = flash ? '#fff' : '#884444';
+      ctx.fillRect(-10, -10, 20, 20);
+      ctx.fillStyle = '#cc6644';
+      ctx.fillRect(-6, -12, 4, 6);
+      ctx.fillRect(2, -12, 4, 6);
+      // HP bar
+      ctx.fillStyle = '#333';
+      ctx.fillRect(-10, -14, 20, 2);
+      ctx.fillStyle = '#ff4444';
+      ctx.fillRect(-10, -14, 20 * hpRatio, 2);
+    } else if (e.type === 'snake') {
+      ctx.fillStyle = flash ? '#fff' : '#66ddaa';
+      ctx.beginPath(); ctx.arc(0, 0, 5, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = '#44aa88';
+      ctx.fillRect(-2, 2, 4, 4);
+    } else if (e.type === 'midboss') {
+      ctx.fillStyle = flash ? '#fff' : '#aa4488';
+      ctx.fillRect(-20, -15, 40, 30);
+      ctx.fillStyle = '#cc66aa';
+      ctx.fillRect(-16, -20, 8, 10);
+      ctx.fillRect(8, -20, 8, 10);
+      ctx.fillStyle = '#ff88cc';
+      ctx.beginPath(); ctx.arc(0, 0, 8, 0, Math.PI * 2); ctx.fill();
+      // HP bar
+      ctx.fillStyle = '#333';
+      ctx.fillRect(-20, -24, 40, 3);
+      ctx.fillStyle = '#ff44aa';
+      ctx.fillRect(-20, -24, 40 * hpRatio, 3);
+    }
+    ctx.restore();
+  }
+}
+
+// ============================================================
+// BOSS SYSTEM
+// ============================================================
+function spawnBoss() {
+  bossSpawned = true;
+  bossActive = true;
+  const bossHp = 80 + stage * 30;
+  boss = {
+    x: GW / 2, y: -50, targetY: 60,
+    hp: bossHp, maxHp: bossHp,
+    w: 60, h: 40,
+    phase: 0, phaseTimer: 0,
+    fireTimer: 0, age: 0,
+    parts: [
+      { x: -25, y: 10, hp: 20, maxHp: 20, w: 12, h: 12, alive: true },
+      { x: 25, y: 10, hp: 20, maxHp: 20, w: 12, h: 12, alive: true },
+      { x: 0, y: -15, hp: 30, maxHp: 30, w: 16, h: 16, alive: true }
+    ]
+  };
+}
+
+function updateBoss(dt) {
+  if (!boss) return;
+  const m = dt * 60;
+  boss.age++;
+
+  // Enter
+  if (boss.y < boss.targetY) {
+    boss.y += 0.5 * m;
+    return;
+  }
+
+  // Movement patterns based on phase
+  boss.phaseTimer++;
+  if (boss.phaseTimer > 300) {
+    boss.phase = (boss.phase + 1) % 3;
+    boss.phaseTimer = 0;
+  }
+
+  if (boss.phase === 0) {
+    boss.x = GW/2 + Math.sin(boss.age * 0.015) * 100;
+  } else if (boss.phase === 1) {
+    boss.x += (px - boss.x) * 0.01 * m;
+  } else {
+    boss.x = GW/2 + Math.cos(boss.age * 0.03) * 60;
+    boss.y = 60 + Math.sin(boss.age * 0.02) * 20;
+  }
+
+  // Firing
+  boss.fireTimer++;
+  const rate = boss.hp < boss.maxHp * 0.3 ? 8 : boss.hp < boss.maxHp * 0.6 ? 12 : 18;
+  if (boss.fireTimer >= rate) {
+    boss.fireTimer = 0;
+    bossFire();
+  }
+
+  // Part destruction
+  for (const part of boss.parts) {
+    if (!part.alive) continue;
+    if (part.hp <= 0) {
+      part.alive = false;
+      spawnExplosion(boss.x + part.x, boss.y + part.y, 20);
+      score += 500 * streakMultiplier;
+      sfxBigExplode();
+    }
+  }
+
+  // Boss death
+  if (boss.hp <= 0) {
+    for (let i = 0; i < 5; i++) {
+      setTimeout(() => {
+        if (boss) spawnExplosion(boss.x + rng(-30, 30), boss.y + rng(-20, 20), 25);
+      }, i * 100);
+    }
+    score += 5000 * streakMultiplier;
+    sfxBigExplode();
+    TAS.fx.shake(12, 0.9);
+    TAS.fx.flash('#ffffff', 0.7);
+    boss = null;
+    bossActive = false;
+    stageCleared = true;
+    stageClearTimer = 180;
+    eBullets = [];
+  }
+}
+
+function bossFire() {
+  if (!boss) return;
+  const a = angleTo(boss.x, boss.y, px, py);
+  const spd = 3 + stage * 0.2;
+
+  // Phase-based patterns
+  if (boss.phase === 0) {
+    // Aimed bursts
+    for (let i = 0; i < 3; i++) {
+      const sa = a + (i - 1) * 0.15;
+      eBullets.push({ x: boss.x, y: boss.y + 20, vx: Math.cos(sa) * spd, vy: Math.sin(sa) * spd, r: 4, color: '#ff2244' });
+    }
+  } else if (boss.phase === 1) {
+    // Spiral
+    for (let i = 0; i < 5; i++) {
+      const sa = boss.age * 0.06 + (Math.PI * 2 / 5) * i;
+      eBullets.push({ x: boss.x, y: boss.y, vx: Math.cos(sa) * spd, vy: Math.sin(sa) * spd, r: 3, color: '#ffaa22' });
+    }
+  } else {
+    // Wall pattern
+    for (let i = 0; i < 8; i++) {
+      const bx = (GW / 9) * (i + 1);
+      eBullets.push({ x: bx, y: boss.y + 25, vx: 0, vy: spd, r: 3, color: '#ff6644' });
+    }
+    // Plus aimed
+    eBullets.push({ x: boss.x, y: boss.y + 20, vx: Math.cos(a) * (spd + 1), vy: Math.sin(a) * (spd + 1), r: 5, color: '#ff0044' });
+  }
+
+  // Parts fire independently
+  for (const part of boss.parts) {
+    if (!part.alive) continue;
+    if (boss.age % 30 === 0) {
+      const pa = angleTo(boss.x + part.x, boss.y + part.y, px, py);
+      eBullets.push({ x: boss.x + part.x, y: boss.y + part.y, vx: Math.cos(pa) * 2.5, vy: Math.sin(pa) * 2.5, r: 3, color: '#cc44ff' });
+    }
+  }
+}
+
+function drawBoss() {
+  if (!boss) return;
+  ctx.save();
+  ctx.translate(boss.x, boss.y);
+
+  const flash = frame % 6 < 2 && boss.hp < boss.maxHp * 0.3;
+
+  // Main body
+  ctx.fillStyle = flash ? '#ffffff' : STAGES[stage].accent;
+  ctx.fillRect(-30, -20, 60, 40);
+  ctx.fillStyle = flash ? '#ffcccc' : '#442233';
+  ctx.fillRect(-24, -16, 48, 32);
+
+  // Core
+  const pulse = Math.sin(frame * 0.08) * 0.3 + 0.7;
+  ctx.globalAlpha = pulse;
+  ctx.fillStyle = '#ff2266';
+  ctx.beginPath(); ctx.arc(0, 0, 10, 0, Math.PI * 2); ctx.fill();
+  ctx.globalAlpha = 1;
+
+  // Parts
+  for (const part of boss.parts) {
+    if (!part.alive) continue;
+    ctx.fillStyle = '#aa6688';
+    ctx.fillRect(part.x - part.w/2, part.y - part.h/2, part.w, part.h);
+    ctx.fillStyle = '#ff4488';
+    ctx.beginPath(); ctx.arc(part.x, part.y, 4, 0, Math.PI * 2); ctx.fill();
+  }
+
+  // HP bar at top
+  ctx.restore();
+  const barW = 100;
+  const barX = GW/2 - barW/2;
+  ctx.fillStyle = '#333';
+  ctx.fillRect(barX, 32, barW, 5);
+  ctx.fillStyle = boss.hp > boss.maxHp * 0.3 ? '#ff4488' : '#ff0000';
+  ctx.fillRect(barX, 32, barW * (boss.hp / boss.maxHp), 5);
+  ctx.fillStyle = '#fff';
+  ctx.font = '8px monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText('BOSS', GW/2, 30);
+}
+
+// ============================================================
+// POWERUPS
+// ============================================================
+function spawnPowerup(x, y) {
+  const types = ['weapon', 'mega', 'bomb', 'heal'];
+  const weights = [0.5, 0.3, 0.1, 0.1];
+  let r = Math.random(), acc = 0;
+  let type = 'weapon';
+  for (let i = 0; i < types.length; i++) {
+    acc += weights[i];
+    if (r < acc) { type = types[i]; break; }
+  }
+  powerups.push({ x, y, type, vy: 1.5, age: 0 });
+}
+
+function updatePowerups(dt) {
+  const m = dt * 60;
+  for (let i = powerups.length - 1; i >= 0; i--) {
+    const p = powerups[i];
+    p.y += p.vy * m;
+    p.age++;
+    if (p.y > GH + 10) { powerups.splice(i, 1); continue; }
+
+    // Collect
+    if (TAS.hit.rectOverlap(px - 10, py - 10, 20, 20, p.x - 8, p.y - 8, 16, 16)) {
+      sfxPowerup();
+      if (p.type === 'weapon') {
+        formLevels[currentForm] = Math.min(3, formLevels[currentForm] + 1);
+      } else if (p.type === 'mega') {
+        megaMeter = Math.min(MEGA_MAX, megaMeter + 25);
+      } else if (p.type === 'bomb') {
+        bombs = Math.min(MAX_BOMBS + 1, bombs + 1);
+      } else if (p.type === 'heal') {
+        hp = Math.min(3, hp + 1);
+      }
+      TAS.particles.spawn(p.x, p.y, '#ffffff', 8, 2, { size: 2 });
+      powerups.splice(i, 1);
+    }
+  }
+}
+
+function drawPowerups() {
+  for (const p of powerups) {
+    const bob = Math.sin(p.age * 0.1) * 2;
+    ctx.save();
+    ctx.translate(p.x, p.y + bob);
+
+    if (p.type === 'weapon') {
+      ctx.fillStyle = '#ffdd00';
+      ctx.fillRect(-6, -6, 12, 12);
+      ctx.fillStyle = '#fff';
+      ctx.font = 'bold 8px monospace';
+      ctx.textAlign = 'center';
+      ctx.fillText('W', 0, 3);
+    } else if (p.type === 'mega') {
+      ctx.fillStyle = '#ff44ff';
+      ctx.beginPath(); ctx.arc(0, 0, 7, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = '#fff';
+      ctx.font = 'bold 7px monospace';
+      ctx.textAlign = 'center';
+      ctx.fillText('M', 0, 3);
+    } else if (p.type === 'bomb') {
+      ctx.fillStyle = '#44ff44';
+      ctx.fillRect(-5, -5, 10, 10);
+      ctx.fillStyle = '#fff';
+      ctx.font = 'bold 7px monospace';
+      ctx.textAlign = 'center';
+      ctx.fillText('B', 0, 3);
+    } else {
+      ctx.fillStyle = '#ff4444';
+      ctx.beginPath(); ctx.arc(0, 0, 6, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = '#fff';
+      ctx.font = 'bold 7px monospace';
+      ctx.textAlign = 'center';
+      ctx.fillText('+', 0, 3);
+    }
+    ctx.restore();
+  }
+}
+
+// ============================================================
+// EXPLOSIONS
+// ============================================================
+function spawnExplosion(x, y, size) {
+  explosions.push({ x, y, size: size || 12, age: 0, maxAge: 20 });
+  TAS.particles.spawn(x, y, '#ffaa44', 8, 3, { size: 2, sizeVar: 2 });
+  TAS.particles.spawn(x, y, '#ff4444', 5, 2, { size: 1 });
+  sfxExplode();
+}
+
+function updateExplosions(dt) {
+  for (let i = explosions.length - 1; i >= 0; i--) {
+    explosions[i].age++;
+    if (explosions[i].age > explosions[i].maxAge) explosions.splice(i, 1);
+  }
+}
+
+function drawExplosions() {
+  for (const e of explosions) {
+    const t = e.age / e.maxAge;
+    const r = e.size * (0.5 + t * 0.8);
+    ctx.globalAlpha = 1 - t;
+    ctx.fillStyle = t < 0.3 ? '#ffffff' : t < 0.6 ? '#ffaa44' : '#ff4400';
+    ctx.beginPath(); ctx.arc(e.x, e.y, r, 0, Math.PI * 2); ctx.fill();
+    ctx.globalAlpha = 1;
+  }
+}
+
+// ============================================================
+// BULLET UPDATES
+// ============================================================
+function updateBullets(dt) {
+  const m = dt * 60;
+
+  // Player bullets
+  for (let i = pBullets.length - 1; i >= 0; i--) {
+    const b = pBullets[i];
+
+    // Homing logic
+    if (b.homing && enemies.length > 0) {
+      let closest = null, closestD = Infinity;
+      for (const e of enemies) {
+        const d = dist(b.x, b.y, e.x, e.y);
+        if (d < closestD) { closestD = d; closest = e; }
+      }
+      if (closest) {
+        const a = angleTo(b.x, b.y, closest.x, closest.y);
+        b.vx += Math.cos(a) * 0.3;
+        b.vy += Math.sin(a) * 0.3;
+        const spd = Math.sqrt(b.vx*b.vx + b.vy*b.vy);
+        if (spd > 5) { b.vx = (b.vx/spd)*5; b.vy = (b.vy/spd)*5; }
+      }
+    }
+
+    b.x += b.vx * m;
+    b.y += b.vy * m;
+
+    if (b.y < -10 || b.y > GH + 10 || b.x < -10 || b.x > GW + 10) {
+      pBullets.splice(i, 1);
+      continue;
+    }
+
+    // Hit enemies
+    let hit = false;
+    for (const e of enemies) {
+      if (TAS.hit.rectOverlap(b.x - b.w/2, b.y - b.h/2, b.w, b.h, e.x - e.w/2, e.y - e.h/2, e.w, e.h)) {
+        e.hp -= b.dmg;
+        hit = true;
+        sfxHit();
+        TAS.particles.spawn(b.x, b.y, b.color, 3, 1.5, { size: 1 });
+        break;
+      }
+    }
+
+    // Hit boss
+    if (!hit && boss) {
+      if (TAS.hit.rectOverlap(b.x - b.w/2, b.y - b.h/2, b.w, b.h, boss.x - boss.w/2, boss.y - boss.h/2, boss.w, boss.h)) {
+        boss.hp -= b.dmg;
+        hit = true;
+        sfxHit();
+        TAS.particles.spawn(b.x, b.y, '#ffffff', 2, 1, { size: 1 });
+      }
+      // Hit boss parts
+      if (!hit) {
+        for (const part of boss.parts) {
+          if (!part.alive) continue;
+          if (TAS.hit.rectOverlap(b.x - b.w/2, b.y - b.h/2, b.w, b.h,
+            boss.x + part.x - part.w/2, boss.y + part.y - part.h/2, part.w, part.h)) {
+            part.hp -= b.dmg;
+            boss.hp -= b.dmg * 0.5;
+            hit = true;
+            sfxHit();
+            break;
+          }
+        }
+      }
+    }
+
+    if (hit) pBullets.splice(i, 1);
+  }
+
+  // Enemy bullets
+  for (let i = eBullets.length - 1; i >= 0; i--) {
+    const b = eBullets[i];
+    b.x += b.vx * m;
+    b.y += b.vy * m;
+
+    if (b.y < -10 || b.y > GH + 10 || b.x < -10 || b.x > GW + 10) {
+      eBullets.splice(i, 1);
+      continue;
+    }
+
+    // Shield form barrier blocks bullets
+    if (currentForm === FORMS.SHIELD && invuln <= 0) {
+      const sd = dist(px, py, b.x, b.y);
+      if (sd < 24 && sd > 12) {
+        // Check if near a shield orb
+        for (let si = 0; si < 4; si++) {
+          const sa = shieldAngle + (Math.PI * 2 / 4) * si;
+          const sx = px + Math.cos(sa) * 20;
+          const sy = py + Math.sin(sa) * 20;
+          if (dist(sx, sy, b.x, b.y) < 8) {
+            eBullets.splice(i, 1);
+            TAS.particles.spawn(b.x, b.y, '#88ccff', 3, 1, { size: 1 });
+            score += 10 * streakMultiplier;
+            break;
+          }
+        }
+        continue;
+      }
+    }
+
+    // Hit player
+    if (invuln <= 0 && megaActive <= 0) {
+      if (dist(px, py, b.x, b.y) < 8 + b.r) {
+        playerHit();
+        eBullets.splice(i, 1);
+      }
+    }
+  }
+}
+
+// ============================================================
+// PLAYER DAMAGE
+// ============================================================
+function playerHit() {
+  hp--;
+  invuln = INVULN_TIME;
+  streakCount = 0;
+  streakMultiplier = 1;
+  sfxDie();
+  TAS.fx.shake(6, 0.9);
+  TAS.fx.flash('#ff0000', 0.3);
+  TAS.particles.spawn(px, py, '#ff4444', 12, 3, { size: 2 });
+
+  if (hp <= 0) {
+    lives--;
+    if (lives <= 0) {
+      gameOver();
+    } else {
+      hp = 3;
+      bombs = MAX_BOMBS;
+      invuln = 180;
+      eBullets = [];
+    }
+  }
+}
+
+function gameOver() {
+  state = 'gameOver';
+  gameOverTimer = 0;
+  if (score > highScore) {
+    highScore = score;
+    TAS.score.save('crisisforce_hi', highScore);
+  }
+}
+
+function useBomb() {
+  if (bombs <= 0) return;
+  bombs--;
+  bombFlash = 30;
+  sfxBomb();
+  TAS.fx.flash('#ffffff', 0.6);
+  TAS.fx.shake(10, 0.88);
+
+  // Clear all enemy bullets
+  eBullets = [];
+  // Damage all enemies
+  for (const e of enemies) e.hp -= 5;
+  if (boss) boss.hp -= 10;
+  invuln = Math.max(invuln, 60);
+}
+
+// ============================================================
+// WAVE SPAWNER
+// ============================================================
+function spawnWave() {
+  const t = stageTimer;
+  const difficulty = stage + 1;
+  const rate = Math.max(20, 60 - stage * 5);
+
+  // Basic drones every rate frames
+  if (t % rate === 0) {
+    const count = rngInt(1, 2 + Math.floor(difficulty / 2));
+    for (let i = 0; i < count; i++) {
+      spawnEnemy('drone', rng(30, GW - 30), -20 - i * 30);
+    }
+  }
+
+  // Spinners
+  if (t % (rate * 3) === 0 && t > 100) {
+    spawnEnemy('spinner', rng(40, GW - 40), -20);
+  }
+
+  // Blades sweep
+  if (t % (rate * 4) === 0 && t > 200) {
+    const dir = Math.random() > 0.5 ? 1 : -1;
+    for (let i = 0; i < 3; i++) {
+      spawnEnemy('blade', dir > 0 ? -20 : GW + 20, 40 + i * 30, { vx: dir * 2.5 });
+    }
+  }
+
+  // Turrets
+  if (t % (rate * 5) === 0 && t > 400) {
+    spawnEnemy('turret', rng(40, GW - 40), -20);
+  }
+
+  // Stage-specific enemies
+  if (stage >= 1 && t % (rate * 2) === 0) {
+    spawnEnemy('fungal', rng(20, GW - 20), -20);
+  }
+  if (stage >= 2 && t % (rate * 6) === 0 && t > 300) {
+    spawnEnemy('heavy', rng(50, GW - 50), -30);
+  }
+  if (stage >= 3 && t % (rate * 2.5 | 0) === 0) {
+    const count = 4 + stage;
+    for (let i = 0; i < count; i++) {
+      spawnEnemy('snake', rng(20, GW - 20), -20 - i * 15, { phase: i * 20 });
+    }
+  }
+
+  // Midboss at 50%
+  if (t === Math.floor(STAGE_LENGTH * 0.5) && !bossActive) {
+    spawnEnemy('midboss', GW / 2, -40);
+  }
+}
+
+// ============================================================
+// BACKGROUND
+// ============================================================
+function drawBackground() {
+  const s = STAGES[stage];
+
+  // Gradient
+  const grad = ctx.createLinearGradient(0, 0, 0, GH);
+  grad.addColorStop(0, s.bgTop);
+  grad.addColorStop(1, s.bgBot);
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, GW, GH);
+
+  // Scrolling elements
+  scrollY += scrollSpeed;
+  for (const el of bgElements) {
+    el.y += el.speed;
+    if (el.y > GH + 10) {
+      el.y = -10;
+      el.x = rng(0, GW);
+    }
+    ctx.globalAlpha = el.bright * 0.4;
+    ctx.fillStyle = s.accent;
+    if (stage === 0) {
+      // City buildings
+      ctx.fillRect(el.x, el.y, el.size * 3, el.size * 6);
+      ctx.fillStyle = '#ffff44';
+      if (Math.random() > 0.7) ctx.fillRect(el.x + 1, el.y + 2, 1, 1);
+    } else if (stage === 1) {
+      // Ocean waves
+      ctx.beginPath();
+      ctx.moveTo(el.x - 5, el.y);
+      ctx.quadraticCurveTo(el.x, el.y - 3, el.x + 5, el.y);
+      ctx.stroke();
+    } else if (stage === 2) {
+      // Lava rocks
+      ctx.fillStyle = '#ff4400';
+      ctx.globalAlpha = el.bright * 0.3;
+      ctx.beginPath(); ctx.arc(el.x, el.y, el.size * 2, 0, Math.PI * 2); ctx.fill();
+    } else if (stage === 3) {
+      // Cloud wisps
+      ctx.fillStyle = '#ffffff';
+      ctx.globalAlpha = el.bright * 0.15;
+      ctx.beginPath(); ctx.arc(el.x, el.y, el.size * 4, 0, Math.PI * 2); ctx.fill();
+    } else if (stage === 4) {
+      // Organic tendrils
+      ctx.strokeStyle = '#44aa33';
+      ctx.globalAlpha = el.bright * 0.4;
+      ctx.lineWidth = el.size;
+      ctx.beginPath();
+      ctx.moveTo(el.x, el.y);
+      ctx.bezierCurveTo(el.x + 10, el.y + 5, el.x - 10, el.y + 15, el.x, el.y + 20);
+      ctx.stroke();
+    } else if (stage === 5) {
+      // Crystal shards
+      ctx.fillStyle = '#cc88ff';
+      ctx.globalAlpha = el.bright * 0.5;
+      ctx.save();
+      ctx.translate(el.x, el.y);
+      ctx.rotate(el.bright * Math.PI);
+      ctx.fillRect(-1, -el.size * 3, 2, el.size * 6);
+      ctx.restore();
+    } else {
+      // Mothership interior - pipes/metal
+      ctx.fillStyle = '#442222';
+      ctx.globalAlpha = el.bright * 0.5;
+      ctx.fillRect(el.x, el.y, el.size * 2, el.size * 8);
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  // Stars always present
+  ctx.fillStyle = '#ffffff';
+  for (let i = 0; i < 30; i++) {
+    const sx = (i * 73 + frame * 0.1) % GW;
+    const sy = (i * 47 + frame * (0.2 + i * 0.01)) % GH;
+    ctx.globalAlpha = 0.3 + (i % 3) * 0.2;
+    ctx.fillRect(sx, sy, 1, 1);
+  }
+  ctx.globalAlpha = 1;
+}
+
+// ============================================================
+// DRAW BULLETS
+// ============================================================
+function drawBullets() {
+  // Player bullets
+  for (const b of pBullets) {
+    ctx.fillStyle = b.color;
+    if (b.homing) {
+      ctx.beginPath();
+      ctx.moveTo(b.x, b.y - b.h/2);
+      ctx.lineTo(b.x - b.w/2, b.y + b.h/2);
+      ctx.lineTo(b.x + b.w/2, b.y + b.h/2);
+      ctx.closePath();
+      ctx.fill();
+    } else {
+      ctx.fillRect(b.x - b.w/2, b.y - b.h/2, b.w, b.h);
+    }
+    // Glow
+    ctx.globalAlpha = 0.3;
+    ctx.fillRect(b.x - b.w/2 - 1, b.y - b.h/2 - 1, b.w + 2, b.h + 2);
+    ctx.globalAlpha = 1;
+  }
+
+  // Enemy bullets
+  for (const b of eBullets) {
+    ctx.fillStyle = b.color;
+    ctx.beginPath();
+    ctx.arc(b.x, b.y, b.r, 0, Math.PI * 2);
+    ctx.fill();
+    // Inner glow
+    ctx.fillStyle = '#ffffff';
+    ctx.globalAlpha = 0.5;
+    ctx.beginPath();
+    ctx.arc(b.x, b.y, b.r * 0.4, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.globalAlpha = 1;
+  }
+}
+
+// ============================================================
+// HUD
+// ============================================================
+function drawHUD() {
+  // Top bar
+  ctx.fillStyle = 'rgba(0,0,0,0.6)';
+  ctx.fillRect(0, 0, GW, 28);
+
+  // Score
+  ctx.font = 'bold 10px monospace';
+  ctx.textAlign = 'left';
+  ctx.fillStyle = '#ffdd44';
+  ctx.fillText('SCORE: ' + score, 4, 11);
+
+  // Stage
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#88ccff';
+  ctx.fillText('STAGE ' + (stage + 1), GW / 2, 11);
+
+  // Lives
+  ctx.textAlign = 'right';
+  ctx.fillStyle = '#44ff88';
+  for (let i = 0; i < lives; i++) {
+    ctx.fillRect(GW - 10 - i * 12, 3, 8, 8);
+  }
+
+  // Bottom HUD
+  ctx.fillStyle = 'rgba(0,0,0,0.5)';
+  ctx.fillRect(0, GH - 36, GW, 36);
+
+  // Form indicator
+  ctx.fillStyle = FORM_COLORS[currentForm];
+  ctx.font = 'bold 9px monospace';
+  ctx.textAlign = 'left';
+  ctx.fillText(FORM_NAMES[currentForm] + ' Lv' + formLevels[currentForm], 4, GH - 24);
+
+  // HP bar
+  ctx.fillStyle = '#333';
+  ctx.fillRect(4, GH - 18, 60, 6);
+  ctx.fillStyle = hp > 1 ? '#44ff88' : '#ff4444';
+  ctx.fillRect(4, GH - 18, 60 * (hp / 3), 6);
+  ctx.fillStyle = '#fff';
+  ctx.font = '7px monospace';
+  ctx.fillText('HP', 4, GH - 7);
+
+  // Mega meter
+  ctx.fillStyle = '#333';
+  ctx.fillRect(70, GH - 18, 60, 6);
+  const megaColor = megaMeter >= MEGA_MAX ? '#ff44ff' : '#884488';
+  ctx.fillStyle = megaColor;
+  ctx.fillRect(70, GH - 18, 60 * (megaMeter / MEGA_MAX), 6);
+  ctx.fillStyle = '#fff';
+  ctx.font = '7px monospace';
+  ctx.fillText('MEGA', 70, GH - 7);
+
+  // Bombs
+  ctx.fillStyle = '#44ff44';
+  ctx.textAlign = 'right';
+  ctx.font = '8px monospace';
+  ctx.fillText('BOMB:' + bombs, GW - 4, GH - 7);
+
+  // Multiplier
+  if (streakMultiplier > 1) {
+    ctx.textAlign = 'right';
+    ctx.fillStyle = '#ffcc00';
+    ctx.font = 'bold 9px monospace';
+    ctx.fillText('x' + streakMultiplier, GW - 4, GH - 22);
+  }
+
+  // Second row - HP pips
+  ctx.textAlign = 'left';
+  ctx.fillStyle = '#aaa';
+  ctx.font = '7px monospace';
+  ctx.fillText('HP:' + hp + '/3  LV:' + lives, 4, 22);
+}
+
+// ============================================================
+// TOUCH / INPUT (drag-to-move + button overlay)
+// ============================================================
+const canvas = TAS.canvas;
+let dragActive = false;
+let lastTouchX = 0, lastTouchY = 0;
+
+function canvasCoords(clientX, clientY) {
+  const rect = canvas.getBoundingClientRect();
+  const dpr = window.devicePixelRatio || 1;
+  const scaleX = (canvas.width / dpr) / rect.width;
+  const scaleY = (canvas.height / dpr) / rect.height;
+  return { x: (clientX - rect.left) * scaleX, y: (clientY - rect.top) * scaleY };
+}
+
+canvas.addEventListener('touchstart', function(e) {
+  e.preventDefault();
+  TAS.audio.ensureAudio();
+  if (state === 'title') { startGame(); return; }
+  if (state === 'gameOver') { state = 'title'; return; }
+  const t = e.touches[0];
+  const c = canvasCoords(t.clientX, t.clientY);
+  dragActive = true;
+  lastTouchX = c.x;
+  lastTouchY = c.y;
+  fireHeld = true;
+}, { passive: false });
+
+canvas.addEventListener('touchmove', function(e) {
+  e.preventDefault();
+  if (!dragActive || state !== 'playing') return;
+  const t = e.touches[0];
+  const c = canvasCoords(t.clientX, t.clientY);
+  px += (c.x - lastTouchX);
+  py += (c.y - lastTouchY);
+  lastTouchX = c.x;
+  lastTouchY = c.y;
+}, { passive: false });
+
+canvas.addEventListener('touchend', function(e) {
+  e.preventDefault();
+  dragActive = false;
+  fireHeld = false;
+}, { passive: false });
+
+// Mouse
+let mouseDown = false;
+canvas.addEventListener('mousedown', function(e) {
+  TAS.audio.ensureAudio();
+  if (state === 'title') { startGame(); return; }
+  if (state === 'gameOver') { state = 'title'; return; }
+  mouseDown = true;
+  const c = canvasCoords(e.clientX, e.clientY);
+  lastTouchX = c.x; lastTouchY = c.y;
+});
+canvas.addEventListener('mousemove', function(e) {
+  if (!mouseDown || state !== 'playing') return;
+  const c = canvasCoords(e.clientX, e.clientY);
+  px += (c.x - lastTouchX);
+  py += (c.y - lastTouchY);
+  lastTouchX = c.x; lastTouchY = c.y;
+});
+canvas.addEventListener('mouseup', function() { mouseDown = false; });
+
+// ============================================================
+// MAIN UPDATE
+// ============================================================
+function update(dt) {
+  frame++;
+  TAS.particles.update(dt);
+  TAS.fx.updateEffects(dt);
+  updateExplosions(dt);
+
+  if (state === 'title') {
+    if (TAS.input.keys['Enter'] || TAS.input.keys['Space'] || TAS.input.keys[' ']) {
+      startGame();
+    }
+    return;
+  }
+
+  if (state === 'gameOver') {
+    gameOverTimer++;
+    if (gameOverTimer > 60 && (TAS.input.keys['Enter'] || TAS.input.keys['Space'] || TAS.input.keys[' '])) {
+      state = 'title';
+    }
+    return;
+  }
+
+  if (state !== 'playing') return;
+
+  // Stage intro
+  if (stageIntroTimer > 0) {
+    stageIntroTimer--;
+    return;
+  }
+
+  // Stage cleared transition
+  if (stageCleared) {
+    stageClearTimer--;
+    if (stageClearTimer <= 0) {
+      stage++;
+      if (stage >= STAGE_COUNT) {
+        // Victory!
+        state = 'victory';
+        if (score > highScore) {
+          highScore = score;
+          TAS.score.save('crisisforce_hi', highScore);
+        }
+        return;
+      }
+      stageTimer = 0;
+      bossActive = false;
+      bossSpawned = false;
+      stageCleared = false;
+      stageIntroTimer = 120;
+      enemies = [];
+      eBullets = [];
+      initBgElements();
+    }
+    return;
+  }
+
+  const m = dt * 60;
+
+  // Player movement (keyboard)
+  const spd = getPlayerSpeed();
+  if (TAS.input.keys['ArrowLeft'] || TAS.input.keys['a'] || TAS.input.touch.left) px -= spd * m;
+  if (TAS.input.keys['ArrowRight'] || TAS.input.keys['d'] || TAS.input.touch.right) px += spd * m;
+  if (TAS.input.keys['ArrowUp'] || TAS.input.keys['w'] || TAS.input.touch.up) py -= spd * m;
+  if (TAS.input.keys['ArrowDown'] || TAS.input.keys['s'] || TAS.input.touch.down) py += spd * m;
+  px = clamp(px, 14, GW - 14);
+  py = clamp(py, 40, GH - 50);
+
+  // Fire (auto-fire on touch, Z key, or A button)
+  fireTimer++;
+  const shouldFire = TAS.input.keys['z'] || TAS.input.keys['Z'] || TAS.input.touch.a || fireHeld || mouseDown;
+  if (shouldFire && fireTimer >= getFireRate()) {
+    fireTimer = 0;
+    fireWeapon();
+  }
+
+  // Form switch (X key or B button)
+  const bPress = TAS.input.keys['x'] || TAS.input.keys['X'] || TAS.input.touch.b;
+  if (bPress && !lastBPress && formSwitchCooldown <= 0) {
+    currentForm = (currentForm + 1) % 3;
+    formSwitchCooldown = 20;
+    sfxTransform();
+    TAS.fx.flash(FORM_COLORS[currentForm], 0.2);
+    TAS.particles.spawn(px, py, FORM_COLORS[currentForm], 15, 3, { size: 2, sizeVar: 2 });
+  }
+  lastBPress = bPress;
+  if (formSwitchCooldown > 0) formSwitchCooldown--;
+
+  // Mega attack (Z+X together or double-tap)
+  if ((TAS.input.keys['z'] || TAS.input.keys['Z']) && (TAS.input.keys['x'] || TAS.input.keys['X']) && megaMeter >= MEGA_MAX) {
+    fireMega();
+  }
+  // On mobile: tap both A+B
+  if (TAS.input.touch.a && TAS.input.touch.b && megaMeter >= MEGA_MAX) {
+    fireMega();
+  }
+
+  // Bomb (C key)
+  if (TAS.input.keys['c'] || TAS.input.keys['C']) {
+    if (bombs > 0) useBomb();
+    TAS.input.keys['c'] = false;
+    TAS.input.keys['C'] = false;
+  }
+
+  // Invulnerability
+  if (invuln > 0) invuln--;
+
+  // Mega
+  updateMega(dt);
+
+  // Bomb flash
+  if (bombFlash > 0) bombFlash--;
+
+  // Stage timer
+  stageTimer++;
+  if (!bossActive && !bossSpawned) {
+    spawnWave();
+    if (stageTimer >= STAGE_LENGTH) {
+      // Clear remaining enemies then boss
+      if (enemies.length === 0 || stageTimer > STAGE_LENGTH + 120) {
+        spawnBoss();
+      }
+    }
+  }
+
+  // Updates
+  updateEnemies(dt);
+  updateBullets(dt);
+  updateBoss(dt);
+  updatePowerups(dt);
+
+  // Collision with enemies (ramming)
+  if (invuln <= 0 && megaActive <= 0) {
+    for (const e of enemies) {
+      if (TAS.hit.rectOverlap(px - 6, py - 8, 12, 16, e.x - e.w/2, e.y - e.h/2, e.w, e.h)) {
+        playerHit();
+        e.hp -= 2;
+        break;
+      }
+    }
+  }
+}
+
+// ============================================================
+// MAIN DRAW
+// ============================================================
+function draw(dt) {
+  // Clear
+  ctx.fillStyle = '#000';
+  ctx.fillRect(0, 0, GW, GH);
+
+  if (state === 'title') {
+    drawTitleScreen();
+    return;
+  }
+
+  if (state === 'gameOver') {
+    drawBackground();
+    TAS.ui.drawGameOver(score, highScore, GW, GH, { frame, extra: 'Stage: ' + (stage + 1) });
+    return;
+  }
+
+  if (state === 'victory') {
+    drawVictoryScreen();
+    return;
+  }
+
+  // Game rendering
+  ctx.save();
+  TAS.fx.applyShake();
+
+  drawBackground();
+
+  // Stage intro overlay
+  if (stageIntroTimer > 0) {
+    ctx.fillStyle = 'rgba(0,0,0,0.6)';
+    ctx.fillRect(0, 0, GW, GH);
+    ctx.textAlign = 'center';
+    ctx.fillStyle = FORM_COLORS[0];
+    ctx.font = 'bold 16px monospace';
+    ctx.fillText('STAGE ' + (stage + 1), GW/2, GH/2 - 20);
+    ctx.fillStyle = '#ffffff';
+    ctx.font = '12px monospace';
+    ctx.fillText(STAGES[stage].name, GW/2, GH/2 + 5);
+    ctx.fillStyle = '#888';
+    ctx.font = '9px monospace';
+    ctx.fillText('DESTROY THE FUNGAL INVASION', GW/2, GH/2 + 30);
+    ctx.restore();
+    drawHUD();
+    TAS.input.drawTouchControls(GW, GH);
+    return;
+  }
+
+  // Stage clear
+  if (stageCleared) {
+    ctx.textAlign = 'center';
+    ctx.fillStyle = '#ffdd44';
+    ctx.font = 'bold 14px monospace';
+    ctx.fillText('STAGE CLEAR!', GW/2, GH/2 - 10);
+    const bonus = (stage + 1) * 1000;
+    ctx.fillStyle = '#ffffff';
+    ctx.font = '10px monospace';
+    ctx.fillText('BONUS: ' + bonus, GW/2, GH/2 + 15);
+    if (stageClearTimer === 170) score += bonus;
+  }
+
+  drawBullets();
+  drawEnemies();
+  drawBoss();
+  drawPowerups();
+  drawExplosions();
+
+  // Player
+  if (invuln <= 0 || frame % 4 < 3) {
+    drawShip(px, py, currentForm, invuln > 0);
+  }
+
+  // Mega effect
+  drawMega();
+
+  TAS.particles.draw();
+  ctx.restore();
+
+  // Bomb flash overlay
+  if (bombFlash > 0) {
+    ctx.globalAlpha = bombFlash / 30 * 0.5;
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, GW, GH);
+    ctx.globalAlpha = 1;
+  }
+
+  TAS.fx.drawFlash(GW, GH);
+  drawHUD();
+  TAS.input.drawTouchControls(GW, GH);
+}
+
+// ============================================================
+// TITLE SCREEN
+// ============================================================
+function drawTitleScreen() {
+  // Animated background
+  const grad = ctx.createLinearGradient(0, 0, 0, GH);
+  grad.addColorStop(0, '#0a0020');
+  grad.addColorStop(1, '#000010');
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, GW, GH);
+
+  // Stars
+  for (let i = 0; i < 50; i++) {
+    const sx = (i * 73 + frame * 0.3) % GW;
+    const sy = (i * 47 + frame * (0.5 + i * 0.01)) % GH;
+    ctx.fillStyle = '#ffffff';
+    ctx.globalAlpha = 0.2 + (i % 4) * 0.15;
+    ctx.fillRect(sx, sy, 1, 1);
+  }
+  ctx.globalAlpha = 1;
+
+  // Title
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#000';
+  ctx.font = 'bold 22px monospace';
+  ctx.fillText('CRISIS FORCE', GW/2 + 2, 100 + 2);
+
+  // Title with color cycling
+  const hue = (frame * 2) % 360;
+  ctx.fillStyle = 'hsl(' + hue + ', 100%, 65%)';
+  ctx.font = 'bold 22px monospace';
+  ctx.fillText('CRISIS FORCE', GW/2, 100);
+
+  // Subtitle
+  ctx.fillStyle = '#888';
+  ctx.font = '9px monospace';
+  ctx.fillText('A Tasern Universe Tale', GW/2, 125);
+
+  // Ship demo
+  drawShip(GW/2, 200, Math.floor(frame / 90) % 3, false);
+
+  // Form names
+  ctx.fillStyle = FORM_COLORS[Math.floor(frame / 90) % 3];
+  ctx.font = '8px monospace';
+  ctx.fillText(FORM_NAMES[Math.floor(frame / 90) % 3] + ' FORM', GW/2, 225);
+
+  // Controls
+  ctx.fillStyle = '#aaaaaa';
+  ctx.font = '8px monospace';
+  ctx.fillText('ARROWS/WASD: Move', GW/2, 280);
+  ctx.fillText('Z: Fire | X: Transform | C: Bomb', GW/2, 295);
+  ctx.fillText('Z+X: Mega Attack (when full)', GW/2, 310);
+
+  // High score
+  if (highScore > 0) {
+    ctx.fillStyle = '#ffdd44';
+    ctx.font = '9px monospace';
+    ctx.fillText('HIGH SCORE: ' + highScore, GW/2, 350);
+  }
+
+  // Start prompt
+  const pulse = Math.sin(frame * 0.06) * 0.3 + 0.7;
+  ctx.globalAlpha = pulse;
+  ctx.fillStyle = '#ffdd44';
+  ctx.font = 'bold 11px monospace';
+  ctx.fillText('PRESS ENTER TO START', GW/2, 420);
+  ctx.globalAlpha = 1;
+
+  // Credits
+  ctx.fillStyle = '#444';
+  ctx.font = '7px monospace';
+  ctx.fillText('MfT Arcade 2026', GW/2, GH - 20);
+}
+
+// ============================================================
+// VICTORY SCREEN
+// ============================================================
+function drawVictoryScreen() {
+  const grad = ctx.createLinearGradient(0, 0, 0, GH);
+  grad.addColorStop(0, '#001030');
+  grad.addColorStop(1, '#000010');
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, GW, GH);
+
+  // Particles
+  if (frame % 5 === 0) {
+    TAS.particles.spawn(rng(0, GW), rng(0, GH), '#ffdd44', 2, 1, { size: 1 });
+  }
+  TAS.particles.draw();
+
+  ctx.textAlign = 'center';
+
+  ctx.fillStyle = '#44ff88';
+  ctx.font = 'bold 18px monospace';
+  ctx.fillText('VICTORY!', GW/2, 100);
+
+  ctx.fillStyle = '#ffffff';
+  ctx.font = '11px monospace';
+  ctx.fillText('The Fungal Invasion is defeated!', GW/2, 140);
+  ctx.fillText('Tasern is saved!', GW/2, 160);
+
+  ctx.fillStyle = '#ffdd44';
+  ctx.font = 'bold 12px monospace';
+  ctx.fillText('FINAL SCORE: ' + score, GW/2, 210);
+
+  if (score >= highScore) {
+    const pulse = Math.sin(frame * 0.06) * 0.3 + 0.7;
+    ctx.globalAlpha = pulse;
+    ctx.fillStyle = '#ff44ff';
+    ctx.fillText('NEW HIGH SCORE!', GW/2, 240);
+    ctx.globalAlpha = 1;
+  }
+
+  // Stats
+  ctx.fillStyle = '#88ccff';
+  ctx.font = '9px monospace';
+  ctx.fillText('Best Multiplier: x' + streakMultiplier, GW/2, 290);
+  ctx.fillText('Lives Remaining: ' + lives, GW/2, 310);
+
+  const pulse2 = Math.sin(frame * 0.05) * 0.3 + 0.7;
+  ctx.globalAlpha = pulse2;
+  ctx.fillStyle = '#88ccff';
+  ctx.font = 'bold 10px monospace';
+  ctx.fillText('PRESS ENTER TO CONTINUE', GW/2, 400);
+  ctx.globalAlpha = 1;
+
+  if (TAS.input.keys['Enter'] || TAS.input.keys['Space'] || TAS.input.keys[' ']) {
+    state = 'title';
+  }
+}
+
+// ============================================================
+// START GAME LOOP
+// ============================================================
+TAS.loop.start(update, draw);
+
+})();
+</script>
+</body>
+</html>

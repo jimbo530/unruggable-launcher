@@ -1,0 +1,1707 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Poop-Man</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body { width: 100%; height: 100%; overflow: hidden; background: #111; touch-action: none; }
+canvas { display: block; margin: 0 auto; }
+#back-link { position: fixed; bottom: 8px; left: 50%; transform: translateX(-50%); color: #666; font-family: monospace; font-size: 12px; text-decoration: none; z-index: 10; }
+#back-link:hover { color: #aaa; }
+</style>
+</head>
+<body>
+<canvas id="gc"></canvas>
+<a id="back-link" href="/games">Back to Arcade</a>
+<script src="nft-loader.js"></script>
+<script>if(window.NftLoader)NftLoader.gate();</script>
+<script src="tasern-engine.js"></script>
+<script>
+(function(){
+"use strict";
+
+// ============================================================
+// CONSTANTS
+// ============================================================
+const GW = 256, GH = 240;
+const ctx = TAS.ctx;
+TAS.initCanvas(GW, GH);
+TAS.input.initTouch({ buttons: ['a','b','c'], labels: { a: 'JUMP', b: 'SHOOT', c: 'WEAP' } });
+
+const TILE = 16;
+const COLS = 16, ROWS = 15;
+const GRAVITY = 600;
+const MAX_HP = 28;
+const MAX_WEAPON_E = 28;
+const BOSS_HP = 28;
+const IFRAME_TIME = 1.5;
+const SHOT_SPEED = 200;
+const PLAYER_SPEED = 80;
+const JUMP_FORCE = -230;
+const SLIDE_SPEED = 140;
+const SLIDE_TIME = 0.4;
+
+// ============================================================
+// STATE
+// ============================================================
+let state = 'title';
+let frame = 0;
+let lives = 3;
+let eTanks = 0;
+let score = 0;
+let bossesBeaten = [false,false,false,false,false,false,false,false];
+let currentStage = -1;
+let currentWeapon = 0; // 0 = poop pellet (default)
+let weaponEnergy = [MAX_WEAPON_E,MAX_WEAPON_E,MAX_WEAPON_E,MAX_WEAPON_E,MAX_WEAPON_E,MAX_WEAPON_E,MAX_WEAPON_E,MAX_WEAPON_E];
+let selectCursor = 0;
+let pauseOpen = false;
+let weaponMenuCursor = 0;
+
+// Player
+let player = null;
+let bullets = [];
+let enemies = [];
+let pickups = [];
+let boss = null;
+let bossActive = false;
+let screenX = 0; // current screen in stage
+let stageData = null;
+let checkpoint = 0;
+let iframeTimer = 0;
+let deathTimer = 0;
+let bossIntroTimer = 0;
+let weaponGetTimer = 0;
+let weaponGetId = -1;
+let fortressStage = 0;
+let fortressRefight = 0;
+
+// ============================================================
+// BOSS DATA
+// ============================================================
+const BOSSES = [
+  { name: 'MfT-Man', color: '#ffcc00', bgColor: '#332200', weapon: 'Gold Shot', weakTo: 5 },
+  { name: 'LP-Man', color: '#33cc66', bgColor: '#003311', weapon: 'LP Flood', weakTo: 7 },
+  { name: 'Spore-Man', color: '#aa44ff', bgColor: '#220033', weapon: 'Spore Shield', weakTo: 4 },
+  { name: 'Crystal-Man', color: '#44aaff', bgColor: '#001133', weapon: 'Crystal Shard', weakTo: 6 },
+  { name: 'Flame-Man', color: '#ff4422', bgColor: '#330500', weapon: 'Flame Burst', weakTo: 2 },
+  { name: 'Reactor-Man', color: '#44ff88', bgColor: '#003322', weapon: 'Reactor Beam', weakTo: 3 },
+  { name: 'Slime-Man', color: '#22ccbb', bgColor: '#002222', weapon: 'Slime Bomb', weakTo: 0 },
+  { name: 'Fungi-Man', color: '#88cc44', bgColor: '#112200', weapon: 'Fungi Spread', weakTo: 1 }
+];
+
+// Weakness chain: MfT(0)->weak to Reactor(5), LP(1)->weak to Fungi(7), Spore(2)->weak to Flame(4),
+// Crystal(3)->weak to Slime(6), Flame(4)->weak to Spore(2), Reactor(5)->weak to Crystal(3),
+// Slime(6)->weak to MfT(0), Fungi(7)->weak to LP(1)
+
+// ============================================================
+// LEVEL GENERATION
+// ============================================================
+function generateStage(stageIdx) {
+  // Each stage = 4 screens of 16x15 tiles
+  const screens = [];
+  const seed = stageIdx * 1000;
+  function seededRand(n) { let x = Math.sin(seed + n) * 10000; return x - Math.floor(x); }
+
+  for (let s = 0; s < 4; s++) {
+    const tiles = [];
+    for (let r = 0; r < ROWS; r++) {
+      const row = [];
+      for (let c = 0; c < COLS; c++) {
+        if (r === ROWS - 1) { row.push(1); continue; } // floor
+        if (r === 0 || c === 0 || c === COLS - 1) { row.push(r === 0 ? 1 : 0); continue; } // ceiling, walls optional
+        row.push(0);
+      }
+      tiles.push(row);
+    }
+
+    // Add platforms based on stage theme
+    const rng = (i) => seededRand(s * 500 + i);
+    const numPlats = 4 + Math.floor(rng(0) * 4);
+    for (let i = 0; i < numPlats; i++) {
+      const px = 2 + Math.floor(rng(i * 3 + 1) * 11);
+      const py = 3 + Math.floor(rng(i * 3 + 2) * 8);
+      const pw = 2 + Math.floor(rng(i * 3 + 3) * 3);
+      for (let j = 0; j < pw && px + j < COLS - 1; j++) {
+        tiles[py][px + j] = 1;
+      }
+    }
+
+    // Add pits in later screens
+    if (s > 0) {
+      const pitX = 4 + Math.floor(rng(100) * 6);
+      const pitW = 2 + Math.floor(rng(101) * 2);
+      for (let j = 0; j < pitW && pitX + j < COLS - 1; j++) {
+        tiles[ROWS - 1][pitX + j] = 0;
+      }
+    }
+
+    // Ladders
+    if (s > 0) {
+      const ladX = 3 + Math.floor(rng(200) * 10);
+      const ladTop = 3 + Math.floor(rng(201) * 4);
+      const ladBot = ladTop + 3 + Math.floor(rng(202) * 3);
+      for (let r = ladTop; r <= Math.min(ladBot, ROWS - 2); r++) {
+        tiles[r][ladX] = 2; // ladder tile
+      }
+    }
+
+    // Clear spawn area on first screen
+    if (s === 0) {
+      for (let r = ROWS - 4; r < ROWS - 1; r++) {
+        for (let c = 1; c < 4; c++) tiles[r][c] = 0;
+      }
+    }
+
+    // Clear boss area on last screen
+    if (s === 3) {
+      for (let r = 2; r < ROWS - 1; r++) {
+        for (let c = 2; c < COLS - 2; c++) {
+          if (r > 4) tiles[r][c] = 0;
+        }
+      }
+      // Boss floor
+      for (let c = 1; c < COLS - 1; c++) tiles[ROWS - 1][c] = 1;
+      // Boss door
+      tiles[ROWS - 3][COLS - 2] = 3; // door tile (visual only)
+    }
+
+    screens.push(tiles);
+  }
+
+  return { screens, theme: stageIdx };
+}
+
+// ============================================================
+// ENEMY SPAWNING
+// ============================================================
+function spawnEnemiesForScreen(screenIdx) {
+  enemies = [];
+  if (screenIdx === 3) return; // boss screen
+
+  const rng = (i) => { let x = Math.sin(currentStage * 7777 + screenIdx * 333 + i) * 10000; return x - Math.floor(x); };
+  const count = 3 + Math.floor(rng(0) * 3);
+  const colors = [BOSSES[currentStage].color, '#ff6666', '#66ffaa', '#ffaa44'];
+
+  for (let i = 0; i < count; i++) {
+    const ex = 60 + rng(i * 4 + 1) * 160;
+    const ey = 40 + rng(i * 4 + 2) * 140;
+    const etype = Math.floor(rng(i * 4 + 3) * 3);
+    enemies.push({
+      x: ex, y: ey, w: 12, h: 12,
+      vx: (rng(i * 4 + 4) > 0.5 ? 1 : -1) * (30 + rng(i * 4 + 5) * 40),
+      vy: 0, hp: etype === 2 ? 3 : (etype === 1 ? 2 : 1),
+      type: etype, color: colors[etype],
+      shootTimer: 1 + rng(i * 4 + 6) * 2,
+      dir: 1, animT: 0
+    });
+  }
+}
+
+// ============================================================
+// PLAYER
+// ============================================================
+function resetPlayer() {
+  player = {
+    x: 24, y: GH - TILE * 2 - 16,
+    w: 12, h: 16, vx: 0, vy: 0,
+    dir: 1, grounded: false, onLadder: false,
+    shooting: false, shootTimer: 0,
+    sliding: false, slideTimer: 0,
+    hp: MAX_HP, alive: true,
+    animFrame: 0, animTimer: 0
+  };
+  iframeTimer = 0;
+  bullets = [];
+}
+
+// ============================================================
+// TILE COLLISION
+// ============================================================
+function getTile(sx, r, c) {
+  if (!stageData || sx < 0 || sx >= stageData.screens.length) return 1;
+  if (r < 0 || r >= ROWS || c < 0 || c >= COLS) return (r >= ROWS) ? 1 : 0;
+  return stageData.screens[sx][r][c];
+}
+
+function isSolid(sx, r, c) {
+  const t = getTile(sx, r, c);
+  return t === 1;
+}
+
+function isLadder(sx, r, c) {
+  return getTile(sx, r, c) === 2;
+}
+
+function tileCollideX(ent, sx) {
+  const left = Math.floor(ent.x / TILE);
+  const right = Math.floor((ent.x + ent.w - 1) / TILE);
+  const top = Math.floor(ent.y / TILE);
+  const bot = Math.floor((ent.y + ent.h - 1) / TILE);
+
+  for (let r = top; r <= bot; r++) {
+    if (isSolid(sx, r, left)) { ent.x = (left + 1) * TILE; ent.vx = 0; return true; }
+    if (isSolid(sx, r, right)) { ent.x = right * TILE - ent.w; ent.vx = 0; return true; }
+  }
+  return false;
+}
+
+function tileCollideY(ent, sx) {
+  const left = Math.floor(ent.x / TILE);
+  const right = Math.floor((ent.x + ent.w - 1) / TILE);
+  const top = Math.floor(ent.y / TILE);
+  const bot = Math.floor((ent.y + ent.h - 1) / TILE);
+
+  ent.grounded = false;
+  if (ent.vy > 0) {
+    for (let c = left; c <= right; c++) {
+      if (isSolid(sx, bot, c)) {
+        ent.y = bot * TILE - ent.h;
+        ent.vy = 0;
+        ent.grounded = true;
+        return true;
+      }
+    }
+  } else if (ent.vy < 0) {
+    for (let c = left; c <= right; c++) {
+      if (isSolid(sx, top, c)) {
+        ent.y = (top + 1) * TILE;
+        ent.vy = 0;
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+// ============================================================
+// SHOOTING
+// ============================================================
+function shoot() {
+  if (bullets.length >= 3 && currentWeapon === 0) return;
+  if (currentWeapon > 0 && weaponEnergy[currentWeapon - 1] <= 0) return;
+
+  player.shooting = true;
+  player.shootTimer = 0.2;
+
+  if (currentWeapon === 0) {
+    // Poop pellet
+    bullets.push({
+      x: player.x + (player.dir > 0 ? player.w : -6),
+      y: player.y + 6, w: 6, h: 4,
+      vx: SHOT_SPEED * player.dir, vy: 0,
+      damage: 1, type: 0, color: '#8B4513', life: 2
+    });
+    TAS.audio.playTone(800, 0.05, 'square', 0.06);
+  } else {
+    weaponEnergy[currentWeapon - 1]--;
+    const wx = player.x + (player.dir > 0 ? player.w : -8);
+    const wy = player.y + 5;
+
+    switch(currentWeapon) {
+      case 1: // Gold Shot - bouncing
+        bullets.push({ x: wx, y: wy, w: 6, h: 6, vx: SHOT_SPEED * 0.9 * player.dir, vy: -80, damage: 2, type: 1, color: '#ffcc00', life: 3, bounces: 3 });
+        TAS.audio.playTone(1200, 0.08, 'sine', 0.06, 600);
+        break;
+      case 2: // LP Flood - ground wave
+        bullets.push({ x: wx, y: player.y + player.h - 6, w: 10, h: 6, vx: SHOT_SPEED * 0.7 * player.dir, vy: 0, damage: 2, type: 2, color: '#33cc66', life: 2, ground: true });
+        TAS.audio.playTone(200, 0.12, 'sawtooth', 0.05, 100);
+        break;
+      case 3: // Spore Shield - orbiting
+        for (let i = 0; i < 4; i++) {
+          bullets.push({ x: player.x, y: player.y, w: 5, h: 5, vx: 0, vy: 0, damage: 1, type: 3, color: '#aa44ff', life: 3, orbit: true, angle: i * Math.PI / 2, orbitR: 24 });
+        }
+        TAS.audio.playTone(500, 0.15, 'sine', 0.04);
+        break;
+      case 4: // Crystal Shard - piercing beam
+        bullets.push({ x: wx, y: wy, w: 20, h: 3, vx: SHOT_SPEED * 1.5 * player.dir, vy: 0, damage: 3, type: 4, color: '#44aaff', life: 1.5, pierce: true });
+        TAS.audio.playTone(1500, 0.06, 'triangle', 0.07);
+        break;
+      case 5: // Flame Burst - arcing fireball
+        bullets.push({ x: wx, y: wy, w: 8, h: 8, vx: SHOT_SPEED * 0.6 * player.dir, vy: -120, damage: 3, type: 5, color: '#ff4422', life: 2, gravity: 200 });
+        TAS.audio.playTone(300, 0.1, 'sawtooth', 0.06, 100);
+        break;
+      case 6: // Reactor Beam - charged shot
+        bullets.push({ x: wx, y: wy - 2, w: 16, h: 8, vx: SHOT_SPEED * 1.2 * player.dir, vy: 0, damage: 4, type: 6, color: '#44ff88', life: 1.5 });
+        TAS.audio.playTone(600, 0.15, 'square', 0.08, 1200);
+        break;
+      case 7: // Slime Bomb - sticky explosion
+        bullets.push({ x: wx, y: wy, w: 8, h: 8, vx: SHOT_SPEED * 0.5 * player.dir, vy: -60, damage: 2, type: 7, color: '#22ccbb', life: 2.5, gravity: 150, explode: true });
+        TAS.audio.playTone(250, 0.08, 'sine', 0.05, 150);
+        break;
+      case 8: // Fungi Spread - 3-way
+        for (let a = -1; a <= 1; a++) {
+          bullets.push({ x: wx, y: wy, w: 5, h: 5, vx: SHOT_SPEED * 0.8 * player.dir, vy: a * 60, damage: 2, type: 8, color: '#88cc44', life: 1.5 });
+        }
+        TAS.audio.playTone(700, 0.06, 'square', 0.05, 400);
+        break;
+    }
+  }
+}
+
+// ============================================================
+// BOSS AI
+// ============================================================
+function createBoss(idx) {
+  const b = BOSSES[idx];
+  return {
+    x: 200, y: GH - TILE - 24, w: 20, h: 24,
+    vx: 0, vy: 0, hp: BOSS_HP, maxHp: BOSS_HP,
+    pattern: 0, patternTimer: 2,
+    attackTimer: 0, jumping: false,
+    dir: -1, color: b.color, idx: idx,
+    grounded: true, phase: 0,
+    shootCooldown: 0, shots: []
+  };
+}
+
+function updateBoss(dt) {
+  if (!boss || !bossActive) return;
+
+  boss.patternTimer -= dt;
+  boss.shootCooldown -= dt;
+
+  // Gravity
+  boss.vy += GRAVITY * dt;
+  boss.y += boss.vy * dt;
+  if (boss.y >= GH - TILE - boss.h) {
+    boss.y = GH - TILE - boss.h;
+    boss.vy = 0;
+    boss.grounded = true;
+  }
+
+  // Face player
+  boss.dir = player.x < boss.x ? -1 : 1;
+
+  // Pattern timer
+  if (boss.patternTimer <= 0) {
+    boss.pattern = (boss.pattern + 1) % 3;
+    boss.patternTimer = 2 + Math.random() * 1.5;
+    boss.phase = 0;
+  }
+
+  // Execute patterns
+  switch (boss.pattern) {
+    case 0: // Jump and shoot
+      if (boss.phase === 0 && boss.grounded) {
+        boss.vy = -280;
+        boss.grounded = false;
+        boss.phase = 1;
+      }
+      if (boss.phase === 1 && boss.shootCooldown <= 0) {
+        bossShoot();
+        boss.shootCooldown = 0.4;
+        boss.phase = 2;
+      }
+      break;
+    case 1: // Rush toward player
+      const dir = player.x < boss.x ? -1 : 1;
+      boss.x += dir * 100 * dt;
+      if (boss.phase === 0 && boss.shootCooldown <= 0) {
+        bossShoot();
+        boss.shootCooldown = 0.8;
+        boss.phase = 1;
+      }
+      break;
+    case 2: // Triple shot
+      if (boss.shootCooldown <= 0 && boss.phase < 3) {
+        bossShoot();
+        boss.shootCooldown = 0.3;
+        boss.phase++;
+      }
+      break;
+  }
+
+  // Keep in bounds
+  boss.x = TAS.math.clamp(boss.x, TILE, GW - TILE - boss.w);
+
+  // Update boss shots
+  for (let i = boss.shots.length - 1; i >= 0; i--) {
+    const s = boss.shots[i];
+    s.x += s.vx * dt;
+    s.y += s.vy * dt;
+    s.life -= dt;
+    if (s.life <= 0 || s.x < 0 || s.x > GW) { boss.shots.splice(i, 1); continue; }
+
+    // Hit player
+    if (iframeTimer <= 0 && TAS.hit.rectOverlap(s.x, s.y, s.w, s.h, player.x, player.y, player.w, player.h)) {
+      damagePlayer(s.damage || 3);
+      boss.shots.splice(i, 1);
+    }
+  }
+}
+
+function bossShoot() {
+  if (!boss) return;
+  const sx = boss.x + (boss.dir > 0 ? boss.w : -6);
+  const sy = boss.y + 8;
+  boss.shots.push({ x: sx, y: sy, w: 8, h: 6, vx: boss.dir * 150, vy: 0, life: 2, damage: 3 });
+  TAS.audio.playTone(400, 0.08, 'sawtooth', 0.05, 200);
+}
+
+// ============================================================
+// DAMAGE & DEATH
+// ============================================================
+function damagePlayer(amount) {
+  if (iframeTimer > 0 || !player.alive) return;
+  player.hp -= amount;
+  iframeTimer = IFRAME_TIME;
+  TAS.fx.flash('#fff', 0.4);
+  TAS.fx.shake(4, 0.85);
+  TAS.audio.playTone(200, 0.15, 'square', 0.08, 80);
+
+  if (player.hp <= 0) {
+    player.hp = 0;
+    player.alive = false;
+    deathTimer = 2;
+    TAS.particles.spawn(player.x + player.w / 2, player.y + player.h / 2, '#ff4444', 20, 3, { gravity: 1.5 });
+    TAS.audio.playNoise(0.3, 0.1, 400);
+  }
+}
+
+function damageBoss(amount) {
+  if (!boss) return;
+  boss.hp -= amount;
+  TAS.particles.spawn(boss.x + boss.w / 2, boss.y + boss.h / 2, boss.color, 8, 2);
+  TAS.audio.playTone(600, 0.05, 'square', 0.06);
+
+  if (boss.hp <= 0) {
+    boss.hp = 0;
+    bossActive = false;
+    // Boss death explosion
+    TAS.fx.flash('#fff', 0.6);
+    TAS.fx.shake(8, 0.9);
+    for (let i = 0; i < 30; i++) {
+      setTimeout(() => {
+        if (boss) TAS.particles.spawn(
+          boss.x + Math.random() * boss.w,
+          boss.y + Math.random() * boss.h,
+          boss.color, 5, 3, { gravity: 1 }
+        );
+      }, i * 50);
+    }
+    TAS.audio.playMelody([[800,0.1],[600,0.1],[400,0.1],[200,0.2]], 100);
+
+    // Award weapon
+    setTimeout(() => {
+      if (currentStage >= 0 && currentStage < 8) {
+        bossesBeaten[currentStage] = true;
+        weaponGetId = currentStage;
+        weaponGetTimer = 3;
+        state = 'weaponGet';
+        score += 1000;
+        saveProg();
+      }
+    }, 1500);
+  }
+}
+
+// ============================================================
+// UPDATE PLAYING
+// ============================================================
+function updatePlaying(dt) {
+  if (!player || !player.alive) {
+    deathTimer -= dt;
+    if (deathTimer <= 0) {
+      lives--;
+      if (lives < 0) {
+        state = 'gameOver';
+        return;
+      }
+      // Respawn at checkpoint
+      resetPlayer();
+      screenX = checkpoint;
+      spawnEnemiesForScreen(screenX);
+      if (boss) { boss.hp = BOSS_HP; boss.shots = []; bossActive = screenX === 3; }
+    }
+    return;
+  }
+
+  iframeTimer = Math.max(0, iframeTimer - dt);
+
+  // Weapon menu toggle
+  if (TAS.input.keys['Tab'] || TAS.input.keys['KeyQ'] || TAS.input.touch.c) {
+    if (!pauseOpen) {
+      pauseOpen = true;
+      weaponMenuCursor = currentWeapon;
+    }
+  }
+  if (pauseOpen) {
+    updateWeaponMenu(dt);
+    return;
+  }
+
+  const keys = TAS.input.keys;
+  const tch = TAS.input.touch;
+
+  // Slide
+  if (player.sliding) {
+    player.slideTimer -= dt;
+    player.vx = SLIDE_SPEED * player.dir;
+    if (player.slideTimer <= 0) {
+      player.sliding = false;
+      player.h = 16;
+      player.y -= 6;
+    }
+  } else if (player.onLadder) {
+    // Ladder movement
+    player.vy = 0;
+    player.vx = 0;
+    if (keys['ArrowUp'] || keys['KeyW'] || tch.up) player.vy = -80;
+    if (keys['ArrowDown'] || keys['KeyS'] || tch.down) player.vy = 80;
+    if (keys['ArrowLeft'] || keys['KeyA'] || tch.left) { player.onLadder = false; player.vx = -PLAYER_SPEED; }
+    if (keys['ArrowRight'] || keys['KeyD'] || tch.right) { player.onLadder = false; player.vx = PLAYER_SPEED; }
+    if (keys['Space'] || keys['KeyZ'] || tch.a) { player.onLadder = false; player.vy = JUMP_FORCE * 0.6; }
+  } else {
+    // Normal movement
+    player.vx = 0;
+    if (keys['ArrowLeft'] || keys['KeyA'] || tch.left) { player.vx = -PLAYER_SPEED; player.dir = -1; }
+    if (keys['ArrowRight'] || keys['KeyD'] || tch.right) { player.vx = PLAYER_SPEED; player.dir = 1; }
+
+    // Jump (variable height)
+    if ((keys['Space'] || keys['KeyZ'] || tch.a) && player.grounded) {
+      player.vy = JUMP_FORCE;
+      player.grounded = false;
+      TAS.audio.playTone(400, 0.05, 'square', 0.04, 600);
+    }
+    // Variable jump - cut short if released
+    if (!(keys['Space'] || keys['KeyZ'] || tch.a) && player.vy < JUMP_FORCE * 0.4) {
+      player.vy = JUMP_FORCE * 0.4;
+    }
+
+    // Slide (down + jump while grounded)
+    if ((keys['ArrowDown'] || keys['KeyS'] || tch.down) && player.grounded && !player.sliding) {
+      if (keys['Space'] || keys['KeyZ'] || tch.a) {
+        player.sliding = true;
+        player.slideTimer = SLIDE_TIME;
+        player.h = 10;
+        player.y += 6;
+        TAS.audio.playNoise(0.08, 0.03, 800);
+      }
+    }
+
+    // Ladder check
+    if ((keys['ArrowUp'] || keys['KeyW'] || tch.up) && !player.sliding) {
+      const col = Math.floor((player.x + player.w / 2) / TILE);
+      const row = Math.floor((player.y + player.h / 2) / TILE);
+      if (isLadder(screenX, row, col)) {
+        player.onLadder = true;
+        player.x = col * TILE + (TILE - player.w) / 2;
+        player.vy = 0;
+      }
+    }
+
+    // Gravity
+    if (!player.grounded) {
+      player.vy += GRAVITY * dt;
+    }
+  }
+
+  // Shoot
+  if ((keys['KeyX'] || keys['Shift'] || tch.b) && player.shootTimer <= 0 && !player.sliding) {
+    shoot();
+  }
+  player.shootTimer = Math.max(0, player.shootTimer - dt);
+
+  // Apply movement
+  player.x += player.vx * dt;
+  tileCollideX(player, screenX);
+  player.y += player.vy * dt;
+  tileCollideY(player, screenX);
+
+  // Ladder gravity override
+  if (player.onLadder) {
+    player.grounded = false;
+    const col = Math.floor((player.x + player.w / 2) / TILE);
+    const row = Math.floor((player.y + player.h) / TILE);
+    if (!isLadder(screenX, row, col) && !isLadder(screenX, row - 1, col)) {
+      player.onLadder = false;
+    }
+  }
+
+  // Screen transitions
+  if (player.x > GW - 4) {
+    if (screenX < stageData.screens.length - 1) {
+      screenX++;
+      player.x = 8;
+      checkpoint = screenX;
+      spawnEnemiesForScreen(screenX);
+      if (screenX === 3 && !bossActive && boss && boss.hp > 0) {
+        bossActive = true;
+        bossIntroTimer = 1.5;
+        state = 'bossIntro';
+      }
+    }
+  }
+  if (player.x < -4) {
+    if (screenX > 0) {
+      screenX--;
+      player.x = GW - player.w - 8;
+      spawnEnemiesForScreen(screenX);
+    }
+  }
+
+  // Pit death
+  if (player.y > GH + 16) {
+    damagePlayer(MAX_HP);
+  }
+
+  // Animation
+  player.animTimer += dt;
+  if (player.animTimer > 0.15) { player.animTimer = 0; player.animFrame = (player.animFrame + 1) % 4; }
+
+  // Update bullets
+  updateBullets(dt);
+
+  // Update enemies
+  updateEnemies(dt);
+
+  // Update boss
+  if (bossActive) updateBoss(dt);
+
+  // Update pickups
+  updatePickups(dt);
+
+  // Particles
+  TAS.particles.update(dt);
+  TAS.fx.updateEffects(dt);
+}
+
+// ============================================================
+// BULLETS UPDATE
+// ============================================================
+function updateBullets(dt) {
+  for (let i = bullets.length - 1; i >= 0; i--) {
+    const b = bullets[i];
+
+    if (b.orbit) {
+      b.angle += dt * 4;
+      b.x = player.x + player.w / 2 + Math.cos(b.angle) * b.orbitR;
+      b.y = player.y + player.h / 2 + Math.sin(b.angle) * b.orbitR;
+    } else {
+      if (b.gravity) b.vy += b.gravity * dt;
+      b.x += b.vx * dt;
+      b.y += b.vy * dt;
+
+      // Bouncing (Gold Shot)
+      if (b.bounces !== undefined && b.y > GH - TILE - b.h) {
+        b.y = GH - TILE - b.h;
+        b.vy = -Math.abs(b.vy) * 0.8 - 60;
+        b.bounces--;
+        if (b.bounces < 0) { bullets.splice(i, 1); continue; }
+      }
+
+      // Ground wave stays on floor
+      if (b.ground) {
+        b.y = GH - TILE - b.h;
+        // Check floor exists
+        const col = Math.floor(b.x / TILE);
+        if (!isSolid(screenX, ROWS - 1, col)) { bullets.splice(i, 1); continue; }
+      }
+    }
+
+    b.life -= dt;
+    if (b.life <= 0 || b.x < -16 || b.x > GW + 16 || b.y < -16 || b.y > GH + 16) {
+      // Slime bomb explosion on death
+      if (b.explode && b.life <= 0) {
+        TAS.particles.spawn(b.x, b.y, b.color, 12, 3, { size: 3 });
+        // Damage nearby enemies
+        for (const e of enemies) {
+          if (TAS.math.dist(b.x, b.y, e.x, e.y) < 30) {
+            e.hp -= b.damage;
+          }
+        }
+        if (boss && bossActive && TAS.math.dist(b.x, b.y, boss.x + boss.w / 2, boss.y + boss.h / 2) < 35) {
+          const dmg = boss.idx === BOSSES[currentStage]?.weakTo ? b.damage * 2 : b.damage;
+          damageBoss(dmg);
+        }
+      }
+      bullets.splice(i, 1);
+      continue;
+    }
+
+    // Hit enemies
+    let hitSomething = false;
+    for (let j = enemies.length - 1; j >= 0; j--) {
+      const e = enemies[j];
+      if (TAS.hit.rectOverlap(b.x, b.y, b.w, b.h, e.x, e.y, e.w, e.h)) {
+        e.hp -= b.damage;
+        if (e.hp <= 0) {
+          TAS.particles.spawn(e.x + e.w / 2, e.y + e.h / 2, e.color, 10, 2);
+          score += 100;
+          // Drop pickup chance
+          if (Math.random() < 0.3) {
+            pickups.push({ x: e.x, y: e.y, type: Math.random() < 0.2 ? 'bigE' : 'smallE', life: 5 });
+          }
+          enemies.splice(j, 1);
+          TAS.audio.playTone(1000, 0.06, 'square', 0.05, 500);
+        }
+        if (!b.pierce) hitSomething = true;
+        break;
+      }
+    }
+
+    // Hit boss
+    if (!hitSomething && boss && bossActive && TAS.hit.rectOverlap(b.x, b.y, b.w, b.h, boss.x, boss.y, boss.w, boss.h)) {
+      const weakIdx = BOSSES[boss.idx].weakTo;
+      const isWeak = (currentWeapon - 1) === weakIdx || (b.type - 1) === weakIdx;
+      const dmg = isWeak ? b.damage * 2 : b.damage;
+      damageBoss(dmg);
+      if (!b.pierce) hitSomething = true;
+    }
+
+    if (hitSomething && !b.pierce) { bullets.splice(i, 1); }
+  }
+}
+
+// ============================================================
+// ENEMIES UPDATE
+// ============================================================
+function updateEnemies(dt) {
+  for (let i = enemies.length - 1; i >= 0; i--) {
+    const e = enemies[i];
+    e.animT += dt;
+
+    // Movement
+    e.x += e.vx * dt;
+    if (e.x < TILE || e.x > GW - TILE - e.w) { e.vx *= -1; e.dir *= -1; }
+
+    // Type-specific behavior
+    if (e.type === 1) {
+      // Flying sine wave
+      e.y += Math.sin(e.animT * 3) * 30 * dt;
+    } else if (e.type === 2) {
+      // Shooter
+      e.shootTimer -= dt;
+      if (e.shootTimer <= 0 && player.alive) {
+        e.shootTimer = 1.5 + Math.random();
+        const dir = player.x < e.x ? -1 : 1;
+        bullets.push({
+          x: e.x + e.w / 2, y: e.y + e.h / 2, w: 5, h: 5,
+          vx: dir * 120, vy: 0, damage: 0, type: -1, color: '#ff6666', life: 2, enemy: true
+        });
+      }
+    }
+
+    // Gravity for ground enemies
+    if (e.type === 0) {
+      e.vy += GRAVITY * dt;
+      e.y += e.vy * dt;
+      const row = Math.floor((e.y + e.h) / TILE);
+      const col = Math.floor((e.x + e.w / 2) / TILE);
+      if (isSolid(screenX, row, col)) {
+        e.y = row * TILE - e.h;
+        e.vy = 0;
+      }
+    }
+
+    // Enemy bullets hitting player
+    if (e.type !== 2) {
+      // Contact damage
+      if (iframeTimer <= 0 && player.alive && TAS.hit.rectOverlap(e.x, e.y, e.w, e.h, player.x, player.y, player.w, player.h)) {
+        damagePlayer(2);
+      }
+    }
+  }
+
+  // Check enemy bullets
+  for (let i = bullets.length - 1; i >= 0; i--) {
+    const b = bullets[i];
+    if (b.enemy && player.alive && iframeTimer <= 0) {
+      if (TAS.hit.rectOverlap(b.x, b.y, b.w, b.h, player.x, player.y, player.w, player.h)) {
+        damagePlayer(2);
+        bullets.splice(i, 1);
+      }
+    }
+  }
+}
+
+// ============================================================
+// PICKUPS UPDATE
+// ============================================================
+function updatePickups(dt) {
+  for (let i = pickups.length - 1; i >= 0; i--) {
+    const p = pickups[i];
+    p.life -= dt;
+    if (p.life <= 0) { pickups.splice(i, 1); continue; }
+
+    if (TAS.hit.rectOverlap(p.x, p.y, 10, 10, player.x, player.y, player.w, player.h)) {
+      if (p.type === 'smallE') { player.hp = Math.min(MAX_HP, player.hp + 4); }
+      else if (p.type === 'bigE') { player.hp = Math.min(MAX_HP, player.hp + 10); }
+      else if (p.type === 'eTank') { eTanks = Math.min(4, eTanks + 1); }
+      else if (p.type === 'weaponE') {
+        if (currentWeapon > 0) weaponEnergy[currentWeapon - 1] = Math.min(MAX_WEAPON_E, weaponEnergy[currentWeapon - 1] + 7);
+      }
+      TAS.audio.playTone(1200, 0.08, 'sine', 0.05, 1600);
+      pickups.splice(i, 1);
+    }
+  }
+}
+
+// ============================================================
+// WEAPON MENU
+// ============================================================
+let menuReleased = false;
+function updateWeaponMenu(dt) {
+  const keys = TAS.input.keys;
+  const tch = TAS.input.touch;
+
+  if (!keys['Tab'] && !keys['KeyQ'] && !tch.c) {
+    menuReleased = true;
+  }
+
+  if (keys['ArrowUp'] || tch.up) {
+    if (!keys._menuUp) { weaponMenuCursor = (weaponMenuCursor - 1 + 9) % 9; keys._menuUp = true; }
+  } else { keys._menuUp = false; }
+
+  if (keys['ArrowDown'] || tch.down) {
+    if (!keys._menuDown) { weaponMenuCursor = (weaponMenuCursor + 1) % 9; keys._menuDown = true; }
+  } else { keys._menuDown = false; }
+
+  // Confirm
+  if ((keys['Enter'] || keys['KeyX'] || tch.b) || (menuReleased && (keys['Tab'] || keys['KeyQ'] || tch.c))) {
+    if (menuReleased) {
+      // Can only select weapons we have
+      if (weaponMenuCursor === 0 || bossesBeaten[weaponMenuCursor - 1]) {
+        currentWeapon = weaponMenuCursor;
+      }
+      pauseOpen = false;
+      menuReleased = false;
+    }
+  }
+
+  // Use E-Tank
+  if ((keys['KeyE'] || keys['ShiftRight']) && eTanks > 0 && player.hp < MAX_HP) {
+    eTanks--;
+    player.hp = MAX_HP;
+    TAS.audio.playMelody([[600,0.08],[800,0.08],[1000,0.08],[1200,0.12]], 80);
+  }
+}
+
+// ============================================================
+// STAGE SELECT
+// ============================================================
+let selectRepeat = 0;
+function updateStageSelect(dt) {
+  selectRepeat -= dt;
+  const keys = TAS.input.keys;
+  const tch = TAS.input.touch;
+
+  if (selectRepeat <= 0) {
+    if (keys['ArrowRight'] || tch.right) { selectCursor = (selectCursor % 4 === 3) ? selectCursor - 3 : selectCursor + 1; selectRepeat = 0.2; }
+    if (keys['ArrowLeft'] || tch.left) { selectCursor = (selectCursor % 4 === 0) ? selectCursor + 3 : selectCursor - 1; selectRepeat = 0.2; }
+    if (keys['ArrowDown'] || tch.down) { selectCursor = (selectCursor + 4) % 8; selectRepeat = 0.2; }
+    if (keys['ArrowUp'] || tch.up) { selectCursor = (selectCursor + 4) % 8; selectRepeat = 0.2; }
+  }
+
+  if (keys['Enter'] || keys['Space'] || keys['KeyZ'] || tch.a) {
+    startStage(selectCursor);
+  }
+}
+
+// ============================================================
+// START STAGE
+// ============================================================
+function startStage(idx) {
+  currentStage = idx;
+  stageData = generateStage(idx);
+  screenX = 0;
+  checkpoint = 0;
+  resetPlayer();
+  spawnEnemiesForScreen(0);
+  boss = createBoss(idx);
+  bossActive = false;
+  bullets = [];
+  pickups = [];
+  state = 'playing';
+  TAS.audio.playMelody([[400,0.06],[600,0.06],[800,0.1]], 80);
+}
+
+// ============================================================
+// DRAW FUNCTIONS
+// ============================================================
+function drawTiles() {
+  if (!stageData || screenX < 0 || screenX >= stageData.screens.length) return;
+  const screen = stageData.screens[screenX];
+  const themeColor = BOSSES[currentStage].color;
+  const bgColor = BOSSES[currentStage].bgColor;
+
+  // Background
+  ctx.fillStyle = bgColor;
+  ctx.fillRect(0, 0, GW, GH);
+
+  // Background details
+  ctx.fillStyle = themeColor + '11';
+  for (let i = 0; i < 8; i++) {
+    const bx = ((frame * 0.2 + i * 50) % (GW + 40)) - 20;
+    const by = 30 + i * 28;
+    ctx.fillRect(bx, by, 20 + i * 5, 3);
+  }
+
+  for (let r = 0; r < ROWS; r++) {
+    for (let c = 0; c < COLS; c++) {
+      const t = screen[r][c];
+      const tx = c * TILE;
+      const ty = r * TILE;
+
+      if (t === 1) {
+        // Solid tile
+        ctx.fillStyle = themeColor;
+        ctx.fillRect(tx, ty, TILE, TILE);
+        ctx.fillStyle = 'rgba(0,0,0,0.3)';
+        ctx.fillRect(tx, ty + TILE - 3, TILE, 3);
+        ctx.fillStyle = 'rgba(255,255,255,0.2)';
+        ctx.fillRect(tx, ty, TILE, 2);
+        // Grid lines
+        ctx.strokeStyle = 'rgba(0,0,0,0.2)';
+        ctx.strokeRect(tx + 0.5, ty + 0.5, TILE - 1, TILE - 1);
+      } else if (t === 2) {
+        // Ladder
+        ctx.fillStyle = '#888';
+        ctx.fillRect(tx + 2, ty, 3, TILE);
+        ctx.fillRect(tx + TILE - 5, ty, 3, TILE);
+        ctx.fillStyle = '#aaa';
+        ctx.fillRect(tx + 2, ty + 4, TILE - 4, 2);
+        ctx.fillRect(tx + 2, ty + 10, TILE - 4, 2);
+      } else if (t === 3) {
+        // Boss door
+        ctx.fillStyle = '#555';
+        ctx.fillRect(tx, ty, TILE, TILE * 2);
+        ctx.fillStyle = themeColor;
+        ctx.fillRect(tx + 3, ty + 3, TILE - 6, TILE * 2 - 6);
+        ctx.fillStyle = '#222';
+        ctx.fillRect(tx + TILE / 2 - 1, ty + TILE, 2, TILE - 4);
+      }
+    }
+  }
+}
+
+function drawPlayer() {
+  if (!player || !player.alive) return;
+  if (iframeTimer > 0 && Math.floor(iframeTimer * 10) % 2 === 0) return; // blink
+
+  const px = Math.floor(player.x);
+  const py = Math.floor(player.y);
+
+  ctx.save();
+  if (player.dir < 0) {
+    ctx.translate(px + player.w, 0);
+    ctx.scale(-1, 1);
+    ctx.translate(-px, 0);
+  }
+
+  // Body color based on current weapon
+  const bodyColor = currentWeapon === 0 ? '#8B6914' :
+    ['#ffcc00','#33cc66','#aa44ff','#44aaff','#ff4422','#44ff88','#22ccbb','#88cc44'][currentWeapon - 1];
+
+  // Helmet
+  ctx.fillStyle = bodyColor;
+  ctx.fillRect(px + 1, py, 10, 7);
+  // Visor
+  ctx.fillStyle = '#111';
+  ctx.fillRect(px + 7, py + 2, 4, 3);
+
+  // Body
+  if (player.sliding) {
+    ctx.fillStyle = bodyColor;
+    ctx.fillRect(px, py, player.w, player.h);
+  } else {
+    ctx.fillStyle = bodyColor;
+    ctx.fillRect(px + 2, py + 7, 8, 6);
+    // Arm (shooting position)
+    const armY = player.shooting ? py + 7 : py + 8;
+    ctx.fillRect(px + 9, armY, 5, 4);
+    // Legs
+    const legOff = player.grounded && player.vx !== 0 ? (player.animFrame % 2) * 2 : 0;
+    ctx.fillStyle = '#222';
+    ctx.fillRect(px + 2, py + 13, 4, 3 + legOff);
+    ctx.fillRect(px + 6, py + 13, 4, 3 + (2 - legOff));
+  }
+
+  // Poop trail on slide
+  if (player.sliding && frame % 3 === 0) {
+    TAS.particles.spawn(px + player.w / 2, py + player.h, '#8B4513', 1, 0.5, { size: 2 });
+  }
+
+  ctx.restore();
+}
+
+function drawEnemies() {
+  for (const e of enemies) {
+    ctx.fillStyle = e.color;
+    // Body
+    ctx.fillRect(e.x, e.y, e.w, e.h);
+    // Eye
+    ctx.fillStyle = '#fff';
+    ctx.fillRect(e.x + (e.dir > 0 ? e.w - 4 : 1), e.y + 2, 3, 3);
+    ctx.fillStyle = '#000';
+    ctx.fillRect(e.x + (e.dir > 0 ? e.w - 3 : 2), e.y + 3, 1, 1);
+
+    if (e.type === 1) {
+      // Wings
+      ctx.fillStyle = e.color + 'aa';
+      const wingOff = Math.sin(e.animT * 8) * 3;
+      ctx.fillRect(e.x - 3, e.y + wingOff, 3, 6);
+      ctx.fillRect(e.x + e.w, e.y + wingOff, 3, 6);
+    }
+    if (e.type === 2) {
+      // Turret barrel
+      ctx.fillStyle = '#666';
+      const bDir = player.x < e.x ? -1 : 1;
+      ctx.fillRect(e.x + (bDir > 0 ? e.w : -5), e.y + e.h / 2 - 1, 5, 3);
+    }
+  }
+}
+
+function drawBoss() {
+  if (!boss || boss.hp <= 0) return;
+
+  const bx = Math.floor(boss.x);
+  const by = Math.floor(boss.y);
+
+  // Body
+  ctx.fillStyle = boss.color;
+  ctx.fillRect(bx, by, boss.w, boss.h);
+
+  // Helmet
+  ctx.fillStyle = '#333';
+  ctx.fillRect(bx + 2, by, boss.w - 4, 8);
+  ctx.fillStyle = boss.color;
+  ctx.fillRect(bx + 4, by + 2, boss.w - 8, 4);
+
+  // Face
+  ctx.fillStyle = '#ffd';
+  ctx.fillRect(bx + 4, by + 8, boss.w - 8, 6);
+  // Eyes
+  ctx.fillStyle = '#f00';
+  ctx.fillRect(bx + 6, by + 9, 3, 3);
+  ctx.fillRect(bx + 12, by + 9, 3, 3);
+
+  // Arms
+  ctx.fillStyle = boss.color;
+  ctx.fillRect(bx - 4, by + 10, 5, 8);
+  ctx.fillRect(bx + boss.w - 1, by + 10, 5, 8);
+
+  // Legs
+  ctx.fillStyle = '#222';
+  const lOff = Math.abs(Math.sin(frame * 0.1)) * 2;
+  ctx.fillRect(bx + 4, by + boss.h - 6, 5, 6 + lOff);
+  ctx.fillRect(bx + 11, by + boss.h - 6, 5, 6 + (2 - lOff));
+
+  // Boss shots
+  for (const s of boss.shots) {
+    ctx.fillStyle = boss.color;
+    ctx.fillRect(s.x, s.y, s.w, s.h);
+    ctx.fillStyle = '#fff';
+    ctx.fillRect(s.x + 2, s.y + 1, 3, 3);
+  }
+
+  // Boss HP bar
+  ctx.fillStyle = '#222';
+  ctx.fillRect(GW - 16, 32, 8, MAX_HP * 3 + 4);
+  ctx.fillStyle = '#555';
+  ctx.fillRect(GW - 15, 34, 6, MAX_HP * 3);
+  const hpH = (boss.hp / BOSS_HP) * MAX_HP * 3;
+  ctx.fillStyle = boss.color;
+  ctx.fillRect(GW - 15, 34 + (MAX_HP * 3 - hpH), 6, hpH);
+}
+
+function drawBullets() {
+  for (const b of bullets) {
+    if (b.enemy) {
+      ctx.fillStyle = '#ff4444';
+      ctx.beginPath();
+      ctx.arc(b.x + b.w / 2, b.y + b.h / 2, b.w / 2, 0, Math.PI * 2);
+      ctx.fill();
+    } else {
+      ctx.fillStyle = b.color;
+      if (b.type === 4) {
+        // Crystal beam
+        ctx.fillRect(b.x, b.y, b.w, b.h);
+        ctx.fillStyle = '#fff';
+        ctx.fillRect(b.x + 2, b.y, b.w - 4, 1);
+      } else if (b.type === 3) {
+        // Spore orbit
+        ctx.beginPath();
+        ctx.arc(b.x + b.w / 2, b.y + b.h / 2, b.w / 2, 0, Math.PI * 2);
+        ctx.fill();
+      } else if (b.type === 5 || b.type === 7) {
+        // Fireball / slime bomb
+        ctx.beginPath();
+        ctx.arc(b.x + b.w / 2, b.y + b.h / 2, b.w / 2, 0, Math.PI * 2);
+        ctx.fill();
+        if (b.type === 5 && frame % 2 === 0) {
+          TAS.particles.spawn(b.x + b.w / 2, b.y + b.h / 2, '#ff8800', 1, 1, { size: 1 });
+        }
+      } else {
+        ctx.fillRect(b.x, b.y, b.w, b.h);
+      }
+    }
+  }
+}
+
+function drawPickups() {
+  for (const p of pickups) {
+    const pulse = Math.sin(frame * 0.1) * 0.3 + 0.7;
+    ctx.globalAlpha = p.life < 1 ? p.life : pulse;
+    if (p.type === 'smallE') {
+      ctx.fillStyle = '#44aaff';
+      ctx.fillRect(p.x, p.y, 8, 8);
+      ctx.fillStyle = '#fff';
+      ctx.fillRect(p.x + 3, p.y + 1, 2, 6);
+      ctx.fillRect(p.x + 1, p.y + 3, 6, 2);
+    } else if (p.type === 'bigE') {
+      ctx.fillStyle = '#ffaa00';
+      ctx.fillRect(p.x, p.y, 10, 10);
+      ctx.fillStyle = '#fff';
+      ctx.fillRect(p.x + 3, p.y + 1, 4, 8);
+      ctx.fillRect(p.x + 1, p.y + 3, 8, 4);
+    } else if (p.type === 'eTank') {
+      ctx.fillStyle = '#22dd22';
+      ctx.fillRect(p.x, p.y, 10, 12);
+      ctx.fillStyle = '#fff';
+      ctx.font = '8px monospace';
+      ctx.fillText('E', p.x + 2, p.y + 10);
+    }
+    ctx.globalAlpha = 1;
+  }
+}
+
+function drawHPBar() {
+  // Player HP bar (left side, vertical like Mega Man)
+  const barX = 6;
+  const barY = 32;
+  const barW = 8;
+  const barH = MAX_HP * 3 + 4;
+
+  ctx.fillStyle = '#222';
+  ctx.fillRect(barX, barY, barW, barH);
+  ctx.fillStyle = '#333';
+  ctx.fillRect(barX + 1, barY + 2, barW - 2, barH - 4);
+
+  // HP pips
+  const hpH = (player.hp / MAX_HP) * (barH - 4);
+  const hpColor = player.hp > 8 ? '#44dd88' : (player.hp > 4 ? '#ffaa00' : '#ff4444');
+  ctx.fillStyle = hpColor;
+  ctx.fillRect(barX + 1, barY + 2 + (barH - 4 - hpH), barW - 2, hpH);
+
+  // Pip lines
+  ctx.fillStyle = 'rgba(0,0,0,0.3)';
+  for (let i = 1; i < MAX_HP; i++) {
+    const ly = barY + 2 + i * 3;
+    ctx.fillRect(barX + 1, ly, barW - 2, 1);
+  }
+
+  // Weapon energy (if not default)
+  if (currentWeapon > 0) {
+    const weX = 18;
+    ctx.fillStyle = '#222';
+    ctx.fillRect(weX, barY, barW, barH);
+    ctx.fillStyle = '#333';
+    ctx.fillRect(weX + 1, barY + 2, barW - 2, barH - 4);
+    const weH = (weaponEnergy[currentWeapon - 1] / MAX_WEAPON_E) * (barH - 4);
+    const wColor = BOSSES[currentWeapon - 1].color;
+    ctx.fillStyle = wColor;
+    ctx.fillRect(weX + 1, barY + 2 + (barH - 4 - weH), barW - 2, weH);
+  }
+
+  // Lives & E-Tanks at top
+  ctx.fillStyle = '#fff';
+  ctx.font = '8px monospace';
+  ctx.textAlign = 'left';
+  ctx.fillText('x' + lives, 6, 22);
+  if (eTanks > 0) {
+    ctx.fillStyle = '#22dd22';
+    ctx.fillText('E:' + eTanks, 30, 22);
+  }
+
+  // Weapon name
+  ctx.fillStyle = currentWeapon === 0 ? '#8B6914' : BOSSES[currentWeapon - 1].color;
+  ctx.textAlign = 'center';
+  const wName = currentWeapon === 0 ? 'P.PELLET' : BOSSES[currentWeapon - 1].weapon.toUpperCase();
+  ctx.fillText(wName, GW / 2, 12);
+}
+
+function drawWeaponMenu() {
+  ctx.fillStyle = 'rgba(0,0,20,0.92)';
+  ctx.fillRect(20, 20, GW - 40, GH - 40);
+  ctx.strokeStyle = '#888';
+  ctx.strokeRect(21, 21, GW - 42, GH - 42);
+
+  ctx.fillStyle = '#fff';
+  ctx.font = 'bold 10px monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText('WEAPON SELECT', GW / 2, 38);
+
+  const items = ['Poop Pellet', ...BOSSES.map(b => b.weapon)];
+  const colors = ['#8B6914', ...BOSSES.map(b => b.color)];
+
+  for (let i = 0; i < 9; i++) {
+    const iy = 50 + i * 18;
+    const available = i === 0 || bossesBeaten[i - 1];
+
+    if (i === weaponMenuCursor) {
+      ctx.fillStyle = '#335';
+      ctx.fillRect(30, iy - 9, GW - 60, 16);
+    }
+
+    ctx.fillStyle = available ? colors[i] : '#444';
+    ctx.font = '8px monospace';
+    ctx.textAlign = 'left';
+    ctx.fillText((i === weaponMenuCursor ? '> ' : '  ') + items[i], 38, iy);
+
+    if (available && i > 0) {
+      // Energy bar
+      const eW = 40;
+      const eFill = (weaponEnergy[i - 1] / MAX_WEAPON_E) * eW;
+      ctx.fillStyle = '#333';
+      ctx.fillRect(GW - 80, iy - 7, eW, 6);
+      ctx.fillStyle = colors[i];
+      ctx.fillRect(GW - 80, iy - 7, eFill, 6);
+    }
+    if (!available) {
+      ctx.fillStyle = '#666';
+      ctx.fillText('???', 38, iy);
+    }
+  }
+
+  ctx.fillStyle = '#888';
+  ctx.font = '7px monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText('E-TANK: ' + eTanks + '  (press E to use)', GW / 2, GH - 30);
+}
+
+function drawStageSelect() {
+  ctx.fillStyle = '#0a0a1a';
+  ctx.fillRect(0, 0, GW, GH);
+
+  // Grid of 8 boss portraits (4x2)
+  ctx.fillStyle = '#fff';
+  ctx.font = 'bold 10px monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText('SELECT STAGE', GW / 2, 20);
+
+  for (let i = 0; i < 8; i++) {
+    const col = i % 4;
+    const row = Math.floor(i / 4);
+    const bx = 22 + col * 56;
+    const by = 36 + row * 90;
+    const bw = 48;
+    const bh = 72;
+
+    // Box
+    const selected = i === selectCursor;
+    ctx.fillStyle = selected ? '#335' : '#1a1a2a';
+    ctx.fillRect(bx, by, bw, bh);
+    ctx.strokeStyle = selected ? '#fff' : (bossesBeaten[i] ? '#666' : '#444');
+    ctx.lineWidth = selected ? 2 : 1;
+    ctx.strokeRect(bx, by, bw, bh);
+    ctx.lineWidth = 1;
+
+    // Boss face
+    const bc = BOSSES[i].color;
+    ctx.fillStyle = bossesBeaten[i] ? '#333' : bc;
+    // Helmet
+    ctx.fillRect(bx + 12, by + 8, 24, 18);
+    // Face
+    ctx.fillStyle = bossesBeaten[i] ? '#555' : '#ffd';
+    ctx.fillRect(bx + 14, by + 18, 20, 12);
+    // Eyes
+    ctx.fillStyle = bossesBeaten[i] ? '#888' : '#f00';
+    ctx.fillRect(bx + 16, by + 21, 5, 5);
+    ctx.fillRect(bx + 27, by + 21, 5, 5);
+
+    // Beaten checkmark
+    if (bossesBeaten[i]) {
+      ctx.fillStyle = '#44ff44';
+      ctx.font = 'bold 14px monospace';
+      ctx.fillText('OK', bx + bw / 2, by + 46);
+    }
+
+    // Name
+    ctx.fillStyle = selected ? '#fff' : '#aaa';
+    ctx.font = '7px monospace';
+    ctx.fillText(BOSSES[i].name, bx + bw / 2, by + bh - 6);
+  }
+
+  // Cursor indicator
+  const pulse = Math.sin(frame * 0.08) * 2;
+  const cx = 22 + (selectCursor % 4) * 56 + 24;
+  const cy = 36 + Math.floor(selectCursor / 4) * 90 - 5 + pulse;
+  ctx.fillStyle = '#ffdd44';
+  ctx.beginPath();
+  ctx.moveTo(cx, cy - 5);
+  ctx.lineTo(cx - 4, cy - 10);
+  ctx.lineTo(cx + 4, cy - 10);
+  ctx.fill();
+
+  // All beaten? Show fortress
+  if (bossesBeaten.every(b => b)) {
+    ctx.fillStyle = '#ff4444';
+    ctx.font = 'bold 9px monospace';
+    ctx.fillText('DR. SPORE\'S FORTRESS AWAITS!', GW / 2, GH - 10);
+  }
+
+  TAS.input.drawTouchControls(GW, GH);
+}
+
+function drawBossIntro() {
+  ctx.fillStyle = '#000';
+  ctx.fillRect(0, 0, GW, GH);
+
+  const b = BOSSES[currentStage];
+  ctx.fillStyle = b.color;
+  ctx.font = 'bold 14px monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText(b.name, GW / 2, GH / 2 - 10);
+
+  const pulse = Math.sin(frame * 0.1) * 0.3 + 0.7;
+  ctx.globalAlpha = pulse;
+  ctx.font = '9px monospace';
+  ctx.fillStyle = '#fff';
+  ctx.fillText('READY', GW / 2, GH / 2 + 14);
+  ctx.globalAlpha = 1;
+}
+
+function drawWeaponGet() {
+  ctx.fillStyle = '#000';
+  ctx.fillRect(0, 0, GW, GH);
+
+  const b = BOSSES[weaponGetId];
+  ctx.fillStyle = b.color;
+  ctx.font = 'bold 10px monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText('YOU GOT', GW / 2, GH / 2 - 30);
+  ctx.font = 'bold 14px monospace';
+  ctx.fillText(b.weapon.toUpperCase(), GW / 2, GH / 2);
+
+  // Animated weapon icon
+  const pulse = Math.sin(frame * 0.1) * 4;
+  ctx.fillStyle = b.color;
+  ctx.beginPath();
+  ctx.arc(GW / 2, GH / 2 + 30 + pulse, 10, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = '#fff';
+  ctx.beginPath();
+  ctx.arc(GW / 2, GH / 2 + 30 + pulse, 4, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Mega Man jingle
+  if (weaponGetTimer > 2.8) {
+    TAS.audio.playMelody([[523,0.12],[659,0.12],[784,0.12],[1047,0.2]], 130);
+  }
+}
+
+// ============================================================
+// TITLE SCREEN
+// ============================================================
+function drawTitle() {
+  ctx.fillStyle = '#0a0510';
+  ctx.fillRect(0, 0, GW, GH);
+
+  // Background poop particles
+  ctx.fillStyle = '#8B451322';
+  for (let i = 0; i < 20; i++) {
+    const px = ((frame * 0.3 + i * 40) % (GW + 20)) - 10;
+    const py = 40 + i * 10 + Math.sin(frame * 0.02 + i) * 10;
+    ctx.beginPath();
+    ctx.arc(px, py, 4 + i % 3, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  // Title
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#000';
+  ctx.font = 'bold 24px monospace';
+  ctx.fillText('POOP-MAN', GW / 2 + 2, 62);
+  ctx.fillStyle = '#8B6914';
+  ctx.fillText('POOP-MAN', GW / 2, 60);
+
+  // Subtitle
+  ctx.fillStyle = '#aaa';
+  ctx.font = '8px monospace';
+  ctx.fillText('A Baseling Arcade Tale', GW / 2, 80);
+
+  // Character preview
+  const cy = 120;
+  ctx.fillStyle = '#8B6914';
+  ctx.fillRect(GW / 2 - 6, cy, 10, 7); // helmet
+  ctx.fillStyle = '#111';
+  ctx.fillRect(GW / 2 + 1, cy + 2, 4, 3); // visor
+  ctx.fillStyle = '#8B6914';
+  ctx.fillRect(GW / 2 - 4, cy + 7, 8, 6); // body
+  ctx.fillRect(GW / 2 + 3, cy + 7, 5, 4); // arm
+  ctx.fillStyle = '#222';
+  ctx.fillRect(GW / 2 - 4, cy + 13, 4, 4); // legs
+  ctx.fillRect(GW / 2, cy + 13, 4, 4);
+
+  // Poop pellet
+  const shotX = GW / 2 + 12 + Math.sin(frame * 0.05) * 4;
+  ctx.fillStyle = '#8B4513';
+  ctx.fillRect(shotX, cy + 8, 6, 4);
+
+  // Start prompt
+  const pulse = Math.sin(frame * 0.06) * 0.3 + 0.7;
+  ctx.globalAlpha = pulse;
+  ctx.fillStyle = '#ffdd44';
+  ctx.font = 'bold 9px monospace';
+  ctx.fillText('PRESS START', GW / 2, 180);
+  ctx.globalAlpha = 1;
+
+  // Controls
+  ctx.fillStyle = '#666';
+  ctx.font = '7px monospace';
+  ctx.fillText('ARROWS: Move  Z/SPACE: Jump', GW / 2, 200);
+  ctx.fillText('X/SHIFT: Shoot  TAB: Weapons', GW / 2, 212);
+  ctx.fillText('DOWN+JUMP: Slide  UP: Ladder', GW / 2, 224);
+
+  TAS.input.drawTouchControls(GW, GH);
+}
+
+function drawGameOver() {
+  ctx.fillStyle = '#0a0510';
+  ctx.fillRect(0, 0, GW, GH);
+
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#ff4444';
+  ctx.font = 'bold 18px monospace';
+  ctx.fillText('GAME OVER', GW / 2, GH / 2 - 20);
+
+  ctx.fillStyle = '#ffdd44';
+  ctx.font = '10px monospace';
+  ctx.fillText('Score: ' + score, GW / 2, GH / 2 + 10);
+
+  const hi = TAS.score.load('poopman_hi');
+  if (score > hi) {
+    TAS.score.save('poopman_hi', score);
+    ctx.fillStyle = '#44ff88';
+    ctx.fillText('NEW HIGH SCORE!', GW / 2, GH / 2 + 30);
+  } else if (hi > 0) {
+    ctx.fillStyle = '#888';
+    ctx.fillText('Best: ' + hi, GW / 2, GH / 2 + 30);
+  }
+
+  const pulse = Math.sin(frame * 0.06) * 0.3 + 0.7;
+  ctx.globalAlpha = pulse;
+  ctx.fillStyle = '#88ccff';
+  ctx.font = '9px monospace';
+  ctx.fillText('PRESS ANY KEY', GW / 2, GH / 2 + 60);
+  ctx.globalAlpha = 1;
+
+  TAS.input.drawTouchControls(GW, GH);
+}
+
+// ============================================================
+// FORTRESS (after all 8 bosses)
+// ============================================================
+function startFortress() {
+  fortressStage = 0;
+  fortressRefight = 0;
+  currentStage = 8; // special
+  stageData = generateFortressStage();
+  screenX = 0;
+  checkpoint = 0;
+  resetPlayer();
+  spawnEnemiesForScreen(0);
+  boss = null;
+  bossActive = false;
+  bullets = [];
+  pickups = [];
+  state = 'playing';
+}
+
+function generateFortressStage() {
+  // Fortress: 4 screens, boss refight at end
+  const screens = [];
+  for (let s = 0; s < 4; s++) {
+    const tiles = [];
+    for (let r = 0; r < ROWS; r++) {
+      const row = [];
+      for (let c = 0; c < COLS; c++) {
+        if (r === ROWS - 1 || r === 0) { row.push(1); continue; }
+        row.push(0);
+      }
+      tiles.push(row);
+    }
+
+    // Fortress platforms - harder
+    const rng = (i) => { let x = Math.sin(fortressStage * 9999 + s * 777 + i) * 10000; return x - Math.floor(x); };
+    const numPlats = 5 + Math.floor(rng(0) * 4);
+    for (let i = 0; i < numPlats; i++) {
+      const px = 1 + Math.floor(rng(i * 3 + 1) * 13);
+      const py = 3 + Math.floor(rng(i * 3 + 2) * 9);
+      const pw = 2 + Math.floor(rng(i * 3 + 3) * 2);
+      for (let j = 0; j < pw && px + j < COLS - 1; j++) {
+        tiles[py][px + j] = 1;
+      }
+    }
+
+    // Pits
+    if (s > 0) {
+      const pitX = 3 + Math.floor(rng(100) * 8);
+      const pitW = 2 + Math.floor(rng(101) * 3);
+      for (let j = 0; j < pitW && pitX + j < COLS - 1; j++) {
+        tiles[ROWS - 1][pitX + j] = 0;
+      }
+    }
+
+    // Boss room on last screen
+    if (s === 3) {
+      for (let r = 2; r < ROWS - 1; r++) {
+        for (let c = 2; c < COLS - 2; c++) tiles[r][c] = 0;
+      }
+      for (let c = 1; c < COLS - 1; c++) tiles[ROWS - 1][c] = 1;
+    }
+
+    // Clear spawn
+    if (s === 0) {
+      for (let r = ROWS - 4; r < ROWS - 1; r++) {
+        for (let c = 1; c < 4; c++) tiles[r][c] = 0;
+      }
+    }
+
+    screens.push(tiles);
+  }
+  return { screens, theme: 8 };
+}
+
+// ============================================================
+// SAVE / LOAD
+// ============================================================
+function saveProg() {
+  try {
+    localStorage.setItem('poopman_save', JSON.stringify({
+      beaten: bossesBeaten, score: score, eTanks: eTanks
+    }));
+  } catch(e) { console.warn('Save failed:', e); }
+}
+
+function loadProg() {
+  try {
+    const d = JSON.parse(localStorage.getItem('poopman_save'));
+    if (d) {
+      bossesBeaten = d.beaten || [false,false,false,false,false,false,false,false];
+      score = d.score || 0;
+      eTanks = d.eTanks || 0;
+    }
+  } catch(e) { console.warn('Load failed:', e); }
+}
+
+// ============================================================
+// MAIN UPDATE
+// ============================================================
+function update(dt) {
+  frame++;
+  const keys = TAS.input.keys;
+  const tch = TAS.input.touch;
+  const anyKey = Object.values(keys).some(Boolean) || tch.a || tch.b;
+
+  switch (state) {
+    case 'title':
+      if (anyKey) {
+        TAS.audio.ensureAudio();
+        loadProg();
+        state = 'stageSelect';
+      }
+      break;
+
+    case 'stageSelect':
+      updateStageSelect(dt);
+      // Check if all bosses beaten - fortress option
+      if (bossesBeaten.every(b => b) && (keys['KeyF'] || (selectCursor === 0 && keys['ShiftLeft']))) {
+        startFortress();
+      }
+      break;
+
+    case 'playing':
+      updatePlaying(dt);
+      break;
+
+    case 'bossIntro':
+      bossIntroTimer -= dt;
+      if (bossIntroTimer <= 0) {
+        state = 'playing';
+        bossActive = true;
+      }
+      break;
+
+    case 'weaponGet':
+      weaponGetTimer -= dt;
+      if (weaponGetTimer <= 0) {
+        state = 'stageSelect';
+      }
+      break;
+
+    case 'gameOver':
+      if (anyKey && frame > 30) {
+        state = 'title';
+        lives = 3;
+        score = 0;
+        eTanks = 0;
+        currentWeapon = 0;
+        weaponEnergy = [MAX_WEAPON_E,MAX_WEAPON_E,MAX_WEAPON_E,MAX_WEAPON_E,MAX_WEAPON_E,MAX_WEAPON_E,MAX_WEAPON_E,MAX_WEAPON_E];
+        frame = 0;
+      }
+      break;
+
+    case 'fortress':
+      updatePlaying(dt);
+      break;
+  }
+}
+
+// ============================================================
+// MAIN DRAW
+// ============================================================
+function draw(dt) {
+  switch (state) {
+    case 'title':
+      drawTitle();
+      break;
+
+    case 'stageSelect':
+      drawStageSelect();
+      break;
+
+    case 'playing':
+    case 'fortress':
+      ctx.save();
+      TAS.fx.applyShake();
+      drawTiles();
+      drawPickups();
+      drawEnemies();
+      drawPlayer();
+      drawBullets();
+      if (bossActive) drawBoss();
+      TAS.particles.draw();
+      ctx.restore();
+      TAS.fx.drawFlash(GW, GH);
+      drawHPBar();
+      if (pauseOpen) drawWeaponMenu();
+      TAS.input.drawTouchControls(GW, GH);
+      break;
+
+    case 'bossIntro':
+      drawBossIntro();
+      break;
+
+    case 'weaponGet':
+      drawWeaponGet();
+      break;
+
+    case 'gameOver':
+      drawGameOver();
+      break;
+  }
+}
+
+// ============================================================
+// START
+// ============================================================
+TAS.loop.start(update, draw);
+
+})();
+</script>
+</body>
+</html>

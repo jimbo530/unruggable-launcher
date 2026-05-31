@@ -27,8 +27,8 @@ const X_SEARCHES = [
   // Agent frameworks
   '"ElizaOS" "token" -is:retweet',
   '"Virtuals" "agent" "launch" -is:retweet',
-  // Unruggable/safe token seekers
-  '"unruggable" OR "rug proof" "token" -is:retweet',
+  // Unrugable/safe token seekers
+  '"unrugable" OR "rug proof" "token" -is:retweet',
   '"locked liquidity" "forever" -is:retweet',
   // Carbon/impact angle
   '"carbon credits" "DeFi" OR "crypto" -is:retweet',
@@ -71,18 +71,18 @@ async function generateReply(originalText, platform = "x") {
   const response = await anthropic.messages.create({
     model: "claude-haiku-4-5-20251001",
     max_tokens: 300,
-    system: `You write short, helpful replies on ${platform} for the MfT Unruggable Launcher.
+    system: `You write short, helpful replies on ${platform} for the MfT Unrugable Launcher.
 You are NOT a bot — you are a builder sharing what you built. Be conversational.
 Never start with "Hey!" or "Great post!". Get straight to the point.
 Never be pushy or salesy. Offer information that's relevant to what they posted.
 
 Key facts you can mention (pick 1-2 max):
-- Unruggable Launcher: 100% supply locked in LPs, no withdraw function
+- Unrugable Launcher: 100% supply locked in LPs, no withdraw function
 - Reactors burn supply every 2hrs, floors mathematically increase
-- Public API: tasern.quest/api/unruggable/tokenomics
+- Public API: tasern.quest/api/unrugable/tokenomics
 - Agent discovery: tasern.quest/llms.txt + ai-plugin.json
 - ${data.launchCount} tokens launched, ${data.totalReactors} reactors active
-- Every trade retires carbon credits (CHAR/Toucan Protocol)
+- Every trade removes carbon credits from markets (CHAR collected permanently at no-withdraw tracking address)
 - ${formatNum(data.burns.MfT || 0)} MfT burned so far
 
 Max ${maxLen} characters. Just the reply text, nothing else.`,
@@ -152,7 +152,7 @@ async function searchFarcaster(neynarKey) {
 
   const searchTerms = [
     "AI agent token launch",
-    "unruggable liquidity",
+    "unrugable liquidity",
     "agent DeFi Base",
     "token launcher API",
     "autonomous trading agent",

@@ -1,0 +1,1697 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Solstice Tower</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body { width: 100%; height: 100%; overflow: hidden; background: #111; touch-action: none; }
+canvas { display: block; margin: 0 auto; }
+#back-link { position: fixed; bottom: 8px; left: 50%; transform: translateX(-50%); color: #666; font-family: monospace; font-size: 12px; text-decoration: none; z-index: 10; }
+#back-link:hover { color: #aaa; }
+</style>
+</head>
+<body>
+<canvas id="gc"></canvas>
+<a id="back-link" href="/games">Back to Arcade</a>
+<script src="nft-loader.js"></script>
+<script>if(window.NftLoader)NftLoader.gate();</script>
+<script src="tasern-engine.js"></script>
+<script>
+(function(){
+"use strict";
+
+const GW = 480, GH = 320;
+const ctx = TAS.ctx;
+TAS.initCanvas(GW, GH);
+TAS.input.initTouch({ buttons: ['a', 'b'], labels: { a: 'JUMP', b: 'USE' } });
+
+// === ISOMETRIC CONSTANTS ===
+const TW = 32; // tile width in iso
+const TH = 16; // tile height in iso
+const TD = 12; // tile depth (height of block)
+const GRID_W = 9, GRID_H = 9; // room grid size
+const ISO_OX = GW / 2; // iso origin X
+const ISO_OY = 60; // iso origin Y
+
+// === TILE TYPES ===
+const T = {
+  EMPTY: 0, FLOOR: 1, WALL: 2, PIT: 3, BLOCK: 4,
+  PLATE: 5, DOOR_R: 6, DOOR_B: 7, DOOR_G: 8, DOOR_Y: 9,
+  KEY_R: 10, KEY_B: 11, KEY_G: 12, KEY_Y: 13,
+  SWITCH: 14, SWITCH_ON: 15, CONVEYOR_UL: 16, CONVEYOR_UR: 17,
+  CONVEYOR_DL: 18, CONVEYOR_DR: 19, PLATFORM: 20, VANISH: 21,
+  EXIT_UL: 22, EXIT_UR: 23, EXIT_DL: 24, EXIT_DR: 25,
+  GEM: 26, POTION: 27, BOOTS: 28, SHIELD: 29, STAFF: 30,
+  SPIKES: 31, ICE: 32, TELEPORT: 33
+};
+
+// === COLORS ===
+const FLOOR_PALETTES = [
+  { top: '#3a4a5c', left: '#2a3a4c', right: '#1e2e3e', accent: '#5588bb' }, // floor 1 blue
+  { top: '#4a5c3a', left: '#3a4c2a', right: '#2e3e1e', accent: '#88bb55' }, // floor 2 green
+  { top: '#5c4a3a', left: '#4c3a2a', right: '#3e2e1e', accent: '#bb8855' }, // floor 3 amber
+  { top: '#5c3a4a', left: '#4c2a3a', right: '#3e1e2e', accent: '#bb5588' }, // floor 4 magenta
+  { top: '#4a3a5c', left: '#3a2a4c', right: '#2e1e3e', accent: '#8855bb' }  // floor 5 purple
+];
+
+const DOOR_COLORS = { 6: '#cc3333', 7: '#3333cc', 8: '#33cc33', 9: '#cccc33' };
+const KEY_COLORS = { 10: '#ff4444', 11: '#4444ff', 12: '#44ff44', 13: '#ffff44' };
+
+// === GAME STATE ===
+let state = 'title';
+let score = 0;
+let highScore = TAS.score.load('solsticetower_hi');
+let lives = 5;
+let frame = 0;
+let currentFloor = 0; // 0-4
+let currentRoom = 0; // 0-7 per floor
+let roomTimer = 0;
+
+// Player
+let player = { gx: 4, gy: 4, z: 0, vz: 0, moving: false, moveT: 0, fromGx: 0, fromGy: 0, dir: 2, jumping: false, jumpT: 0, hasShield: false, hasBoots: false };
+let potions = 0;
+let keys = { red: 0, blue: 0, green: 0, yellow: 0 };
+let staffPieces = 0;
+let gems = 0;
+
+// Room state
+let grid = [];
+let enemies = [];
+let blocks = [];
+let platforms = [];
+let switches = [];
+let conveyors = [];
+let roomSolved = false;
+let deathAnim = 0;
+let winAnim = 0;
+let potionActive = 0; // timer for potion reveal effect
+let showMap = false;
+
+// Progress tracking
+let solvedRooms = []; // array of [floor, room] solved
+let visitedRooms = [];
+
+// === ISO CONVERSION ===
+function isoX(gx, gy) { return ISO_OX + (gx - gy) * (TW / 2); }
+function isoY(gx, gy, z) { return ISO_OY + (gx + gy) * (TH / 2) - (z || 0) * TD; }
+
+// === ROOM GENERATION ===
+// Each room is defined by a seed that deterministically generates its layout
+function hashRoom(floor, room) {
+  let h = (floor * 1337 + room * 7919 + 42) | 0;
+  h = ((h >> 16) ^ h) * 0x45d9f3b | 0;
+  h = ((h >> 16) ^ h) * 0x45d9f3b | 0;
+  return (h >> 16) ^ h;
+}
+
+function seededRandom(seed) {
+  let s = seed;
+  return function() {
+    s = (s * 1103515245 + 12345) & 0x7fffffff;
+    return s / 0x7fffffff;
+  };
+}
+
+function generateRoom(floor, room) {
+  const seed = hashRoom(floor, room);
+  const rng = seededRandom(seed);
+  const isBoss = room === 7;
+  grid = [];
+  enemies = [];
+  blocks = [];
+  platforms = [];
+  switches = [];
+  conveyors = [];
+  roomSolved = false;
+
+  // Init grid with floor tiles
+  for (let y = 0; y < GRID_H; y++) {
+    grid[y] = [];
+    for (let x = 0; x < GRID_W; x++) {
+      grid[y][x] = T.FLOOR;
+    }
+  }
+
+  // Walls on edges
+  for (let x = 0; x < GRID_W; x++) { grid[0][x] = T.WALL; grid[GRID_H-1][x] = T.WALL; }
+  for (let y = 0; y < GRID_H; y++) { grid[y][0] = T.WALL; grid[y][GRID_W-1] = T.WALL; }
+
+  // Determine exits based on adjacent rooms
+  const exits = getExits(floor, room);
+  for (const e of exits) {
+    if (e.dir === 0) grid[0][4] = T.EXIT_UL; // up-left exit
+    if (e.dir === 1) grid[4][GRID_W-1] = T.EXIT_UR; // up-right exit
+    if (e.dir === 2) grid[GRID_H-1][4] = T.EXIT_DL; // down-left exit
+    if (e.dir === 3) grid[4][0] = T.EXIT_DR; // down-right exit
+  }
+
+  // Place puzzle elements based on room type
+  const puzzleType = getPuzzleType(floor, room);
+
+  if (puzzleType === 'blocks') {
+    generateBlockPuzzle(rng, floor);
+  } else if (puzzleType === 'keys') {
+    generateKeyPuzzle(rng, floor);
+  } else if (puzzleType === 'switches') {
+    generateSwitchPuzzle(rng, floor);
+  } else if (puzzleType === 'platforms') {
+    generatePlatformPuzzle(rng, floor);
+  } else if (puzzleType === 'conveyors') {
+    generateConveyorPuzzle(rng, floor);
+  } else if (puzzleType === 'boss') {
+    generateBossPuzzle(rng, floor);
+  } else {
+    generateMixedPuzzle(rng, floor);
+  }
+
+  // Place enemies based on floor difficulty
+  const enemyCount = Math.min(floor + 1, 4) + (isBoss ? 2 : 0);
+  for (let i = 0; i < enemyCount; i++) {
+    placeEnemy(rng, floor);
+  }
+
+  // Gems in some rooms
+  if (rng() > 0.4) {
+    const gx = 1 + Math.floor(rng() * (GRID_W - 2));
+    const gy = 1 + Math.floor(rng() * (GRID_H - 2));
+    if (grid[gy][gx] === T.FLOOR) grid[gy][gx] = T.GEM;
+  }
+
+  // Staff piece on boss rooms of floors 0-3
+  if (isBoss && floor < 4) {
+    grid[1][4] = T.STAFF;
+  }
+
+  // Potions/boots/shields randomly
+  if (rng() > 0.7 && !isBoss) {
+    const ix = 1 + Math.floor(rng() * (GRID_W - 2));
+    const iy = 1 + Math.floor(rng() * (GRID_H - 2));
+    if (grid[iy][ix] === T.FLOOR) {
+      const r = rng();
+      if (r < 0.4) grid[iy][ix] = T.POTION;
+      else if (r < 0.7) grid[iy][ix] = T.BOOTS;
+      else grid[iy][ix] = T.SHIELD;
+    }
+  }
+
+  // Set player start
+  player.gx = 4; player.gy = 7;
+  player.z = 0; player.vz = 0;
+  player.moving = false; player.jumping = false;
+  player.moveT = 0; player.jumpT = 0;
+
+  // Make sure player start is clear
+  grid[player.gy][player.gx] = T.FLOOR;
+  roomTimer = 0;
+}
+
+function getPuzzleType(floor, room) {
+  if (room === 7) return 'boss';
+  const types = ['blocks', 'keys', 'switches', 'platforms', 'conveyors', 'mixed', 'blocks'];
+  return types[room % types.length];
+}
+
+function getExits(floor, room) {
+  const exits = [];
+  // Linear progression with branches: rooms 0-6 connect forward, room 7 is boss (reached from 6)
+  if (room > 0) exits.push({ dir: 3 }); // back exit
+  if (room < 7) exits.push({ dir: 1 }); // forward exit
+  // Stairs between floors
+  if (room === 7 && floor < 4) exits.push({ dir: 0 }); // up to next floor
+  if (room === 0 && floor > 0) exits.push({ dir: 2 }); // down to prev floor
+  return exits;
+}
+
+function generateBlockPuzzle(rng, floor) {
+  const plateCount = 1 + Math.floor(rng() * 2);
+  for (let i = 0; i < plateCount; i++) {
+    const px = 2 + Math.floor(rng() * 5);
+    const py = 2 + Math.floor(rng() * 5);
+    if (grid[py][px] === T.FLOOR) grid[py][px] = T.PLATE;
+  }
+  // Place blocks near but not on plates
+  for (let y = 1; y < GRID_H - 1; y++) {
+    for (let x = 1; x < GRID_W - 1; x++) {
+      if (grid[y][x] === T.PLATE) {
+        const bx = x + (rng() > 0.5 ? 1 : -1);
+        const by = y + (rng() > 0.5 ? 1 : -1);
+        if (bx > 0 && bx < GRID_W-1 && by > 0 && by < GRID_H-1 && grid[by][bx] === T.FLOOR) {
+          grid[by][bx] = T.BLOCK;
+          blocks.push({ gx: bx, gy: by, moving: false });
+        }
+      }
+    }
+  }
+  // Add walls for complexity
+  const wallCount = 2 + Math.floor(rng() * (floor + 1));
+  for (let i = 0; i < wallCount; i++) {
+    const wx = 1 + Math.floor(rng() * (GRID_W - 2));
+    const wy = 1 + Math.floor(rng() * (GRID_H - 2));
+    if (grid[wy][wx] === T.FLOOR && !(wx === 4 && wy === 7)) grid[wy][wx] = T.WALL;
+  }
+  // Door that opens when all plates pressed
+  grid[1][4] = T.DOOR_R;
+}
+
+function generateKeyPuzzle(rng, floor) {
+  const keyType = 10 + Math.floor(rng() * 4); // KEY_R through KEY_Y
+  const doorType = keyType - 4; // matching door
+  // Place key in a corner
+  const corners = [[1,1],[1,GRID_H-2],[GRID_W-2,1],[GRID_W-2,GRID_H-2]];
+  const kc = corners[Math.floor(rng() * 4)];
+  grid[kc[1]][kc[0]] = keyType;
+  // Place door blocking exit
+  grid[4][GRID_W-2] = doorType;
+  // Obstacles
+  const wallCount = 3 + Math.floor(rng() * floor);
+  for (let i = 0; i < wallCount; i++) {
+    const wx = 1 + Math.floor(rng() * (GRID_W - 2));
+    const wy = 1 + Math.floor(rng() * (GRID_H - 2));
+    if (grid[wy][wx] === T.FLOOR && !(wx === 4 && wy === 7)) {
+      grid[wy][wx] = rng() > 0.5 ? T.WALL : T.PIT;
+    }
+  }
+}
+
+function generateSwitchPuzzle(rng, floor) {
+  const switchCount = 2 + Math.floor(rng() * 2);
+  for (let i = 0; i < switchCount; i++) {
+    const sx = 1 + Math.floor(rng() * (GRID_W - 2));
+    const sy = 1 + Math.floor(rng() * (GRID_H - 2));
+    if (grid[sy][sx] === T.FLOOR && !(sx === 4 && sy === 7)) {
+      grid[sy][sx] = T.SWITCH;
+      switches.push({ gx: sx, gy: sy, on: false, order: i });
+    }
+  }
+  // Add walls
+  for (let i = 0; i < 4; i++) {
+    const wx = 1 + Math.floor(rng() * (GRID_W - 2));
+    const wy = 1 + Math.floor(rng() * (GRID_H - 2));
+    if (grid[wy][wx] === T.FLOOR && !(wx === 4 && wy === 7)) grid[wy][wx] = T.WALL;
+  }
+  grid[1][4] = T.DOOR_B;
+}
+
+function generatePlatformPuzzle(rng, floor) {
+  // Create pits with moving platforms
+  for (let y = 2; y < GRID_H - 2; y++) {
+    for (let x = 2; x < GRID_W - 2; x++) {
+      if (rng() > 0.6 && !(x === 4 && y === 7)) {
+        grid[y][x] = T.PIT;
+      }
+    }
+  }
+  // Add platforms over pits
+  const platCount = 2 + Math.floor(rng() * 3);
+  for (let i = 0; i < platCount; i++) {
+    const px = 2 + Math.floor(rng() * 5);
+    const py = 2 + Math.floor(rng() * 5);
+    if (grid[py][px] === T.PIT) {
+      grid[py][px] = T.PLATFORM;
+      platforms.push({ gx: px, gy: py, startGx: px, startGy: py, dir: Math.floor(rng() * 4), speed: 0.5 + rng() * 0.5, t: rng() * Math.PI * 2, range: 2 });
+    }
+  }
+  // Some vanishing tiles
+  for (let y = 2; y < GRID_H - 2; y++) {
+    for (let x = 2; x < GRID_W - 2; x++) {
+      if (grid[y][x] === T.PIT && rng() > 0.7) {
+        grid[y][x] = T.VANISH;
+      }
+    }
+  }
+  // Ensure path exists - place some floor
+  grid[3][4] = T.FLOOR; grid[5][4] = T.FLOOR;
+  grid[4][3] = T.FLOOR; grid[4][5] = T.FLOOR;
+}
+
+function generateConveyorPuzzle(rng, floor) {
+  // Place conveyors in patterns
+  const dirs = [T.CONVEYOR_UL, T.CONVEYOR_UR, T.CONVEYOR_DL, T.CONVEYOR_DR];
+  for (let y = 2; y < GRID_H - 2; y++) {
+    for (let x = 2; x < GRID_W - 2; x++) {
+      if (rng() > 0.6 && !(x === 4 && y === 7)) {
+        const ct = dirs[Math.floor(rng() * 4)];
+        grid[y][x] = ct;
+        conveyors.push({ gx: x, gy: y, type: ct });
+      }
+    }
+  }
+  // Block to push onto plate via conveyors
+  grid[4][4] = T.BLOCK;
+  blocks.push({ gx: 4, gy: 4, moving: false });
+  grid[2][2] = T.PLATE;
+  grid[1][4] = T.DOOR_G;
+}
+
+function generateBossPuzzle(rng, floor) {
+  // Large multi-step puzzle
+  generateBlockPuzzle(rng, floor);
+  // Add switches
+  const sx = 2 + Math.floor(rng() * 3);
+  const sy = 2 + Math.floor(rng() * 3);
+  if (grid[sy][sx] === T.FLOOR) {
+    grid[sy][sx] = T.SWITCH;
+    switches.push({ gx: sx, gy: sy, on: false, order: 0 });
+  }
+  // Add some pits
+  for (let i = 0; i < 3; i++) {
+    const px = 1 + Math.floor(rng() * (GRID_W - 2));
+    const py = 1 + Math.floor(rng() * (GRID_H - 2));
+    if (grid[py][px] === T.FLOOR && !(px === 4 && py === 7)) grid[py][px] = T.PIT;
+  }
+}
+
+function generateMixedPuzzle(rng, floor) {
+  // Mix of elements
+  if (rng() > 0.5) generateBlockPuzzle(rng, floor);
+  else generateKeyPuzzle(rng, floor);
+  // Add spikes
+  for (let i = 0; i < 2; i++) {
+    const sx = 1 + Math.floor(rng() * (GRID_W - 2));
+    const sy = 1 + Math.floor(rng() * (GRID_H - 2));
+    if (grid[sy][sx] === T.FLOOR && !(sx === 4 && sy === 7)) grid[sy][sx] = T.SPIKES;
+  }
+}
+
+function placeEnemy(rng, floor) {
+  let attempts = 20;
+  while (attempts-- > 0) {
+    const ex = 1 + Math.floor(rng() * (GRID_W - 2));
+    const ey = 1 + Math.floor(rng() * (GRID_H - 2));
+    if (grid[ey][ex] === T.FLOOR && !(ex === player.gx && ey === player.gy) && Math.abs(ex - 4) + Math.abs(ey - 7) > 3) {
+      const types = ['orb', 'slime', 'blade', 'ghost'];
+      const typeIdx = Math.min(Math.floor(rng() * (floor + 2)), 3);
+      enemies.push({
+        gx: ex, gy: ey, x: ex, y: ey,
+        type: types[typeIdx],
+        dir: Math.floor(rng() * 4),
+        speed: 0.3 + rng() * 0.3 + floor * 0.05,
+        t: rng() * Math.PI * 2,
+        patrolDist: 2 + Math.floor(rng() * 2),
+        startX: ex, startY: ey
+      });
+      return;
+    }
+  }
+}
+
+// === CHECK ROOM SOLVED ===
+function checkRoomSolved() {
+  // Check if all plates have blocks on them
+  let allPlates = true;
+  for (let y = 0; y < GRID_H; y++) {
+    for (let x = 0; x < GRID_W; x++) {
+      if (grid[y][x] === T.PLATE) {
+        const hasBlock = blocks.some(b => b.gx === x && b.gy === y);
+        if (!hasBlock) allPlates = false;
+      }
+    }
+  }
+  // Check all switches on (in order)
+  let allSwitches = switches.length > 0 ? switches.every(s => s.on) : true;
+  // Room is solved when conditions met
+  if (switches.length > 0 && allSwitches) {
+    openDoors();
+    return true;
+  }
+  if (allPlates && blocks.length > 0) {
+    openDoors();
+    return true;
+  }
+  // Rooms with just keys/doors solve when doors opened
+  let hasDoor = false;
+  for (let y = 0; y < GRID_H; y++) {
+    for (let x = 0; x < GRID_W; x++) {
+      if (grid[y][x] >= T.DOOR_R && grid[y][x] <= T.DOOR_Y) hasDoor = true;
+    }
+  }
+  if (!hasDoor && blocks.length === 0 && switches.length === 0) return true;
+  return false;
+}
+
+function openDoors() {
+  for (let y = 0; y < GRID_H; y++) {
+    for (let x = 0; x < GRID_W; x++) {
+      if (grid[y][x] >= T.DOOR_R && grid[y][x] <= T.DOOR_Y) {
+        grid[y][x] = T.FLOOR;
+      }
+    }
+  }
+  TAS.audio.playTone(523, 0.15, 'square', 0.08);
+  TAS.audio.playTone(659, 0.15, 'square', 0.08);
+  setTimeout(function() { TAS.audio.playTone(784, 0.2, 'square', 0.08); }, 150);
+}
+
+// === PLAYER MOVEMENT ===
+function movePlayer(dx, dy) {
+  if (player.moving || player.jumping || deathAnim > 0) return;
+  const nx = player.gx + dx;
+  const ny = player.gy + dy;
+  player.dir = dx === -1 && dy === 0 ? 3 : dx === 1 && dy === 0 ? 1 : dx === 0 && dy === -1 ? 0 : 2;
+
+  if (nx < 0 || nx >= GRID_W || ny < 0 || ny >= GRID_H) {
+    // Check if this is an exit
+    if (tryExit(nx, ny)) return;
+    return;
+  }
+
+  const tile = grid[ny][nx];
+
+  // Walls block
+  if (tile === T.WALL) return;
+
+  // Doors with keys
+  if (tile >= T.DOOR_R && tile <= T.DOOR_Y) {
+    const keyName = ['red', 'blue', 'green', 'yellow'][tile - T.DOOR_R];
+    if (keys[keyName] > 0) {
+      keys[keyName]--;
+      grid[ny][nx] = T.FLOOR;
+      TAS.audio.playTone(440, 0.1, 'square', 0.07);
+    }
+    return;
+  }
+
+  // Block pushing
+  if (tile === T.BLOCK) {
+    const bx = nx + dx;
+    const by = ny + dy;
+    if (bx >= 0 && bx < GRID_W && by >= 0 && by < GRID_H) {
+      const behindTile = grid[by][bx];
+      if (behindTile === T.FLOOR || behindTile === T.PLATE || behindTile === T.PIT ||
+          (behindTile >= T.CONVEYOR_UL && behindTile <= T.CONVEYOR_DR)) {
+        // Push block
+        const block = blocks.find(b => b.gx === nx && b.gy === ny);
+        if (block) {
+          grid[ny][nx] = T.FLOOR;
+          if (behindTile === T.PIT) {
+            // Block fills pit
+            grid[by][bx] = T.FLOOR;
+            const idx = blocks.indexOf(block);
+            blocks.splice(idx, 1);
+            TAS.audio.playNoise(0.2, 0.06, 200);
+          } else {
+            block.gx = bx; block.gy = by;
+            grid[by][bx] = T.BLOCK;
+            TAS.audio.playTone(150, 0.08, 'square', 0.06);
+          }
+        }
+      } else {
+        return; // Can't push
+      }
+    } else {
+      return; // Edge
+    }
+  }
+
+  // Pits
+  if (tile === T.PIT) {
+    if (player.jumping || player.hasBoots) {
+      // Can jump over if jumping
+    } else {
+      // Fall into pit
+      startDeath();
+      return;
+    }
+  }
+
+  // Spikes
+  if (tile === T.SPIKES) {
+    if (player.hasShield) {
+      player.hasShield = false;
+      TAS.audio.playNoise(0.15, 0.05, 400);
+    } else if (!player.jumping) {
+      startDeath();
+      return;
+    }
+  }
+
+  // Collectibles
+  if (tile >= T.KEY_R && tile <= T.KEY_Y) {
+    const keyName = ['red', 'blue', 'green', 'yellow'][tile - T.KEY_R];
+    keys[keyName]++;
+    grid[ny][nx] = T.FLOOR;
+    TAS.audio.playTone(880, 0.1, 'triangle', 0.07);
+    score += 50;
+  }
+  if (tile === T.GEM) {
+    grid[ny][nx] = T.FLOOR;
+    gems++;
+    score += 100;
+    TAS.audio.playTone(1047, 0.08, 'sine', 0.06);
+    TAS.particles.spawn(isoX(nx, ny), isoY(nx, ny), '#ffff44', 8, 2);
+  }
+  if (tile === T.POTION) {
+    grid[ny][nx] = T.FLOOR;
+    potions++;
+    TAS.audio.playTone(600, 0.12, 'sine', 0.06);
+  }
+  if (tile === T.BOOTS) {
+    grid[ny][nx] = T.FLOOR;
+    player.hasBoots = true;
+    TAS.audio.playTone(350, 0.1, 'square', 0.06);
+  }
+  if (tile === T.SHIELD) {
+    grid[ny][nx] = T.FLOOR;
+    player.hasShield = true;
+    TAS.audio.playTone(300, 0.15, 'triangle', 0.06);
+  }
+  if (tile === T.STAFF) {
+    grid[ny][nx] = T.FLOOR;
+    staffPieces++;
+    score += 500;
+    TAS.audio.playMelody([[523, 0.1], [659, 0.1], [784, 0.1], [1047, 0.2]], 120);
+    TAS.particles.spawn(isoX(nx, ny), isoY(nx, ny), '#ff88ff', 16, 3);
+    TAS.fx.flash('#ffffff', 0.4);
+  }
+
+  // Switch
+  if (tile === T.SWITCH) {
+    grid[ny][nx] = T.SWITCH_ON;
+    const sw = switches.find(s => s.gx === nx && s.gy === ny);
+    if (sw) sw.on = true;
+    TAS.audio.playTone(660, 0.08, 'square', 0.06);
+  }
+
+  // Move
+  player.fromGx = player.gx;
+  player.fromGy = player.gy;
+  player.gx = nx;
+  player.gy = ny;
+  player.moving = true;
+  player.moveT = 0;
+}
+
+function tryExit(nx, ny) {
+  // Check if moving to an exit tile
+  let exitDir = -1;
+  if (ny < 0 && grid[0][player.gx] >= T.EXIT_UL) exitDir = 0;
+  if (nx >= GRID_W && grid[player.gy][GRID_W-1] >= T.EXIT_UL) exitDir = 1;
+  if (ny >= GRID_H && grid[GRID_H-1][player.gx] >= T.EXIT_UL) exitDir = 2;
+  if (nx < 0 && grid[player.gy][0] >= T.EXIT_UL) exitDir = 3;
+
+  if (exitDir >= 0) {
+    // Mark room solved/visited
+    if (!isRoomVisited(currentFloor, currentRoom)) {
+      visitedRooms.push([currentFloor, currentRoom]);
+    }
+    if (checkRoomSolved() && !isRoomSolved(currentFloor, currentRoom)) {
+      solvedRooms.push([currentFloor, currentRoom]);
+      score += 200;
+    }
+
+    // Navigate
+    if (exitDir === 1 && currentRoom < 7) { currentRoom++; generateRoom(currentFloor, currentRoom); player.gx = 1; player.gy = 4; }
+    else if (exitDir === 3 && currentRoom > 0) { currentRoom--; generateRoom(currentFloor, currentRoom); player.gx = GRID_W-2; player.gy = 4; }
+    else if (exitDir === 0 && currentFloor < 4) { currentFloor++; currentRoom = 0; generateRoom(currentFloor, currentRoom); player.gx = 4; player.gy = GRID_H-2; }
+    else if (exitDir === 2 && currentFloor > 0) { currentFloor--; currentRoom = 7; generateRoom(currentFloor, currentRoom); player.gx = 4; player.gy = 1; }
+
+    TAS.audio.playTone(440, 0.05, 'sine', 0.05);
+    saveProgress();
+    return true;
+  }
+  return false;
+}
+
+function startDeath() {
+  if (player.hasShield) {
+    player.hasShield = false;
+    TAS.audio.playNoise(0.2, 0.06, 500);
+    TAS.fx.flash('#ffffff', 0.2);
+    return;
+  }
+  deathAnim = 1.0;
+  lives--;
+  TAS.audio.playTone(200, 0.3, 'sawtooth', 0.08, 80);
+  TAS.fx.shake(6, 0.85);
+  TAS.particles.spawn(isoX(player.gx, player.gy), isoY(player.gx, player.gy), '#ff4444', 12, 3);
+  if (lives <= 0) {
+    state = 'gameOver';
+    if (score > highScore) { highScore = score; TAS.score.save('solsticetower_hi', score); }
+  }
+}
+
+function isRoomSolved(f, r) { return solvedRooms.some(s => s[0] === f && s[1] === r); }
+function isRoomVisited(f, r) { return visitedRooms.some(s => s[0] === f && s[1] === r); }
+
+// === ENEMY UPDATE ===
+function updateEnemies(dt) {
+  for (const e of enemies) {
+    e.t += dt * e.speed * 3;
+    if (e.type === 'orb') {
+      // Patrol back and forth
+      if (e.dir === 0 || e.dir === 2) {
+        e.y = e.startY + Math.sin(e.t) * e.patrolDist;
+      } else {
+        e.x = e.startX + Math.sin(e.t) * e.patrolDist;
+      }
+    } else if (e.type === 'slime') {
+      // Bounce diagonally
+      e.x = e.startX + Math.sin(e.t) * e.patrolDist;
+      e.y = e.startY + Math.cos(e.t * 1.3) * e.patrolDist;
+    } else if (e.type === 'blade') {
+      // Circular pattern
+      e.x = e.startX + Math.cos(e.t) * e.patrolDist;
+      e.y = e.startY + Math.sin(e.t) * e.patrolDist;
+    } else if (e.type === 'ghost') {
+      // Seek player slowly
+      const dx = player.gx - e.x;
+      const dy = player.gy - e.y;
+      const d = Math.sqrt(dx * dx + dy * dy);
+      if (d > 0.1) {
+        e.x += (dx / d) * e.speed * dt * 1.5;
+        e.y += (dy / d) * e.speed * dt * 1.5;
+      }
+    }
+    e.gx = Math.round(e.x);
+    e.gy = Math.round(e.y);
+
+    // Check collision with player
+    const pdx = player.gx - e.x;
+    const pdy = player.gy - e.y;
+    if (Math.sqrt(pdx * pdx + pdy * pdy) < 0.6 && deathAnim <= 0 && !player.jumping) {
+      startDeath();
+    }
+  }
+}
+
+// === CONVEYOR LOGIC ===
+function applyConveyors(dt) {
+  const tile = grid[player.gy] && grid[player.gy][player.gx];
+  if (!player.moving && tile >= T.CONVEYOR_UL && tile <= T.CONVEYOR_DR) {
+    const convDirs = { [T.CONVEYOR_UL]: [-1, -1], [T.CONVEYOR_UR]: [1, -1], [T.CONVEYOR_DL]: [-1, 1], [T.CONVEYOR_DR]: [1, 1] };
+    const cd = convDirs[tile];
+    if (cd) {
+      // Push player slowly
+      player.conveyorTimer = (player.conveyorTimer || 0) + dt;
+      if (player.conveyorTimer > 0.4) {
+        player.conveyorTimer = 0;
+        movePlayer(cd[0], 0);
+        if (!player.moving) movePlayer(0, cd[1]);
+      }
+    }
+  }
+}
+
+// === PLATFORM UPDATE ===
+function updatePlatforms(dt) {
+  for (const p of platforms) {
+    p.t += dt * p.speed * 2;
+    const oldGx = p.gx, oldGy = p.gy;
+    if (p.dir === 0 || p.dir === 2) {
+      p.gy = p.startGy + Math.round(Math.sin(p.t) * p.range);
+    } else {
+      p.gx = p.startGx + Math.round(Math.sin(p.t) * p.range);
+    }
+    p.gx = TAS.math.clamp(p.gx, 1, GRID_W - 2);
+    p.gy = TAS.math.clamp(p.gy, 1, GRID_H - 2);
+    // Move player if standing on platform
+    if (player.gx === oldGx && player.gy === oldGy && !player.moving) {
+      player.gx = p.gx;
+      player.gy = p.gy;
+    }
+  }
+}
+
+// === VANISHING TILES ===
+let vanishTimers = {};
+function updateVanish(dt) {
+  const key = player.gx + ',' + player.gy;
+  if (grid[player.gy] && grid[player.gy][player.gx] === T.VANISH) {
+    if (!vanishTimers[key]) vanishTimers[key] = 0;
+    vanishTimers[key] += dt;
+    if (vanishTimers[key] > 1.0) {
+      grid[player.gy][player.gx] = T.PIT;
+      delete vanishTimers[key];
+      startDeath();
+    }
+  }
+}
+
+// === SAVE/LOAD ===
+function saveProgress() {
+  try {
+    const data = { floor: currentFloor, room: currentRoom, lives, score, gems, potions, keys, staffPieces, solvedRooms, visitedRooms };
+    localStorage.setItem('solsticetower_save', JSON.stringify(data));
+  } catch(e) { console.error('Save failed:', e); }
+}
+
+function loadProgress() {
+  try {
+    const raw = localStorage.getItem('solsticetower_save');
+    if (raw) {
+      const data = JSON.parse(raw);
+      currentFloor = data.floor || 0;
+      currentRoom = data.room || 0;
+      lives = data.lives || 5;
+      score = data.score || 0;
+      gems = data.gems || 0;
+      potions = data.potions || 0;
+      keys = data.keys || { red: 0, blue: 0, green: 0, yellow: 0 };
+      staffPieces = data.staffPieces || 0;
+      solvedRooms = data.solvedRooms || [];
+      visitedRooms = data.visitedRooms || [];
+      return true;
+    }
+  } catch(e) { console.error('Load failed:', e); }
+  return false;
+}
+
+// === START GAME ===
+function startGame() {
+  state = 'playing';
+  if (!loadProgress()) {
+    score = 0; lives = 5; currentFloor = 0; currentRoom = 0;
+    gems = 0; potions = 0; staffPieces = 0;
+    keys = { red: 0, blue: 0, green: 0, yellow: 0 };
+    solvedRooms = []; visitedRooms = [];
+  }
+  generateRoom(currentFloor, currentRoom);
+  TAS.particles.clear();
+  deathAnim = 0;
+}
+
+function newGame() {
+  localStorage.removeItem('solsticetower_save');
+  score = 0; lives = 5; currentFloor = 0; currentRoom = 0;
+  gems = 0; potions = 0; staffPieces = 0;
+  keys = { red: 0, blue: 0, green: 0, yellow: 0 };
+  solvedRooms = []; visitedRooms = [];
+  state = 'playing';
+  generateRoom(currentFloor, currentRoom);
+  TAS.particles.clear();
+  deathAnim = 0;
+}
+
+// === INPUT HANDLING ===
+let inputCooldown = 0;
+let jumpPressed = false;
+let usePressed = false;
+
+function handleInput(dt) {
+  inputCooldown -= dt;
+  if (inputCooldown > 0) return;
+
+  const k = TAS.input.keys;
+  const t = TAS.input.touch;
+
+  // Isometric movement mapping: arrow keys map to isometric diagonals
+  // Up = move up-left on grid (-x), Down = move down-right (+x)
+  // Left = move down-left (+y), Right = move up-right (-y)
+  if ((k['ArrowUp'] || k['KeyW'] || t.up) && !player.moving) {
+    movePlayer(0, -1);
+    inputCooldown = 0.12;
+  } else if ((k['ArrowDown'] || k['KeyS'] || t.down) && !player.moving) {
+    movePlayer(0, 1);
+    inputCooldown = 0.12;
+  } else if ((k['ArrowLeft'] || k['KeyA'] || t.left) && !player.moving) {
+    movePlayer(-1, 0);
+    inputCooldown = 0.12;
+  } else if ((k['ArrowRight'] || k['KeyD'] || t.right) && !player.moving) {
+    movePlayer(1, 0);
+    inputCooldown = 0.12;
+  }
+
+  // Jump
+  if ((k['Space'] || k['KeyZ'] || t.a) && !jumpPressed) {
+    jumpPressed = true;
+    if (!player.jumping && !player.moving) {
+      player.jumping = true;
+      player.jumpT = 0;
+      TAS.audio.playTone(440, 0.06, 'square', 0.05, 660);
+    }
+  }
+  if (!k['Space'] && !k['KeyZ'] && !t.a) jumpPressed = false;
+
+  // Use potion
+  if ((k['KeyX'] || k['ShiftLeft'] || t.b) && !usePressed) {
+    usePressed = true;
+    if (potions > 0) {
+      potions--;
+      potionActive = 3.0; // 3 seconds reveal
+      TAS.audio.playTone(800, 0.15, 'sine', 0.06, 400);
+      TAS.particles.spawn(isoX(player.gx, player.gy), isoY(player.gx, player.gy), '#88ffff', 10, 2);
+    }
+  }
+  if (!k['KeyX'] && !k['ShiftLeft'] && !t.b) usePressed = false;
+
+  // Map toggle
+  if (k['KeyM'] || k['Tab']) { showMap = true; } else { showMap = false; }
+}
+
+// === UPDATE ===
+function update(dt) {
+  frame++;
+  TAS.particles.update(dt);
+  TAS.fx.updateEffects(dt);
+
+  if (state === 'title') {
+    if (Object.values(TAS.input.keys).some(Boolean) || TAS.input.touch.a) {
+      TAS.audio.ensureAudio();
+      startGame();
+    }
+    return;
+  }
+
+  if (state === 'gameOver') {
+    if (Object.values(TAS.input.keys).some(Boolean) || TAS.input.touch.a) {
+      state = 'title';
+    }
+    return;
+  }
+
+  if (state === 'victory') {
+    winAnim += dt;
+    if (winAnim > 5 && (Object.values(TAS.input.keys).some(Boolean) || TAS.input.touch.a)) {
+      state = 'title';
+    }
+    return;
+  }
+
+  if (state === 'playing') {
+    roomTimer += dt;
+
+    // Death animation
+    if (deathAnim > 0) {
+      deathAnim -= dt;
+      if (deathAnim <= 0) {
+        if (lives > 0) {
+          generateRoom(currentFloor, currentRoom);
+        }
+      }
+      return;
+    }
+
+    // Player movement interpolation
+    if (player.moving) {
+      player.moveT += dt * 6;
+      if (player.moveT >= 1) {
+        player.moving = false;
+        player.moveT = 1;
+        // Check solve after each move
+        if (checkRoomSolved()) roomSolved = true;
+      }
+    }
+
+    // Jump animation
+    if (player.jumping) {
+      player.jumpT += dt * 3;
+      player.z = Math.sin(player.jumpT * Math.PI) * 1.5;
+      if (player.jumpT >= 1) {
+        player.jumping = false;
+        player.z = 0;
+        player.jumpT = 0;
+        // Landing on pit check
+        const tile = grid[player.gy] && grid[player.gy][player.gx];
+        if (tile === T.PIT && !player.hasBoots) {
+          startDeath();
+        }
+      }
+    }
+
+    handleInput(dt);
+    updateEnemies(dt);
+    applyConveyors(dt);
+    updatePlatforms(dt);
+    updateVanish(dt);
+
+    // Potion timer
+    if (potionActive > 0) potionActive -= dt;
+
+    // Victory check - floor 5 boss with all staff pieces
+    if (currentFloor === 4 && currentRoom === 7 && isRoomSolved(4, 7) && staffPieces >= 4) {
+      state = 'victory';
+      winAnim = 0;
+      if (score > highScore) { highScore = score; TAS.score.save('solsticetower_hi', score); }
+      TAS.audio.playMelody([[523,0.15],[659,0.15],[784,0.15],[1047,0.3]], 150);
+    }
+  }
+}
+
+// === DRAWING ===
+
+// Draw isometric tile
+function drawIsoTile(gx, gy, topColor, leftColor, rightColor, height) {
+  const x = isoX(gx, gy);
+  const y = isoY(gx, gy);
+  const h = (height || 1) * TD;
+
+  // Top face
+  ctx.fillStyle = topColor;
+  ctx.beginPath();
+  ctx.moveTo(x, y - h);
+  ctx.lineTo(x + TW/2, y + TH/2 - h);
+  ctx.lineTo(x, y + TH - h);
+  ctx.lineTo(x - TW/2, y + TH/2 - h);
+  ctx.closePath();
+  ctx.fill();
+
+  // Left face
+  ctx.fillStyle = leftColor;
+  ctx.beginPath();
+  ctx.moveTo(x - TW/2, y + TH/2 - h);
+  ctx.lineTo(x, y + TH - h);
+  ctx.lineTo(x, y + TH);
+  ctx.lineTo(x - TW/2, y + TH/2);
+  ctx.closePath();
+  ctx.fill();
+
+  // Right face
+  ctx.fillStyle = rightColor;
+  ctx.beginPath();
+  ctx.moveTo(x + TW/2, y + TH/2 - h);
+  ctx.lineTo(x, y + TH - h);
+  ctx.lineTo(x, y + TH);
+  ctx.lineTo(x + TW/2, y + TH/2);
+  ctx.closePath();
+  ctx.fill();
+}
+
+// Draw flat diamond tile (no depth)
+function drawIsoFlat(gx, gy, color, alpha) {
+  const x = isoX(gx, gy);
+  const y = isoY(gx, gy);
+  ctx.globalAlpha = alpha || 1;
+  ctx.fillStyle = color;
+  ctx.beginPath();
+  ctx.moveTo(x, y);
+  ctx.lineTo(x + TW/2, y + TH/2);
+  ctx.lineTo(x, y + TH);
+  ctx.lineTo(x - TW/2, y + TH/2);
+  ctx.closePath();
+  ctx.fill();
+  ctx.globalAlpha = 1;
+}
+
+// Draw shadow under floating objects
+function drawShadow(gx, gy, size) {
+  const x = isoX(gx, gy);
+  const y = isoY(gx, gy) + TH/2;
+  ctx.globalAlpha = 0.3;
+  ctx.fillStyle = '#000';
+  ctx.beginPath();
+  ctx.ellipse(x, y, size * TW/4, size * TH/4, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.globalAlpha = 1;
+}
+
+// Draw the baseling wizard character
+function drawPlayer() {
+  let gx = player.gx, gy = player.gy;
+  if (player.moving) {
+    gx = TAS.math.lerp(player.fromGx, player.gx, player.moveT);
+    gy = TAS.math.lerp(player.fromGy, player.gy, player.moveT);
+  }
+  const x = isoX(gx, gy);
+  const baseY = isoY(gx, gy);
+  const jumpOff = player.z * TD;
+  const y = baseY - jumpOff;
+
+  // Shadow
+  if (player.jumping) drawShadow(gx, gy, 0.6);
+
+  // Death flash
+  if (deathAnim > 0 && Math.floor(deathAnim * 10) % 2 === 0) return;
+
+  // Body (round baseling shape)
+  ctx.fillStyle = '#6644aa';
+  ctx.beginPath();
+  ctx.ellipse(x, y - 4, 7, 9, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Face area
+  ctx.fillStyle = '#8866cc';
+  ctx.beginPath();
+  ctx.ellipse(x, y - 6, 5, 5, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Eyes
+  ctx.fillStyle = '#fff';
+  ctx.beginPath();
+  ctx.arc(x - 2, y - 7, 2, 0, Math.PI * 2);
+  ctx.arc(x + 2, y - 7, 2, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = '#111';
+  ctx.beginPath();
+  ctx.arc(x - 2, y - 7, 1, 0, Math.PI * 2);
+  ctx.arc(x + 2, y - 7, 1, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Wizard hat
+  ctx.fillStyle = '#2a1566';
+  ctx.beginPath();
+  ctx.moveTo(x, y - 20);
+  ctx.lineTo(x - 6, y - 10);
+  ctx.lineTo(x + 6, y - 10);
+  ctx.closePath();
+  ctx.fill();
+  // Hat brim
+  ctx.fillStyle = '#3a2577';
+  ctx.beginPath();
+  ctx.ellipse(x, y - 10, 8, 3, 0, 0, Math.PI * 2);
+  ctx.fill();
+  // Star on hat
+  ctx.fillStyle = '#ffdd44';
+  ctx.beginPath();
+  ctx.arc(x, y - 15, 1.5, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Shield glow
+  if (player.hasShield) {
+    ctx.strokeStyle = '#44ddff';
+    ctx.lineWidth = 1.5;
+    ctx.globalAlpha = 0.5 + Math.sin(frame * 0.1) * 0.2;
+    ctx.beginPath();
+    ctx.ellipse(x, y - 5, 10, 12, 0, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.globalAlpha = 1;
+  }
+
+  // Boots glow
+  if (player.hasBoots) {
+    ctx.fillStyle = '#ffaa22';
+    ctx.globalAlpha = 0.6;
+    ctx.beginPath();
+    ctx.ellipse(x - 3, y + 3, 3, 2, 0, 0, Math.PI * 2);
+    ctx.ellipse(x + 3, y + 3, 3, 2, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.globalAlpha = 1;
+  }
+}
+
+// Draw enemy
+function drawEnemy(e) {
+  const x = isoX(e.x, e.y);
+  const y = isoY(e.x, e.y);
+  const bob = Math.sin(e.t * 2) * 2;
+
+  drawShadow(e.x, e.y, 0.5);
+
+  if (e.type === 'orb') {
+    // Glowing orb
+    ctx.fillStyle = '#ff6644';
+    ctx.beginPath();
+    ctx.arc(x, y - 6 + bob, 6, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = '#ffaa44';
+    ctx.beginPath();
+    ctx.arc(x, y - 6 + bob, 3, 0, Math.PI * 2);
+    ctx.fill();
+    // Glow
+    ctx.globalAlpha = 0.3;
+    ctx.fillStyle = '#ff4400';
+    ctx.beginPath();
+    ctx.arc(x, y - 6 + bob, 9, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.globalAlpha = 1;
+  } else if (e.type === 'slime') {
+    // Bouncing slime blob
+    const squish = 1 + Math.abs(Math.sin(e.t * 3)) * 0.3;
+    ctx.fillStyle = '#44cc44';
+    ctx.beginPath();
+    ctx.ellipse(x, y - 3 + Math.abs(bob), 7 * squish, 5 / squish, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = '#66ee66';
+    ctx.beginPath();
+    ctx.arc(x - 2, y - 5 + Math.abs(bob), 2, 0, Math.PI * 2);
+    ctx.fill();
+    // Eyes
+    ctx.fillStyle = '#000';
+    ctx.beginPath();
+    ctx.arc(x - 2, y - 4 + Math.abs(bob), 1, 0, Math.PI * 2);
+    ctx.arc(x + 2, y - 4 + Math.abs(bob), 1, 0, Math.PI * 2);
+    ctx.fill();
+  } else if (e.type === 'blade') {
+    // Spinning blade
+    const angle = e.t * 5;
+    ctx.save();
+    ctx.translate(x, y - 5);
+    ctx.rotate(angle);
+    ctx.fillStyle = '#aaaacc';
+    for (let i = 0; i < 4; i++) {
+      ctx.rotate(Math.PI / 2);
+      ctx.fillRect(-1, -8, 2, 8);
+    }
+    ctx.fillStyle = '#666688';
+    ctx.beginPath();
+    ctx.arc(0, 0, 3, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+  } else if (e.type === 'ghost') {
+    // Floating ghost
+    ctx.globalAlpha = 0.6 + Math.sin(e.t * 2) * 0.2;
+    ctx.fillStyle = '#aaccff';
+    ctx.beginPath();
+    ctx.ellipse(x, y - 8 + bob, 6, 8, 0, 0, Math.PI);
+    ctx.fill();
+    // Wavy bottom
+    for (let i = 0; i < 3; i++) {
+      ctx.beginPath();
+      ctx.arc(x - 4 + i * 4, y + bob, 2, 0, Math.PI);
+      ctx.fill();
+    }
+    // Eyes
+    ctx.fillStyle = '#4466aa';
+    ctx.beginPath();
+    ctx.arc(x - 2, y - 10 + bob, 1.5, 0, Math.PI * 2);
+    ctx.arc(x + 2, y - 10 + bob, 1.5, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.globalAlpha = 1;
+  }
+}
+
+// Draw room tiles
+function drawRoom() {
+  const pal = FLOOR_PALETTES[currentFloor];
+
+  // Draw floor shadow/base
+  ctx.fillStyle = '#0a0a12';
+  ctx.beginPath();
+  ctx.moveTo(isoX(0, 0), isoY(0, 0) + TH);
+  ctx.lineTo(isoX(GRID_W, 0), isoY(GRID_W, 0) + TH);
+  ctx.lineTo(isoX(GRID_W, GRID_H), isoY(GRID_W, GRID_H) + TH);
+  ctx.lineTo(isoX(0, GRID_H), isoY(0, GRID_H) + TH);
+  ctx.closePath();
+  ctx.fill();
+
+  // Sort draw order: back to front (y ascending, x ascending)
+  for (let gy = 0; gy < GRID_H; gy++) {
+    for (let gx = 0; gx < GRID_W; gx++) {
+      const tile = grid[gy][gx];
+      const x = isoX(gx, gy);
+      const y = isoY(gx, gy);
+
+      if (tile === T.EMPTY || tile === T.PIT) {
+        // Pit - draw dark hole
+        if (tile === T.PIT) {
+          drawIsoFlat(gx, gy, '#0a0505', 1);
+          // Pit edge glow
+          ctx.strokeStyle = '#331111';
+          ctx.lineWidth = 0.5;
+          ctx.beginPath();
+          ctx.moveTo(x, y); ctx.lineTo(x + TW/2, y + TH/2); ctx.lineTo(x, y + TH); ctx.lineTo(x - TW/2, y + TH/2); ctx.closePath();
+          ctx.stroke();
+        }
+        continue;
+      }
+
+      if (tile === T.FLOOR || tile === T.SWITCH_ON) {
+        drawIsoTile(gx, gy, pal.top, pal.left, pal.right, 0.5);
+        if (tile === T.SWITCH_ON) {
+          // Lit switch indicator
+          ctx.fillStyle = '#44ff44';
+          ctx.beginPath();
+          ctx.arc(x, y + TH/2 - TD * 0.5, 3, 0, Math.PI * 2);
+          ctx.fill();
+        }
+      } else if (tile === T.WALL) {
+        drawIsoTile(gx, gy, '#555566', '#333344', '#222233', 2);
+        // Top edge highlight
+        ctx.strokeStyle = '#666677';
+        ctx.lineWidth = 0.5;
+        ctx.beginPath();
+        ctx.moveTo(x - TW/2, y + TH/2 - TD*2); ctx.lineTo(x, y - TD*2); ctx.lineTo(x + TW/2, y + TH/2 - TD*2);
+        ctx.stroke();
+      } else if (tile === T.BLOCK) {
+        drawIsoTile(gx, gy, '#887744', '#665522', '#554411', 1.5);
+        // Cross pattern on block
+        ctx.strokeStyle = '#aa9955';
+        ctx.lineWidth = 0.5;
+        const by = y + TH/2 - TD * 1.5;
+        ctx.beginPath();
+        ctx.moveTo(x - 4, by); ctx.lineTo(x + 4, by);
+        ctx.moveTo(x, by - 3); ctx.lineTo(x, by + 3);
+        ctx.stroke();
+      } else if (tile === T.PLATE) {
+        drawIsoTile(gx, gy, pal.top, pal.left, pal.right, 0.3);
+        // Pressure plate indicator
+        ctx.fillStyle = '#ffaa33';
+        ctx.globalAlpha = 0.6 + Math.sin(frame * 0.08) * 0.2;
+        drawIsoFlat(gx, gy, '#ffaa33', 0.5);
+        ctx.globalAlpha = 1;
+      } else if (tile >= T.DOOR_R && tile <= T.DOOR_Y) {
+        const dc = DOOR_COLORS[tile];
+        drawIsoTile(gx, gy, dc, darken(dc, 0.6), darken(dc, 0.4), 2);
+        // Keyhole
+        ctx.fillStyle = '#000';
+        ctx.beginPath();
+        ctx.arc(x, y + TH/2 - TD, 2, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillRect(x - 0.5, y + TH/2 - TD, 1, 4);
+      } else if (tile >= T.KEY_R && tile <= T.KEY_Y) {
+        drawIsoTile(gx, gy, pal.top, pal.left, pal.right, 0.5);
+        // Floating key
+        const kc = KEY_COLORS[tile];
+        const kb = Math.sin(frame * 0.08) * 2;
+        ctx.fillStyle = kc;
+        ctx.beginPath();
+        ctx.arc(x, y - 2 + kb, 4, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillRect(x - 1, y + 2 + kb, 2, 5);
+        ctx.fillRect(x - 3, y + 5 + kb, 3, 1.5);
+      } else if (tile === T.SWITCH) {
+        drawIsoTile(gx, gy, pal.top, pal.left, pal.right, 0.5);
+        // Switch lever
+        ctx.fillStyle = '#888';
+        ctx.fillRect(x - 1, y + TH/2 - TD - 6, 2, 6);
+        ctx.fillStyle = '#cc4444';
+        ctx.beginPath();
+        ctx.arc(x, y + TH/2 - TD - 7, 3, 0, Math.PI * 2);
+        ctx.fill();
+      } else if (tile >= T.CONVEYOR_UL && tile <= T.CONVEYOR_DR) {
+        drawIsoTile(gx, gy, '#3a3a4a', '#2a2a3a', '#1e1e2e', 0.4);
+        // Arrow indicators
+        ctx.fillStyle = '#88aaff';
+        ctx.globalAlpha = 0.5 + Math.sin(frame * 0.1 + gx + gy) * 0.3;
+        const arrows = { [T.CONVEYOR_UL]: [-3, -2], [T.CONVEYOR_UR]: [3, -2], [T.CONVEYOR_DL]: [-3, 2], [T.CONVEYOR_DR]: [3, 2] };
+        const ar = arrows[tile];
+        ctx.beginPath();
+        ctx.moveTo(x + ar[0] * 2, y + TH/2 - TD*0.4 + ar[1] * 2);
+        ctx.lineTo(x + ar[0], y + TH/2 - TD*0.4 + ar[1] - 2);
+        ctx.lineTo(x + ar[0], y + TH/2 - TD*0.4 + ar[1] + 2);
+        ctx.fill();
+        ctx.globalAlpha = 1;
+      } else if (tile === T.PLATFORM) {
+        const plat = platforms.find(p => p.startGx === gx && p.startGy === gy);
+        // Draw at platform's current position instead
+        if (plat) {
+          drawIsoTile(plat.gx, plat.gy, '#6688aa', '#4466aa', '#335599', 0.6);
+          // Moving indicator
+          ctx.fillStyle = '#aaccff';
+          ctx.globalAlpha = 0.5;
+          ctx.beginPath();
+          ctx.arc(isoX(plat.gx, plat.gy), isoY(plat.gx, plat.gy) + TH/2 - TD*0.6, 2, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.globalAlpha = 1;
+        }
+      } else if (tile === T.VANISH) {
+        const vkey = gx + ',' + gy;
+        const vt = vanishTimers[vkey] || 0;
+        const valpha = 1 - vt * 0.8;
+        ctx.globalAlpha = valpha;
+        drawIsoTile(gx, gy, '#aa6644', '#884422', '#663311', 0.5);
+        ctx.globalAlpha = 1;
+        // Warning cracks
+        if (vt > 0.3) {
+          ctx.strokeStyle = '#ffaa44';
+          ctx.lineWidth = 0.5;
+          ctx.beginPath();
+          ctx.moveTo(x - 3, y + TH/2 - 4); ctx.lineTo(x + 2, y + TH/2 - 2);
+          ctx.moveTo(x + 1, y + TH/2 - 5); ctx.lineTo(x - 2, y + TH/2);
+          ctx.stroke();
+        }
+      } else if (tile >= T.EXIT_UL && tile <= T.EXIT_DR) {
+        drawIsoTile(gx, gy, pal.top, pal.left, pal.right, 0.5);
+        // Exit glow
+        ctx.fillStyle = '#44ffaa';
+        ctx.globalAlpha = 0.4 + Math.sin(frame * 0.06) * 0.2;
+        ctx.beginPath();
+        ctx.arc(x, y + TH/2 - TD*0.5, 5, 0, Math.PI * 2);
+        ctx.fill();
+        // Arrow direction
+        ctx.fillStyle = '#44ffaa';
+        const edir = tile - T.EXIT_UL;
+        const earrows = [[-2,-4],[4,-2],[-2,4],[-4,-2]];
+        const ea = earrows[edir];
+        ctx.beginPath();
+        ctx.moveTo(x + ea[0]*2, y + TH/2 - TD*0.5 + ea[1]*2);
+        ctx.lineTo(x + ea[0]*2 - 2, y + TH/2 - TD*0.5 + ea[1]*2 - 2);
+        ctx.lineTo(x + ea[0]*2 + 2, y + TH/2 - TD*0.5 + ea[1]*2 + 2);
+        ctx.fill();
+        ctx.globalAlpha = 1;
+      } else if (tile === T.GEM) {
+        drawIsoTile(gx, gy, pal.top, pal.left, pal.right, 0.5);
+        // Sparkly gem
+        const gb = Math.sin(frame * 0.1) * 2;
+        ctx.fillStyle = '#44ffcc';
+        ctx.beginPath();
+        ctx.moveTo(x, y - 4 + gb);
+        ctx.lineTo(x + 4, y + gb);
+        ctx.lineTo(x, y + 3 + gb);
+        ctx.lineTo(x - 4, y + gb);
+        ctx.closePath();
+        ctx.fill();
+        ctx.fillStyle = '#88ffee';
+        ctx.beginPath();
+        ctx.moveTo(x, y - 4 + gb);
+        ctx.lineTo(x + 2, y - 1 + gb);
+        ctx.lineTo(x, y + gb);
+        ctx.lineTo(x - 2, y - 1 + gb);
+        ctx.closePath();
+        ctx.fill();
+      } else if (tile === T.POTION) {
+        drawIsoTile(gx, gy, pal.top, pal.left, pal.right, 0.5);
+        // Potion bottle
+        ctx.fillStyle = '#2244aa';
+        ctx.fillRect(x - 3, y - 2, 6, 7);
+        ctx.fillStyle = '#4488ff';
+        ctx.fillRect(x - 2, y - 1, 4, 5);
+        ctx.fillStyle = '#886633';
+        ctx.fillRect(x - 1, y - 4, 2, 3);
+      } else if (tile === T.BOOTS) {
+        drawIsoTile(gx, gy, pal.top, pal.left, pal.right, 0.5);
+        // Boots
+        ctx.fillStyle = '#cc6622';
+        ctx.fillRect(x - 4, y, 3, 5);
+        ctx.fillRect(x + 1, y, 3, 5);
+        ctx.fillStyle = '#ffaa44';
+        ctx.fillRect(x - 4, y - 1, 3, 2);
+        ctx.fillRect(x + 1, y - 1, 3, 2);
+      } else if (tile === T.SHIELD) {
+        drawIsoTile(gx, gy, pal.top, pal.left, pal.right, 0.5);
+        // Shield
+        ctx.fillStyle = '#4488cc';
+        ctx.beginPath();
+        ctx.moveTo(x, y - 5);
+        ctx.lineTo(x + 5, y - 2);
+        ctx.lineTo(x + 4, y + 3);
+        ctx.lineTo(x, y + 5);
+        ctx.lineTo(x - 4, y + 3);
+        ctx.lineTo(x - 5, y - 2);
+        ctx.closePath();
+        ctx.fill();
+        ctx.fillStyle = '#66aaee';
+        ctx.beginPath();
+        ctx.arc(x, y, 2, 0, Math.PI * 2);
+        ctx.fill();
+      } else if (tile === T.STAFF) {
+        drawIsoTile(gx, gy, pal.top, pal.left, pal.right, 0.5);
+        // Staff piece (glowing)
+        const sb = Math.sin(frame * 0.06) * 3;
+        ctx.fillStyle = '#ff88ff';
+        ctx.globalAlpha = 0.4;
+        ctx.beginPath();
+        ctx.arc(x, y - 5 + sb, 8, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.globalAlpha = 1;
+        ctx.fillStyle = '#ffaaff';
+        ctx.fillRect(x - 1, y - 8 + sb, 2, 12);
+        ctx.fillStyle = '#ff44ff';
+        ctx.beginPath();
+        ctx.arc(x, y - 9 + sb, 3, 0, Math.PI * 2);
+        ctx.fill();
+      } else if (tile === T.SPIKES) {
+        drawIsoTile(gx, gy, pal.top, pal.left, pal.right, 0.5);
+        // Spikes
+        ctx.fillStyle = '#999';
+        for (let i = 0; i < 3; i++) {
+          ctx.beginPath();
+          ctx.moveTo(x - 4 + i * 4, y + TH/2 - TD*0.5);
+          ctx.lineTo(x - 2 + i * 4, y + TH/2 - TD*0.5 - 5);
+          ctx.lineTo(x + i * 4, y + TH/2 - TD*0.5);
+          ctx.fill();
+        }
+      } else if (tile === T.ICE) {
+        drawIsoTile(gx, gy, '#aaddff', '#88bbdd', '#6699bb', 0.5);
+      }
+    }
+
+    // Draw enemies and player at correct depth
+    for (const e of enemies) {
+      if (Math.round(e.y) === gy) drawEnemy(e);
+    }
+    if (Math.round(player.gy) === gy || (player.moving && Math.round(TAS.math.lerp(player.fromGy, player.gy, player.moveT)) === gy)) {
+      drawPlayer();
+    }
+  }
+}
+
+// Darken color helper
+function darken(hex, amount) {
+  const r = parseInt(hex.slice(1, 3), 16);
+  const g = parseInt(hex.slice(3, 5), 16);
+  const b = parseInt(hex.slice(5, 7), 16);
+  return '#' + Math.floor(r * amount).toString(16).padStart(2, '0') +
+    Math.floor(g * amount).toString(16).padStart(2, '0') +
+    Math.floor(b * amount).toString(16).padStart(2, '0');
+}
+
+// Draw HUD
+function drawHUD() {
+  const barH = 28;
+  ctx.fillStyle = 'rgba(10,5,20,0.85)';
+  ctx.fillRect(0, 0, GW, barH);
+
+  ctx.font = 'bold 11px monospace';
+  ctx.textAlign = 'left';
+
+  // Score
+  ctx.fillStyle = '#ffdd44';
+  ctx.fillText('SCORE: ' + score, 6, 18);
+
+  // Floor/Room
+  ctx.fillStyle = '#88ccff';
+  ctx.textAlign = 'center';
+  ctx.fillText('F' + (currentFloor + 1) + ' R' + (currentRoom + 1), GW / 2, 18);
+
+  // Lives
+  ctx.textAlign = 'right';
+  ctx.fillStyle = '#44dd88';
+  for (let i = 0; i < lives; i++) {
+    ctx.beginPath();
+    ctx.arc(GW - 10 - i * 16, 14, 5, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  // Bottom bar - items
+  ctx.fillStyle = 'rgba(10,5,20,0.85)';
+  ctx.fillRect(0, GH - 24, GW, 24);
+  ctx.font = '10px monospace';
+  ctx.textAlign = 'left';
+
+  let ix = 6;
+  // Keys
+  if (keys.red > 0) { ctx.fillStyle = '#ff4444'; ctx.fillText('R:' + keys.red, ix, GH - 8); ix += 32; }
+  if (keys.blue > 0) { ctx.fillStyle = '#4444ff'; ctx.fillText('B:' + keys.blue, ix, GH - 8); ix += 32; }
+  if (keys.green > 0) { ctx.fillStyle = '#44ff44'; ctx.fillText('G:' + keys.green, ix, GH - 8); ix += 32; }
+  if (keys.yellow > 0) { ctx.fillStyle = '#ffff44'; ctx.fillText('Y:' + keys.yellow, ix, GH - 8); ix += 32; }
+
+  // Potions
+  ctx.fillStyle = '#4488ff';
+  ctx.fillText('POT:' + potions, ix, GH - 8); ix += 48;
+
+  // Staff pieces
+  ctx.fillStyle = '#ff88ff';
+  ctx.textAlign = 'right';
+  ctx.fillText('STAFF: ' + staffPieces + '/4', GW - 6, GH - 8);
+
+  // Gems
+  ctx.fillStyle = '#44ffcc';
+  ctx.fillText('GEMS: ' + gems, GW - 80, GH - 8);
+}
+
+// Draw minimap
+function drawMap() {
+  const mw = 160, mh = 100;
+  const mx = (GW - mw) / 2, my = (GH - mh) / 2;
+  ctx.fillStyle = 'rgba(0,0,0,0.9)';
+  ctx.fillRect(mx - 2, my - 18, mw + 4, mh + 22);
+  ctx.strokeStyle = '#444';
+  ctx.strokeRect(mx - 2, my - 18, mw + 4, mh + 22);
+
+  ctx.fillStyle = '#88ccff';
+  ctx.font = 'bold 10px monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText('TOWER MAP', GW / 2, my - 6);
+
+  for (let f = 0; f < 5; f++) {
+    const fy = my + (4 - f) * 20;
+    ctx.fillStyle = '#333';
+    ctx.font = '8px monospace';
+    ctx.textAlign = 'left';
+    ctx.fillText('F' + (f + 1), mx + 2, fy + 10);
+
+    for (let r = 0; r < 8; r++) {
+      const rx = mx + 20 + r * 17;
+      const ry = fy + 2;
+      if (isRoomSolved(f, r)) {
+        ctx.fillStyle = '#44dd88';
+      } else if (isRoomVisited(f, r)) {
+        ctx.fillStyle = '#666';
+      } else {
+        ctx.fillStyle = '#222';
+      }
+      ctx.fillRect(rx, ry, 14, 12);
+      ctx.strokeStyle = '#555';
+      ctx.strokeRect(rx, ry, 14, 12);
+
+      // Current position
+      if (f === currentFloor && r === currentRoom) {
+        ctx.fillStyle = '#ffdd44';
+        ctx.beginPath();
+        ctx.arc(rx + 7, ry + 6, 3, 0, Math.PI * 2);
+        ctx.fill();
+      }
+
+      // Boss room marker
+      if (r === 7) {
+        ctx.fillStyle = '#ff4444';
+        ctx.font = '7px monospace';
+        ctx.textAlign = 'center';
+        ctx.fillText('B', rx + 7, ry + 9);
+      }
+    }
+  }
+}
+
+// Draw title screen
+function drawTitle() {
+  // Background - isometric tower preview
+  ctx.fillStyle = '#0a0a14';
+  ctx.fillRect(0, 0, GW, GH);
+
+  // Decorative iso tiles
+  for (let i = 0; i < 5; i++) {
+    const gy = 3 + i;
+    for (let j = 0; j < 3; j++) {
+      const gx = 3 + j;
+      const pal = FLOOR_PALETTES[i];
+      const ox = GW/2 - 100 + j * 40;
+      const oy = 180 + i * 20 - j * 10;
+      ctx.fillStyle = pal.top;
+      ctx.beginPath();
+      ctx.moveTo(ox, oy); ctx.lineTo(ox + 20, oy + 10); ctx.lineTo(ox, oy + 20); ctx.lineTo(ox - 20, oy + 10);
+      ctx.closePath(); ctx.fill();
+    }
+  }
+
+  // Tower silhouette
+  ctx.fillStyle = '#1a1a2e';
+  ctx.beginPath();
+  ctx.moveTo(GW/2 - 40, GH - 30);
+  ctx.lineTo(GW/2 - 35, 120);
+  ctx.lineTo(GW/2 - 20, 90);
+  ctx.lineTo(GW/2, 70);
+  ctx.lineTo(GW/2 + 20, 90);
+  ctx.lineTo(GW/2 + 35, 120);
+  ctx.lineTo(GW/2 + 40, GH - 30);
+  ctx.closePath();
+  ctx.fill();
+
+  // Windows
+  for (let i = 0; i < 5; i++) {
+    ctx.fillStyle = FLOOR_PALETTES[i].accent;
+    ctx.globalAlpha = 0.4 + Math.sin(frame * 0.03 + i) * 0.2;
+    ctx.fillRect(GW/2 - 8, 100 + i * 35, 6, 8);
+    ctx.fillRect(GW/2 + 2, 100 + i * 35, 6, 8);
+  }
+  ctx.globalAlpha = 1;
+
+  TAS.ui.drawTitle('SOLSTICE TOWER', 'A Baseling Wizard\'s Quest', GW, GH, { frame, titleColor: '#aa66ff' });
+
+  // Continue prompt if save exists
+  try {
+    if (localStorage.getItem('solsticetower_save')) {
+      ctx.fillStyle = '#666';
+      ctx.font = '10px monospace';
+      ctx.textAlign = 'center';
+      ctx.fillText('(saved game found)', GW/2, GH * 0.82);
+    }
+  } catch(e) { /* no-op */ }
+}
+
+// === MAIN DRAW ===
+function draw(dt) {
+  ctx.fillStyle = '#0a0a14';
+  ctx.fillRect(0, 0, GW, GH);
+
+  if (state === 'title') {
+    drawTitle();
+    return;
+  }
+
+  if (state === 'gameOver') {
+    TAS.ui.drawGameOver(score, highScore, GW, GH, { frame, extra: 'Floor ' + (currentFloor+1) + ' Room ' + (currentRoom+1) });
+    return;
+  }
+
+  if (state === 'victory') {
+    ctx.fillStyle = '#0a0a14';
+    ctx.fillRect(0, 0, GW, GH);
+
+    // Victory particles
+    if (frame % 5 === 0) {
+      TAS.particles.spawn(TAS.math.randRange(50, GW-50), TAS.math.randRange(50, GH-50), ['#ff88ff','#44ffcc','#ffdd44','#88ccff'][TAS.math.randInt(0,3)], 3, 2);
+    }
+
+    ctx.textAlign = 'center';
+    ctx.fillStyle = '#ffdd44';
+    ctx.font = 'bold 24px monospace';
+    ctx.fillText('TOWER CONQUERED!', GW/2, 80);
+
+    ctx.fillStyle = '#aa66ff';
+    ctx.font = '14px monospace';
+    ctx.fillText('The Baseling Wizard reassembles', GW/2, 130);
+    ctx.fillText('the Staff of Solstice!', GW/2, 150);
+
+    ctx.fillStyle = '#44ffcc';
+    ctx.font = 'bold 16px monospace';
+    ctx.fillText('SCORE: ' + score, GW/2, 200);
+
+    ctx.fillStyle = '#888';
+    ctx.font = '12px monospace';
+    ctx.fillText('Rooms solved: ' + solvedRooms.length + '/40', GW/2, 230);
+    ctx.fillText('Gems: ' + gems, GW/2, 250);
+
+    const pulse = Math.sin(frame * 0.05) * 0.3 + 0.7;
+    ctx.globalAlpha = pulse;
+    ctx.fillStyle = '#88ccff';
+    ctx.font = 'bold 12px monospace';
+    ctx.fillText('PRESS ANY KEY', GW/2, 290);
+    ctx.globalAlpha = 1;
+
+    TAS.particles.draw();
+    return;
+  }
+
+  // Game rendering
+  ctx.save();
+  TAS.fx.applyShake();
+
+  // Background gradient for current floor
+  const pal = FLOOR_PALETTES[currentFloor];
+  const bgGrad = ctx.createLinearGradient(0, 0, 0, GH);
+  bgGrad.addColorStop(0, '#0a0a14');
+  bgGrad.addColorStop(1, darken(pal.top, 0.3));
+  ctx.fillStyle = bgGrad;
+  ctx.fillRect(0, 0, GW, GH);
+
+  // Potion reveal glow
+  if (potionActive > 0) {
+    ctx.globalAlpha = potionActive * 0.1;
+    ctx.fillStyle = '#88ffff';
+    ctx.fillRect(0, 0, GW, GH);
+    ctx.globalAlpha = 1;
+  }
+
+  drawRoom();
+  TAS.particles.draw();
+  ctx.restore();
+
+  TAS.fx.drawFlash(GW, GH);
+  drawHUD();
+
+  // Map overlay
+  if (showMap) drawMap();
+
+  TAS.input.drawTouchControls(GW, GH);
+
+  // Room solved indicator
+  if (roomSolved) {
+    ctx.fillStyle = '#44dd88';
+    ctx.globalAlpha = 0.6 + Math.sin(frame * 0.1) * 0.2;
+    ctx.font = 'bold 10px monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText('ROOM CLEAR!', GW/2, GH - 30);
+    ctx.globalAlpha = 1;
+  }
+}
+
+// === START ===
+TAS.loop.start(update, draw);
+
+})();
+</script>
+</body>
+</html>

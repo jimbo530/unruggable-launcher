@@ -15,8 +15,8 @@ MfT is not core to any single SDG but contributes measurably to several through 
 - Donation records (from BURGERS community)
 
 ### SDG 13 — Climate Action
-**Partners:** CHAR (Toucan/Puro.earth biochar), NCT (Nature Carbon Tonne), BCT (Base Carbon Tonne), CCC (Carbon Counting Coin)
-**How:** Every MycoPad launch allocates 6% of seed to CHAR reactor. CHAR = 1 tonne CO2 removed. Burns are permanent retirement. NCT/BCT/CCC extend carbon coverage across Polygon with game-integrated LP pairs.
+**Partners:** CHAR (Toucan/Puro.earth biochar), NCT (Nature Carbon Tonne), BCT (Base Carbon Tonne), CCC (Carbon Counting Club — @CCountingClub)
+**How:** Every Unrugable launch allocates 6% of seed to CHAR reactor. CHAR = 1 tonne CO2 removed. Burns are permanent retirement. CCC = 1 lb CO2e of biochar applied to gardens, work documented on X before tokens are minted (Base: 0xd0581088eaaa4bf9a948b15a057b809c2b0cd61c). NCT/BCT extend carbon coverage on Polygon with game-integrated LP pairs.
 **Measurable:**
 - CHAR burned = exact tonnes CO2 retired (on-chain at 0xfd78..., Base)
 - NCT/BCT/CCC burned in Polygon reactors (on-chain)
@@ -45,11 +45,11 @@ MfT is not core to any single SDG but contributes measurably to several through 
 **How:** AZUSD stablecoin is backed partly by Helios (solar/clean energy investment tokens). JLT tokens represent renewable energy credits (MWh equivalent). LANTERN supports solar energy initiatives. All in active LP pairs.
 **Measurable:**
 - AZUSD locked in LP across ecosystem (on-chain, Base)
-- AZUSD in MycoPad floor pools (on-chain)
+- AZUSD in Unrugable floor pools (on-chain)
 - JLT/LANTERN in Polygon LP pairs (on-chain)
 
 ### SDG 9 — Industry, Innovation, and Infrastructure
-**How:** Open-source DeFi infrastructure. Agent SDK with 40+ MCP tools. Reactor network as public goods infrastructure. Permissionless — anyone can call execute().
+**How:** Open-source DeFi infrastructure. Agent SDK with 39 MCP tools. Reactor network as public goods infrastructure. Permissionless — anyone can call execute().
 **Measurable:**
 - Reactor count and fire frequency (on-chain)
 - Agent SDK usage / API calls (server logs)
@@ -80,7 +80,7 @@ MfT is not core to any single SDG but contributes measurably to several through 
 | CHAR | Biochar carbon removal | 13 | Base | 1 tonne/token |
 | NCT | Nature carbon credits | 13, 15 | Polygon | 0.1 tonne/token |
 | BCT | Base carbon credits | 13 | Polygon | 0.05 tonne/token |
-| CCC | Carbon counting | 13 | Polygon | ~1 lb/token |
+| CCC | Biochar in gardens (1 lb CO2e/token) | 13, 15 | Base + Polygon | 1 lb/token |
 | TGN | Mangrove planting | 14, 15 | Base | Community reported |
 | REGEN | Regenerative finance | 12, 15 | Polygon | Community reported |
 | AU24T | Tokenized trees | 15 | Polygon | Community reported |

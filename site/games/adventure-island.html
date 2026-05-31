@@ -1,0 +1,1142 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Adventure Island</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body { width: 100%; height: 100%; overflow: hidden; background: #111; touch-action: none; }
+canvas { display: block; margin: 0 auto; }
+#back-link { position: fixed; bottom: 8px; left: 50%; transform: translateX(-50%); color: #666; font-family: monospace; font-size: 12px; text-decoration: none; z-index: 10; }
+#back-link:hover { color: #aaa; }
+</style>
+</head>
+<body>
+<canvas id="gc"></canvas>
+<a id="back-link" href="/games">Back to Arcade</a>
+<script src="nft-loader.js"></script>
+<script>if(window.NftLoader)NftLoader.gate();</script>
+<script src="tasern-engine.js"></script>
+<script>
+(function(){
+"use strict";
+
+// === CONSTANTS ===
+var GW = 480, GH = 270;
+var ctx = TAS.ctx;
+TAS.initCanvas(GW, GH);
+TAS.input.initTouch({ buttons: ['a', 'b'], labels: { a: 'JUMP', b: 'THROW' } });
+
+var TILE = 16;
+var GRAVITY = 980;
+var GROUND_Y = GH - 32;
+var PLAYER_W = 14, PLAYER_H = 20;
+var SCROLL_SPEED = 80;
+var STAGE_LENGTH = 3200;
+
+// === GAME STATE ===
+var state = 'title';
+var score = 0;
+var highScore = TAS.score.load('adventureisland_hi');
+var lives = 3;
+var world = 1, stage = 1;
+var frame = 0;
+var stageTimer = 0;
+
+// Player
+var px, py, pvx, pvy, pOnGround, pDucking, pFacing;
+var pEnergy, pMaxEnergy;
+var pWeapon; // 'axe','boomerang','fire'
+var pHasSkateboard, pOnSkateboard;
+var pInvincible, pInvTimer;
+var pAnimFrame, pAnimTimer;
+var pDead, pDeadTimer;
+
+// Camera
+var camX;
+
+// Level data
+var platforms, enemies, foods, eggs, projectiles, decorations;
+var goalX;
+var levelSeed;
+var checkpoint;
+
+// Parallax layers
+var bgLayers;
+
+// World themes
+var WORLDS = [
+  { name: 'Beach',    sky: '#87CEEB', ground: '#C2B280', platform: '#8B4513', accent: '#228B22' },
+  { name: 'Forest',   sky: '#2d5016', ground: '#3a5f0b', platform: '#5c3a1e', accent: '#1a3d0a' },
+  { name: 'Cave',     sky: '#1a1a2e', ground: '#3d3d3d', platform: '#555555', accent: '#666633' },
+  { name: 'Mountain', sky: '#4a6fa5', ground: '#7a7a6a', platform: '#5a5a4a', accent: '#8b8b7a' },
+  { name: 'Cloud',    sky: '#b0d4f1', ground: '#ffffff', platform: '#ddeeff', accent: '#aaccee' },
+  { name: 'Volcano',  sky: '#2a0a0a', ground: '#4a2a0a', platform: '#6a3a1a', accent: '#ff4400' },
+  { name: 'Ice',      sky: '#c0e8ff', ground: '#e8f4ff', platform: '#a0d0f0', accent: '#80b0d0' },
+  { name: 'Castle',   sky: '#1a1a2e', ground: '#4a4a5a', platform: '#6a6a7a', accent: '#8a3a5a' }
+];
+
+// Enemy types per world
+var ENEMY_TYPES = [
+  ['crab', 'seagull'],
+  ['snail', 'spider'],
+  ['bat', 'rock'],
+  ['goat', 'eagle'],
+  ['bird', 'cloud_puff'],
+  ['fire_snake', 'fire_jet'],
+  ['polar_bear', 'icicle'],
+  ['knight', 'wizard']
+];
+
+// Food types
+var FOOD_ITEMS = ['apple', 'banana', 'meat', 'fish', 'mushroom', 'watermelon'];
+
+// === SEEDED RANDOM ===
+var rngState = 1;
+function seedRng(s) { rngState = s || 1; }
+function rng() {
+  rngState = (rngState * 1664525 + 1013904223) & 0xFFFFFFFF;
+  return (rngState >>> 0) / 4294967296;
+}
+function rngInt(min, max) { return Math.floor(rng() * (max - min + 1)) + min; }
+
+// === INIT GAME ===
+function startGame() {
+  state = 'playing';
+  score = 0;
+  lives = 3;
+  world = 1;
+  stage = 1;
+  TAS.particles.clear();
+  initStage();
+}
+
+function initStage() {
+  levelSeed = world * 100 + stage * 17 + 42;
+  seedRng(levelSeed);
+
+  px = 40; py = GROUND_Y - PLAYER_H;
+  pvx = 0; pvy = 0;
+  pOnGround = true; pDucking = false; pFacing = 1;
+  pEnergy = 100; pMaxEnergy = 100;
+  if (!pWeapon) pWeapon = 'axe';
+  pHasSkateboard = false; pOnSkateboard = false;
+  pInvincible = false; pInvTimer = 0;
+  pAnimFrame = 0; pAnimTimer = 0;
+  pDead = false; pDeadTimer = 0;
+
+  camX = 0;
+  projectiles = [];
+  stageTimer = 0;
+  checkpoint = 0;
+
+  generateLevel();
+}
+
+// === LEVEL GENERATION ===
+function generateLevel() {
+  platforms = [];
+  enemies = [];
+  foods = [];
+  eggs = [];
+  decorations = [];
+
+  var length = STAGE_LENGTH + (world - 1) * 400 + (stage - 1) * 200;
+  goalX = length;
+
+  // Ground with gaps
+  var gx = 0;
+  while (gx < length + GW) {
+    var segLen = rngInt(80, 250);
+    platforms.push({ x: gx, y: GROUND_Y, w: segLen, h: 40, type: 'ground' });
+    gx += segLen;
+    // Gap chance increases with world
+    if (rng() < 0.15 + world * 0.03 && gx > 200 && gx < length - 200) {
+      gx += rngInt(40, 70 + world * 5);
+    }
+  }
+
+  // Floating platforms
+  var platCount = Math.floor(length / 120) + world * 3;
+  for (var i = 0; i < platCount; i++) {
+    var fx = rngInt(100, length - 100);
+    var fy = rngInt(GROUND_Y - 90, GROUND_Y - 40);
+    var fw = rngInt(40, 80);
+    platforms.push({ x: fx, y: fy, w: fw, h: 10, type: 'float' });
+  }
+
+  // Enemies
+  var enemyCount = Math.floor(length / 150) + world * 2 + stage;
+  var eTypes = ENEMY_TYPES[world - 1];
+  for (var i = 0; i < enemyCount; i++) {
+    var ex = rngInt(200, length - 100);
+    var etype = eTypes[rngInt(0, eTypes.length - 1)];
+    var flying = (etype === 'seagull' || etype === 'bat' || etype === 'eagle' ||
+                  etype === 'bird' || etype === 'cloud_puff' || etype === 'icicle');
+    var ey = flying ? rngInt(60, GROUND_Y - 60) : GROUND_Y - 16;
+    enemies.push({
+      x: ex, y: ey, w: 14, h: 14,
+      type: etype, flying: flying,
+      vx: flying ? (rng() < 0.5 ? -1 : 1) * rngInt(20, 50) : -rngInt(15, 40),
+      vy: 0, alive: true, anim: 0,
+      startX: ex, patrol: rngInt(40, 100)
+    });
+  }
+
+  // Food items
+  var foodCount = Math.floor(length / 80);
+  for (var i = 0; i < foodCount; i++) {
+    var foodX = rngInt(80, length - 50);
+    var foodY = rng() < 0.3 ? rngInt(GROUND_Y - 80, GROUND_Y - 50) : GROUND_Y - 12;
+    foods.push({
+      x: foodX, y: foodY, w: 10, h: 10,
+      type: FOOD_ITEMS[rngInt(0, FOOD_ITEMS.length - 1)],
+      collected: false
+    });
+  }
+
+  // Eggs (weapons, food, skateboard)
+  var eggCount = rngInt(3, 6) + Math.floor(world / 2);
+  for (var i = 0; i < eggCount; i++) {
+    var eggX = rngInt(150, length - 150);
+    var eggY = rng() < 0.4 ? rngInt(GROUND_Y - 90, GROUND_Y - 50) : GROUND_Y - 14;
+    var contents;
+    var r = rng();
+    if (r < 0.25) contents = 'boomerang';
+    else if (r < 0.45) contents = 'fire';
+    else if (r < 0.6) contents = 'skateboard';
+    else contents = 'food';
+    // Some eggs are invisible (jump to reveal)
+    eggs.push({
+      x: eggX, y: eggY, w: 12, h: 14,
+      contents: contents, visible: rng() < 0.6,
+      opened: false
+    });
+  }
+
+  // Decorations (visual only)
+  var decCount = Math.floor(length / 60);
+  for (var i = 0; i < decCount; i++) {
+    var dtype = rng() < 0.5 ? 'tree' : 'rock';
+    if (world === 1) dtype = rng() < 0.6 ? 'palm' : 'rock';
+    if (world === 5) dtype = 'cloud';
+    decorations.push({
+      x: rngInt(0, length), y: GROUND_Y,
+      type: dtype, size: rngInt(20, 50)
+    });
+  }
+
+  // BG layers
+  bgLayers = [
+    { color: getTheme().sky, speed: 0 },
+    { speed: 0.2, elements: [] },
+    { speed: 0.5, elements: [] }
+  ];
+  // Populate bg elements
+  for (var i = 0; i < 8; i++) {
+    bgLayers[1].elements.push({ x: rngInt(0, GW * 3), y: rngInt(20, 80), w: rngInt(40, 100), h: rngInt(20, 50) });
+  }
+  for (var i = 0; i < 12; i++) {
+    bgLayers[2].elements.push({ x: rngInt(0, GW * 3), y: rngInt(60, 140), w: rngInt(20, 60), h: rngInt(30, 60) });
+  }
+}
+
+function getTheme() { return WORLDS[Math.min(world - 1, 7)]; }
+
+// === PLAYER ACTIONS ===
+function throwWeapon() {
+  if (pDead || pDucking) return;
+  var sx = px + (pFacing > 0 ? PLAYER_W : 0);
+  var sy = py + 6;
+  var proj = { x: sx, y: sy, vx: 0, vy: 0, type: pWeapon, alive: true, timer: 0, returning: false };
+
+  if (pWeapon === 'axe') {
+    proj.vx = pFacing * 200;
+    proj.vy = -120;
+  } else if (pWeapon === 'boomerang') {
+    proj.vx = pFacing * 180;
+    proj.vy = 0;
+  } else if (pWeapon === 'fire') {
+    proj.vx = pFacing * 250;
+    proj.vy = 0;
+  }
+  projectiles.push(proj);
+  // SFX
+  TAS.audio.playTone(300, 0.08, 'sawtooth', 0.06, 500);
+}
+
+function playerDie() {
+  if (pDead) return;
+  if (pOnSkateboard) {
+    // Lose skateboard instead
+    pOnSkateboard = false;
+    pHasSkateboard = false;
+    pInvincible = true;
+    pInvTimer = 1.5;
+    TAS.audio.playNoise(0.3, 0.08, 800);
+    TAS.fx.shake(3, 0.9);
+    return;
+  }
+  pDead = true;
+  pDeadTimer = 2;
+  pvy = -300;
+  lives--;
+  TAS.audio.playTone(200, 0.3, 'sawtooth', 0.1, 50);
+  TAS.audio.playNoise(0.4, 0.1, 400);
+  TAS.fx.shake(6, 0.85);
+  TAS.fx.flash('#ff0000', 0.4);
+  TAS.particles.spawn(px + PLAYER_W / 2, py + PLAYER_H / 2, '#ffaa00', 12, 3, { gravity: 1.5 });
+}
+
+function collectFood(f) {
+  f.collected = true;
+  pEnergy = Math.min(pMaxEnergy, pEnergy + 20);
+  score += 50;
+  TAS.audio.playTone(500, 0.06, 'sine', 0.06);
+  TAS.audio.playTone(700, 0.06, 'sine', 0.05);
+  TAS.particles.spawn(f.x + 5, f.y + 5, '#44ff44', 5, 1.5);
+}
+
+function openEgg(egg) {
+  egg.opened = true;
+  score += 100;
+  TAS.audio.playNoise(0.1, 0.06, 2000);
+  TAS.audio.playTone(800, 0.1, 'sine', 0.06, 1200);
+  TAS.particles.spawn(egg.x + 6, egg.y + 7, '#ffffff', 8, 2);
+
+  if (egg.contents === 'skateboard') {
+    pHasSkateboard = true;
+    pOnSkateboard = true;
+  } else if (egg.contents === 'food') {
+    pEnergy = Math.min(pMaxEnergy, pEnergy + 40);
+  } else {
+    pWeapon = egg.contents;
+  }
+}
+
+function completeStage() {
+  state = 'stageClear';
+  stageTimer = 0;
+  var timeBonus = Math.max(0, Math.floor((300 - stageTimer) * 10));
+  var energyBonus = Math.floor(pEnergy * 5);
+  score += timeBonus + energyBonus;
+  if (score > highScore) {
+    highScore = score;
+    TAS.score.save('adventureisland_hi', highScore);
+  }
+  TAS.audio.playMelody([[523, 0.1], [659, 0.1], [784, 0.1], [1047, 0.2]], 100);
+}
+
+// === UPDATE ===
+function update(dt) {
+  frame++;
+  TAS.particles.update(dt);
+  TAS.fx.updateEffects(dt);
+
+  if (state === 'title') {
+    if (Object.values(TAS.input.keys).some(Boolean) || TAS.input.touch.a) {
+      TAS.audio.ensureAudio();
+      startGame();
+    }
+    return;
+  }
+
+  if (state === 'gameOver') {
+    if (frame % 2 === 0) return; // throttle input
+    if (Object.values(TAS.input.keys).some(Boolean) || TAS.input.touch.a) {
+      state = 'title';
+    }
+    return;
+  }
+
+  if (state === 'stageClear') {
+    stageTimer += dt;
+    if (stageTimer > 3) {
+      stage++;
+      if (stage > 4) { stage = 1; world++; }
+      if (world > 8) {
+        // Game complete
+        state = 'gameOver';
+        return;
+      }
+      pWeapon = 'axe';
+      initStage();
+      state = 'playing';
+    }
+    return;
+  }
+
+  if (state !== 'playing') return;
+
+  stageTimer += dt;
+
+  // --- Player dead animation ---
+  if (pDead) {
+    pDeadTimer -= dt;
+    py += pvy * dt;
+    pvy += GRAVITY * dt;
+    if (pDeadTimer <= 0) {
+      if (lives <= 0) {
+        state = 'gameOver';
+        if (score > highScore) {
+          highScore = score;
+          TAS.score.save('adventureisland_hi', highScore);
+        }
+      } else {
+        // Respawn
+        px = Math.max(40, checkpoint);
+        py = GROUND_Y - PLAYER_H;
+        pvx = 0; pvy = 0;
+        pOnGround = true;
+        pDead = false;
+        pEnergy = 80;
+        pWeapon = 'axe';
+        pOnSkateboard = false;
+        pHasSkateboard = false;
+        pInvincible = true;
+        pInvTimer = 2;
+      }
+    }
+    return;
+  }
+
+  // --- Energy drain ---
+  var drainRate = 4 + world * 0.8 + stage * 0.3;
+  pEnergy -= drainRate * dt;
+  if (pEnergy <= 0) {
+    pEnergy = 0;
+    playerDie();
+    return;
+  }
+
+  // --- Invincibility timer ---
+  if (pInvincible) {
+    pInvTimer -= dt;
+    if (pInvTimer <= 0) pInvincible = false;
+  }
+
+  // --- Input ---
+  var kLeft = TAS.input.keys['ArrowLeft'] || TAS.input.keys['KeyA'] || TAS.input.touch.left;
+  var kRight = TAS.input.keys['ArrowRight'] || TAS.input.keys['KeyD'] || TAS.input.touch.right;
+  var kJump = TAS.input.keys['ArrowUp'] || TAS.input.keys['KeyW'] || TAS.input.keys['Space'] || TAS.input.touch.a;
+  var kDown = TAS.input.keys['ArrowDown'] || TAS.input.keys['KeyS'] || TAS.input.touch.down;
+  var kThrow = TAS.input.keys['KeyX'] || TAS.input.keys['KeyZ'] || TAS.input.keys['KeyF'] || TAS.input.touch.b;
+
+  // Duck
+  pDucking = kDown && pOnGround;
+
+  // Horizontal movement
+  var moveSpeed = pOnSkateboard ? 160 : 110;
+  if (kLeft && !pDucking) { pvx = -moveSpeed; pFacing = -1; }
+  else if (kRight && !pDucking) { pvx = moveSpeed; pFacing = 1; }
+  else { pvx = pOnSkateboard ? pvx * 0.98 : 0; }
+
+  // Ice world slippery
+  if (world === 7 && pOnGround) {
+    if (!kLeft && !kRight) pvx *= 0.97;
+  }
+
+  // Jump
+  if (kJump && pOnGround) {
+    pvy = -340;
+    pOnGround = false;
+    TAS.audio.playTone(350, 0.06, 'square', 0.04, 500);
+  }
+
+  // Throw (with cooldown via projectile count)
+  if (kThrow && projectiles.length < 3) {
+    // Debounce
+    if (!update._throwHeld) {
+      throwWeapon();
+      update._throwHeld = true;
+    }
+  } else if (!kThrow) {
+    update._throwHeld = false;
+  }
+
+  // Physics
+  if (!pOnGround) pvy += GRAVITY * dt;
+  px += pvx * dt;
+  py += pvy * dt;
+
+  // Platform collision
+  pOnGround = false;
+  for (var i = 0; i < platforms.length; i++) {
+    var p = platforms[i];
+    if (p.x > camX + GW + 100 || p.x + p.w < camX - 100) continue;
+    if (px + PLAYER_W > p.x && px < p.x + p.w) {
+      // Landing on top
+      if (pvy >= 0 && py + PLAYER_H >= p.y && py + PLAYER_H <= p.y + 16) {
+        py = p.y - PLAYER_H;
+        pvy = 0;
+        pOnGround = true;
+      }
+    }
+  }
+
+  // Fall death
+  if (py > GH + 50) { playerDie(); return; }
+
+  // Keep in bounds (left)
+  if (px < camX - 10) px = camX - 10;
+
+  // Animation
+  pAnimTimer += dt;
+  if (pAnimTimer > 0.1) {
+    pAnimTimer = 0;
+    pAnimFrame = (pAnimFrame + 1) % 4;
+  }
+
+  // Camera
+  var targetCam = px - GW * 0.3;
+  camX += (targetCam - camX) * 3 * dt;
+  if (camX < 0) camX = 0;
+
+  // Checkpoint
+  if (px > checkpoint + 400) checkpoint = px - 100;
+
+  // --- Projectiles ---
+  for (var i = projectiles.length - 1; i >= 0; i--) {
+    var proj = projectiles[i];
+    proj.timer += dt;
+    proj.x += proj.vx * dt;
+    proj.y += proj.vy * dt;
+
+    if (proj.type === 'axe') {
+      proj.vy += 300 * dt; // Arc
+    } else if (proj.type === 'boomerang') {
+      if (proj.timer > 0.4 && !proj.returning) {
+        proj.returning = true;
+      }
+      if (proj.returning) {
+        var toPx = px - proj.x;
+        var toPy = py - proj.y;
+        var d = Math.sqrt(toPx * toPx + toPy * toPy);
+        if (d > 0) { proj.vx = (toPx / d) * 200; proj.vy = (toPy / d) * 200; }
+        if (d < 20) proj.alive = false;
+      }
+    }
+    // Remove offscreen
+    if (proj.x < camX - 50 || proj.x > camX + GW + 50 || proj.y > GH + 50) {
+      proj.alive = false;
+    }
+    if (proj.timer > 3) proj.alive = false;
+    if (!proj.alive) { projectiles.splice(i, 1); continue; }
+
+    // Hit enemies
+    for (var j = 0; j < enemies.length; j++) {
+      var e = enemies[j];
+      if (!e.alive) continue;
+      if (TAS.hit.rectOverlap(proj.x - 4, proj.y - 4, 8, 8, e.x, e.y, e.w, e.h)) {
+        e.alive = false;
+        if (proj.type !== 'fire') proj.alive = false;
+        score += 100;
+        TAS.audio.playTone(150, 0.12, 'square', 0.06, 80);
+        TAS.particles.spawn(e.x + e.w / 2, e.y + e.h / 2, '#ff8800', 8, 2.5, { gravity: 1 });
+        TAS.fx.shake(2, 0.92);
+      }
+    }
+  }
+
+  // --- Enemies ---
+  for (var i = 0; i < enemies.length; i++) {
+    var e = enemies[i];
+    if (!e.alive) continue;
+    if (e.x < camX - 200 || e.x > camX + GW + 200) continue;
+
+    e.anim += dt;
+    if (e.flying) {
+      e.x += e.vx * dt;
+      e.y += Math.sin(e.anim * 3) * 0.5;
+      if (Math.abs(e.x - e.startX) > e.patrol) e.vx = -e.vx;
+    } else {
+      e.x += e.vx * dt;
+      if (Math.abs(e.x - e.startX) > e.patrol) e.vx = -e.vx;
+    }
+
+    // Collision with player
+    if (!pInvincible && !pDead) {
+      if (TAS.hit.rectOverlap(px, py, PLAYER_W, PLAYER_H, e.x, e.y, e.w, e.h)) {
+        playerDie();
+        return;
+      }
+    }
+  }
+
+  // --- Food collection ---
+  for (var i = 0; i < foods.length; i++) {
+    var f = foods[i];
+    if (f.collected) continue;
+    if (f.x < camX - 50 || f.x > camX + GW + 50) continue;
+    if (TAS.hit.rectOverlap(px, py, PLAYER_W, PLAYER_H, f.x, f.y, f.w, f.h)) {
+      collectFood(f);
+    }
+  }
+
+  // --- Egg collection ---
+  for (var i = 0; i < eggs.length; i++) {
+    var egg = eggs[i];
+    if (egg.opened) continue;
+    if (egg.x < camX - 50 || egg.x > camX + GW + 50) continue;
+    // Reveal hidden eggs by jumping into their space
+    if (!egg.visible) {
+      if (TAS.hit.rectOverlap(px, py - 10, PLAYER_W, 10, egg.x, egg.y, egg.w, egg.h)) {
+        egg.visible = true;
+        TAS.audio.playTone(600, 0.05, 'square', 0.04);
+      }
+      continue;
+    }
+    if (TAS.hit.rectOverlap(px, py, PLAYER_W, PLAYER_H, egg.x, egg.y, egg.w, egg.h)) {
+      openEgg(egg);
+    }
+  }
+
+  // --- Goal check ---
+  if (px >= goalX) {
+    completeStage();
+  }
+
+  // --- Energy warning sound ---
+  if (pEnergy < 25 && frame % 30 === 0) {
+    TAS.audio.playTone(880, 0.03, 'square', 0.03);
+  }
+}
+update._throwHeld = false;
+
+// === DRAW ===
+function draw(dt) {
+  var theme = getTheme();
+
+  // --- Title screen ---
+  if (state === 'title') {
+    ctx.fillStyle = '#1a4a2a';
+    ctx.fillRect(0, 0, GW, GH);
+
+    // Draw island scene
+    drawTitleScene();
+
+    TAS.ui.drawTitle('ADVENTURE ISLAND', 'A Tasern Tale', GW, GH, { frame: frame, titleColor: '#44ff88' });
+
+    // High score
+    ctx.fillStyle = '#ffdd44';
+    ctx.font = 'bold 10px monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText('HIGH SCORE: ' + highScore, GW / 2, GH * 0.35);
+    return;
+  }
+
+  // --- Game Over ---
+  if (state === 'gameOver') {
+    ctx.fillStyle = '#111';
+    ctx.fillRect(0, 0, GW, GH);
+    var extra = 'World ' + world + '-' + stage + '  |  Score: ' + score;
+    TAS.ui.drawGameOver(score, highScore, GW, GH, { frame: frame, extra: extra });
+    return;
+  }
+
+  // --- Stage Clear ---
+  if (state === 'stageClear') {
+    ctx.fillStyle = theme.sky;
+    ctx.fillRect(0, 0, GW, GH);
+    ctx.textAlign = 'center';
+    ctx.fillStyle = '#ffffff';
+    ctx.font = 'bold 18px monospace';
+    ctx.fillText('STAGE CLEAR!', GW / 2, GH * 0.35);
+    ctx.font = 'bold 12px monospace';
+    ctx.fillStyle = '#ffdd44';
+    ctx.fillText('World ' + world + '-' + stage, GW / 2, GH * 0.5);
+    ctx.fillStyle = '#88ff88';
+    ctx.font = '10px monospace';
+    ctx.fillText('Score: ' + score, GW / 2, GH * 0.65);
+    return;
+  }
+
+  // === PLAYING STATE ===
+  ctx.save();
+  TAS.fx.applyShake();
+
+  // Sky
+  ctx.fillStyle = theme.sky;
+  ctx.fillRect(0, 0, GW, GH);
+
+  // Parallax backgrounds
+  drawParallax(theme);
+
+  // Offset for camera
+  ctx.save();
+  ctx.translate(-Math.floor(camX), 0);
+
+  // Decorations (behind)
+  drawDecorations(theme);
+
+  // Platforms
+  drawPlatforms(theme);
+
+  // Food
+  drawFood();
+
+  // Eggs
+  drawEggs();
+
+  // Enemies
+  drawEnemies();
+
+  // Player
+  if (!pDead || pDeadTimer > 0) drawPlayer();
+
+  // Projectiles
+  drawProjectiles();
+
+  // Goal
+  drawGoal();
+
+  ctx.restore(); // camera
+
+  // Particles (screen space)
+  TAS.particles.draw();
+
+  ctx.restore(); // shake
+
+  TAS.fx.drawFlash(GW, GH);
+
+  // HUD
+  drawHUD();
+
+  // Touch controls
+  TAS.input.drawTouchControls(GW, GH);
+}
+
+// === DRAW HELPERS ===
+function drawTitleScene() {
+  // Simple tropical bg
+  ctx.fillStyle = '#87CEEB';
+  ctx.fillRect(0, GH * 0.3, GW, GH * 0.7);
+
+  // Water
+  ctx.fillStyle = '#2288cc';
+  ctx.fillRect(0, GH * 0.7, GW, GH * 0.3);
+
+  // Sand
+  ctx.fillStyle = '#C2B280';
+  ctx.fillRect(0, GH * 0.65, GW, 20);
+
+  // Palm trees
+  for (var i = 0; i < 3; i++) {
+    var tx = 80 + i * 160;
+    ctx.fillStyle = '#8B4513';
+    ctx.fillRect(tx, GH * 0.4, 6, GH * 0.25);
+    ctx.fillStyle = '#228B22';
+    ctx.beginPath();
+    ctx.arc(tx + 3, GH * 0.38, 25, 0, Math.PI * 2);
+    ctx.fill();
+  }
+}
+
+function drawParallax(theme) {
+  // Layer 1 - distant mountains/clouds
+  var scrollBg1 = (camX * 0.2) % GW;
+  ctx.fillStyle = mixColor(theme.sky, '#000000', 0.15);
+  for (var i = 0; i < 5; i++) {
+    var mx = i * 120 - scrollBg1 % 120;
+    var mh = 30 + (i * 17) % 40;
+    drawMountain(mx, GH * 0.5, 100, mh);
+  }
+
+  // Layer 2 - mid-ground
+  var scrollBg2 = (camX * 0.5) % GW;
+  ctx.fillStyle = mixColor(theme.ground, theme.sky, 0.4);
+  for (var i = 0; i < 8; i++) {
+    var mx = i * 80 - scrollBg2 % 80;
+    var mh = 15 + (i * 13) % 25;
+    drawMountain(mx, GH * 0.7, 60, mh);
+  }
+}
+
+function drawMountain(x, baseY, w, h) {
+  ctx.beginPath();
+  ctx.moveTo(x, baseY);
+  ctx.lineTo(x + w / 2, baseY - h);
+  ctx.lineTo(x + w, baseY);
+  ctx.fill();
+}
+
+function mixColor(c1, c2, t) {
+  // Simple hex mix
+  var r1 = parseInt(c1.slice(1, 3), 16), g1 = parseInt(c1.slice(3, 5), 16), b1 = parseInt(c1.slice(5, 7), 16);
+  var r2 = parseInt(c2.slice(1, 3), 16), g2 = parseInt(c2.slice(3, 5), 16), b2 = parseInt(c2.slice(5, 7), 16);
+  var r = Math.floor(r1 + (r2 - r1) * t);
+  var g = Math.floor(g1 + (g2 - g1) * t);
+  var b = Math.floor(b1 + (b2 - b1) * t);
+  return 'rgb(' + r + ',' + g + ',' + b + ')';
+}
+
+function drawDecorations(theme) {
+  for (var i = 0; i < decorations.length; i++) {
+    var d = decorations[i];
+    if (d.x < camX - 60 || d.x > camX + GW + 60) continue;
+
+    if (d.type === 'palm' || d.type === 'tree') {
+      ctx.fillStyle = '#6B3A10';
+      ctx.fillRect(d.x, d.y - d.size, 5, d.size);
+      ctx.fillStyle = theme.accent;
+      ctx.beginPath();
+      ctx.arc(d.x + 2, d.y - d.size, d.size * 0.4, 0, Math.PI * 2);
+      ctx.fill();
+    } else if (d.type === 'rock') {
+      ctx.fillStyle = '#666';
+      ctx.beginPath();
+      ctx.arc(d.x, d.y - d.size * 0.3, d.size * 0.3, 0, Math.PI * 2);
+      ctx.fill();
+    } else if (d.type === 'cloud') {
+      ctx.fillStyle = 'rgba(255,255,255,0.4)';
+      ctx.beginPath();
+      ctx.arc(d.x, d.y - d.size, d.size * 0.5, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+}
+
+function drawPlatforms(theme) {
+  for (var i = 0; i < platforms.length; i++) {
+    var p = platforms[i];
+    if (p.x + p.w < camX - 20 || p.x > camX + GW + 20) continue;
+
+    if (p.type === 'ground') {
+      ctx.fillStyle = theme.ground;
+      ctx.fillRect(p.x, p.y, p.w, p.h);
+      // Grass top
+      ctx.fillStyle = theme.accent;
+      ctx.fillRect(p.x, p.y, p.w, 3);
+      // Texture lines
+      ctx.fillStyle = mixColor(theme.ground, '#000000', 0.2);
+      for (var j = 0; j < p.w; j += 12) {
+        ctx.fillRect(p.x + j, p.y + 8, 6, 1);
+      }
+    } else {
+      ctx.fillStyle = theme.platform;
+      ctx.fillRect(p.x, p.y, p.w, p.h);
+      ctx.fillStyle = mixColor(theme.platform, '#ffffff', 0.3);
+      ctx.fillRect(p.x, p.y, p.w, 2);
+    }
+  }
+}
+
+function drawFood() {
+  for (var i = 0; i < foods.length; i++) {
+    var f = foods[i];
+    if (f.collected) continue;
+    if (f.x < camX - 20 || f.x > camX + GW + 20) continue;
+
+    var bob = Math.sin(frame * 0.08 + f.x) * 2;
+    var colors = { apple: '#ff3333', banana: '#ffdd00', meat: '#cc6633',
+                   fish: '#6699cc', mushroom: '#cc44cc', watermelon: '#33cc33' };
+    ctx.fillStyle = colors[f.type] || '#ff8800';
+    ctx.beginPath();
+    ctx.arc(f.x + 5, f.y + 5 + bob, 5, 0, Math.PI * 2);
+    ctx.fill();
+    // Highlight
+    ctx.fillStyle = 'rgba(255,255,255,0.4)';
+    ctx.beginPath();
+    ctx.arc(f.x + 3, f.y + 3 + bob, 2, 0, Math.PI * 2);
+    ctx.fill();
+  }
+}
+
+function drawEggs() {
+  for (var i = 0; i < eggs.length; i++) {
+    var egg = eggs[i];
+    if (egg.opened || !egg.visible) continue;
+    if (egg.x < camX - 20 || egg.x > camX + GW + 20) continue;
+
+    // Egg shape
+    ctx.fillStyle = '#ffffee';
+    ctx.beginPath();
+    ctx.ellipse(egg.x + 6, egg.y + 7, 6, 7, 0, 0, Math.PI * 2);
+    ctx.fill();
+    // Spots
+    ctx.fillStyle = '#88cc44';
+    ctx.beginPath();
+    ctx.arc(egg.x + 4, egg.y + 5, 2, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.beginPath();
+    ctx.arc(egg.x + 8, egg.y + 9, 1.5, 0, Math.PI * 2);
+    ctx.fill();
+  }
+}
+
+function drawEnemies() {
+  for (var i = 0; i < enemies.length; i++) {
+    var e = enemies[i];
+    if (!e.alive) continue;
+    if (e.x < camX - 30 || e.x > camX + GW + 30) continue;
+
+    var colors = {
+      crab: '#ff4444', seagull: '#dddddd', snail: '#996633', spider: '#333333',
+      bat: '#552255', rock: '#777777', goat: '#cc9966', eagle: '#885533',
+      bird: '#4488ff', cloud_puff: '#ccccff', fire_snake: '#ff6600', fire_jet: '#ffaa00',
+      polar_bear: '#eeeeee', icicle: '#aaddff', knight: '#888888', wizard: '#6633aa'
+    };
+
+    ctx.fillStyle = colors[e.type] || '#ff0000';
+
+    if (e.flying) {
+      // Wing flap
+      var wing = Math.sin(e.anim * 10) * 4;
+      ctx.beginPath();
+      ctx.arc(e.x + 7, e.y + 7, 7, 0, Math.PI * 2);
+      ctx.fill();
+      // Wings
+      ctx.fillRect(e.x - 2, e.y + 4 + wing, 4, 3);
+      ctx.fillRect(e.x + 12, e.y + 4 - wing, 4, 3);
+    } else {
+      // Body
+      ctx.fillRect(e.x, e.y, e.w, e.h);
+      // Eyes
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(e.x + 3, e.y + 3, 3, 3);
+      ctx.fillRect(e.x + 9, e.y + 3, 3, 3);
+      ctx.fillStyle = '#000';
+      ctx.fillRect(e.x + 4, e.y + 4, 2, 2);
+      ctx.fillRect(e.x + 10, e.y + 4, 2, 2);
+      // Legs animation
+      var legOff = Math.sin(e.anim * 8) * 2;
+      ctx.fillStyle = colors[e.type] || '#ff0000';
+      ctx.fillRect(e.x + 2, e.y + e.h, 3, 3 + legOff);
+      ctx.fillRect(e.x + 9, e.y + e.h, 3, 3 - legOff);
+    }
+  }
+}
+
+function drawPlayer() {
+  if (pInvincible && Math.floor(frame / 3) % 2 === 0) return; // Blink
+
+  var dx = px, dy = py;
+
+  // Body color (baseling - green/teal)
+  var bodyColor = pOnSkateboard ? '#44ddaa' : '#55cc88';
+
+  ctx.save();
+  if (pFacing < 0) {
+    ctx.translate(dx + PLAYER_W, 0);
+    ctx.scale(-1, 1);
+    dx = 0;
+  }
+
+  // Skateboard
+  if (pOnSkateboard) {
+    ctx.fillStyle = '#cc8833';
+    ctx.fillRect(pFacing < 0 ? dx - 3 : dx - 3, dy + PLAYER_H - 2, PLAYER_W + 6, 3);
+    ctx.fillStyle = '#333';
+    ctx.beginPath();
+    ctx.arc((pFacing < 0 ? dx : dx) + 2, dy + PLAYER_H + 2, 2, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.beginPath();
+    ctx.arc((pFacing < 0 ? dx : dx) + PLAYER_W - 2, dy + PLAYER_H + 2, 2, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  // Legs
+  var legOff = pOnGround ? Math.sin(pAnimFrame * 1.5) * 3 : 0;
+  ctx.fillStyle = bodyColor;
+  if (pDucking) {
+    ctx.fillRect(dx + 2, dy + PLAYER_H - 6, 4, 4);
+    ctx.fillRect(dx + 8, dy + PLAYER_H - 6, 4, 4);
+  } else {
+    ctx.fillRect(dx + 2, dy + PLAYER_H - 6, 4, 6 + legOff);
+    ctx.fillRect(dx + 8, dy + PLAYER_H - 6, 4, 6 - legOff);
+  }
+
+  // Body
+  var bodyY = pDucking ? dy + 6 : dy + 2;
+  var bodyH = pDucking ? PLAYER_H - 10 : PLAYER_H - 8;
+  ctx.fillStyle = bodyColor;
+  ctx.beginPath();
+  ctx.arc(dx + PLAYER_W / 2, bodyY + bodyH / 2, PLAYER_W / 2 + 1, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Grass skirt
+  ctx.fillStyle = '#228822';
+  ctx.fillRect(dx, dy + PLAYER_H - 9, PLAYER_W, 4);
+  for (var i = 0; i < 4; i++) {
+    ctx.fillRect(dx + i * 4, dy + PLAYER_H - 6, 2, 3);
+  }
+
+  // Head
+  ctx.fillStyle = bodyColor;
+  ctx.beginPath();
+  ctx.arc(dx + PLAYER_W / 2, dy + 5, 6, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Leaf hat
+  ctx.fillStyle = '#33aa33';
+  ctx.beginPath();
+  ctx.moveTo(dx + 2, dy + 3);
+  ctx.lineTo(dx + PLAYER_W / 2, dy - 5);
+  ctx.lineTo(dx + PLAYER_W - 2, dy + 3);
+  ctx.fill();
+  ctx.fillStyle = '#44cc44';
+  ctx.beginPath();
+  ctx.moveTo(dx + 4, dy + 2);
+  ctx.lineTo(dx + PLAYER_W / 2, dy - 3);
+  ctx.lineTo(dx + PLAYER_W - 4, dy + 2);
+  ctx.fill();
+
+  // Eyes
+  ctx.fillStyle = '#ffffff';
+  ctx.fillRect(dx + 4, dy + 3, 3, 3);
+  ctx.fillRect(dx + 9, dy + 3, 3, 3);
+  ctx.fillStyle = '#000';
+  ctx.fillRect(dx + 5, dy + 4, 2, 2);
+  ctx.fillRect(dx + 10, dy + 4, 2, 2);
+
+  // Mouth
+  if (pEnergy < 25) {
+    // Panicked open mouth
+    ctx.fillStyle = '#000';
+    ctx.beginPath();
+    ctx.arc(dx + PLAYER_W / 2, dy + 9, 2, 0, Math.PI * 2);
+    ctx.fill();
+  } else {
+    ctx.fillStyle = '#000';
+    ctx.fillRect(dx + 5, dy + 8, 4, 1);
+  }
+
+  ctx.restore();
+}
+
+function drawProjectiles() {
+  for (var i = 0; i < projectiles.length; i++) {
+    var p = projectiles[i];
+    if (!p.alive) continue;
+
+    var rot = p.timer * 10;
+    ctx.save();
+    ctx.translate(p.x, p.y);
+    ctx.rotate(rot);
+
+    if (p.type === 'axe') {
+      ctx.fillStyle = '#8B4513';
+      ctx.fillRect(-3, -1, 6, 2);
+      ctx.fillStyle = '#aaaaaa';
+      ctx.fillRect(-4, -4, 4, 4);
+    } else if (p.type === 'boomerang') {
+      ctx.fillStyle = '#ddaa33';
+      ctx.fillRect(-5, -1, 10, 2);
+      ctx.fillRect(-1, -5, 2, 10);
+    } else if (p.type === 'fire') {
+      ctx.fillStyle = '#ff6600';
+      ctx.beginPath();
+      ctx.arc(0, 0, 4, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = '#ffdd00';
+      ctx.beginPath();
+      ctx.arc(0, 0, 2, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    ctx.restore();
+  }
+}
+
+function drawGoal() {
+  if (goalX < camX - 20 || goalX > camX + GW + 20) return;
+
+  // Flagpole
+  ctx.fillStyle = '#8B4513';
+  ctx.fillRect(goalX, GROUND_Y - 50, 4, 50);
+  // Flag
+  var wave = Math.sin(frame * 0.1) * 3;
+  ctx.fillStyle = '#ff4444';
+  ctx.beginPath();
+  ctx.moveTo(goalX + 4, GROUND_Y - 50);
+  ctx.lineTo(goalX + 24 + wave, GROUND_Y - 42);
+  ctx.lineTo(goalX + 4, GROUND_Y - 34);
+  ctx.fill();
+  // GOAL text
+  ctx.fillStyle = '#ffdd44';
+  ctx.font = 'bold 8px monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText('GOAL', goalX + 2, GROUND_Y - 54);
+}
+
+function drawHUD() {
+  // Top bar
+  var barH = 24;
+  ctx.fillStyle = 'rgba(10,5,20,0.75)';
+  ctx.fillRect(0, 0, GW, barH);
+
+  ctx.font = 'bold 9px monospace';
+
+  // Score
+  ctx.fillStyle = '#ffdd44';
+  ctx.textAlign = 'left';
+  ctx.fillText('SCORE: ' + score, 4, 14);
+
+  // World-Stage
+  ctx.fillStyle = '#88ccff';
+  ctx.textAlign = 'center';
+  ctx.fillText('W' + world + '-' + stage, GW / 2, 14);
+
+  // Lives
+  ctx.fillStyle = '#44dd88';
+  ctx.textAlign = 'right';
+  for (var i = 0; i < lives; i++) {
+    ctx.beginPath();
+    ctx.arc(GW - 8 - i * 14, 12, 5, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  // Weapon indicator
+  ctx.textAlign = 'left';
+  var weaponColors = { axe: '#aaaaaa', boomerang: '#ddaa33', fire: '#ff6600' };
+  ctx.fillStyle = weaponColors[pWeapon] || '#fff';
+  ctx.fillText(pWeapon.toUpperCase(), 4, barH + 12);
+
+  // Skateboard indicator
+  if (pOnSkateboard) {
+    ctx.fillStyle = '#cc8833';
+    ctx.fillText('BOARD', 70, barH + 12);
+  }
+
+  // Energy bar
+  var ebX = GW - 140, ebY = 3, ebW = 90, ebH = 8;
+  ctx.fillStyle = '#222';
+  ctx.fillRect(ebX, ebY, ebW, ebH);
+
+  var energyPct = pEnergy / pMaxEnergy;
+  var eColor = energyPct > 0.5 ? '#44ff44' : energyPct > 0.25 ? '#ffaa00' : '#ff3333';
+  ctx.fillStyle = eColor;
+  ctx.fillRect(ebX, ebY, ebW * energyPct, ebH);
+
+  // Energy border
+  ctx.strokeStyle = '#666';
+  ctx.lineWidth = 1;
+  ctx.strokeRect(ebX, ebY, ebW, ebH);
+
+  // Label
+  ctx.fillStyle = '#fff';
+  ctx.font = 'bold 7px monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText('VITALITY', ebX + ebW / 2, ebY + ebH + 9);
+
+  // Energy warning flash
+  if (pEnergy < 25 && frame % 20 < 10) {
+    ctx.fillStyle = 'rgba(255,0,0,0.15)';
+    ctx.fillRect(0, 0, GW, GH);
+  }
+
+  // High score
+  ctx.fillStyle = '#888';
+  ctx.font = '7px monospace';
+  ctx.textAlign = 'right';
+  ctx.fillText('HI: ' + highScore, GW - 4, barH + 12);
+}
+
+// === START ===
+TAS.loop.start(update, draw);
+
+})();
+</script>
+</body>
+</html>

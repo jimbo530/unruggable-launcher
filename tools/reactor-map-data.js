@@ -72,7 +72,8 @@ async function getSymbol(addr) {
     const s = await c.symbol();
     symCache[k] = s;
     return s;
-  } catch {
+  } catch (e) {
+    console.warn('[reactor-map] symbol lookup:', addr?.slice(0, 10), e.message || e);
     return addr.slice(0, 6) + "..." + addr.slice(-4);
   }
 }
@@ -147,7 +148,7 @@ async function readReactor(addr, attempt = 1) {
     if (upstream && upstream !== ethers.ZeroAddress) {
       info.upstream = upstream;
     }
-  } catch {}
+  } catch (e) { console.warn('[reactor-map] upstream read:', e.message || e); }
 
   // Read pool tags (batched)
   const readCount = Math.min(info.pools, 8);
@@ -270,7 +271,7 @@ async function main() {
         return;
       }
     } catch (e) {
-      // Not JSON — treat as full rebuild signal
+      console.warn('reactor-map-data: trigger data not JSON, doing full rebuild:', e.message || e);
     }
 
     console.log(`[${ts()}] Full rebuild triggered`);

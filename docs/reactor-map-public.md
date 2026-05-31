@@ -18,7 +18,7 @@
   - EB/MfT
 - Receives fuel from: EGP, CHAR, BURGERS, AZUSD, WALL, BBT, EBT
 
-## MycoPad Reactor (launch hub)
+## Unrugable Hub Reactor (launch hub)
 - Address: 0xF5B9Fc40080aAcC262f078eCE374A2268dcdb045
 - Token: MfT
 - 5 pools
@@ -28,7 +28,7 @@
 - Address: 0xC28e64551816535d9ef06CE95844F2b5317353bA
 - 10 pools
 - Receives fuel from: BB v5, EB v5
-- Feeds: MycoPad
+- Feeds: Unrugable Hub
 
 ## Chain Reactors (feed V1 Prime)
 
@@ -95,7 +95,7 @@
 - 4 pools
 - Feeds: BB v5
 
-## Launched Token Reactors (feed MycoPad)
+## Launched Token Reactors (feed Unrugable Hub)
 
 ### MTEST (first V4 launch)
 - Reactor: 0xAb2d...
@@ -119,7 +119,7 @@
 ## Flow
 ```
 ecowealth -> BB v5 ─┐
-                     ├─> EB relay -> MycoPad
+                     ├─> EB relay -> Unrugable Hub
              EB v5 ─┘
 
 CHAR ────┐
@@ -129,7 +129,7 @@ AZUSD ───┤
   ^      │
   TGN ───┘
 
-Launched tokens -> MycoPad -> (fuel accumulates)
+Launched tokens -> Unrugable Hub -> (fuel accumulates)
 
 EARTH (standalone, own VPS keeper)
 ```

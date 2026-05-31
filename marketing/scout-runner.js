@@ -38,7 +38,14 @@ const ERC20_ABI = [
   "function balanceOf(address) view returns (uint256)",
 ];
 
-const NOTE = "MfT: Forever-locked, growing liquidity. Launch tokens with permanent LP at memefortrees.com/unrugable";
+const NOTE = [
+  "MfT|0x8FB87d13B40B1A67B22ED1a17e2835fe7e3a9bA3|BASE",
+  "POOP|0x126555aecBAC290b25644e4b7f29c016aE95f4dc|BASE",
+  "35+ reactors 2hr cycles 180+ V3 pools execute()=0x61461954 permissionless",
+  "Baselings: on-chain pets earning yield 24/7|Gardens: POOP->LP locked forever",
+  "Factory:0xF0c1B3d6Bc0B4dEd2DDF81374feEA8a2c536bD51 $5->8 LPs+reactor+burn",
+  "5 renounced immutable reactors|400+ holders|Docs: tasern.quest/llms.txt",
+].join("\\n");
 const DROP_AMOUNT = 100;
 const MAX_PER_CYCLE = 50;
 const MIN_ETH = 0.0003;
@@ -99,8 +106,21 @@ async function runDrops() {
   const dropLog = loadDropLog();
 
   // Get uncontacted hot+warm targets
+  // Exclude contracts, routers, burn addresses — sync with holder-scan.js
+  const EXCLUDE = new Set([
+    "0xe2a4a8b9d77080c57799a94ba8edeb2dd6e0ac10", "0x0780b1456d5e60cf26c8cd6541b85e805c8c05f2",
+    "0x8f079761078bdf2c8143b431857046586fc26f3a", "0x3fc91a3afd70395cd496c647d5a6cc9d4b2b7fad",
+    "0x2626664c2603336e57b271c5c0b26f421741e481", "0xbe6d8f0d05cc4be24d5167a3ef062215be6d18a5",
+    "0x03a520b32c04bf3beef7beb72e919cf822ed34f1", "0xed3ae91b2bb22307c07438eeeba2500c18eabcfe",
+    "0xfdb309f2a7055e2dd8221f9eb27655f11d2d43be", "0x513d2eb33f1a7ec3798cc221ab4b4ce2a3fafb98",
+    "0x20a14d6a1ab57851a58d4a85c0fc06f23a7aea42", "0xd8af1b75c81ec5fc66d0f3f75c6d86fccf379281",
+    "0xc2edd32dc7b3f07ccaf9b8df72d011c66c78f95f", "0xfd780b0ae569e15e514b819ecfdf46f804953a4b",
+    "0xc28e64551816535d9ef06ce95844f2b5317353ba", "0x84fb78ac1e60d33de602caf004eb5626cd2420be",
+    "0xe693dd02bb1ba0850a1a153a03b99531004096b1", "0x2e06eb264db2c7bcd8b9a216827b7d0ef3beaca2",
+    "0x0000000000000000000000000000000000000000", "0x000000000000000000000000000000000000dead",
+  ]);
   const candidates = Object.values(targets.wallets)
-    .filter(w => !w.contacted && (w.tier === "hot" || w.tier === "warm"))
+    .filter(w => !w.contacted && !EXCLUDE.has(w.address.toLowerCase()) && (w.tier === "hot" || w.tier === "warm"))
     .sort((a, b) => b.score - a.score)
     .slice(0, MAX_PER_CYCLE);
 

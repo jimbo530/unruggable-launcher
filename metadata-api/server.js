@@ -2,6 +2,8 @@
 // Stores token images and metadata for the launchpad gallery.
 // Deploy on VPS: node server.js (runs on port 3456)
 
+try { require("dotenv").config(); } catch (e) { /* dotenv optional */ }
+
 const http = require("http");
 const fs = require("fs");
 const path = require("path");
@@ -11,7 +13,7 @@ const PORT = 3456;
 const DATA_DIR = path.join(__dirname, "data");
 const IMG_DIR = path.join(DATA_DIR, "images");
 const BASE_RPC = "https://mainnet.base.org";
-const BASE_URL = "https://tasern.quest/api/unruggable";
+const BASE_URL = "https://tasern.quest/api/unrugable";
 const LAUNCHER_URL = "https://tasern.quest/launcher/unrugable.html";
 
 const SUPABASE_URL = process.env.SUPABASE_URL || "https://hhniimufxjjgmessjtbc.supabase.co";
@@ -53,6 +55,9 @@ const OLD_FACTORIES = [
 const NEW_FACTORIES = [
   "0x51eF41E0730c0e607950421e1EE113b089867d3e",  // V4.3
   "0xF0c1B3d6Bc0B4dEd2DDF81374feEA8a2c536bD51",  // V5.2
+  "0x65F8227f37932e1aF1771398DFA76B4079fbDb21",  // V5.3
+  "0xb1fE1deeA42F85F124E7cB166B2f52a1D7f1d054",  // V5.4
+  "0x9FCE6fF019570dC09678C6Fcd513bDF5cf766fC9",  // V5.5
 ];
 const OLD_FACTORY_ABI = [
   "function launchCount() view returns (uint256)",
@@ -75,10 +80,24 @@ const ERC20_ABI = [
   "function totalSupply() view returns (uint256)",
   "function decimals() view returns (uint8)",
 ];
+const ADOPTION_ADDR = "0x013a1091108D50eF5F9cC3FDa38f9b2BA4D3F81d";
+const ADOPTION_ABI = [
+  "function adoptionCount() view returns (uint256)",
+  "function adopterOf(address token) view returns (address)",
+  "function reactorOf(address token) view returns (address)",
+];
+function getAdoption() {
+  return new ethers.Contract(ADOPTION_ADDR, ADOPTION_ABI, getProvider());
+}
 
 let _provider;
+let _providerCreated = 0;
 function getProvider() {
-  if (!_provider) _provider = new ethers.JsonRpcProvider(BASE_RPC);
+  // Recreate provider every 5 minutes to avoid stale connections
+  if (!_provider || Date.now() - _providerCreated > 300000) {
+    _provider = new ethers.JsonRpcProvider(BASE_RPC);
+    _providerCreated = Date.now();
+  }
   return _provider;
 }
 function getFactory(addr) {
@@ -133,7 +152,7 @@ function toEIP7572(meta) {
   return {
     name: meta.name || "Unknown Token",
     symbol: meta.symbol || "???",
-    description: meta.description || (meta.name || meta.symbol || "Token") + " — launched on MfT Unruggable Launcher. Liquidity locked forever.",
+    description: meta.description || (meta.name || meta.symbol || "Token") + " — launched on MfT Unrugable Launcher. Liquidity locked forever.",
     image: imgPath || meta.image || null,
     external_link: LAUNCHER_URL,
     decimals: 18,
@@ -283,6 +302,133 @@ async function refreshReactorCards() {
 setTimeout(refreshReactorCards, 10000);
 setInterval(refreshReactorCards, 30 * 60 * 1000);
 
+// ── Auto-listing: Trust Wallet PR on new token launch ───────────────────────
+const GITHUB_TOKEN = process.env.GITHUB_TOKEN || "";
+const TRUSTWALLET_REPO = "trustwallet/assets";
+const TW_CHAIN_DIR = "blockchains/base/assets";
+
+function githubApi(method, endpoint, body) {
+  return new Promise((resolve, reject) => {
+    if (!GITHUB_TOKEN) return resolve({ status: 0, data: "no token" });
+    const data = body ? JSON.stringify(body) : null;
+    const opts = {
+      hostname: "api.github.com",
+      path: endpoint,
+      method,
+      headers: {
+        "User-Agent": "UnrugableLauncher/1.0",
+        Authorization: "Bearer " + GITHUB_TOKEN,
+        Accept: "application/vnd.github.v3+json",
+        ...(data ? { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(data) } : {}),
+      },
+    };
+    const req = require("https").request(opts, (res) => {
+      const chunks = [];
+      res.on("data", c => chunks.push(c));
+      res.on("end", () => {
+        const r = Buffer.concat(chunks).toString();
+        try { resolve({ status: res.statusCode, data: JSON.parse(r) }); }
+        catch { resolve({ status: res.statusCode, data: r }); }
+      });
+    });
+    req.on("error", reject);
+    if (data) req.write(data);
+    req.end();
+  });
+}
+
+async function autoListToken(addr, meta) {
+  if (!GITHUB_TOKEN) {
+    console.log("[AutoList] No GITHUB_TOKEN — skipping Trust Wallet PR for", meta.symbol);
+    return;
+  }
+
+  const checksumAddr = ethers.getAddress(addr);
+  console.log("[AutoList] Starting auto-list for", meta.symbol, checksumAddr);
+
+  // Check if logo exists
+  if (!hasImage(addr)) {
+    console.log("[AutoList] No logo — skipping Trust Wallet PR");
+    return;
+  }
+
+  try {
+    // Get GitHub user
+    const userRes = await githubApi("GET", "/user");
+    if (userRes.status !== 200) { console.log("[AutoList] Bad GitHub token"); return; }
+    const username = userRes.data.login;
+
+    // Fork (idempotent)
+    await githubApi("POST", "/repos/" + TRUSTWALLET_REPO + "/forks", {});
+    await new Promise(r => setTimeout(r, 3000));
+
+    // Get default branch SHA
+    const refRes = await githubApi("GET", "/repos/" + username + "/assets/git/ref/heads/master");
+    if (refRes.status !== 200) { console.log("[AutoList] Cannot get fork ref"); return; }
+    const baseSha = refRes.data.object.sha;
+
+    // Create branch
+    const branchName = "add-" + meta.symbol.toLowerCase().replace(/[^a-z0-9]/g, "") + "-base-" + Date.now();
+    const branchRes = await githubApi("POST", "/repos/" + username + "/assets/git/refs", {
+      ref: "refs/heads/" + branchName, sha: baseSha,
+    });
+    if (branchRes.status !== 201) { console.log("[AutoList] Cannot create branch"); return; }
+
+    // Read logo file and upload
+    let logoB64 = null;
+    for (const ext of ["png", "jpg", "jpeg", "gif", "webp"]) {
+      const p = getImgPath(addr, ext);
+      if (fs.existsSync(p)) {
+        logoB64 = fs.readFileSync(p).toString("base64");
+        break;
+      }
+    }
+    if (!logoB64) { console.log("[AutoList] Logo file disappeared"); return; }
+
+    const logoPath = TW_CHAIN_DIR + "/" + checksumAddr + "/logo.png";
+    const upRes = await githubApi("PUT", "/repos/" + username + "/assets/contents/" + logoPath, {
+      message: "Add " + meta.symbol + " logo on Base",
+      content: logoB64,
+      branch: branchName,
+    });
+    if (upRes.status !== 201) { console.log("[AutoList] Logo upload failed:", upRes.status); return; }
+
+    // Upload info.json
+    const info = {
+      name: meta.name, symbol: meta.symbol, type: "ERC20", decimals: 18,
+      description: meta.description || (meta.name + " on Unrugable Launcher. Liquidity locked forever."),
+      website: "https://tasern.quest",
+      explorer: "https://basescan.org/token/" + checksumAddr,
+      status: "active", id: checksumAddr,
+      links: [
+        { name: "twitter", url: "https://x.com/memefortrees" },
+        { name: "website", url: "https://tasern.quest" },
+      ],
+    };
+    await githubApi("PUT", "/repos/" + username + "/assets/contents/" + TW_CHAIN_DIR + "/" + checksumAddr + "/info.json", {
+      message: "Add " + meta.symbol + " info on Base",
+      content: Buffer.from(JSON.stringify(info, null, 2)).toString("base64"),
+      branch: branchName,
+    });
+
+    // Create PR
+    const prRes = await githubApi("POST", "/repos/" + TRUSTWALLET_REPO + "/pulls", {
+      title: "Add " + meta.symbol + " (" + meta.name + ") on Base",
+      body: "- Contract: `" + checksumAddr + "`\n- [BaseScan](https://basescan.org/token/" + checksumAddr + ")\n- Liquidity permanently locked via Unrugable Launcher\n",
+      head: username + ":" + branchName,
+      base: "master",
+    });
+
+    if (prRes.status === 201) {
+      console.log("[AutoList] Trust Wallet PR created:", prRes.data.html_url);
+    } else {
+      console.log("[AutoList] PR failed:", prRes.status);
+    }
+  } catch (e) {
+    console.error("[AutoList] Error:", e.message);
+  }
+}
+
 // ── HTTP Server ─────────────────────────────────────────────────────────────
 const server = http.createServer(async (req, res) => {
   cors(res);
@@ -395,6 +541,9 @@ const server = http.createServer(async (req, res) => {
         saveToSupabase(addr, body);
       }
 
+      // Fire auto-listing in background (non-blocking)
+      autoListToken(addr, meta).catch(e => console.error("Auto-list error:", e.message));
+
       return json(res, 200, { ok: true, metadata: toEIP7572(meta) });
     } catch (e) {
       console.error("POST /metadata error:", e.message);
@@ -418,34 +567,27 @@ const server = http.createServer(async (req, res) => {
     }
   }
 
-  // GET /factory — factory info + recent launches (for agents)
+  // GET /factory — factory info + recent launches (from local metadata)
   if (req.method === "GET" && parts[0] === "factory") {
     try {
       const latestFactory = NEW_FACTORIES[NEW_FACTORIES.length - 1];
-      const factory = getFactory(latestFactory);
-      const [launchCount, minSeed, upstream] = await Promise.all([
-        factory.launchCount(),
-        factory.minSeed(),
-        factory.upstreamReactor(),
-      ]);
-      const total = Number(launchCount);
-      const count = Math.min(total, 10);
-      const launches = [];
-      for (let i = total - 1; i >= total - count; i--) {
-        const l = await factory.launches(i);
-        launches.push({
-          token: l.token, reactor: l.reactor, charReactor: l.charReactor, launcher: l.launcher,
-          supply: ethers.formatUnits(l.supply, 18),
-          seedUSDC: (Number(l.seed) / 1e6).toFixed(2),
-          date: new Date(Number(l.timestamp) * 1000).toISOString(),
-        });
-      }
+      // Read from local metadata files (reliable, no RPC needed)
+      const files = fs.readdirSync(DATA_DIR).filter(f => f.endsWith(".json"));
+      const allTokens = files.map(f => {
+        try { return JSON.parse(fs.readFileSync(path.join(DATA_DIR, f), "utf8")); } catch { return null; }
+      }).filter(Boolean).sort((a, b) => new Date(b.created || 0) - new Date(a.created || 0));
+      const launches = allTokens.slice(0, 10).map(t => ({
+        token: t.address, reactor: t.reactor || null, charReactor: t.charReactor || null,
+        launcher: t.grower || null, supply: t.supply || null,
+        seedUSDC: t.seed ? Number(t.seed).toFixed(2) : null,
+        date: t.created || null,
+      }));
       return json(res, 200, {
         factory: latestFactory,
         chain: "Base (8453)",
-        launchCount: total,
-        minSeedUSDC: (Number(minSeed) / 1e6).toFixed(2),
-        upstreamReactor: upstream,
+        launchCount: allTokens.length,
+        minSeedUSDC: "5.00",
+        upstreamReactor: "0xF5B9Fc40080aAcC262f078eCE374A2268dcdb045",
         recentLaunches: launches,
         launchUrl: LAUNCHER_URL,
       });
@@ -488,6 +630,51 @@ const server = http.createServer(async (req, res) => {
     return json(res, 404, { error: "no leaderboard data yet" });
   }
 
+  // GET /tokenlist.json — Uniswap Token List standard (EIP-2678)
+  // Aggregators, wallets, and portfolio trackers pull from this format
+  if (req.method === "GET" && (parts[0] === "tokenlist.json" || parts[0] === "tokenlist")) {
+    try {
+      const files = fs.readdirSync(DATA_DIR).filter(f => f.endsWith(".json"));
+      const tokens = [];
+      for (const f of files) {
+        try {
+          const meta = JSON.parse(fs.readFileSync(path.join(DATA_DIR, f), "utf8"));
+          if (!meta.address || !meta.symbol || !meta.name) continue;
+          const addr = meta.address.toLowerCase();
+          const entry = {
+            chainId: 8453,
+            address: ethers.getAddress(addr),
+            name: meta.name,
+            symbol: meta.symbol,
+            decimals: 18,
+          };
+          if (hasImage(addr)) {
+            entry.logoURI = BASE_URL + "/image/" + addr;
+          }
+          tokens.push(entry);
+        } catch (e) { /* skip malformed */ }
+      }
+      // Version bumps on each request based on token count
+      const ver = { major: 1, minor: Math.floor(tokens.length / 10), patch: tokens.length % 10 };
+      const list = {
+        name: "Unrugable Tokens",
+        timestamp: new Date().toISOString(),
+        version: ver,
+        logoURI: "https://tasern.quest/launcher/og-launcher.png",
+        keywords: ["unrugable", "mft", "base", "reactor"],
+        tags: {
+          launched: { name: "Launched", description: "Tokens launched via Unrugable Launcher" },
+          adopted: { name: "Adopted", description: "Tokens adopted into the reactor network" },
+        },
+        tokens,
+      };
+      return json(res, 200, list);
+    } catch (e) {
+      console.error("GET /tokenlist.json error:", e.message);
+      return json(res, 500, { error: "internal error" });
+    }
+  }
+
   // GET /openapi.json
   if (req.method === "GET" && (parts[0] === "openapi.json" || (parts[0] === "openapi" && parts[1] === "json"))) {
     const specPath = path.join(__dirname, "openapi.json");
@@ -505,13 +692,13 @@ const server = http.createServer(async (req, res) => {
     const addr = parts[1].toLowerCase();
     if (!/^0x[0-9a-f]{40}$/.test(addr)) return json(res, 400, { error: "invalid address" });
     const metaPath = getMetaPath(addr);
-    let title = "MfT Unruggable Launcher";
-    let desc = "Launch an unruggable token. Liquidity locked forever.";
+    let title = "MfT Unrugable Launcher";
+    let desc = "Launch an unrugable token. Liquidity locked forever.";
     let image = "https://tasern.quest/launcher/og-launcher.png";
     let redirect = LAUNCHER_URL;
     if (fs.existsSync(metaPath)) {
       const meta = JSON.parse(fs.readFileSync(metaPath, "utf8"));
-      title = (meta.name || meta.symbol || "Token") + " on MfT Unruggable Launcher";
+      title = (meta.name || meta.symbol || "Token") + " on MfT Unrugable Launcher";
       desc = (meta.description || meta.symbol + " launched on MfT.") + " Liquidity locked forever. Join the network!";
       if (meta.image) image = BASE_URL + meta.image;
       if (meta.reactor) redirect = LAUNCHER_URL + "?ref=" + meta.reactor;
@@ -536,13 +723,47 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // GET /adoption — adoption contract info, or /adoption/{tokenAddr} for specific token
+  if (req.method === "GET" && parts[0] === "adoption") {
+    try {
+      const adoption = getAdoption();
+      if (parts[1] && parts[1].startsWith("0x")) {
+        const tokenAddr = parts[1];
+        const [adopter, reactor] = await Promise.all([
+          adoption.adopterOf(tokenAddr),
+          adoption.reactorOf(tokenAddr),
+        ]);
+        const isAdopted = adopter !== ethers.ZeroAddress;
+        return json(res, 200, {
+          token: tokenAddr,
+          isAdopted,
+          adopter: isAdopted ? adopter : null,
+          reactor: isAdopted ? reactor : null,
+          adoptUrl: LAUNCHER_URL.replace("unrugable.html", "adopt.html"),
+        });
+      }
+      const count = Number(await adoption.adoptionCount());
+      return json(res, 200, {
+        contract: ADOPTION_ADDR,
+        chain: "Base (8453)",
+        adoptionCount: count,
+        fee: "$5 USDC",
+        description: "Adopt any existing token into the Unrugable reactor network. Creates permanent locked liquidity and automated buy-back reactor.",
+        adoptUrl: LAUNCHER_URL.replace("unrugable.html", "adopt.html"),
+      });
+    } catch (e) {
+      console.error("GET /adoption error:", e.message);
+      return json(res, 500, { error: "internal error" });
+    }
+  }
+
   // GET /tokenomics
   if (req.method === "GET" && parts[0] === "tokenomics") {
     return json(res, 200, {
-      network: "Unruggable Launcher",
+      network: "Unrugable Launcher",
       chain: "Base (8453)",
       factory: NEW_FACTORIES[NEW_FACTORIES.length - 1],
-      description: "Every token launched creates permanently locked liquidity paired against MfT, BB, and EB.",
+      description: "Every token launched creates permanently locked liquidity paired against MfT, cbBTC, WETH, and AZUSD.",
       links: {
         launcher: LAUNCHER_URL,
         reactorDashboard: "https://tasern.quest/launcher/reactor-dashboard.html",
@@ -552,6 +773,15 @@ const server = http.createServer(async (req, res) => {
   }
 
   json(res, 404, { error: "not found" });
+});
+
+// ── Global error handlers — prevent unhandled rejections from crashing PM2 ──
+process.on("unhandledRejection", (reason) => {
+  console.error(`[${new Date().toISOString()}] Unhandled rejection:`, reason?.message || reason);
+});
+process.on("uncaughtException", (err) => {
+  console.error(`[${new Date().toISOString()}] Uncaught exception:`, err?.message || err);
+  process.exit(1);
 });
 
 server.listen(PORT, () => {

@@ -1,0 +1,1643 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>LP Lemmings</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body { width: 100%; height: 100%; overflow: hidden; background: #111; touch-action: none; }
+canvas { display: block; margin: 0 auto; }
+#back-link {
+  position: fixed; bottom: 8px; left: 50%; transform: translateX(-50%);
+  color: #666; font-family: monospace; font-size: 12px; text-decoration: none; z-index: 10;
+}
+#back-link:hover { color: #aaa; }
+</style>
+</head>
+<body>
+<canvas id="gc"></canvas>
+<a id="back-link" href="/games">Back to Arcade</a>
+<script src="nft-loader.js"></script>
+<script>if(window.NftLoader)NftLoader.gate();</script>
+<script>
+(function() {
+"use strict";
+
+// ============================================================
+// CONSTANTS
+// ============================================================
+const WORLD_W = 320;
+const WORLD_H = 200;
+const PIXEL_SCALE = 2;
+
+// Terrain types
+const T_AIR = 0;
+const T_DIRT = 1;
+const T_GRASS = 2;
+const T_STONE = 3;
+const T_WATER = 4;
+const T_LAVA = 5;
+const T_EXIT = 6;
+const T_ENTRANCE = 7;
+
+// Jobs
+const JOB_NONE = 0;
+const JOB_BLOCKER = 1;
+const JOB_DIGGER = 2;
+const JOB_BASHER = 3;
+const JOB_BUILDER = 4;
+const JOB_CLIMBER = 5;
+const JOB_FLOATER = 6;
+const JOB_BOMBER = 7;
+
+const JOB_NAMES = ['Walk', 'Blocker', 'Digger', 'Basher', 'Builder', 'Climber', 'Floater', 'Bomber'];
+const JOB_COLORS = ['#44ee66', '#ee3333', '#996633', '#ff8800', '#ffdd00', '#33aaff', '#ffffff', '#ff00ff'];
+
+// Baseling dimensions
+const BAS_W = 4;
+const BAS_H = 8;
+
+// Physics
+const GRAVITY = 0.15;
+const WALK_SPEED = 0.5;
+const FALL_DEATH = 60;
+const MAX_BUILDERS_STEPS = 12;
+const DIG_RATE = 2;
+const BASH_RATE = 2;
+const BOMBER_FUSE = 300; // frames (5s at 60fps)
+
+// ============================================================
+// CANVAS SETUP
+// ============================================================
+const canvas = document.getElementById('gc');
+const ctx = canvas.getContext('2d');
+let W, H, SCALE, OFFSET_X, OFFSET_Y;
+
+function resize() {
+  const dpr = window.devicePixelRatio || 1;
+  const sw = window.innerWidth;
+  const sh = window.innerHeight - 20;
+  SCALE = Math.min(sw / (WORLD_W * PIXEL_SCALE), sh / ((WORLD_H + 40) * PIXEL_SCALE));
+  W = Math.floor(WORLD_W * PIXEL_SCALE * SCALE);
+  H = Math.floor((WORLD_H + 40) * PIXEL_SCALE * SCALE);
+  OFFSET_X = Math.floor((sw - W) / 2);
+  OFFSET_Y = Math.floor((sh - H) / 2);
+  canvas.width = W * dpr;
+  canvas.height = H * dpr;
+  canvas.style.width = W + 'px';
+  canvas.style.height = H + 'px';
+  canvas.style.marginTop = Math.max(0, OFFSET_Y) + 'px';
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+}
+window.addEventListener('resize', resize);
+resize();
+
+// ============================================================
+// AUDIO ENGINE
+// ============================================================
+let audioCtx = null;
+function ensureAudio() {
+  if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  if (audioCtx.state === 'suspended') audioCtx.resume();
+}
+
+function playTone(freq, dur, type, vol, slide) {
+  if (!audioCtx) return;
+  const osc = audioCtx.createOscillator();
+  const gain = audioCtx.createGain();
+  osc.type = type || 'square';
+  osc.frequency.setValueAtTime(freq, audioCtx.currentTime);
+  if (slide) osc.frequency.linearRampToValueAtTime(slide, audioCtx.currentTime + dur);
+  gain.gain.setValueAtTime(vol || 0.1, audioCtx.currentTime);
+  gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + dur);
+  osc.connect(gain);
+  gain.connect(audioCtx.destination);
+  osc.start();
+  osc.stop(audioCtx.currentTime + dur);
+}
+
+function playNoise(dur, vol) {
+  if (!audioCtx) return;
+  const bufSize = audioCtx.sampleRate * dur;
+  const buf = audioCtx.createBuffer(1, bufSize, audioCtx.sampleRate);
+  const data = buf.getChannelData(0);
+  for (let i = 0; i < bufSize; i++) data[i] = Math.random() * 2 - 1;
+  const src = audioCtx.createBufferSource();
+  src.buffer = buf;
+  const gain = audioCtx.createGain();
+  gain.gain.setValueAtTime(vol || 0.05, audioCtx.currentTime);
+  gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + dur);
+  src.connect(gain);
+  gain.connect(audioCtx.destination);
+  src.start();
+  src.stop(audioCtx.currentTime + dur);
+}
+
+const SFX = {
+  assign() { playTone(880, 0.08, 'square', 0.06); playTone(1100, 0.06, 'square', 0.05); },
+  dig() { playNoise(0.05, 0.06); playTone(150, 0.04, 'triangle', 0.04, 100); },
+  build() { playTone(600, 0.05, 'triangle', 0.05, 800); },
+  splat() { playTone(200, 0.3, 'sawtooth', 0.1, 50); playNoise(0.2, 0.1); },
+  drown() { playTone(300, 0.4, 'sine', 0.08, 100); },
+  explode() { playNoise(0.3, 0.15); playTone(80, 0.4, 'sawtooth', 0.12, 30); },
+  exit() { playTone(523, 0.1, 'square', 0.06); playTone(784, 0.1, 'square', 0.06); playTone(1047, 0.15, 'square', 0.08); },
+  levelWin() {
+    [523, 659, 784, 1047].forEach((n, i) => setTimeout(() => playTone(n, 0.15, 'square', 0.08), i * 120));
+  },
+  levelFail() {
+    [440, 349, 293, 220].forEach((n, i) => setTimeout(() => playTone(n, 0.2, 'sawtooth', 0.08), i * 180));
+  },
+  spawn() { playTone(440, 0.05, 'sine', 0.03, 660); },
+  nuke() { playTone(60, 0.8, 'sawtooth', 0.15, 20); playNoise(0.6, 0.12); }
+};
+
+// ============================================================
+// PARTICLES
+// ============================================================
+let particles = [];
+function spawnParticles(x, y, color, count, speed) {
+  for (let i = 0; i < count; i++) {
+    const angle = Math.random() * Math.PI * 2;
+    const spd = (speed || 1.5) * (0.5 + Math.random());
+    particles.push({ x, y, vx: Math.cos(angle) * spd, vy: Math.sin(angle) * spd - 1, life: 1, color, size: 1 + Math.random() * 2 });
+  }
+}
+
+function updateParticles() {
+  for (let i = particles.length - 1; i >= 0; i--) {
+    const p = particles[i];
+    p.x += p.vx;
+    p.y += p.vy;
+    p.vy += 0.05;
+    p.life -= 0.02;
+    if (p.life <= 0) particles.splice(i, 1);
+  }
+}
+
+function drawParticles() {
+  const s = PIXEL_SCALE * SCALE;
+  for (const p of particles) {
+    ctx.globalAlpha = p.life;
+    ctx.fillStyle = p.color;
+    ctx.fillRect(p.x * s, p.y * s, p.size * s, p.size * s);
+  }
+  ctx.globalAlpha = 1;
+}
+
+// ============================================================
+// TERRAIN
+// ============================================================
+let terrain = [];
+
+function initTerrain() {
+  terrain = [];
+  for (let x = 0; x < WORLD_W; x++) {
+    terrain[x] = new Uint8Array(WORLD_H);
+  }
+}
+
+function getTerrain(x, y) {
+  if (x < 0 || x >= WORLD_W || y < 0 || y >= WORLD_H) return T_STONE;
+  return terrain[x][y];
+}
+
+function setTerrain(x, y, val) {
+  if (x >= 0 && x < WORLD_W && y >= 0 && y < WORLD_H) {
+    terrain[x][y] = val;
+  }
+}
+
+function isSolid(x, y) {
+  const t = getTerrain(x, y);
+  return t === T_DIRT || t === T_GRASS || t === T_STONE;
+}
+
+function isDeadly(x, y) {
+  const t = getTerrain(x, y);
+  return t === T_WATER || t === T_LAVA;
+}
+
+function isDiggable(x, y) {
+  const t = getTerrain(x, y);
+  return t === T_DIRT || t === T_GRASS;
+}
+
+function drawTerrain() {
+  const s = PIXEL_SCALE * SCALE;
+  const imgData = ctx.createImageData(Math.ceil(WORLD_W * s), Math.ceil(WORLD_H * s));
+  const pw = imgData.width;
+  const ph = imgData.height;
+  const data = imgData.data;
+
+  for (let wx = 0; wx < WORLD_W; wx++) {
+    for (let wy = 0; wy < WORLD_H; wy++) {
+      const t = terrain[wx][wy];
+      let r = 0, g = 0, b = 0, a = 0;
+      switch (t) {
+        case T_DIRT: r = 139; g = 90; b = 43; a = 255; break;
+        case T_GRASS: r = 60; g = 180; b = 60; a = 255; break;
+        case T_STONE: r = 100; g = 100; b = 110; a = 255; break;
+        case T_WATER: r = 30; g = 80; b = 200; a = 255; break;
+        case T_LAVA: r = 220; g = 50 + Math.random() * 30; b = 20; a = 255; break;
+        case T_EXIT: r = 0; g = 255; b = 200; a = 180; break;
+        case T_ENTRANCE: r = 255; g = 200; b = 0; a = 180; break;
+        default: r = 17; g = 17; b = 17; a = 255; break;
+      }
+
+      // Add noise to solid terrain
+      if (t === T_DIRT || t === T_STONE) {
+        const noise = (Math.random() - 0.5) * 20;
+        r = Math.max(0, Math.min(255, r + noise));
+        g = Math.max(0, Math.min(255, g + noise));
+        b = Math.max(0, Math.min(255, b + noise));
+      }
+
+      const pxStart = Math.floor(wx * s);
+      const pyStart = Math.floor(wy * s);
+      const pxEnd = Math.floor((wx + 1) * s);
+      const pyEnd = Math.floor((wy + 1) * s);
+
+      for (let px = pxStart; px < pxEnd && px < pw; px++) {
+        for (let py = pyStart; py < pyEnd && py < ph; py++) {
+          const idx = (py * pw + px) * 4;
+          data[idx] = r;
+          data[idx + 1] = g;
+          data[idx + 2] = b;
+          data[idx + 3] = a;
+        }
+      }
+    }
+  }
+  ctx.putImageData(imgData, 0, 0);
+}
+
+// Pre-render terrain to offscreen canvas for performance
+let terrainDirty = true;
+let terrainCanvas = null;
+
+function renderTerrainToBuffer() {
+  if (!terrainCanvas) {
+    terrainCanvas = document.createElement('canvas');
+  }
+  const s = PIXEL_SCALE * SCALE;
+  terrainCanvas.width = Math.ceil(WORLD_W * s);
+  terrainCanvas.height = Math.ceil(WORLD_H * s);
+  const tctx = terrainCanvas.getContext('2d');
+  const imgData = tctx.createImageData(terrainCanvas.width, terrainCanvas.height);
+  const pw = imgData.width;
+  const ph = imgData.height;
+  const data = imgData.data;
+
+  for (let wx = 0; wx < WORLD_W; wx++) {
+    for (let wy = 0; wy < WORLD_H; wy++) {
+      const t = terrain[wx][wy];
+      let r = 17, g = 17, b = 17, a = 255;
+      switch (t) {
+        case T_DIRT: r = 139; g = 90; b = 43; break;
+        case T_GRASS: r = 60; g = 180; b = 60; break;
+        case T_STONE: r = 100; g = 100; b = 110; break;
+        case T_WATER:
+          r = 30; g = 80 + Math.sin(wx * 0.3) * 20; b = 200; break;
+        case T_LAVA:
+          r = 220; g = 50 + Math.sin(wx * 0.5 + wy * 0.3) * 30; b = 20; break;
+        case T_EXIT: r = 0; g = 220; b = 180; break;
+        case T_ENTRANCE: r = 200; g = 180; b = 50; break;
+        default: break;
+      }
+
+      if (t === T_DIRT || t === T_STONE) {
+        const hash = (wx * 7919 + wy * 104729) % 256;
+        const noise = (hash / 256 - 0.5) * 20;
+        r = Math.max(0, Math.min(255, r + noise));
+        g = Math.max(0, Math.min(255, g + noise));
+        b = Math.max(0, Math.min(255, b + noise));
+      }
+
+      const pxStart = Math.floor(wx * s);
+      const pyStart = Math.floor(wy * s);
+      const pxEnd = Math.floor((wx + 1) * s);
+      const pyEnd = Math.floor((wy + 1) * s);
+
+      for (let px = pxStart; px < pxEnd && px < pw; px++) {
+        for (let py = pyStart; py < pyEnd && py < ph; py++) {
+          const idx = (py * pw + px) * 4;
+          data[idx] = r;
+          data[idx + 1] = g;
+          data[idx + 2] = b;
+          data[idx + 3] = a;
+        }
+      }
+    }
+  }
+  tctx.putImageData(imgData, 0, 0);
+  terrainDirty = false;
+}
+
+// ============================================================
+// BASELING (LEMMING) ENTITY
+// ============================================================
+let baselings = [];
+let savedCount = 0;
+let deadCount = 0;
+let selectedBaseling = -1;
+
+function createBaseling(x, y) {
+  return {
+    x: x,
+    y: y,
+    vx: WALK_SPEED,
+    vy: 0,
+    dir: 1, // 1 = right, -1 = left
+    job: JOB_NONE,
+    alive: true,
+    exited: false,
+    falling: false,
+    fallDist: 0,
+    climbing: false,
+    floating: false,
+    permanent: false, // climber/floater are permanent
+    hasFloater: false,
+    hasClimber: false,
+    buildSteps: 0,
+    bomberTimer: -1,
+    animFrame: 0,
+    animTimer: 0
+  };
+}
+
+function updateBaseling(b) {
+  if (!b.alive || b.exited) return;
+
+  b.animTimer++;
+  if (b.animTimer > 8) {
+    b.animTimer = 0;
+    b.animFrame = (b.animFrame + 1) % 2;
+  }
+
+  // Bomber countdown
+  if (b.bomberTimer > 0) {
+    b.bomberTimer--;
+    if (b.bomberTimer <= 0) {
+      explodeBaseling(b);
+      return;
+    }
+  }
+
+  // Check deadly terrain
+  const cx = Math.floor(b.x + BAS_W / 2);
+  const cy = Math.floor(b.y + BAS_H);
+  if (isDeadly(cx, cy) || isDeadly(cx, cy - 1)) {
+    killBaseling(b, getTerrain(cx, cy) === T_LAVA ? '#ff4400' : '#4488ff');
+    if (getTerrain(cx, cy) === T_WATER) SFX.drown();
+    else SFX.splat();
+    return;
+  }
+
+  // Check exit
+  if (getTerrain(cx, Math.floor(b.y + BAS_H / 2)) === T_EXIT) {
+    b.exited = true;
+    savedCount++;
+    SFX.exit();
+    spawnParticles(b.x + BAS_W / 2, b.y + BAS_H / 2, '#00ffcc', 8, 1);
+    return;
+  }
+
+  // Gravity and falling
+  const groundBelow = isSolid(cx, Math.floor(b.y + BAS_H));
+  const groundBelowL = isSolid(Math.floor(b.x), Math.floor(b.y + BAS_H));
+  const onGround = groundBelow || groundBelowL;
+
+  if (!onGround && b.job !== JOB_BUILDER) {
+    if (b.climbing) {
+      b.climbing = false;
+    }
+    b.falling = true;
+    if (b.hasFloater || b.job === JOB_FLOATER) {
+      b.vy = Math.min(b.vy + GRAVITY * 0.2, 0.8);
+      b.floating = true;
+    } else {
+      b.vy = Math.min(b.vy + GRAVITY, 4);
+    }
+    b.y += b.vy;
+    b.fallDist += Math.abs(b.vy);
+
+    // Check if landed
+    const newCy = Math.floor(b.y + BAS_H);
+    if (isSolid(cx, newCy)) {
+      b.y = newCy - BAS_H;
+      if (b.fallDist > FALL_DEATH && !b.floating && !b.hasFloater) {
+        killBaseling(b, '#ff6644');
+        SFX.splat();
+        return;
+      }
+      b.falling = false;
+      b.floating = false;
+      b.fallDist = 0;
+      b.vy = 0;
+    }
+    return;
+  }
+
+  if (onGround && b.falling) {
+    if (b.fallDist > FALL_DEATH && !b.floating && !b.hasFloater) {
+      killBaseling(b, '#ff6644');
+      SFX.splat();
+      return;
+    }
+    b.falling = false;
+    b.floating = false;
+    b.fallDist = 0;
+    b.vy = 0;
+  }
+
+  // Job-specific behavior
+  switch (b.job) {
+    case JOB_BLOCKER:
+      // Just stand still
+      return;
+
+    case JOB_DIGGER:
+      if (b.animTimer === 0) {
+        let dug = false;
+        for (let dx = -1; dx <= BAS_W; dx++) {
+          const tx = Math.floor(b.x) + dx;
+          const ty = Math.floor(b.y + BAS_H);
+          if (isDiggable(tx, ty)) {
+            setTerrain(tx, ty, T_AIR);
+            dug = true;
+            terrainDirty = true;
+          }
+          const ty2 = Math.floor(b.y + BAS_H + 1);
+          if (isDiggable(tx, ty2)) {
+            setTerrain(tx, ty2, T_AIR);
+            dug = true;
+            terrainDirty = true;
+          }
+        }
+        if (dug) {
+          b.y += DIG_RATE;
+          SFX.dig();
+        } else {
+          b.job = JOB_NONE;
+        }
+      }
+      return;
+
+    case JOB_BASHER:
+      if (b.animTimer === 0) {
+        let bashed = false;
+        for (let dy = 0; dy < BAS_H; dy++) {
+          const tx = Math.floor(b.x + (b.dir > 0 ? BAS_W : -1));
+          const ty = Math.floor(b.y) + dy;
+          if (isDiggable(tx, ty)) {
+            setTerrain(tx, ty, T_AIR);
+            bashed = true;
+            terrainDirty = true;
+          }
+          const tx2 = Math.floor(b.x + (b.dir > 0 ? BAS_W + 1 : -2));
+          if (isDiggable(tx2, ty)) {
+            setTerrain(tx2, ty, T_AIR);
+            bashed = true;
+            terrainDirty = true;
+          }
+        }
+        if (bashed) {
+          b.x += b.dir * BASH_RATE;
+          SFX.dig();
+        } else {
+          b.job = JOB_NONE;
+        }
+      }
+      return;
+
+    case JOB_BUILDER:
+      if (b.animTimer === 0 && b.buildSteps < MAX_BUILDERS_STEPS) {
+        const tx = Math.floor(b.x + (b.dir > 0 ? BAS_W : -1));
+        const ty = Math.floor(b.y + BAS_H);
+        // Place a brick
+        for (let dx = 0; dx < 3; dx++) {
+          const bx = Math.floor(b.x) + b.dir * dx;
+          if (getTerrain(bx, ty) === T_AIR) {
+            setTerrain(bx, ty, T_DIRT);
+            terrainDirty = true;
+          }
+        }
+        b.x += b.dir * 2;
+        b.y -= 1;
+        b.buildSteps++;
+        SFX.build();
+
+        // Check if hit a wall
+        const wallCheck = Math.floor(b.x + (b.dir > 0 ? BAS_W : 0));
+        if (isSolid(wallCheck, Math.floor(b.y + BAS_H / 2))) {
+          b.job = JOB_NONE;
+          b.buildSteps = 0;
+        }
+      }
+      if (b.buildSteps >= MAX_BUILDERS_STEPS) {
+        b.job = JOB_NONE;
+        b.buildSteps = 0;
+        b.dir = -b.dir;
+      }
+      return;
+
+    default:
+      break;
+  }
+
+  // Normal walking
+  const nextX = b.x + b.dir * WALK_SPEED;
+  const headY = Math.floor(b.y + 2);
+  const feetY = Math.floor(b.y + BAS_H - 1);
+  const frontX = Math.floor(nextX + (b.dir > 0 ? BAS_W : 0));
+
+  // Check wall ahead
+  if (isSolid(frontX, feetY) || isSolid(frontX, headY)) {
+    // Try to step up (1 pixel)
+    if (!isSolid(frontX, feetY - 1) && !isSolid(frontX, headY - 1)) {
+      b.x = nextX;
+      b.y -= 1;
+    } else if (!isSolid(frontX, feetY - 2) && !isSolid(frontX, headY - 2)) {
+      b.x = nextX;
+      b.y -= 2;
+    } else if (b.hasClimber || b.job === JOB_CLIMBER) {
+      // Climb
+      b.climbing = true;
+      b.y -= WALK_SPEED;
+      const topCheck = Math.floor(b.y);
+      if (!isSolid(frontX, topCheck)) {
+        b.climbing = false;
+        b.x += b.dir * 2;
+        b.y -= 2;
+      }
+    } else {
+      b.dir = -b.dir;
+    }
+  } else {
+    b.x = nextX;
+  }
+
+  // Check for blockers
+  for (let i = 0; i < baselings.length; i++) {
+    const other = baselings[i];
+    if (other === b || !other.alive || other.exited || other.job !== JOB_BLOCKER) continue;
+    if (Math.abs(b.x - other.x) < BAS_W + 1 && Math.abs(b.y - other.y) < BAS_H) {
+      if ((b.dir > 0 && b.x < other.x) || (b.dir < 0 && b.x > other.x)) {
+        b.dir = -b.dir;
+      }
+    }
+  }
+
+  // Boundary check
+  if (b.x < 0) { b.x = 0; b.dir = 1; }
+  if (b.x > WORLD_W - BAS_W) { b.x = WORLD_W - BAS_W; b.dir = -1; }
+  if (b.y > WORLD_H + 20) { killBaseling(b, '#666'); }
+}
+
+function killBaseling(b, color) {
+  b.alive = false;
+  deadCount++;
+  spawnParticles(b.x + BAS_W / 2, b.y + BAS_H / 2, color || '#ff4444', 12, 1.5);
+}
+
+function explodeBaseling(b) {
+  b.alive = false;
+  deadCount++;
+  SFX.explode();
+  // Destroy terrain in radius
+  const cx = Math.floor(b.x + BAS_W / 2);
+  const cy = Math.floor(b.y + BAS_H / 2);
+  const radius = 10;
+  for (let dx = -radius; dx <= radius; dx++) {
+    for (let dy = -radius; dy <= radius; dy++) {
+      if (dx * dx + dy * dy <= radius * radius) {
+        const tx = cx + dx;
+        const ty = cy + dy;
+        if (isDiggable(tx, ty)) {
+          setTerrain(tx, ty, T_AIR);
+        }
+      }
+    }
+  }
+  terrainDirty = true;
+  spawnParticles(cx, cy, '#ff00ff', 25, 3);
+  spawnParticles(cx, cy, '#ffaa00', 15, 2);
+}
+
+function drawBaseling(b) {
+  if (!b.alive || b.exited) return;
+  const s = PIXEL_SCALE * SCALE;
+  const sx = b.x * s;
+  const sy = b.y * s;
+  const pw = s; // pixel width
+
+  // Body color based on job
+  const bodyColor = b.job !== JOB_NONE ? JOB_COLORS[b.job] : '#44ee66';
+  ctx.fillStyle = bodyColor;
+
+  // Body (4x6 lower portion)
+  ctx.fillRect(sx, sy + 2 * pw, BAS_W * pw, 6 * pw);
+
+  // Head (4x2 top)
+  ctx.fillStyle = '#ffcc88';
+  ctx.fillRect(sx, sy + 0 * pw, BAS_W * pw, 2 * pw);
+
+  // Green hair tuft
+  ctx.fillStyle = '#22ff44';
+  ctx.fillRect(sx + pw, sy - pw, 2 * pw, pw);
+  if (b.animFrame === 0) {
+    ctx.fillRect(sx + 2 * pw, sy - 2 * pw, pw, pw);
+  } else {
+    ctx.fillRect(sx + pw, sy - 2 * pw, pw, pw);
+  }
+
+  // Walking animation - legs
+  ctx.fillStyle = '#335533';
+  if (b.job === JOB_BLOCKER) {
+    // Arms out pose
+    ctx.fillRect(sx - pw, sy + 3 * pw, pw, 2 * pw);
+    ctx.fillRect(sx + BAS_W * pw, sy + 3 * pw, pw, 2 * pw);
+  } else if (b.falling || b.floating) {
+    // Spread arms/legs
+    if (b.floating || b.hasFloater) {
+      // Parachute
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(sx - 2 * pw, sy - 3 * pw, (BAS_W + 4) * pw, pw);
+      ctx.fillRect(sx - pw, sy - 2 * pw, (BAS_W + 2) * pw, pw);
+      ctx.fillStyle = '#aaaaaa';
+      ctx.fillRect(sx, sy - pw, pw, pw);
+      ctx.fillRect(sx + (BAS_W - 1) * pw, sy - pw, pw, pw);
+    }
+  } else if (b.climbing) {
+    // Climbing pose
+    ctx.fillRect(sx + (b.dir > 0 ? BAS_W * pw : -pw), sy + 2 * pw, pw, pw);
+    ctx.fillRect(sx + (b.dir > 0 ? BAS_W * pw : -pw), sy + 5 * pw, pw, pw);
+  } else {
+    // Walking legs
+    if (b.animFrame === 0) {
+      ctx.fillRect(sx + pw, sy + BAS_H * pw, pw, pw);
+      ctx.fillRect(sx + 2 * pw, sy + BAS_H * pw, pw, pw);
+    } else {
+      ctx.fillRect(sx, sy + BAS_H * pw, pw, pw);
+      ctx.fillRect(sx + 3 * pw, sy + BAS_H * pw, pw, pw);
+    }
+  }
+
+  // Bomber countdown indicator
+  if (b.bomberTimer > 0) {
+    ctx.fillStyle = '#ff0000';
+    ctx.font = Math.floor(5 * s) + 'px monospace';
+    ctx.fillText(Math.ceil(b.bomberTimer / 60), sx, sy - 3 * pw);
+  }
+
+  // Selection highlight
+  if (selectedBaseling >= 0 && baselings[selectedBaseling] === b) {
+    ctx.strokeStyle = '#ffff00';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(sx - pw, sy - 3 * pw, (BAS_W + 2) * pw, (BAS_H + 4) * pw);
+  }
+}
+
+// ============================================================
+// LEVEL DEFINITIONS
+// ============================================================
+const LEVELS = [
+  // Level 1: Simple drop and walk
+  { name: "First Steps", total: 10, save: 8, rate: 60, entrance: [40, 30], exit: [270, 160],
+    jobs: { blocker: 0, digger: 0, basher: 0, builder: 0, climber: 0, floater: 0, bomber: 0 },
+    build: function() {
+      fillRect(0, 170, 320, 30, T_DIRT);
+      fillRect(0, 168, 320, 2, T_GRASS);
+      fillRect(0, 50, 320, 2, T_GRASS);
+      fillRect(0, 52, 320, 6, T_DIRT);
+    }},
+  // Level 2: Dig down
+  { name: "Dig It", total: 10, save: 8, rate: 50, entrance: [150, 20], exit: [150, 170],
+    jobs: { blocker: 0, digger: 5, basher: 0, builder: 0, climber: 0, floater: 0, bomber: 0 },
+    build: function() {
+      fillRect(0, 180, 320, 20, T_DIRT);
+      fillRect(0, 178, 320, 2, T_GRASS);
+      fillRect(80, 60, 160, 30, T_DIRT);
+      fillRect(80, 58, 160, 2, T_GRASS);
+      fillRect(100, 110, 120, 20, T_DIRT);
+      fillRect(100, 108, 120, 2, T_GRASS);
+    }},
+  // Level 3: Block and redirect
+  { name: "Turn Around", total: 10, save: 7, rate: 50, entrance: [50, 30], exit: [50, 160],
+    jobs: { blocker: 2, digger: 1, basher: 0, builder: 0, climber: 0, floater: 0, bomber: 0 },
+    build: function() {
+      fillRect(0, 170, 320, 30, T_DIRT);
+      fillRect(0, 168, 320, 2, T_GRASS);
+      fillRect(20, 60, 260, 20, T_DIRT);
+      fillRect(20, 58, 260, 2, T_GRASS);
+      // Pit on right
+      fillRect(250, 170, 70, 30, T_WATER);
+    }},
+  // Level 4: Floater intro
+  { name: "Soft Landing", total: 12, save: 9, rate: 45, entrance: [160, 10], exit: [160, 175],
+    jobs: { blocker: 0, digger: 0, basher: 0, builder: 0, climber: 0, floater: 12, bomber: 0 },
+    build: function() {
+      fillRect(0, 185, 320, 15, T_DIRT);
+      fillRect(0, 183, 320, 2, T_GRASS);
+      fillRect(120, 30, 80, 10, T_DIRT);
+      fillRect(120, 28, 80, 2, T_GRASS);
+    }},
+  // Level 5: Builder intro
+  { name: "Bridge the Gap", total: 10, save: 8, rate: 50, entrance: [30, 120], exit: [280, 160],
+    jobs: { blocker: 1, digger: 0, basher: 0, builder: 3, climber: 0, floater: 0, bomber: 0 },
+    build: function() {
+      fillRect(0, 170, 120, 30, T_DIRT);
+      fillRect(0, 168, 120, 2, T_GRASS);
+      fillRect(200, 170, 120, 30, T_DIRT);
+      fillRect(200, 168, 120, 2, T_GRASS);
+      fillRect(120, 185, 80, 15, T_WATER);
+      fillRect(0, 145, 60, 25, T_DIRT);
+      fillRect(0, 143, 60, 2, T_GRASS);
+    }},
+  // Level 6: Basher intro
+  { name: "Through the Wall", total: 15, save: 10, rate: 40, entrance: [30, 60], exit: [280, 160],
+    jobs: { blocker: 1, digger: 1, basher: 3, builder: 0, climber: 0, floater: 0, bomber: 0 },
+    build: function() {
+      fillRect(0, 170, 320, 30, T_DIRT);
+      fillRect(0, 168, 320, 2, T_GRASS);
+      fillRect(0, 80, 100, 20, T_DIRT);
+      fillRect(0, 78, 100, 2, T_GRASS);
+      fillRect(100, 80, 8, 90, T_DIRT);
+      fillRect(180, 80, 8, 90, T_DIRT);
+      fillRect(250, 100, 8, 70, T_DIRT);
+    }},
+  // Level 7: Multi-tool
+  { name: "Combined Arms", total: 15, save: 12, rate: 40, entrance: [20, 20], exit: [290, 170],
+    jobs: { blocker: 2, digger: 2, basher: 2, builder: 2, climber: 0, floater: 2, bomber: 0 },
+    build: function() {
+      fillRect(0, 180, 320, 20, T_DIRT);
+      fillRect(0, 40, 80, 20, T_DIRT);
+      fillRect(0, 38, 80, 2, T_GRASS);
+      fillRect(80, 40, 8, 140, T_DIRT);
+      fillRect(120, 100, 80, 15, T_DIRT);
+      fillRect(120, 98, 80, 2, T_GRASS);
+      fillRect(220, 60, 100, 10, T_DIRT);
+      fillRect(220, 58, 100, 2, T_GRASS);
+      fillRect(220, 70, 8, 110, T_DIRT);
+      fillRect(270, 178, 50, 2, T_GRASS);
+    }},
+  // Level 8: Water hazard
+  { name: "Don't Get Wet", total: 15, save: 11, rate: 40, entrance: [20, 40], exit: [290, 80],
+    jobs: { blocker: 2, digger: 0, basher: 0, builder: 5, climber: 0, floater: 3, bomber: 0 },
+    build: function() {
+      fillRect(0, 60, 60, 15, T_DIRT);
+      fillRect(0, 58, 60, 2, T_GRASS);
+      fillRect(0, 150, 320, 50, T_WATER);
+      fillRect(100, 100, 40, 50, T_DIRT);
+      fillRect(100, 98, 40, 2, T_GRASS);
+      fillRect(200, 80, 40, 70, T_DIRT);
+      fillRect(200, 78, 40, 2, T_GRASS);
+      fillRect(260, 100, 60, 10, T_DIRT);
+      fillRect(260, 98, 60, 2, T_GRASS);
+    }},
+  // Level 9: Climber level
+  { name: "Reach the Top", total: 12, save: 9, rate: 45, entrance: [160, 170], exit: [160, 15],
+    jobs: { blocker: 1, digger: 0, basher: 0, builder: 2, climber: 5, floater: 0, bomber: 0 },
+    build: function() {
+      fillRect(0, 185, 320, 15, T_DIRT);
+      fillRect(0, 183, 320, 2, T_GRASS);
+      fillRect(120, 140, 80, 10, T_DIRT);
+      fillRect(120, 138, 80, 2, T_GRASS);
+      fillRect(100, 90, 15, 60, T_DIRT);
+      fillRect(205, 90, 15, 60, T_DIRT);
+      fillRect(100, 40, 120, 10, T_DIRT);
+      fillRect(100, 38, 120, 2, T_GRASS);
+      fillRect(140, 20, 40, 5, T_DIRT);
+    }},
+  // Level 10: Bomber time
+  { name: "Blow It Up", total: 15, save: 10, rate: 35, entrance: [20, 100], exit: [290, 160],
+    jobs: { blocker: 3, digger: 0, basher: 0, builder: 0, climber: 0, floater: 0, bomber: 3 },
+    build: function() {
+      fillRect(0, 170, 320, 30, T_DIRT);
+      fillRect(0, 168, 320, 2, T_GRASS);
+      fillRect(0, 120, 60, 20, T_DIRT);
+      fillRect(0, 118, 60, 2, T_GRASS);
+      fillRect(80, 80, 15, 90, T_STONE);
+      fillRect(80, 80, 15, 30, T_DIRT);
+      fillRect(160, 60, 15, 110, T_STONE);
+      fillRect(160, 60, 15, 40, T_DIRT);
+      fillRect(240, 100, 15, 70, T_STONE);
+      fillRect(240, 100, 15, 30, T_DIRT);
+    }},
+  // Level 11: Tight timing
+  { name: "Split Second", total: 20, save: 15, rate: 30, entrance: [160, 10], exit: [280, 170],
+    jobs: { blocker: 3, digger: 2, basher: 2, builder: 2, climber: 0, floater: 3, bomber: 0 },
+    build: function() {
+      fillRect(0, 180, 320, 20, T_DIRT);
+      fillRect(0, 178, 320, 2, T_GRASS);
+      fillRect(120, 30, 80, 12, T_DIRT);
+      fillRect(120, 28, 80, 2, T_GRASS);
+      fillRect(0, 90, 150, 10, T_DIRT);
+      fillRect(0, 88, 150, 2, T_GRASS);
+      fillRect(180, 130, 140, 10, T_DIRT);
+      fillRect(180, 128, 140, 2, T_GRASS);
+      fillRect(150, 90, 8, 90, T_DIRT);
+      fillRect(60, 160, 80, 20, T_LAVA);
+    }},
+  // Level 12: Multi-path
+  { name: "Two Roads", total: 20, save: 16, rate: 30, entrance: [160, 10], exit: [160, 175],
+    jobs: { blocker: 4, digger: 3, basher: 2, builder: 2, climber: 2, floater: 2, bomber: 0 },
+    build: function() {
+      fillRect(0, 185, 320, 15, T_DIRT);
+      fillRect(130, 35, 60, 10, T_DIRT);
+      fillRect(130, 33, 60, 2, T_GRASS);
+      fillRect(0, 80, 130, 10, T_DIRT);
+      fillRect(0, 78, 130, 2, T_GRASS);
+      fillRect(190, 80, 130, 10, T_DIRT);
+      fillRect(190, 78, 130, 2, T_GRASS);
+      fillRect(60, 130, 80, 8, T_DIRT);
+      fillRect(180, 130, 80, 8, T_DIRT);
+      fillRect(155, 80, 10, 105, T_STONE);
+      fillRect(140, 168, 40, 2, T_GRASS);
+    }},
+  // Level 13: Lava run
+  { name: "Floor is Lava", total: 20, save: 14, rate: 30, entrance: [20, 30], exit: [290, 30],
+    jobs: { blocker: 2, digger: 0, basher: 0, builder: 8, climber: 0, floater: 2, bomber: 0 },
+    build: function() {
+      fillRect(0, 160, 320, 40, T_LAVA);
+      fillRect(0, 50, 50, 10, T_DIRT);
+      fillRect(0, 48, 50, 2, T_GRASS);
+      fillRect(80, 80, 30, 80, T_STONE);
+      fillRect(150, 60, 30, 100, T_STONE);
+      fillRect(230, 80, 30, 80, T_STONE);
+      fillRect(280, 50, 40, 10, T_DIRT);
+      fillRect(280, 48, 40, 2, T_GRASS);
+    }},
+  // Level 14: Maze
+  { name: "Maze Runner", total: 20, save: 15, rate: 30, entrance: [20, 10], exit: [290, 175],
+    jobs: { blocker: 3, digger: 3, basher: 3, builder: 1, climber: 2, floater: 2, bomber: 1 },
+    build: function() {
+      fillRect(0, 185, 320, 15, T_DIRT);
+      fillRect(0, 30, 250, 8, T_DIRT);
+      fillRect(70, 65, 320, 8, T_DIRT);
+      fillRect(0, 100, 250, 8, T_DIRT);
+      fillRect(70, 135, 320, 8, T_DIRT);
+      // Vertical barriers
+      fillRect(120, 30, 8, 35, T_STONE);
+      fillRect(200, 65, 8, 35, T_STONE);
+      fillRect(120, 100, 8, 35, T_STONE);
+      fillRect(60, 155, 200, 30, T_WATER);
+    }},
+  // Level 15: The Gauntlet
+  { name: "The Gauntlet", total: 25, save: 18, rate: 25, entrance: [20, 30], exit: [290, 170],
+    jobs: { blocker: 3, digger: 3, basher: 3, builder: 3, climber: 2, floater: 3, bomber: 1 },
+    build: function() {
+      fillRect(0, 180, 320, 20, T_DIRT);
+      fillRect(0, 178, 320, 2, T_GRASS);
+      fillRect(0, 50, 50, 15, T_DIRT);
+      fillRect(0, 48, 50, 2, T_GRASS);
+      // Obstacles
+      fillRect(70, 50, 8, 130, T_STONE);
+      fillRect(70, 50, 8, 60, T_DIRT);
+      fillRect(100, 130, 40, 48, T_WATER);
+      fillRect(160, 80, 8, 100, T_DIRT);
+      fillRect(190, 120, 40, 60, T_LAVA);
+      fillRect(250, 60, 8, 120, T_STONE);
+      fillRect(250, 60, 8, 50, T_DIRT);
+    }},
+  // Level 16: Expert - Precision
+  { name: "Pixel Perfect", total: 25, save: 20, rate: 25, entrance: [160, 5], exit: [160, 180],
+    jobs: { blocker: 2, digger: 2, basher: 1, builder: 4, climber: 1, floater: 2, bomber: 1 },
+    build: function() {
+      fillRect(0, 190, 320, 10, T_LAVA);
+      fillRect(130, 25, 60, 8, T_DIRT);
+      fillRect(130, 23, 60, 2, T_GRASS);
+      fillRect(40, 60, 50, 6, T_DIRT);
+      fillRect(230, 60, 50, 6, T_DIRT);
+      fillRect(130, 95, 60, 6, T_DIRT);
+      fillRect(40, 130, 50, 6, T_DIRT);
+      fillRect(230, 130, 50, 6, T_DIRT);
+      fillRect(120, 165, 80, 6, T_STONE);
+      fillRect(145, 185, 30, 5, T_DIRT);
+      // Narrow safe zone
+      fillRect(0, 60, 40, 6, T_STONE);
+      fillRect(280, 60, 40, 6, T_STONE);
+    }},
+  // Level 17: Expert - One way
+  { name: "No Way Back", total: 25, save: 20, rate: 20, entrance: [20, 80], exit: [290, 80],
+    jobs: { blocker: 4, digger: 1, basher: 4, builder: 3, climber: 2, floater: 1, bomber: 0 },
+    build: function() {
+      fillRect(0, 170, 320, 30, T_LAVA);
+      fillRect(0, 100, 320, 10, T_DIRT);
+      fillRect(0, 98, 320, 2, T_GRASS);
+      // Stone pillars blocking path
+      for (let i = 0; i < 5; i++) {
+        fillRect(50 + i * 55, 40, 10, 60, T_STONE);
+      }
+      // Dirt sections on top
+      for (let i = 0; i < 5; i++) {
+        fillRect(50 + i * 55, 40, 10, 20, T_DIRT);
+      }
+      fillRect(0, 100, 30, 10, T_DIRT);
+      fillRect(290, 100, 30, 10, T_DIRT);
+    }},
+  // Level 18: Expert - Water world
+  { name: "Rising Tide", total: 30, save: 22, rate: 20, entrance: [160, 10], exit: [30, 50],
+    jobs: { blocker: 3, digger: 2, basher: 2, builder: 6, climber: 3, floater: 3, bomber: 1 },
+    build: function() {
+      fillRect(0, 130, 320, 70, T_WATER);
+      fillRect(130, 25, 60, 8, T_DIRT);
+      fillRect(130, 23, 60, 2, T_GRASS);
+      fillRect(80, 60, 40, 6, T_DIRT);
+      fillRect(200, 60, 40, 6, T_DIRT);
+      fillRect(50, 90, 30, 6, T_STONE);
+      fillRect(240, 90, 30, 6, T_STONE);
+      fillRect(140, 100, 40, 30, T_STONE);
+      fillRect(0, 65, 40, 8, T_DIRT);
+      fillRect(0, 63, 40, 2, T_GRASS);
+    }},
+  // Level 19: Expert - All or nothing
+  { name: "All or Nothing", total: 30, save: 25, rate: 18, entrance: [20, 20], exit: [290, 170],
+    jobs: { blocker: 3, digger: 2, basher: 3, builder: 4, climber: 3, floater: 3, bomber: 2 },
+    build: function() {
+      fillRect(0, 180, 320, 20, T_DIRT);
+      fillRect(0, 178, 320, 2, T_GRASS);
+      fillRect(0, 35, 60, 10, T_DIRT);
+      fillRect(0, 33, 60, 2, T_GRASS);
+      // Complex obstacle course
+      fillRect(80, 35, 10, 80, T_STONE);
+      fillRect(80, 35, 10, 30, T_DIRT);
+      fillRect(100, 80, 60, 6, T_DIRT);
+      fillRect(180, 50, 10, 70, T_STONE);
+      fillRect(180, 50, 10, 25, T_DIRT);
+      fillRect(200, 100, 60, 6, T_DIRT);
+      fillRect(280, 80, 10, 100, T_STONE);
+      fillRect(280, 80, 10, 30, T_DIRT);
+      fillRect(100, 130, 80, 50, T_LAVA);
+      fillRect(200, 150, 60, 30, T_WATER);
+    }},
+  // Level 20: Final challenge
+  { name: "LP or Death", total: 40, save: 32, rate: 15, entrance: [160, 5], exit: [160, 185],
+    jobs: { blocker: 5, digger: 3, basher: 4, builder: 5, climber: 3, floater: 4, bomber: 3 },
+    build: function() {
+      fillRect(0, 195, 320, 5, T_LAVA);
+      fillRect(130, 20, 60, 6, T_DIRT);
+      fillRect(130, 18, 60, 2, T_GRASS);
+      // Multi-layer maze
+      fillRect(0, 50, 140, 6, T_DIRT);
+      fillRect(180, 50, 140, 6, T_DIRT);
+      fillRect(70, 80, 180, 6, T_DIRT);
+      fillRect(0, 110, 130, 6, T_STONE);
+      fillRect(190, 110, 130, 6, T_STONE);
+      fillRect(130, 110, 60, 6, T_DIRT);
+      fillRect(60, 140, 200, 6, T_DIRT);
+      fillRect(100, 170, 120, 6, T_STONE);
+      fillRect(100, 170, 120, 3, T_DIRT);
+      // Hazards
+      fillRect(0, 85, 50, 25, T_WATER);
+      fillRect(270, 85, 50, 25, T_WATER);
+      fillRect(140, 56, 40, 24, T_LAVA);
+      fillRect(20, 145, 40, 25, T_LAVA);
+      fillRect(260, 145, 40, 25, T_LAVA);
+      // Exit platform
+      fillRect(140, 190, 40, 5, T_DIRT);
+      fillRect(140, 188, 40, 2, T_GRASS);
+    }}
+];
+
+function fillRect(x, y, w, h, type) {
+  for (let dx = 0; dx < w; dx++) {
+    for (let dy = 0; dy < h; dy++) {
+      setTerrain(x + dx, y + dy, type);
+    }
+  }
+}
+
+// ============================================================
+// GAME STATE
+// ============================================================
+let gameState = 'menu'; // menu, playing, paused, levelComplete, levelFail
+let currentLevel = 0;
+let spawnTimer = 0;
+let spawnCount = 0;
+let totalToSpawn = 0;
+let entranceX = 0, entranceY = 0;
+let exitX = 0, exitY = 0;
+let gameSpeed = 1; // 0=paused, 1=normal, 2=fast, 4=turbo
+let selectedJob = JOB_NONE;
+let jobCounts = {};
+let frameCount = 0;
+let levelTime = 0;
+let nukeActive = false;
+
+function startLevel(idx) {
+  if (idx >= LEVELS.length) {
+    gameState = 'menu';
+    return;
+  }
+  currentLevel = idx;
+  const lvl = LEVELS[idx];
+  initTerrain();
+  lvl.build();
+
+  // Place entrance and exit markers
+  entranceX = lvl.entrance[0];
+  entranceY = lvl.entrance[1];
+  exitX = lvl.exit[0];
+  exitY = lvl.exit[1];
+
+  // Mark exit area
+  for (let dx = 0; dx < 12; dx++) {
+    for (let dy = 0; dy < 12; dy++) {
+      setTerrain(exitX + dx, exitY + dy, T_EXIT);
+    }
+  }
+  // Mark entrance area
+  for (let dx = 0; dx < 10; dx++) {
+    for (let dy = 0; dy < 6; dy++) {
+      setTerrain(entranceX + dx, entranceY + dy, T_ENTRANCE);
+    }
+  }
+
+  baselings = [];
+  savedCount = 0;
+  deadCount = 0;
+  spawnCount = 0;
+  spawnTimer = 0;
+  totalToSpawn = lvl.total;
+  selectedBaseling = -1;
+  selectedJob = JOB_NONE;
+  gameSpeed = 1;
+  nukeActive = false;
+  frameCount = 0;
+  levelTime = 0;
+
+  jobCounts = {
+    [JOB_BLOCKER]: lvl.jobs.blocker,
+    [JOB_DIGGER]: lvl.jobs.digger,
+    [JOB_BASHER]: lvl.jobs.basher,
+    [JOB_BUILDER]: lvl.jobs.builder,
+    [JOB_CLIMBER]: lvl.jobs.climber,
+    [JOB_FLOATER]: lvl.jobs.floater,
+    [JOB_BOMBER]: lvl.jobs.bomber,
+  };
+
+  terrainDirty = true;
+  gameState = 'playing';
+}
+
+// ============================================================
+// INPUT
+// ============================================================
+let mouseX = 0, mouseY = 0;
+let mouseDown = false;
+
+function getWorldPos(clientX, clientY) {
+  const rect = canvas.getBoundingClientRect();
+  const cx = clientX - rect.left;
+  const cy = clientY - rect.top;
+  const s = PIXEL_SCALE * SCALE;
+  return { x: cx / s, y: cy / s };
+}
+
+function handleClick(clientX, clientY) {
+  ensureAudio();
+  const rect = canvas.getBoundingClientRect();
+  const cx = clientX - rect.left;
+  const cy = clientY - rect.top;
+  const s = PIXEL_SCALE * SCALE;
+  const worldX = cx / s;
+  const worldY = cy / s;
+
+  if (gameState === 'menu') {
+    // Check level select buttons
+    const btnW = 40, btnH = 20, cols = 5, padding = 8;
+    const startX = (WORLD_W - (cols * (btnW + padding) - padding)) / 2;
+    const startY = 80;
+    for (let i = 0; i < LEVELS.length; i++) {
+      const col = i % cols;
+      const row = Math.floor(i / cols);
+      const bx = startX + col * (btnW + padding);
+      const by = startY + row * (btnH + padding);
+      if (worldX >= bx && worldX <= bx + btnW && worldY >= by && worldY <= by + btnH) {
+        startLevel(i);
+        return;
+      }
+    }
+    return;
+  }
+
+  if (gameState === 'levelComplete' || gameState === 'levelFail') {
+    if (gameState === 'levelComplete') {
+      startLevel(currentLevel + 1);
+    } else {
+      startLevel(currentLevel);
+    }
+    return;
+  }
+
+  if (gameState !== 'playing') return;
+
+  // Check UI panel (bottom 40px area)
+  const panelY = WORLD_H;
+  if (worldY >= panelY) {
+    handlePanelClick(worldX, worldY - panelY);
+    return;
+  }
+
+  // Try to select a baseling
+  let closestIdx = -1;
+  let closestDist = 12;
+  for (let i = 0; i < baselings.length; i++) {
+    const b = baselings[i];
+    if (!b.alive || b.exited) continue;
+    const dx = worldX - (b.x + BAS_W / 2);
+    const dy = worldY - (b.y + BAS_H / 2);
+    const dist = Math.sqrt(dx * dx + dy * dy);
+    if (dist < closestDist) {
+      closestDist = dist;
+      closestIdx = i;
+    }
+  }
+
+  if (closestIdx >= 0) {
+    // If we have a job selected and click a baseling, assign it
+    if (selectedJob !== JOB_NONE && jobCounts[selectedJob] > 0) {
+      const b = baselings[closestIdx];
+      if (b.job === JOB_NONE || selectedJob === JOB_CLIMBER || selectedJob === JOB_FLOATER || selectedJob === JOB_BOMBER) {
+        assignJob(closestIdx, selectedJob);
+      }
+    } else {
+      selectedBaseling = closestIdx;
+    }
+  } else {
+    selectedBaseling = -1;
+  }
+}
+
+function handlePanelClick(x, y) {
+  // Job buttons
+  const btnW = 30;
+  const btnH = 18;
+  const startX = 5;
+  const startY = 5;
+
+  for (let i = 1; i <= 7; i++) {
+    const bx = startX + (i - 1) * (btnW + 4);
+    const by = startY;
+    if (x >= bx && x <= bx + btnW && y >= by && y <= by + btnH) {
+      if (jobCounts[i] > 0) {
+        selectedJob = (selectedJob === i) ? JOB_NONE : i;
+        // If a baseling is selected, assign immediately
+        if (selectedBaseling >= 0 && selectedJob !== JOB_NONE) {
+          assignJob(selectedBaseling, selectedJob);
+        }
+      }
+      return;
+    }
+  }
+
+  // Speed buttons (right side)
+  const speedBtns = [0, 1, 2, 4];
+  const speedLabels = ['||', '>',  '>>', '>>>'];
+  const speedStartX = 250;
+  for (let i = 0; i < 4; i++) {
+    const bx = speedStartX + i * 18;
+    const by = startY;
+    if (x >= bx && x <= bx + 16 && y >= by && y <= by + btnH) {
+      gameSpeed = speedBtns[i];
+      return;
+    }
+  }
+
+  // Nuke button
+  if (x >= 250 && x <= 280 && y >= 24 && y <= 38) {
+    if (!nukeActive) {
+      nukeActive = true;
+      SFX.nuke();
+      for (const b of baselings) {
+        if (b.alive && !b.exited) {
+          b.bomberTimer = 60 + Math.random() * 120;
+        }
+      }
+    }
+  }
+}
+
+function assignJob(idx, job) {
+  const b = baselings[idx];
+  if (!b || !b.alive || b.exited) return;
+
+  if (job === JOB_CLIMBER) {
+    b.hasClimber = true;
+    jobCounts[job]--;
+    SFX.assign();
+    return;
+  }
+  if (job === JOB_FLOATER) {
+    b.hasFloater = true;
+    jobCounts[job]--;
+    SFX.assign();
+    return;
+  }
+  if (job === JOB_BOMBER) {
+    b.bomberTimer = BOMBER_FUSE;
+    b.job = JOB_BOMBER;
+    jobCounts[job]--;
+    SFX.assign();
+    return;
+  }
+
+  if (b.job !== JOB_NONE && job !== JOB_BOMBER) return;
+
+  b.job = job;
+  b.buildSteps = 0;
+  jobCounts[job]--;
+  SFX.assign();
+}
+
+canvas.addEventListener('mousedown', (e) => { mouseDown = true; handleClick(e.clientX, e.clientY); });
+canvas.addEventListener('mouseup', () => { mouseDown = false; });
+canvas.addEventListener('mousemove', (e) => {
+  const rect = canvas.getBoundingClientRect();
+  const s = PIXEL_SCALE * SCALE;
+  mouseX = (e.clientX - rect.left) / s;
+  mouseY = (e.clientY - rect.top) / s;
+});
+
+canvas.addEventListener('touchstart', (e) => {
+  e.preventDefault();
+  const t = e.touches[0];
+  handleClick(t.clientX, t.clientY);
+});
+canvas.addEventListener('touchmove', (e) => { e.preventDefault(); });
+canvas.addEventListener('touchend', (e) => { e.preventDefault(); });
+
+// Keyboard
+document.addEventListener('keydown', (e) => {
+  ensureAudio();
+  if (gameState === 'playing') {
+    if (e.key >= '1' && e.key <= '7') {
+      const j = parseInt(e.key);
+      if (jobCounts[j] > 0) {
+        selectedJob = (selectedJob === j) ? JOB_NONE : j;
+        if (selectedBaseling >= 0 && selectedJob !== JOB_NONE) {
+          assignJob(selectedBaseling, selectedJob);
+        }
+      }
+    }
+    if (e.key === 'p' || e.key === 'P') gameSpeed = gameSpeed === 0 ? 1 : 0;
+    if (e.key === '+' || e.key === '=') gameSpeed = Math.min(4, gameSpeed * 2 || 1);
+    if (e.key === '-') gameSpeed = Math.max(0, gameSpeed / 2);
+    if (e.key === 'n' || e.key === 'N') {
+      if (!nukeActive) {
+        nukeActive = true;
+        SFX.nuke();
+        for (const b of baselings) {
+          if (b.alive && !b.exited) b.bomberTimer = 60 + Math.random() * 120;
+        }
+      }
+    }
+    if (e.key === 'Escape') {
+      gameState = 'menu';
+    }
+  } else if (gameState === 'menu') {
+    if (e.key === 'Enter') startLevel(0);
+  } else if (gameState === 'levelComplete') {
+    startLevel(currentLevel + 1);
+  } else if (gameState === 'levelFail') {
+    startLevel(currentLevel);
+  }
+});
+
+// ============================================================
+// GAME LOOP
+// ============================================================
+function update() {
+  if (gameState !== 'playing' || gameSpeed === 0) return;
+
+  for (let tick = 0; tick < gameSpeed; tick++) {
+    frameCount++;
+    levelTime++;
+
+    // Spawn baselings
+    if (spawnCount < totalToSpawn) {
+      spawnTimer++;
+      const rate = LEVELS[currentLevel].rate;
+      if (spawnTimer >= rate) {
+        spawnTimer = 0;
+        const b = createBaseling(entranceX + 3, entranceY + 6);
+        baselings.push(b);
+        spawnCount++;
+        SFX.spawn();
+      }
+    }
+
+    // Update all baselings
+    for (const b of baselings) {
+      updateBaseling(b);
+    }
+
+    // Update particles
+    updateParticles();
+
+    // Check win/lose
+    const allDone = (savedCount + deadCount >= totalToSpawn) &&
+                    baselings.every(b => !b.alive || b.exited);
+    if (allDone || (spawnCount >= totalToSpawn && baselings.every(b => !b.alive || b.exited))) {
+      const lvl = LEVELS[currentLevel];
+      if (savedCount >= lvl.save) {
+        gameState = 'levelComplete';
+        SFX.levelWin();
+      } else {
+        gameState = 'levelFail';
+        SFX.levelFail();
+      }
+      return;
+    }
+  }
+}
+
+// ============================================================
+// RENDERING
+// ============================================================
+function draw() {
+  const s = PIXEL_SCALE * SCALE;
+
+  // Clear
+  ctx.fillStyle = '#111';
+  ctx.fillRect(0, 0, W, H);
+
+  if (gameState === 'menu') {
+    drawMenu();
+    return;
+  }
+
+  // Draw terrain
+  if (terrainDirty) renderTerrainToBuffer();
+  if (terrainCanvas) ctx.drawImage(terrainCanvas, 0, 0, terrainCanvas.width, terrainCanvas.height, 0, 0, W, H * (WORLD_H / (WORLD_H + 40)));
+
+  // Draw entrance door
+  ctx.fillStyle = '#ffcc00';
+  ctx.fillRect(entranceX * s, (entranceY - 4) * s, 10 * s, 4 * s);
+  ctx.fillStyle = '#aa8800';
+  ctx.fillRect((entranceX + 2) * s, (entranceY - 3) * s, 6 * s, 3 * s);
+
+  // Draw exit portal (LP pool)
+  const exitPulse = Math.sin(frameCount * 0.05) * 0.3 + 0.7;
+  ctx.fillStyle = `rgba(0, 255, 200, ${exitPulse * 0.3})`;
+  ctx.fillRect((exitX - 2) * s, (exitY - 2) * s, 16 * s, 16 * s);
+  ctx.strokeStyle = `rgba(0, 255, 200, ${exitPulse})`;
+  ctx.lineWidth = 2;
+  ctx.strokeRect(exitX * s, exitY * s, 12 * s, 12 * s);
+  // LP text
+  ctx.fillStyle = '#00ffcc';
+  ctx.font = Math.floor(5 * s) + 'px monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText('LP', (exitX + 6) * s, (exitY + 7) * s);
+  ctx.textAlign = 'left';
+
+  // Draw baselings
+  for (const b of baselings) {
+    drawBaseling(b);
+  }
+
+  // Draw particles
+  drawParticles();
+
+  // Draw cursor highlight
+  if (gameState === 'playing' && selectedJob !== JOB_NONE) {
+    ctx.strokeStyle = JOB_COLORS[selectedJob];
+    ctx.lineWidth = 1;
+    ctx.globalAlpha = 0.5 + Math.sin(frameCount * 0.1) * 0.3;
+    ctx.beginPath();
+    ctx.arc(mouseX * s, mouseY * s, 8 * s, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.globalAlpha = 1;
+  }
+
+  // Draw UI panel
+  drawPanel();
+
+  // Draw level results
+  if (gameState === 'levelComplete') drawResultScreen(true);
+  if (gameState === 'levelFail') drawResultScreen(false);
+}
+
+function drawMenu() {
+  const s = PIXEL_SCALE * SCALE;
+  ctx.fillStyle = '#111';
+  ctx.fillRect(0, 0, W, H);
+
+  // Title
+  ctx.fillStyle = '#00ffcc';
+  ctx.font = 'bold ' + Math.floor(12 * s) + 'px monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText('LP LEMMINGS', (WORLD_W / 2) * s, 30 * s);
+
+  ctx.fillStyle = '#888';
+  ctx.font = Math.floor(4 * s) + 'px monospace';
+  ctx.fillText('Guide your Baselings to the LP Pool!', (WORLD_W / 2) * s, 45 * s);
+
+  // Draw a little baseling mascot
+  const mx = WORLD_W / 2 - 2;
+  const my = 55;
+  ctx.fillStyle = '#44ee66';
+  ctx.fillRect(mx * s, (my + 2) * s, 4 * s, 6 * s);
+  ctx.fillStyle = '#ffcc88';
+  ctx.fillRect(mx * s, my * s, 4 * s, 2 * s);
+  ctx.fillStyle = '#22ff44';
+  ctx.fillRect((mx + 1) * s, (my - 1) * s, 2 * s, s);
+  ctx.fillRect((mx + 2) * s, (my - 2) * s, s, s);
+
+  // Level select
+  ctx.fillStyle = '#aaa';
+  ctx.font = Math.floor(4 * s) + 'px monospace';
+  ctx.fillText('Select Level:', (WORLD_W / 2) * s, 75 * s);
+
+  const btnW = 40, btnH = 20, cols = 5, padding = 8;
+  const startX = (WORLD_W - (cols * (btnW + padding) - padding)) / 2;
+  const startY = 80;
+
+  for (let i = 0; i < LEVELS.length; i++) {
+    const col = i % cols;
+    const row = Math.floor(i / cols);
+    const bx = startX + col * (btnW + padding);
+    const by = startY + row * (btnH + padding);
+
+    // Button bg
+    const hover = mouseX >= bx && mouseX <= bx + btnW && mouseY >= by && mouseY <= by + btnH;
+    ctx.fillStyle = hover ? '#335544' : '#223322';
+    ctx.fillRect(bx * s, by * s, btnW * s, btnH * s);
+    ctx.strokeStyle = '#44aa66';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(bx * s, by * s, btnW * s, btnH * s);
+
+    // Level number
+    ctx.fillStyle = '#00ffcc';
+    ctx.font = Math.floor(4 * s) + 'px monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText((i + 1) + '', (bx + btnW / 2) * s, (by + 8) * s);
+
+    // Level name (small)
+    ctx.fillStyle = '#888';
+    ctx.font = Math.floor(2.5 * s) + 'px monospace';
+    ctx.fillText(LEVELS[i].name, (bx + btnW / 2) * s, (by + 15) * s);
+  }
+
+  ctx.textAlign = 'left';
+
+  // Controls help
+  ctx.fillStyle = '#555';
+  ctx.font = Math.floor(3 * s) + 'px monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText('Click baseling + select job | Keys: 1-7=jobs, P=pause, +/-=speed, N=nuke', (WORLD_W / 2) * s, 195 * s);
+  ctx.textAlign = 'left';
+}
+
+function drawPanel() {
+  const s = PIXEL_SCALE * SCALE;
+  const panelTop = WORLD_H * s;
+
+  // Panel background
+  ctx.fillStyle = '#1a1a2a';
+  ctx.fillRect(0, panelTop, W, 40 * s);
+  ctx.strokeStyle = '#333';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(0, panelTop);
+  ctx.lineTo(W, panelTop);
+  ctx.stroke();
+
+  // Job buttons
+  const btnW = 30;
+  const btnH = 18;
+  const startX = 5;
+  const startY = WORLD_H + 5;
+
+  for (let i = 1; i <= 7; i++) {
+    const bx = startX + (i - 1) * (btnW + 4);
+    const by = startY;
+    const count = jobCounts[i] || 0;
+    const active = selectedJob === i;
+
+    ctx.fillStyle = active ? JOB_COLORS[i] : (count > 0 ? '#2a2a3a' : '#1a1a1a');
+    ctx.fillRect(bx * s, by * s, btnW * s, btnH * s);
+    ctx.strokeStyle = count > 0 ? JOB_COLORS[i] : '#333';
+    ctx.lineWidth = active ? 2 : 1;
+    ctx.strokeRect(bx * s, by * s, btnW * s, btnH * s);
+
+    // Job name
+    ctx.fillStyle = active ? '#000' : (count > 0 ? '#ddd' : '#555');
+    ctx.font = Math.floor(3 * s) + 'px monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText(JOB_NAMES[i].slice(0, 4), (bx + btnW / 2) * s, (by + 8) * s);
+
+    // Count
+    ctx.fillStyle = active ? '#000' : '#aaa';
+    ctx.font = Math.floor(3 * s) + 'px monospace';
+    ctx.fillText(count + '', (bx + btnW / 2) * s, (by + 15) * s);
+  }
+
+  // Speed buttons
+  const speedBtns = [0, 1, 2, 4];
+  const speedLabels = ['||', '>', '>>', '>>>'];
+  const speedStartX = 250;
+  for (let i = 0; i < 4; i++) {
+    const bx = speedStartX + i * 18;
+    const by = startY;
+    const active = gameSpeed === speedBtns[i];
+    ctx.fillStyle = active ? '#44aa66' : '#2a2a3a';
+    ctx.fillRect(bx * s, by * s, 16 * s, btnH * s);
+    ctx.strokeStyle = '#44aa66';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(bx * s, by * s, 16 * s, btnH * s);
+    ctx.fillStyle = active ? '#000' : '#aaa';
+    ctx.font = Math.floor(3 * s) + 'px monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText(speedLabels[i], (bx + 8) * s, (by + 11) * s);
+  }
+
+  // Nuke button
+  ctx.fillStyle = nukeActive ? '#660000' : '#440000';
+  ctx.fillRect(250 * s, (startY + 20) * s, 30 * s, 12 * s);
+  ctx.strokeStyle = '#ff0000';
+  ctx.lineWidth = 1;
+  ctx.strokeRect(250 * s, (startY + 20) * s, 30 * s, 12 * s);
+  ctx.fillStyle = nukeActive ? '#666' : '#ff4444';
+  ctx.font = Math.floor(3 * s) + 'px monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText('NUKE', 265 * s, (startY + 28) * s);
+
+  // Stats display
+  ctx.textAlign = 'left';
+  ctx.fillStyle = '#00ffcc';
+  ctx.font = Math.floor(3.5 * s) + 'px monospace';
+  const lvl = LEVELS[currentLevel];
+  const statsY = startY + 22;
+  ctx.fillText('Lv' + (currentLevel + 1) + ': ' + lvl.name, 5 * s, statsY * s);
+  ctx.fillStyle = '#88ff88';
+  ctx.fillText('Saved: ' + savedCount + '/' + lvl.save, 5 * s, (statsY + 10) * s);
+  ctx.fillStyle = '#ff8888';
+  ctx.fillText('Dead: ' + deadCount, 80 * s, (statsY + 10) * s);
+  ctx.fillStyle = '#aaaaaa';
+  ctx.fillText('Out: ' + spawnCount + '/' + totalToSpawn, 140 * s, (statsY + 10) * s);
+  ctx.fillStyle = '#aaaaaa';
+  ctx.fillText(Math.floor(levelTime / 60) + 's', 210 * s, (statsY + 10) * s);
+
+  ctx.textAlign = 'left';
+}
+
+function drawResultScreen(won) {
+  const s = PIXEL_SCALE * SCALE;
+  ctx.fillStyle = 'rgba(0,0,0,0.7)';
+  ctx.fillRect(0, 0, W, H);
+
+  ctx.textAlign = 'center';
+  const cx = (WORLD_W / 2) * s;
+
+  if (won) {
+    ctx.fillStyle = '#00ffcc';
+    ctx.font = 'bold ' + Math.floor(10 * s) + 'px monospace';
+    ctx.fillText('LEVEL COMPLETE!', cx, 70 * s);
+
+    ctx.fillStyle = '#88ff88';
+    ctx.font = Math.floor(5 * s) + 'px monospace';
+    ctx.fillText('Saved ' + savedCount + ' / ' + LEVELS[currentLevel].save + ' required', cx, 100 * s);
+
+    ctx.fillStyle = '#aaa';
+    ctx.font = Math.floor(4 * s) + 'px monospace';
+    ctx.fillText('Click to continue', cx, 140 * s);
+  } else {
+    ctx.fillStyle = '#ff4444';
+    ctx.font = 'bold ' + Math.floor(10 * s) + 'px monospace';
+    ctx.fillText('LEVEL FAILED', cx, 70 * s);
+
+    ctx.fillStyle = '#ff8888';
+    ctx.font = Math.floor(5 * s) + 'px monospace';
+    ctx.fillText('Saved ' + savedCount + ' / ' + LEVELS[currentLevel].save + ' needed', cx, 100 * s);
+
+    ctx.fillStyle = '#aaa';
+    ctx.font = Math.floor(4 * s) + 'px monospace';
+    ctx.fillText('Click to retry', cx, 140 * s);
+  }
+
+  ctx.textAlign = 'left';
+}
+
+// ============================================================
+// MAIN LOOP
+// ============================================================
+let lastTime = 0;
+function loop(ts) {
+  const dt = Math.min((ts - lastTime) / 1000, 0.05);
+  lastTime = ts;
+
+  update();
+  draw();
+
+  requestAnimationFrame(loop);
+}
+
+requestAnimationFrame(loop);
+
+})();
+</script>
+</body>
+</html>

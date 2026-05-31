@@ -66,7 +66,8 @@ async function doPool(name, token0Addr, ebtAmount, ebtPerToken0) {
     if (s[0] === 0n) throw new Error('not init');
     ct = Number(s[1]);
     console.log('Already initialized, tick:', ct);
-  } catch {
+  } catch (e) {
+    console.warn('[mint-ebt] pool not initialized, initializing:', e.message || e);
     const sqrtP = BigInt(Math.floor(Math.sqrt(ebtPerToken0) * 79228162514264337593543950336));
     console.log('Initializing sqrtP:', sqrtP.toString());
     await (await pool.initialize(sqrtP, { gasLimit: 300000 })).wait();
@@ -140,7 +141,7 @@ async function main() {
   let ms;
   for (let i = 0; i < 3; i++) {
     try { ms = await new ethers.Contract(mftPool, POOL, p).slot0(); break; }
-    catch { console.log('Rate limited, retrying...'); await sleep(3000); }
+    catch (e) { console.log('Rate limited, retrying:', e.message || e); await sleep(3000); }
   }
   const mftPerWeth = Math.pow(1.0001, Number(ms[1]));
   const mftPrice = ethPrice / mftPerWeth;

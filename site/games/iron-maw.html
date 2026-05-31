@@ -1,0 +1,1843 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Iron Maw</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body { width: 100%; height: 100%; overflow: hidden; background: #111; touch-action: none; }
+canvas { display: block; margin: 0 auto; }
+#back-link { position: fixed; bottom: 8px; left: 50%; transform: translateX(-50%); color: #666; font-family: monospace; font-size: 12px; text-decoration: none; z-index: 10; }
+#back-link:hover { color: #aaa; }
+</style>
+</head>
+<body>
+<canvas id="gc"></canvas>
+<a id="back-link" href="/games">Back to Arcade</a>
+<script src="nft-loader.js"></script>
+<script>if(window.NftLoader)NftLoader.gate();</script>
+<script src="tasern-engine.js"></script>
+<script>
+(function(){
+"use strict";
+
+// === CONSTANTS ===
+const GW = 400, GH = 300;
+const TILE = 16;
+const COLS = 25, ROWS = 18; // 400/16=25, 288/16=18 (top 12px for HUD)
+const HUD_H = 12;
+const ctx = TAS.ctx;
+TAS.initCanvas(GW, GH);
+TAS.input.initTouch({ buttons: ['a','b','c','d'], labels: { a:'JUMP', b:'SHOOT', c:'MORPH', d:'MAP' } });
+
+// === SEED RNG ===
+let seed = 7919;
+function srand(s){ seed = s; }
+function rand(){ seed = (seed * 16807 + 0) % 2147483647; return (seed & 0x7fffffff) / 0x7fffffff; }
+function randI(min,max){ return Math.floor(rand()*(max-min+1))+min; }
+
+// === ZONE DEFINITIONS ===
+const ZONES = [
+  { name:'Landing Cavern', bg:'#0a0a14', wall:'#334', floor:'#223', accent:'#556', enemies:['crawler','floater','spiker','bat'], palette:['#445','#556','#667'] },
+  { name:'Fungal Depths', bg:'#0a100a', wall:'#253', floor:'#142', accent:'#4a6', enemies:['spore','mushroom','tendril','fungoid'], palette:['#2a4','#4c6','#6e8'] },
+  { name:'Lava Core', bg:'#1a0800', wall:'#532', floor:'#421', accent:'#f84', enemies:['firewalker','magmite','lavabat','cinder'], palette:['#f64','#fa4','#fc6'] },
+  { name:'Frozen Abyss', bg:'#060a14', wall:'#358', floor:'#246', accent:'#8bf', enemies:['icicle','frostling','iceworm','glacial'], palette:['#6af','#8cf','#aef'] },
+  { name:'Reactor Heart', bg:'#0c0808', wall:'#433', floor:'#322', accent:'#f66', enemies:['turret','drone','sentinel','mech'], palette:['#c44','#e66','#f88'] }
+];
+
+// === GAME STATE ===
+let state = 'title';
+let frame = 0;
+let player, world, camera, items, enemies, projectiles, bombs;
+let mapOpen = false;
+let pauseTimer = 0;
+let bossActive = null;
+let transDir = null, transTick = 0;
+let deathTimer = 0;
+let endTimer = 0;
+
+// Upgrades
+const UPGRADES = ['morphBall','bombs','highJump','speedBoots','grapple','iceBeam','waveBeam','missile','heatSuit'];
+const UPGRADE_NAMES = { morphBall:'MORPH BALL', bombs:'BOMBS', highJump:'HIGH JUMP', speedBoots:'SPEED BOOTS', grapple:'GRAPPLE BEAM', iceBeam:'ICE BEAM', waveBeam:'WAVE BEAM', missile:'MISSILES', heatSuit:'HEAT SUIT' };
+
+// === WORLD GENERATION ===
+// Room layout: 5 zones, each ~16 rooms arranged in a grid pattern
+// Total grid: zones are sub-grids within a larger world grid
+const WORLD_W = 20; // rooms wide
+const WORLD_H = 20; // rooms tall
+// Zone regions in the world grid
+const ZONE_REGIONS = [
+  { x:7, y:7, w:6, h:6 },  // Landing Cavern (center)
+  { x:1, y:8, w:6, h:7 },  // Fungal Depths (left)
+  { x:8, y:1, w:6, h:6 },  // Lava Core (top)
+  { x:1, y:1, w:6, h:6 },  // Frozen Abyss (top-left)
+  { x:14, y:4, w:6, h:8 }  // Reactor Heart (right)
+];
+
+function getZoneAt(rx, ry) {
+  for (let z = ZONE_REGIONS.length - 1; z >= 0; z--) {
+    const r = ZONE_REGIONS[z];
+    if (rx >= r.x && rx < r.x + r.w && ry >= r.y && ry < r.y + r.h) return z;
+  }
+  return -1;
+}
+
+function generateWorld() {
+  world = { rooms: {}, visited: {}, saveRooms: {} };
+  items = {};
+
+  srand(42);
+
+  // Generate rooms for each zone
+  for (let z = 0; z < 5; z++) {
+    const reg = ZONE_REGIONS[z];
+    for (let ry = reg.y; ry < reg.y + reg.h; ry++) {
+      for (let rx = reg.x; rx < reg.x + reg.w; rx++) {
+        const key = rx + ',' + ry;
+        world.rooms[key] = generateRoom(rx, ry, z);
+      }
+    }
+    // Save room: center of each zone
+    const sx = reg.x + Math.floor(reg.w / 2);
+    const sy = reg.y + Math.floor(reg.h / 2);
+    const skey = sx + ',' + sy;
+    world.saveRooms[skey] = true;
+    if (world.rooms[skey]) {
+      // Clear save room - make it peaceful
+      const room = world.rooms[skey];
+      for (let ty = 2; ty < ROWS - 2; ty++) {
+        for (let tx = 3; tx < COLS - 3; tx++) {
+          room.tiles[ty][tx] = 0;
+        }
+      }
+      room.isSave = true;
+    }
+  }
+
+  // Place upgrades at specific locations
+  placeUpgrades();
+  // Place energy tanks
+  placeEnergyTanks();
+  // Place missile expansions
+  placeMissileExpansions();
+}
+
+function generateRoom(rx, ry, zone) {
+  srand(rx * 1000 + ry * 37 + zone * 7);
+  const tiles = [];
+  const template = randI(0, 5);
+
+  for (let ty = 0; ty < ROWS; ty++) {
+    tiles[ty] = [];
+    for (let tx = 0; tx < COLS; tx++) {
+      // Borders
+      if (ty === 0 || ty === ROWS - 1) { tiles[ty][tx] = 1; continue; }
+      if (tx === 0 || tx === COLS - 1) { tiles[ty][tx] = 1; continue; }
+      tiles[ty][tx] = 0;
+    }
+  }
+
+  // Door openings for connections
+  const reg = ZONE_REGIONS[zone];
+  // Left door
+  if (rx > reg.x || getZoneAt(rx - 1, ry) >= 0) {
+    tiles[Math.floor(ROWS/2)][0] = 0;
+    tiles[Math.floor(ROWS/2)-1][0] = 0;
+  }
+  // Right door
+  if (rx < reg.x + reg.w - 1 || getZoneAt(rx + 1, ry) >= 0) {
+    tiles[Math.floor(ROWS/2)][COLS-1] = 0;
+    tiles[Math.floor(ROWS/2)-1][COLS-1] = 0;
+  }
+  // Top door
+  if (ry > reg.y || getZoneAt(rx, ry - 1) >= 0) {
+    tiles[0][Math.floor(COLS/2)] = 0;
+    tiles[0][Math.floor(COLS/2)+1] = 0;
+  }
+  // Bottom door
+  if (ry < reg.y + reg.h - 1 || getZoneAt(rx, ry + 1) >= 0) {
+    tiles[ROWS-1][Math.floor(COLS/2)] = 0;
+    tiles[ROWS-1][Math.floor(COLS/2)+1] = 0;
+  }
+
+  // Internal structure based on template
+  switch(template) {
+    case 0: // Platforms
+      for (let i = 0; i < 4; i++) {
+        const py = 4 + i * 3;
+        const px = randI(3, 8);
+        const pw = randI(4, 8);
+        for (let x = px; x < Math.min(px + pw, COLS - 2); x++) tiles[py][x] = 1;
+      }
+      break;
+    case 1: // Corridors
+      for (let ty = 3; ty < ROWS - 3; ty++) {
+        if (ty === Math.floor(ROWS/2) || ty === Math.floor(ROWS/2)-1) continue;
+        for (let tx = 2; tx < COLS - 2; tx++) {
+          if ((ty < 6 || ty > ROWS - 6) && tx > 4 && tx < COLS - 4) tiles[ty][tx] = 1;
+        }
+      }
+      // Carve corridors
+      for (let tx = 2; tx < COLS - 2; tx++) { tiles[4][tx] = 0; tiles[5][tx] = 0; }
+      for (let tx = 2; tx < COLS - 2; tx++) { tiles[ROWS-5][tx] = 0; tiles[ROWS-6][tx] = 0; }
+      break;
+    case 2: // Pillars
+      for (let py = 4; py < ROWS - 3; py += 4) {
+        for (let px = 4; px < COLS - 3; px += 5) {
+          tiles[py][px] = 1;
+          tiles[py-1][px] = 1;
+          if (rand() > 0.5) tiles[py][px+1] = 1;
+        }
+      }
+      break;
+    case 3: // Morph tunnel
+      for (let ty = ROWS - 4; ty < ROWS - 1; ty++) {
+        for (let tx = 2; tx < COLS - 2; tx++) tiles[ty][tx] = 1;
+      }
+      // Carve 1-tile tunnel
+      for (let tx = 2; tx < COLS - 2; tx++) tiles[ROWS-3][tx] = 0;
+      // Upper platforms
+      for (let i = 0; i < 3; i++) {
+        const px = 3 + i * 7;
+        for (let x = px; x < px + 5 && x < COLS - 2; x++) tiles[6 + i * 3][x] = 1;
+      }
+      break;
+    case 4: // Vertical shaft
+      for (let ty = 2; ty < ROWS - 2; ty++) {
+        for (let tx = 2; tx < COLS - 2; tx++) {
+          if (tx < 8 || tx > COLS - 9) tiles[ty][tx] = 1;
+        }
+      }
+      // Ledges in shaft
+      for (let i = 0; i < 5; i++) {
+        const ly = 3 + i * 3;
+        const lx = (i % 2 === 0) ? 8 : COLS - 13;
+        for (let x = lx; x < lx + 4; x++) tiles[ly][x] = 0;
+        // Clear above ledge
+        if (ly > 0) for (let x = lx; x < lx + 4; x++) tiles[ly-1][x] = 0;
+      }
+      break;
+    case 5: // Open arena
+      for (let tx = 6; tx < COLS - 6; tx++) tiles[ROWS - 5][tx] = 1;
+      tiles[7][8] = 1; tiles[7][9] = 1;
+      tiles[7][COLS-9] = 1; tiles[7][COLS-10] = 1;
+      break;
+  }
+
+  // Zone-specific features
+  if (zone === 1 && rand() > 0.5) {
+    // Fungal: more morph tunnels (mark as type 3 = bomb blocks)
+    const ty = randI(6, ROWS - 4);
+    for (let tx = 3; tx < COLS - 3; tx++) { if (rand() > 0.6) tiles[ty][tx] = 3; }
+  }
+  if (zone === 2) {
+    // Lava: bottom lava tiles
+    for (let tx = 1; tx < COLS - 1; tx++) {
+      if (tiles[ROWS-2][tx] === 0 && rand() > 0.4) tiles[ROWS-2][tx] = 4; // lava
+    }
+  }
+  if (zone === 3) {
+    // Ice: slippery platforms (mark as type 5)
+    for (let ty = 0; ty < ROWS; ty++) {
+      for (let tx = 0; tx < COLS; tx++) {
+        if (tiles[ty][tx] === 1 && rand() > 0.6) tiles[ty][tx] = 5;
+      }
+    }
+  }
+  if (zone === 4 && rand() > 0.5) {
+    // Reactor: speed blocks (type 6)
+    const ty = randI(5, ROWS - 5);
+    for (let tx = 3; tx < 8; tx++) tiles[ty][tx] = 6;
+  }
+
+  return { tiles, zone, template };
+}
+
+function placeUpgrades() {
+  // Place each upgrade in a specific zone at a dead-end-ish room
+  const placements = [
+    { upgrade:'morphBall', zone:0, rx:8, ry:9 },
+    { upgrade:'bombs', zone:1, rx:3, ry:11 },
+    { upgrade:'highJump', zone:1, rx:2, ry:9 },
+    { upgrade:'speedBoots', zone:0, rx:11, ry:10 },
+    { upgrade:'iceBeam', zone:3, rx:2, ry:3 },
+    { upgrade:'waveBeam', zone:4, rx:17, ry:6 },
+    { upgrade:'missile', zone:0, rx:10, ry:8 },
+    { upgrade:'grapple', zone:2, rx:11, ry:3 },
+    { upgrade:'heatSuit', zone:3, rx:4, ry:2 }
+  ];
+
+  for (const p of placements) {
+    const key = p.rx + ',' + p.ry;
+    items[key] = items[key] || [];
+    items[key].push({ type:'upgrade', upgrade: p.upgrade, x: 12 * TILE, y: 8 * TILE, collected: false });
+  }
+}
+
+function placeEnergyTanks() {
+  const tanks = [
+    { rx:9, ry:8 }, { rx:4, ry:10 }, { rx:10, ry:3 },
+    { rx:3, ry:4 }, { rx:16, ry:7 }, { rx:7, ry:12 },
+    { rx:13, ry:5 }, { rx:5, ry:9 }
+  ];
+  for (const t of tanks) {
+    const key = t.rx + ',' + t.ry;
+    if (!world.rooms[key]) continue;
+    items[key] = items[key] || [];
+    items[key].push({ type:'etank', x: 6 * TILE, y: 5 * TILE, collected: false });
+  }
+}
+
+function placeMissileExpansions() {
+  const packs = [
+    { rx:8, ry:8 }, { rx:5, ry:12 }, { rx:12, ry:4 },
+    { rx:2, ry:5 }, { rx:18, ry:6 }, { rx:6, ry:10 },
+    { rx:15, ry:8 }, { rx:3, ry:3 }, { rx:9, ry:11 }, { rx:14, ry:5 }
+  ];
+  for (const p of packs) {
+    const key = p.rx + ',' + p.ry;
+    if (!world.rooms[key]) continue;
+    items[key] = items[key] || [];
+    items[key].push({ type:'missile', x: 18 * TILE, y: 10 * TILE, collected: false });
+  }
+}
+
+// === PLAYER ===
+function createPlayer() {
+  return {
+    x: 12 * TILE, y: 14 * TILE,
+    vx: 0, vy: 0,
+    w: 14, h: 24,
+    dir: 1, // 1=right, -1=left
+    grounded: false,
+    morphed: false,
+    crouching: false,
+    aimUp: false,
+    aimDiag: false,
+    running: false,
+    runTimer: 0,
+    dashSpeed: false,
+    hp: 99, maxHp: 99,
+    missiles: 0, maxMissiles: 0,
+    charge: 0,
+    iframes: 0,
+    roomX: 10, roomY: 10,
+    upgrades: {},
+    etanks: 0,
+    missilePacks: 0,
+    itemPercent: 0,
+    downTapTimer: 0,
+    grappling: false,
+    grappleX: 0, grappleY: 0,
+    onIce: false,
+    animFrame: 0,
+    animTimer: 0
+  };
+}
+
+// === ENEMY SPAWNING ===
+function spawnEnemiesForRoom(rx, ry) {
+  const key = rx + ',' + ry;
+  const room = world.rooms[key];
+  if (!room || room.isSave) return [];
+
+  const zone = room.zone;
+  const zoneData = ZONES[zone];
+  srand(rx * 777 + ry * 131 + zone * 17);
+
+  const enList = [];
+  const count = randI(2, 5);
+
+  for (let i = 0; i < count; i++) {
+    const type = zoneData.enemies[randI(0, zoneData.enemies.length - 1)];
+    const ex = randI(4, COLS - 5) * TILE;
+    const ey = randI(3, ROWS - 4) * TILE;
+
+    // Check tile is empty
+    const tx = Math.floor(ex / TILE);
+    const ty = Math.floor(ey / TILE);
+    if (room.tiles[ty] && room.tiles[ty][tx] !== 0) continue;
+
+    enList.push({
+      type, x: ex, y: ey, vx: (rand() > 0.5 ? 1 : -1) * 0.5,
+      vy: 0, hp: 3 + zone * 2, maxHp: 3 + zone * 2,
+      w: 12, h: 12, timer: 0, shootTimer: randI(60, 180),
+      frozen: 0, zone
+    });
+  }
+  return enList;
+}
+
+// === BOSS DATA ===
+function spawnBoss(zone) {
+  const bossHP = [80, 120, 160, 200, 400];
+  return {
+    zone, x: 14 * TILE, y: 6 * TILE,
+    vx: 1, vy: 0, w: 32, h: 40,
+    hp: bossHP[zone], maxHp: bossHP[zone],
+    phase: 0, timer: 0, attackTimer: 0,
+    pattern: 0, dead: false, active: true
+  };
+}
+
+// Boss rooms: last room reachable in each zone
+const BOSS_ROOMS = [
+  { rx:12, ry:12 }, { rx:1, ry:14 }, { rx:13, ry:1 },
+  { rx:1, ry:1 }, { rx:19, ry:7 }
+];
+
+// === CAMERA & TRANSITIONS ===
+function initCamera() {
+  return { x: 0, y: 0 };
+}
+
+function enterRoom(rx, ry, fromDir) {
+  const key = rx + ',' + ry;
+  if (!world.rooms[key]) return false;
+
+  player.roomX = rx;
+  player.roomY = ry;
+  world.visited[key] = true;
+
+  // Position player based on entry direction
+  if (fromDir === 'left') { player.x = (COLS - 3) * TILE; player.y = Math.floor(ROWS/2) * TILE - player.h; }
+  else if (fromDir === 'right') { player.x = 2 * TILE; player.y = Math.floor(ROWS/2) * TILE - player.h; }
+  else if (fromDir === 'up') { player.x = Math.floor(COLS/2) * TILE; player.y = (ROWS - 3) * TILE; }
+  else if (fromDir === 'down') { player.x = Math.floor(COLS/2) * TILE; player.y = 2 * TILE; }
+
+  // Spawn enemies
+  enemies = spawnEnemiesForRoom(rx, ry);
+  projectiles = [];
+  bombs = [];
+
+  // Check if boss room
+  bossActive = null;
+  for (let b = 0; b < BOSS_ROOMS.length; b++) {
+    if (BOSS_ROOMS[b].rx === rx && BOSS_ROOMS[b].ry === ry) {
+      const bossKey = 'boss_' + b;
+      if (!player.upgrades[bossKey]) {
+        bossActive = spawnBoss(b);
+        enemies = [];
+      }
+      break;
+    }
+  }
+
+  return true;
+}
+
+// === COLLISION ===
+function getTile(rx, ry, tx, ty) {
+  const key = rx + ',' + ry;
+  const room = world.rooms[key];
+  if (!room) return 1;
+  if (ty < 0 || ty >= ROWS || tx < 0 || tx >= COLS) return 1;
+  return room.tiles[ty][tx];
+}
+
+function isSolid(tileType) {
+  return tileType === 1 || tileType === 3 || tileType === 5 || tileType === 6;
+}
+
+function collidesWorld(x, y, w, h) {
+  const t1x = Math.floor(x / TILE);
+  const t1y = Math.floor(y / TILE);
+  const t2x = Math.floor((x + w - 1) / TILE);
+  const t2y = Math.floor((y + h - 1) / TILE);
+
+  for (let ty = t1y; ty <= t2y; ty++) {
+    for (let tx = t1x; tx <= t2x; tx++) {
+      const tile = getTile(player.roomX, player.roomY, tx, ty);
+      if (isSolid(tile)) return true;
+    }
+  }
+  return false;
+}
+
+function isOnIce(x, y, w, h) {
+  const ty = Math.floor((y + h) / TILE);
+  const t1x = Math.floor(x / TILE);
+  const t2x = Math.floor((x + w - 1) / TILE);
+  for (let tx = t1x; tx <= t2x; tx++) {
+    if (getTile(player.roomX, player.roomY, tx, ty) === 5) return true;
+  }
+  return false;
+}
+
+// === INPUT HELPERS ===
+function keyLeft() { return TAS.input.keys['ArrowLeft'] || TAS.input.keys['KeyA'] || TAS.input.touch.left; }
+function keyRight() { return TAS.input.keys['ArrowRight'] || TAS.input.keys['KeyD'] || TAS.input.touch.right; }
+function keyUp() { return TAS.input.keys['ArrowUp'] || TAS.input.keys['KeyW'] || TAS.input.touch.up; }
+function keyDown() { return TAS.input.keys['ArrowDown'] || TAS.input.keys['KeyS'] || TAS.input.touch.down; }
+function keyJump() { return TAS.input.keys['KeyZ'] || TAS.input.keys['Space'] || TAS.input.touch.a; }
+function keyShoot() { return TAS.input.keys['KeyX'] || TAS.input.keys['KeyJ'] || TAS.input.touch.b; }
+function keyMorph() { return TAS.input.keys['KeyC'] || TAS.input.keys['KeyK'] || TAS.input.touch.c; }
+function keyMap() { return TAS.input.keys['KeyM'] || TAS.input.keys['Tab'] || TAS.input.touch.d; }
+function keyMissile() { return TAS.input.keys['KeyV'] || TAS.input.keys['KeyL']; }
+
+let prevJump = false, prevShoot = false, prevMorph = false, prevMap = false, prevMissile = false;
+let prevDown = false;
+
+function justPressed(current, prev) { return current && !prev; }
+
+// === GAME INIT ===
+function startGame() {
+  player = createPlayer();
+  generateWorld();
+  camera = initCamera();
+  projectiles = [];
+  bombs = [];
+  enemies = [];
+  bossActive = null;
+  mapOpen = false;
+  deathTimer = 0;
+  endTimer = 0;
+
+  // Start in Landing Cavern center
+  player.roomX = 10;
+  player.roomY = 10;
+  enterRoom(player.roomX, player.roomY, null);
+  player.x = 12 * TILE;
+  player.y = 10 * TILE;
+
+  state = 'playing';
+}
+
+// === SAVE / LOAD ===
+function saveGame() {
+  const data = {
+    px: player.x, py: player.y, roomX: player.roomX, roomY: player.roomY,
+    hp: player.maxHp, missiles: player.maxMissiles,
+    upgrades: player.upgrades, etanks: player.etanks, missilePacks: player.missilePacks,
+    visited: world.visited, collectedItems: {}
+  };
+  // Track collected items
+  for (const key in items) {
+    for (let i = 0; i < items[key].length; i++) {
+      if (items[key][i].collected) {
+        data.collectedItems[key + '_' + i] = true;
+      }
+    }
+  }
+  try { localStorage.setItem('ironmaw_save', JSON.stringify(data)); } catch(e) { console.error('Save failed:', e); }
+}
+
+function loadGame() {
+  try {
+    const raw = localStorage.getItem('ironmaw_save');
+    if (!raw) return false;
+    const data = JSON.parse(raw);
+    startGame();
+    player.roomX = data.roomX;
+    player.roomY = data.roomY;
+    player.x = data.px;
+    player.y = data.py;
+    player.maxHp = data.hp;
+    player.hp = data.hp;
+    player.maxMissiles = data.missiles;
+    player.missiles = data.missiles;
+    player.upgrades = data.upgrades || {};
+    player.etanks = data.etanks || 0;
+    player.missilePacks = data.missilePacks || 0;
+    world.visited = data.visited || {};
+    if (data.collectedItems) {
+      for (const key in items) {
+        for (let i = 0; i < items[key].length; i++) {
+          if (data.collectedItems[key + '_' + i]) items[key][i].collected = true;
+        }
+      }
+    }
+    enterRoom(player.roomX, player.roomY, null);
+    player.x = data.px;
+    player.y = data.py;
+    return true;
+  } catch(e) { console.error('Load failed:', e); return false; }
+}
+
+// === UPDATE ===
+function update(dt) {
+  frame++;
+  TAS.particles.update(dt);
+  TAS.fx.updateEffects(dt);
+
+  const jmp = keyJump(), sht = keyShoot(), mrp = keyMorph(), mp = keyMap(), mis = keyMissile();
+  const dn = keyDown();
+
+  if (state === 'title') {
+    if (justPressed(jmp, prevJump) || justPressed(sht, prevShoot)) {
+      TAS.audio.ensureAudio();
+      if (!loadGame()) startGame();
+    }
+    prevJump = jmp; prevShoot = sht; prevMorph = mrp; prevMap = mp; prevMissile = mis; prevDown = dn;
+    return;
+  }
+
+  if (state === 'dead') {
+    deathTimer += dt;
+    if (deathTimer > 3) { state = 'title'; }
+    prevJump = jmp; prevShoot = sht; prevMorph = mrp; prevMap = mp; prevMissile = mis; prevDown = dn;
+    return;
+  }
+
+  if (state === 'ending') {
+    endTimer += dt;
+    if (endTimer > 8) { state = 'title'; }
+    prevJump = jmp; prevShoot = sht; prevMorph = mrp; prevMap = mp; prevMissile = mis; prevDown = dn;
+    return;
+  }
+
+  if (state !== 'playing') return;
+
+  // Map toggle
+  if (justPressed(mp, prevMap)) { mapOpen = !mapOpen; }
+  if (mapOpen) { prevJump = jmp; prevShoot = sht; prevMorph = mrp; prevMap = mp; prevMissile = mis; prevDown = dn; return; }
+
+  // Item get pause
+  if (pauseTimer > 0) { pauseTimer -= dt; prevJump = jmp; prevShoot = sht; prevMorph = mrp; prevMap = mp; prevMissile = mis; prevDown = dn; return; }
+
+  // Transition
+  if (transDir) {
+    transTick += dt;
+    if (transTick > 0.3) { transDir = null; transTick = 0; }
+    prevJump = jmp; prevShoot = sht; prevMorph = mrp; prevMap = mp; prevMissile = mis; prevDown = dn;
+    return;
+  }
+
+  // === PLAYER PHYSICS ===
+  const GRAVITY = 600;
+  const MOVE_SPEED = player.dashSpeed ? 200 : 100;
+  const JUMP_SPEED = player.upgrades.highJump ? -280 : -210;
+  const MORPH_H = 10;
+  const FRICTION = player.onIce ? 0.98 : 0.7;
+
+  // Iframes
+  if (player.iframes > 0) player.iframes -= dt;
+
+  // Heat damage in Lava Core without suit
+  const currentZone = getZoneAt(player.roomX, player.roomY);
+  if (currentZone === 2 && !player.upgrades.heatSuit) {
+    if (frame % 60 === 0) {
+      player.hp -= 5;
+      TAS.fx.flash('#f40', 0.1);
+    }
+  }
+
+  // Morph ball toggle
+  if (player.upgrades.morphBall) {
+    if (justPressed(mrp, prevMorph)) {
+      player.morphed = !player.morphed;
+      if (player.morphed) {
+        player.h = MORPH_H;
+        player.y += 14;
+        TAS.audio.playTone(300, 0.05, 'sine', 0.06);
+        TAS.audio.playTone(500, 0.05, 'sine', 0.06);
+      } else {
+        // Check if can stand
+        player.h = 24;
+        player.y -= 14;
+        if (collidesWorld(player.x, player.y, player.w, player.h)) {
+          // Can't unmorph here
+          player.h = MORPH_H;
+          player.y += 14;
+          player.morphed = true;
+        } else {
+          TAS.audio.playTone(500, 0.05, 'sine', 0.06);
+          TAS.audio.playTone(300, 0.05, 'sine', 0.06);
+        }
+      }
+    }
+    // Double-tap down for morph
+    if (justPressed(dn, prevDown) && !player.morphed && player.grounded) {
+      player.downTapTimer = 15;
+    } else if (player.downTapTimer > 0) {
+      player.downTapTimer--;
+      if (justPressed(dn, prevDown)) {
+        player.morphed = true;
+        player.h = MORPH_H;
+        player.y += 14;
+        player.downTapTimer = 0;
+        TAS.audio.playTone(300, 0.05, 'sine', 0.06);
+      }
+    }
+  }
+
+  // Horizontal movement
+  let accel = 0;
+  if (keyLeft()) { accel = -MOVE_SPEED; player.dir = -1; }
+  if (keyRight()) { accel = MOVE_SPEED; player.dir = 1; }
+
+  // Speed boots
+  if (player.upgrades.speedBoots && (keyLeft() || keyRight())) {
+    player.runTimer += dt;
+    if (player.runTimer > 1.0) {
+      player.dashSpeed = true;
+      if (frame % 3 === 0) TAS.particles.spawn(player.x + player.w/2, player.y + player.h, '#ff0', 1, 1);
+    }
+  } else {
+    player.runTimer = 0;
+    player.dashSpeed = false;
+  }
+
+  if (accel !== 0) {
+    player.vx += accel * dt;
+    const maxSpd = player.dashSpeed ? 200 : 100;
+    player.vx = TAS.math.clamp(player.vx, -maxSpd, maxSpd);
+  } else {
+    player.vx *= FRICTION;
+    if (Math.abs(player.vx) < 1) player.vx = 0;
+  }
+
+  // Aiming
+  player.aimUp = keyUp() && !player.morphed;
+  player.aimDiag = keyUp() && (keyLeft() || keyRight()) && !player.morphed;
+  player.crouching = keyDown() && player.grounded && !player.morphed;
+
+  // Jump (variable height)
+  if (justPressed(jmp, prevJump) && player.grounded && !player.morphed) {
+    player.vy = JUMP_SPEED;
+    player.grounded = false;
+    TAS.audio.playTone(250, 0.08, 'square', 0.04, 400);
+  }
+  // Variable jump height - release early = lower jump
+  if (!jmp && player.vy < -50) {
+    player.vy *= 0.6;
+  }
+
+  // Bomb jump (in morph ball)
+  if (player.morphed && justPressed(jmp, prevJump) && player.upgrades.bombs) {
+    // Place bomb
+    bombs.push({ x: player.x + player.w/2, y: player.y + player.h/2, timer: 0.8 });
+    TAS.audio.playTone(200, 0.06, 'triangle', 0.04);
+  }
+
+  // Gravity
+  player.vy += GRAVITY * dt;
+  if (player.vy > 400) player.vy = 400;
+
+  // Move X
+  const newX = player.x + player.vx * dt;
+  if (!collidesWorld(newX, player.y, player.w, player.h)) {
+    player.x = newX;
+  } else {
+    // Break speed blocks
+    if (player.dashSpeed && player.upgrades.speedBoots) {
+      const checkTx = player.dir > 0 ? Math.floor((newX + player.w) / TILE) : Math.floor(newX / TILE);
+      for (let ty = Math.floor(player.y / TILE); ty <= Math.floor((player.y + player.h - 1) / TILE); ty++) {
+        if (getTile(player.roomX, player.roomY, checkTx, ty) === 6) {
+          world.rooms[player.roomX + ',' + player.roomY].tiles[ty][checkTx] = 0;
+          TAS.particles.spawn(checkTx * TILE + 8, ty * TILE + 8, '#ff0', 6, 3);
+          TAS.audio.playNoise(0.1, 0.06, 800);
+        }
+      }
+    }
+    player.vx = 0;
+  }
+
+  // Move Y
+  const newY = player.y + player.vy * dt;
+  if (!collidesWorld(player.x, newY, player.w, player.h)) {
+    player.y = newY;
+    player.grounded = false;
+  } else {
+    if (player.vy > 0) {
+      player.grounded = true;
+      player.y = Math.floor((newY + player.h) / TILE) * TILE - player.h;
+    } else {
+      player.y = Math.ceil(newY / TILE) * TILE;
+    }
+    player.vy = 0;
+  }
+
+  // Ice check
+  player.onIce = player.grounded && isOnIce(player.x, player.y, player.w, player.h);
+
+  // Lava damage
+  const footTy = Math.floor((player.y + player.h + 1) / TILE);
+  const footTx = Math.floor((player.x + player.w/2) / TILE);
+  if (getTile(player.roomX, player.roomY, footTx, footTy) === 4) {
+    if (player.iframes <= 0) {
+      player.hp -= 15;
+      player.iframes = 1;
+      player.vy = -150;
+      TAS.fx.flash('#f40', 0.3);
+      TAS.fx.shake(4);
+    }
+  }
+
+  // === SHOOTING ===
+  if (sht && !player.morphed) {
+    player.charge += dt;
+  }
+  if (justPressed(sht, prevShoot) && !player.morphed) {
+    player.charge = 0;
+  }
+  if (!sht && prevShoot && !player.morphed) {
+    fireShot();
+    player.charge = 0;
+  }
+
+  // Missile
+  if (justPressed(mis, prevMissile) && player.missiles > 0 && !player.morphed) {
+    fireMissile();
+    player.missiles--;
+  }
+
+  // === ROOM TRANSITIONS ===
+  if (player.x < -4) {
+    if (enterRoom(player.roomX - 1, player.roomY, 'left')) {
+      transDir = 'left'; transTick = 0;
+    } else { player.x = 0; }
+  }
+  if (player.x > COLS * TILE - player.w + 4) {
+    if (enterRoom(player.roomX + 1, player.roomY, 'right')) {
+      transDir = 'right'; transTick = 0;
+    } else { player.x = COLS * TILE - player.w; }
+  }
+  if (player.y < -4) {
+    if (enterRoom(player.roomX, player.roomY - 1, 'down')) {
+      transDir = 'up'; transTick = 0;
+    } else { player.y = 0; }
+  }
+  if (player.y > ROWS * TILE) {
+    if (enterRoom(player.roomX, player.roomY + 1, 'up')) {
+      transDir = 'down'; transTick = 0;
+    } else { player.y = ROWS * TILE - player.h; }
+  }
+
+  // === BOMBS ===
+  for (let i = bombs.length - 1; i >= 0; i--) {
+    bombs[i].timer -= dt;
+    if (bombs[i].timer <= 0) {
+      explodeBomb(bombs[i]);
+      bombs.splice(i, 1);
+    }
+  }
+
+  // === PROJECTILES ===
+  for (let i = projectiles.length - 1; i >= 0; i--) {
+    const p = projectiles[i];
+    p.x += p.vx * dt;
+    p.y += p.vy * dt;
+    p.life -= dt;
+
+    // Check wall collision (unless wave beam)
+    if (!p.wave) {
+      const tx = Math.floor(p.x / TILE);
+      const ty = Math.floor(p.y / TILE);
+      const tile = getTile(player.roomX, player.roomY, tx, ty);
+      if (isSolid(tile)) {
+        if (p.missile && tile === 1) {
+          // Missiles don't break walls but do disappear
+        }
+        projectiles.splice(i, 1);
+        TAS.particles.spawn(p.x, p.y, p.color || '#ff0', 3, 2);
+        continue;
+      }
+    }
+
+    if (p.life <= 0 || p.x < -16 || p.x > GW + 16 || p.y < -16 || p.y > GH + 16) {
+      projectiles.splice(i, 1);
+      continue;
+    }
+
+    // Enemy hit
+    if (p.friendly) {
+      for (let e = enemies.length - 1; e >= 0; e--) {
+        if (TAS.hit.rectOverlap(p.x - 3, p.y - 3, 6, 6, enemies[e].x, enemies[e].y, enemies[e].w, enemies[e].h)) {
+          let dmg = p.damage || 1;
+          if (p.ice && !enemies[e].frozen) {
+            enemies[e].frozen = 3; // 3 seconds
+            enemies[e].vx = 0;
+            TAS.particles.spawn(enemies[e].x + 6, enemies[e].y + 6, '#8cf', 5, 2);
+          }
+          enemies[e].hp -= dmg;
+          if (enemies[e].hp <= 0) {
+            TAS.particles.spawn(enemies[e].x + 6, enemies[e].y + 6, ZONES[enemies[e].zone].accent, 8, 3);
+            TAS.audio.playNoise(0.08, 0.04, 600);
+            // Drop pickups sometimes
+            if (Math.random() < 0.3) dropPickup(enemies[e].x, enemies[e].y);
+            enemies.splice(e, 1);
+          } else {
+            TAS.particles.spawn(p.x, p.y, '#fff', 2, 1);
+          }
+          if (!p.wave) { projectiles.splice(i, 1); break; }
+        }
+      }
+      // Boss hit
+      if (bossActive && !bossActive.dead) {
+        if (TAS.hit.rectOverlap(p.x - 3, p.y - 3, 6, 6, bossActive.x, bossActive.y, bossActive.w, bossActive.h)) {
+          bossActive.hp -= (p.damage || 1);
+          TAS.particles.spawn(p.x, p.y, '#fff', 3, 2);
+          if (!p.wave) projectiles.splice(i, 1);
+          if (bossActive.hp <= 0) {
+            bossActive.dead = true;
+            bossActive.timer = 0;
+            player.upgrades['boss_' + bossActive.zone] = true;
+            TAS.fx.shake(8);
+            TAS.fx.flash('#fff', 0.5);
+            for (let k = 0; k < 20; k++) TAS.particles.spawn(bossActive.x + 16, bossActive.y + 20, '#f84', 1, 4);
+            TAS.audio.playMelody([[600,0.1],[800,0.1],[1000,0.15]], 100);
+            // Final boss?
+            if (bossActive.zone === 4) {
+              endTimer = 0;
+              state = 'ending';
+            }
+          }
+        }
+      }
+    } else {
+      // Enemy projectile hits player
+      if (player.iframes <= 0 && TAS.hit.rectOverlap(p.x - 3, p.y - 3, 6, 6, player.x, player.y, player.w, player.h)) {
+        damagePlayer(p.damage || 10);
+        projectiles.splice(i, 1);
+      }
+    }
+  }
+
+  // === ENEMIES ===
+  for (let i = 0; i < enemies.length; i++) {
+    const e = enemies[i];
+    if (e.frozen > 0) { e.frozen -= dt; continue; }
+
+    e.timer += dt;
+    e.x += e.vx * 60 * dt;
+    e.y += e.vy * 60 * dt;
+
+    // Simple patrol AI
+    const etx = Math.floor((e.x + e.w/2 + e.vx * 16) / TILE);
+    const ety = Math.floor((e.y + e.h) / TILE);
+    if (isSolid(getTile(player.roomX, player.roomY, etx, Math.floor(e.y/TILE))) ||
+        e.x < TILE || e.x > (COLS-2)*TILE) {
+      e.vx = -e.vx;
+    }
+
+    // Shooting enemies
+    e.shootTimer -= dt * 60;
+    if (e.shootTimer <= 0) {
+      e.shootTimer = 120 + Math.random() * 120;
+      const dx = player.x - e.x, dy = player.y - e.y;
+      const d = Math.sqrt(dx*dx + dy*dy);
+      if (d < 200 && d > 0) {
+        projectiles.push({
+          x: e.x + e.w/2, y: e.y + e.h/2,
+          vx: (dx/d) * 120, vy: (dy/d) * 120,
+          life: 2, friendly: false, damage: 8, color: '#f44'
+        });
+      }
+    }
+
+    // Contact damage
+    if (player.iframes <= 0 && TAS.hit.rectOverlap(player.x, player.y, player.w, player.h, e.x, e.y, e.w, e.h)) {
+      damagePlayer(10 + e.zone * 3);
+    }
+  }
+
+  // === BOSS UPDATE ===
+  if (bossActive && !bossActive.dead) {
+    updateBoss(bossActive, dt);
+  }
+
+  // === ITEMS ===
+  const roomKey = player.roomX + ',' + player.roomY;
+  if (items[roomKey]) {
+    for (const item of items[roomKey]) {
+      if (item.collected) continue;
+      if (TAS.hit.rectOverlap(player.x, player.y, player.w, player.h, item.x, item.y, 14, 14)) {
+        collectItem(item);
+      }
+    }
+  }
+
+  // === SAVE ROOM ===
+  if (world.saveRooms[roomKey] && player.grounded) {
+    // Show save prompt - auto save when grounded in save room
+    player.hp = player.maxHp;
+    player.missiles = player.maxMissiles;
+    if (frame % 120 === 0) saveGame();
+  }
+
+  // === DEATH ===
+  if (player.hp <= 0) {
+    player.hp = 0;
+    state = 'dead';
+    deathTimer = 0;
+    TAS.fx.shake(6);
+    TAS.fx.flash('#f00', 0.4);
+    TAS.particles.spawn(player.x + player.w/2, player.y + player.h/2, '#f84', 15, 4);
+    TAS.audio.playMelody([[400,0.15],[300,0.15],[200,0.2],[100,0.3]], 150);
+  }
+
+  // Animation
+  player.animTimer += dt;
+  if (player.animTimer > 0.1) {
+    player.animTimer = 0;
+    player.animFrame = (player.animFrame + 1) % 4;
+  }
+
+  prevJump = jmp; prevShoot = sht; prevMorph = mrp; prevMap = mp; prevMissile = mis; prevDown = dn;
+}
+
+function fireShot() {
+  let chargeLevel = 0;
+  if (player.charge > 1.5) chargeLevel = 2;
+  else if (player.charge > 0.6) chargeLevel = 1;
+
+  let dx = player.dir, dy = 0;
+  if (player.aimUp && !keyLeft() && !keyRight()) { dx = 0; dy = -1; }
+  else if (player.aimDiag) { dy = -0.7; dx = player.dir * 0.7; }
+
+  const speed = 250 + chargeLevel * 50;
+  const damage = 1 + chargeLevel * 2;
+  const size = 3 + chargeLevel * 2;
+
+  projectiles.push({
+    x: player.x + player.w/2 + dx * 8,
+    y: player.y + (player.aimUp ? 2 : player.h/2) + dy * 8,
+    vx: dx * speed, vy: dy * speed,
+    life: 0.8, friendly: true, damage,
+    color: chargeLevel === 2 ? '#f4f' : chargeLevel === 1 ? '#4ff' : '#ff0',
+    size, wave: !!player.upgrades.waveBeam,
+    ice: !!player.upgrades.iceBeam
+  });
+
+  if (chargeLevel === 2) {
+    TAS.audio.playTone(150, 0.2, 'sawtooth', 0.08, 600);
+    TAS.fx.shake(2);
+  } else if (chargeLevel === 1) {
+    TAS.audio.playTone(400, 0.1, 'square', 0.06, 600);
+  } else {
+    TAS.audio.playTone(800, 0.06, 'square', 0.04, 1200);
+  }
+}
+
+function fireMissile() {
+  let dx = player.dir, dy = 0;
+  if (player.aimUp && !keyLeft() && !keyRight()) { dx = 0; dy = -1; }
+  else if (player.aimDiag) { dy = -0.7; dx = player.dir * 0.7; }
+
+  projectiles.push({
+    x: player.x + player.w/2 + dx * 8,
+    y: player.y + player.h/2 + dy * 8,
+    vx: dx * 300, vy: dy * 300,
+    life: 1.2, friendly: true, damage: 8,
+    color: '#f44', size: 5, missile: true, wave: false, ice: false
+  });
+  TAS.audio.playNoise(0.15, 0.08, 400);
+}
+
+function explodeBomb(bomb) {
+  TAS.particles.spawn(bomb.x, bomb.y, '#ff0', 10, 3);
+  TAS.audio.playNoise(0.15, 0.08, 300);
+  TAS.fx.shake(3);
+
+  // Break bomb blocks nearby
+  const tx = Math.floor(bomb.x / TILE);
+  const ty = Math.floor(bomb.y / TILE);
+  for (let dy = -1; dy <= 1; dy++) {
+    for (let dx = -1; dx <= 1; dx++) {
+      const cx = tx + dx, cy = ty + dy;
+      if (getTile(player.roomX, player.roomY, cx, cy) === 3) {
+        world.rooms[player.roomX + ',' + player.roomY].tiles[cy][cx] = 0;
+        TAS.particles.spawn(cx * TILE + 8, cy * TILE + 8, '#4a6', 4, 2);
+      }
+    }
+  }
+
+  // Bomb jump - push player up if close
+  const pdx = player.x + player.w/2 - bomb.x;
+  const pdy = player.y + player.h/2 - bomb.y;
+  if (Math.abs(pdx) < 24 && Math.abs(pdy) < 24) {
+    player.vy = -220;
+    player.grounded = false;
+  }
+
+  // Damage enemies
+  for (let i = enemies.length - 1; i >= 0; i--) {
+    const e = enemies[i];
+    if (TAS.math.dist(bomb.x, bomb.y, e.x + e.w/2, e.y + e.h/2) < 32) {
+      e.hp -= 4;
+      if (e.hp <= 0) {
+        TAS.particles.spawn(e.x + 6, e.y + 6, '#ff0', 6, 3);
+        enemies.splice(i, 1);
+      }
+    }
+  }
+}
+
+function damagePlayer(amount) {
+  if (player.iframes > 0) return;
+  player.hp -= amount;
+  player.iframes = 1.0;
+  TAS.fx.flash('#f00', 0.2);
+  TAS.fx.shake(3);
+  TAS.audio.playTone(150, 0.1, 'sawtooth', 0.06, 80);
+}
+
+function collectItem(item) {
+  item.collected = true;
+  pauseTimer = 1.5;
+
+  if (item.type === 'upgrade') {
+    player.upgrades[item.upgrade] = true;
+    if (item.upgrade === 'missile') { player.maxMissiles += 5; player.missiles = player.maxMissiles; }
+    TAS.audio.playMelody([[523,0.12],[659,0.12],[784,0.12],[1047,0.2]], 130);
+    TAS.fx.flash('#fff', 0.3);
+  } else if (item.type === 'etank') {
+    player.etanks++;
+    player.maxHp += 100;
+    player.hp = player.maxHp;
+    TAS.audio.playMelody([[440,0.1],[550,0.1],[660,0.15]], 100);
+  } else if (item.type === 'missile') {
+    player.missilePacks++;
+    player.maxMissiles += 5;
+    player.missiles = player.maxMissiles;
+    TAS.audio.playMelody([[600,0.08],[700,0.08],[800,0.12]], 80);
+  }
+}
+
+function dropPickup(x, y) {
+  // Small health or missile pickup (visual effect, instant collect)
+  if (Math.random() < 0.5) {
+    player.hp = Math.min(player.hp + 10, player.maxHp);
+    TAS.particles.spawn(x, y, '#4f4', 3, 1);
+  } else if (player.maxMissiles > 0) {
+    player.missiles = Math.min(player.missiles + 2, player.maxMissiles);
+    TAS.particles.spawn(x, y, '#f44', 3, 1);
+  }
+}
+
+// === BOSS AI ===
+function updateBoss(boss, dt) {
+  boss.timer += dt;
+  boss.attackTimer += dt;
+
+  // Phase transitions
+  if (boss.hp < boss.maxHp * 0.66 && boss.phase === 0) { boss.phase = 1; TAS.fx.flash('#f80', 0.3); }
+  if (boss.hp < boss.maxHp * 0.33 && boss.phase === 1) { boss.phase = 2; TAS.fx.flash('#f00', 0.4); }
+
+  // Movement
+  const speed = (1 + boss.phase * 0.5) * 60;
+  boss.x += boss.vx * speed * dt;
+  if (boss.x < 3 * TILE || boss.x > (COLS - 5) * TILE) boss.vx = -boss.vx;
+
+  // Vertical bob
+  boss.y = 5 * TILE + Math.sin(boss.timer * 2) * 20;
+
+  // Attacks
+  const attackRate = 1.5 - boss.phase * 0.4;
+  if (boss.attackTimer > attackRate) {
+    boss.attackTimer = 0;
+
+    const pattern = Math.floor(boss.timer * 0.5 + boss.phase) % 3;
+    if (pattern === 0) {
+      // Spread shot
+      for (let a = -2; a <= 2; a++) {
+        const ang = Math.PI/2 + a * 0.3;
+        projectiles.push({
+          x: boss.x + boss.w/2, y: boss.y + boss.h,
+          vx: Math.cos(ang) * 150, vy: Math.sin(ang) * 150,
+          life: 2, friendly: false, damage: 12 + boss.phase * 4, color: '#f84'
+        });
+      }
+    } else if (pattern === 1) {
+      // Aimed shot
+      const dx = player.x - boss.x, dy = player.y - boss.y;
+      const d = Math.sqrt(dx*dx+dy*dy) || 1;
+      for (let s = 0; s < 2 + boss.phase; s++) {
+        projectiles.push({
+          x: boss.x + boss.w/2 + (Math.random()-0.5)*16,
+          y: boss.y + boss.h,
+          vx: (dx/d) * (180 + s*20), vy: (dy/d) * (180 + s*20),
+          life: 2, friendly: false, damage: 15, color: '#ff4'
+        });
+      }
+    } else {
+      // Drop bombs
+      projectiles.push({
+        x: boss.x + boss.w/2, y: boss.y + boss.h,
+        vx: 0, vy: 200,
+        life: 3, friendly: false, damage: 20, color: '#f44'
+      });
+    }
+    TAS.audio.playTone(100, 0.1, 'sawtooth', 0.05, 50);
+  }
+
+  // Contact damage
+  if (player.iframes <= 0 && TAS.hit.rectOverlap(player.x, player.y, player.w, player.h, boss.x, boss.y, boss.w, boss.h)) {
+    damagePlayer(20);
+  }
+}
+
+// === DRAW ===
+function draw(dt) {
+  const zone = getZoneAt(player ? player.roomX : 10, player ? player.roomY : 10);
+  const zoneData = ZONES[Math.max(0, zone)];
+
+  // Background
+  ctx.fillStyle = state === 'title' ? '#0a0a14' : zoneData.bg;
+  ctx.fillRect(0, 0, GW, GH);
+
+  if (state === 'title') {
+    drawTitle();
+    return;
+  }
+
+  if (state === 'dead') {
+    drawDeath();
+    return;
+  }
+
+  if (state === 'ending') {
+    drawEnding();
+    return;
+  }
+
+  if (mapOpen) {
+    drawMap();
+    return;
+  }
+
+  ctx.save();
+  TAS.fx.applyShake();
+
+  // Translate for HUD offset
+  ctx.translate(0, HUD_H);
+
+  // Draw room tiles
+  drawRoom();
+
+  // Draw items
+  drawItems();
+
+  // Draw enemies
+  drawEnemies();
+
+  // Draw boss
+  if (bossActive && !bossActive.dead) drawBoss();
+
+  // Draw projectiles
+  drawProjectiles();
+
+  // Draw bombs
+  drawBombs();
+
+  // Draw player
+  if (state === 'playing') drawPlayer();
+
+  // Particles
+  TAS.particles.draw();
+
+  ctx.restore();
+
+  // HUD
+  TAS.fx.drawFlash(GW, GH);
+  drawHUD();
+
+  // Transition effect
+  if (transDir) {
+    const progress = transTick / 0.3;
+    ctx.fillStyle = '#000';
+    ctx.globalAlpha = 1 - progress;
+    ctx.fillRect(0, 0, GW, GH);
+    ctx.globalAlpha = 1;
+  }
+
+  // Pause text for item get
+  if (pauseTimer > 0) {
+    drawItemGet();
+  }
+
+  // Save room indicator
+  const roomKey = player.roomX + ',' + player.roomY;
+  if (world.saveRooms[roomKey]) {
+    ctx.fillStyle = '#4f4';
+    ctx.font = '10px monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText('SAVE STATION - ENERGY RESTORED', GW/2, GH - 8);
+  }
+
+  // Touch controls
+  TAS.input.drawTouchControls(GW, GH);
+}
+
+function drawTitle() {
+  // Background atmosphere
+  for (let i = 0; i < 30; i++) {
+    const x = (i * 47 + frame * 0.3) % GW;
+    const y = (i * 31 + Math.sin(frame * 0.01 + i) * 20) % GH;
+    ctx.fillStyle = 'rgba(255,100,50,' + (0.03 + Math.sin(frame*0.02+i)*0.02) + ')';
+    ctx.fillRect(x, y, 2, 2);
+  }
+
+  ctx.textAlign = 'center';
+
+  // Title
+  ctx.fillStyle = '#000';
+  ctx.font = 'bold 28px monospace';
+  ctx.fillText('IRON MAW', GW/2 + 2, 72);
+  ctx.fillStyle = '#c44';
+  ctx.fillText('IRON MAW', GW/2, 70);
+
+  // Subtitle
+  ctx.fillStyle = '#888';
+  ctx.font = '11px monospace';
+  ctx.fillText('The Depths Hunger', GW/2, 95);
+
+  // Controls
+  ctx.fillStyle = '#556';
+  ctx.font = '9px monospace';
+  const controls = [
+    'ARROWS / WASD - Move',
+    'Z / SPACE - Jump',
+    'X / J - Shoot (hold to charge)',
+    'C / K - Morph Ball',
+    'V / L - Missile',
+    'M / TAB - Map'
+  ];
+  for (let i = 0; i < controls.length; i++) {
+    ctx.fillText(controls[i], GW/2, 130 + i * 14);
+  }
+
+  // Start prompt
+  const pulse = Math.sin(frame * 0.05) * 0.3 + 0.7;
+  ctx.globalAlpha = pulse;
+  ctx.fillStyle = '#ffdd44';
+  ctx.font = 'bold 12px monospace';
+  ctx.fillText('PRESS JUMP OR SHOOT TO START', GW/2, 260);
+  ctx.globalAlpha = 1;
+
+  ctx.fillStyle = '#444';
+  ctx.font = '8px monospace';
+  ctx.fillText('A Tasern Tale', GW/2, 285);
+}
+
+function drawRoom() {
+  const roomKey = player.roomX + ',' + player.roomY;
+  const room = world.rooms[roomKey];
+  if (!room) return;
+
+  const zoneData = ZONES[room.zone];
+
+  for (let ty = 0; ty < ROWS; ty++) {
+    for (let tx = 0; tx < COLS; tx++) {
+      const tile = room.tiles[ty][tx];
+      const px = tx * TILE, py = ty * TILE;
+
+      if (tile === 0) continue;
+
+      if (tile === 1) {
+        ctx.fillStyle = zoneData.wall;
+        ctx.fillRect(px, py, TILE, TILE);
+        // Edge highlight
+        ctx.fillStyle = zoneData.accent;
+        ctx.globalAlpha = 0.2;
+        ctx.fillRect(px, py, TILE, 1);
+        ctx.fillRect(px, py, 1, TILE);
+        ctx.globalAlpha = 1;
+      } else if (tile === 3) {
+        // Bomb blocks
+        ctx.fillStyle = '#4a4';
+        ctx.fillRect(px, py, TILE, TILE);
+        ctx.strokeStyle = '#6c6';
+        ctx.strokeRect(px+1, py+1, TILE-2, TILE-2);
+      } else if (tile === 4) {
+        // Lava
+        ctx.fillStyle = '#f40';
+        ctx.fillRect(px, py, TILE, TILE);
+        const glow = Math.sin(frame * 0.1 + tx) * 0.3 + 0.7;
+        ctx.fillStyle = 'rgba(255,200,0,' + (glow * 0.4) + ')';
+        ctx.fillRect(px, py, TILE, TILE/2);
+      } else if (tile === 5) {
+        // Ice blocks
+        ctx.fillStyle = '#468';
+        ctx.fillRect(px, py, TILE, TILE);
+        ctx.fillStyle = 'rgba(150,200,255,0.3)';
+        ctx.fillRect(px+2, py+2, TILE-4, 3);
+      } else if (tile === 6) {
+        // Speed blocks
+        ctx.fillStyle = '#554';
+        ctx.fillRect(px, py, TILE, TILE);
+        ctx.strokeStyle = '#ff0';
+        ctx.setLineDash([2,2]);
+        ctx.strokeRect(px+1, py+1, TILE-2, TILE-2);
+        ctx.setLineDash([]);
+      }
+    }
+  }
+
+  // Save room glow
+  if (room.isSave) {
+    ctx.fillStyle = 'rgba(60,255,120,0.03)';
+    ctx.fillRect(0, 0, COLS*TILE, ROWS*TILE);
+  }
+}
+
+function drawPlayer() {
+  if (player.iframes > 0 && Math.floor(player.iframes * 10) % 2 === 0) return;
+
+  const px = Math.floor(player.x);
+  const py = Math.floor(player.y);
+
+  if (player.morphed) {
+    // Morph ball
+    const bobY = Math.sin(frame * 0.2) * 1;
+    ctx.fillStyle = '#4af';
+    ctx.beginPath();
+    ctx.arc(px + player.w/2, py + player.h/2 + bobY, 5, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = '#8cf';
+    ctx.beginPath();
+    ctx.arc(px + player.w/2 - 1, py + player.h/2 - 1 + bobY, 2, 0, Math.PI * 2);
+    ctx.fill();
+  } else {
+    // Armored baseling
+    // Body
+    ctx.fillStyle = '#36a';
+    ctx.fillRect(px + 2, py + 8, 10, 14);
+    // Helmet
+    ctx.fillStyle = '#48c';
+    ctx.fillRect(px + 1, py, 12, 10);
+    // Visor
+    ctx.fillStyle = '#0f8';
+    const visorX = player.dir > 0 ? px + 8 : px + 2;
+    ctx.fillRect(visorX, py + 3, 5, 3);
+    // Arm cannon
+    ctx.fillStyle = '#555';
+    const armY = player.aimUp ? py + 2 : player.aimDiag ? py + 4 : py + 12;
+    const armX = player.dir > 0 ? px + 10 : px - 4;
+    ctx.fillRect(armX, armY, 6, 4);
+    // Cannon tip glow when charging
+    if (player.charge > 0.3) {
+      const glow = Math.min(player.charge / 1.5, 1);
+      ctx.fillStyle = player.charge > 1.5 ? '#f4f' : '#4ff';
+      ctx.globalAlpha = 0.5 + Math.sin(frame * 0.3) * 0.3;
+      ctx.beginPath();
+      ctx.arc(armX + (player.dir > 0 ? 6 : 0), armY + 2, 3 + glow * 3, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.globalAlpha = 1;
+    }
+    // Legs
+    ctx.fillStyle = '#345';
+    if (player.grounded && Math.abs(player.vx) > 5) {
+      // Walking animation
+      const legOff = Math.sin(player.animFrame * Math.PI/2) * 3;
+      ctx.fillRect(px + 2, py + 20, 4, 4 + legOff);
+      ctx.fillRect(px + 8, py + 20, 4, 4 - legOff);
+    } else {
+      ctx.fillRect(px + 2, py + 20, 4, 4);
+      ctx.fillRect(px + 8, py + 20, 4, 4);
+    }
+
+    // Crouch indicator
+    if (player.crouching) {
+      ctx.fillStyle = '#36a';
+      ctx.fillRect(px + 1, py + 16, 12, 8);
+    }
+  }
+}
+
+function drawEnemies() {
+  for (const e of enemies) {
+    if (e.frozen > 0) {
+      ctx.fillStyle = '#8cf';
+      ctx.fillRect(e.x - 1, e.y - 1, e.w + 2, e.h + 2);
+    }
+
+    const zd = ZONES[e.zone];
+    ctx.fillStyle = zd.accent;
+
+    // Different shapes per enemy type
+    switch(e.type) {
+      case 'crawler': case 'mushroom': case 'firewalker': case 'frostling': case 'drone':
+        ctx.fillRect(e.x, e.y, e.w, e.h);
+        ctx.fillStyle = '#f00';
+        ctx.fillRect(e.x + 2, e.y + 2, 3, 3);
+        ctx.fillRect(e.x + e.w - 5, e.y + 2, 3, 3);
+        break;
+      case 'floater': case 'spore': case 'lavabat': case 'icicle': case 'sentinel':
+        ctx.beginPath();
+        ctx.arc(e.x + e.w/2, e.y + e.h/2, e.w/2, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = '#f00';
+        ctx.fillRect(e.x + e.w/2 - 2, e.y + e.h/2 - 1, 4, 2);
+        break;
+      case 'spiker': case 'tendril': case 'magmite': case 'iceworm': case 'turret':
+        ctx.fillRect(e.x, e.y + 4, e.w, e.h - 4);
+        ctx.fillStyle = '#ff0';
+        // Spikes
+        for (let s = 0; s < 3; s++) {
+          ctx.beginPath();
+          ctx.moveTo(e.x + 2 + s*5, e.y + 4);
+          ctx.lineTo(e.x + 4 + s*5, e.y);
+          ctx.lineTo(e.x + 6 + s*5, e.y + 4);
+          ctx.fill();
+        }
+        break;
+      default:
+        ctx.fillRect(e.x, e.y, e.w, e.h);
+        ctx.fillStyle = '#fff';
+        ctx.fillRect(e.x + 3, e.y + 3, 2, 2);
+    }
+  }
+}
+
+function drawBoss() {
+  const b = bossActive;
+  const zd = ZONES[b.zone];
+
+  // Boss body
+  const flash = b.timer % 0.2 < 0.1 && b.hp < b.maxHp * 0.33;
+  ctx.fillStyle = flash ? '#fff' : zd.accent;
+  ctx.fillRect(b.x, b.y, b.w, b.h);
+
+  // Core
+  ctx.fillStyle = '#f00';
+  ctx.beginPath();
+  ctx.arc(b.x + b.w/2, b.y + b.h/2, 8 + Math.sin(frame*0.1)*2, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Eyes
+  ctx.fillStyle = '#ff0';
+  ctx.fillRect(b.x + 6, b.y + 8, 6, 4);
+  ctx.fillRect(b.x + b.w - 12, b.y + 8, 6, 4);
+
+  // Armor plates
+  ctx.fillStyle = zd.wall;
+  ctx.fillRect(b.x - 4, b.y + 10, 4, 20);
+  ctx.fillRect(b.x + b.w, b.y + 10, 4, 20);
+
+  // HP bar
+  ctx.fillStyle = '#300';
+  ctx.fillRect(b.x, b.y - 8, b.w, 4);
+  ctx.fillStyle = '#f44';
+  ctx.fillRect(b.x, b.y - 8, b.w * (b.hp / b.maxHp), 4);
+}
+
+function drawProjectiles() {
+  for (const p of projectiles) {
+    ctx.fillStyle = p.color || '#ff0';
+    const size = p.size || 3;
+    if (p.missile) {
+      ctx.fillRect(p.x - size/2, p.y - 2, size, 4);
+      // Trail
+      ctx.fillStyle = 'rgba(255,100,0,0.5)';
+      ctx.fillRect(p.x - size, p.y - 1, size/2, 2);
+    } else if (p.wave) {
+      ctx.globalAlpha = 0.6 + Math.sin(frame * 0.3) * 0.3;
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, size, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.globalAlpha = 1;
+    } else {
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, size/2, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+}
+
+function drawBombs() {
+  for (const b of bombs) {
+    const flash = b.timer < 0.3 && Math.floor(b.timer * 20) % 2;
+    ctx.fillStyle = flash ? '#fff' : '#4af';
+    ctx.beginPath();
+    ctx.arc(b.x, b.y, 4, 0, Math.PI * 2);
+    ctx.fill();
+  }
+}
+
+function drawItems() {
+  const roomKey = player.roomX + ',' + player.roomY;
+  if (!items[roomKey]) return;
+
+  for (const item of items[roomKey]) {
+    if (item.collected) continue;
+    const bob = Math.sin(frame * 0.05 + item.x) * 2;
+
+    if (item.type === 'upgrade') {
+      // Glowing orb
+      ctx.fillStyle = '#f4f';
+      ctx.globalAlpha = 0.5 + Math.sin(frame * 0.08) * 0.3;
+      ctx.beginPath();
+      ctx.arc(item.x + 7, item.y + 7 + bob, 9, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.globalAlpha = 1;
+      ctx.fillStyle = '#fff';
+      ctx.beginPath();
+      ctx.arc(item.x + 7, item.y + 7 + bob, 5, 0, Math.PI * 2);
+      ctx.fill();
+    } else if (item.type === 'etank') {
+      // Energy tank
+      ctx.fillStyle = '#4f4';
+      ctx.fillRect(item.x + 2, item.y + 3 + bob, 10, 8);
+      ctx.fillStyle = '#8f8';
+      ctx.fillRect(item.x + 4, item.y + 1 + bob, 6, 3);
+    } else if (item.type === 'missile') {
+      // Missile pack
+      ctx.fillStyle = '#f44';
+      ctx.fillRect(item.x + 4, item.y + 2 + bob, 6, 10);
+      ctx.fillStyle = '#faa';
+      ctx.beginPath();
+      ctx.moveTo(item.x + 7, item.y + bob);
+      ctx.lineTo(item.x + 4, item.y + 4 + bob);
+      ctx.lineTo(item.x + 10, item.y + 4 + bob);
+      ctx.fill();
+    }
+  }
+}
+
+function drawHUD() {
+  if (!player) return;
+
+  // HUD bar
+  ctx.fillStyle = 'rgba(0,0,0,0.8)';
+  ctx.fillRect(0, 0, GW, HUD_H);
+
+  // Energy
+  ctx.fillStyle = '#4f4';
+  ctx.font = 'bold 9px monospace';
+  ctx.textAlign = 'left';
+  ctx.fillText('E:' + player.hp + '/' + player.maxHp, 4, 9);
+
+  // Missiles
+  if (player.maxMissiles > 0) {
+    ctx.fillStyle = '#f44';
+    ctx.fillText('M:' + player.missiles, 110, 9);
+  }
+
+  // Zone name
+  const zone = getZoneAt(player.roomX, player.roomY);
+  if (zone >= 0) {
+    ctx.fillStyle = ZONES[zone].accent;
+    ctx.textAlign = 'center';
+    ctx.fillText(ZONES[zone].name, GW/2, 9);
+  }
+
+  // Charge indicator
+  if (player.charge > 0.3) {
+    ctx.fillStyle = player.charge > 1.5 ? '#f4f' : '#4ff';
+    ctx.textAlign = 'right';
+    ctx.fillText('CHG', GW - 4, 9);
+  }
+
+  // Coordinates (small debug)
+  ctx.fillStyle = '#333';
+  ctx.textAlign = 'right';
+  ctx.font = '7px monospace';
+  ctx.fillText(player.roomX + ',' + player.roomY, GW - 4, GH - 2);
+}
+
+function drawItemGet() {
+  ctx.fillStyle = 'rgba(0,0,0,0.7)';
+  ctx.fillRect(0, GH/2 - 30, GW, 60);
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#fff';
+  ctx.font = 'bold 12px monospace';
+
+  // Find which item was just collected
+  const roomKey = player.roomX + ',' + player.roomY;
+  if (items[roomKey]) {
+    for (const item of items[roomKey]) {
+      if (item.collected) {
+        if (item.type === 'upgrade') {
+          ctx.fillText(UPGRADE_NAMES[item.upgrade] || item.upgrade, GW/2, GH/2 - 8);
+          ctx.fillStyle = '#aaa';
+          ctx.font = '9px monospace';
+          ctx.fillText('ACQUIRED', GW/2, GH/2 + 10);
+        } else if (item.type === 'etank') {
+          ctx.fillText('ENERGY TANK', GW/2, GH/2 - 8);
+          ctx.fillStyle = '#4f4';
+          ctx.font = '9px monospace';
+          ctx.fillText('MAX ENERGY +100', GW/2, GH/2 + 10);
+        } else if (item.type === 'missile') {
+          ctx.fillText('MISSILE EXPANSION', GW/2, GH/2 - 8);
+          ctx.fillStyle = '#f44';
+          ctx.font = '9px monospace';
+          ctx.fillText('MISSILES +5', GW/2, GH/2 + 10);
+        }
+        break;
+      }
+    }
+  }
+}
+
+function drawMap() {
+  ctx.fillStyle = 'rgba(0,0,10,0.95)';
+  ctx.fillRect(0, 0, GW, GH);
+
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#aaa';
+  ctx.font = 'bold 11px monospace';
+  ctx.fillText('MAP', GW/2, 15);
+
+  // Draw visited rooms
+  const cellW = 14, cellH = 10;
+  const offX = GW/2 - WORLD_W * cellW / 2;
+  const offY = 25;
+
+  for (const key in world.visited) {
+    const parts = key.split(',');
+    const rx = parseInt(parts[0]), ry = parseInt(parts[1]);
+    const zone = getZoneAt(rx, ry);
+    const zd = zone >= 0 ? ZONES[zone] : ZONES[0];
+
+    const sx = offX + rx * cellW;
+    const sy = offY + ry * cellH;
+
+    ctx.fillStyle = zd.wall;
+    ctx.fillRect(sx, sy, cellW - 1, cellH - 1);
+
+    // Save room marker
+    if (world.saveRooms[key]) {
+      ctx.fillStyle = '#4f4';
+      ctx.fillRect(sx + 2, sy + 2, cellW - 5, cellH - 5);
+    }
+
+    // Boss room marker
+    for (const br of BOSS_ROOMS) {
+      if (br.rx === rx && br.ry === ry) {
+        ctx.fillStyle = player.upgrades['boss_' + BOSS_ROOMS.indexOf(br)] ? '#444' : '#f44';
+        ctx.fillRect(sx + 3, sy + 2, cellW - 7, cellH - 5);
+      }
+    }
+  }
+
+  // Player position
+  const px = offX + player.roomX * cellW;
+  const py = offY + player.roomY * cellH;
+  ctx.fillStyle = (frame % 30 < 15) ? '#fff' : '#4af';
+  ctx.fillRect(px + 2, py + 1, cellW - 5, cellH - 3);
+
+  // Legend
+  ctx.textAlign = 'left';
+  ctx.fillStyle = '#888';
+  ctx.font = '8px monospace';
+  ctx.fillText('YOU', offX, GH - 50);
+  ctx.fillStyle = '#4af';
+  ctx.fillRect(offX + 25, GH - 56, 6, 6);
+
+  ctx.fillStyle = '#888';
+  ctx.fillText('SAVE', offX + 50, GH - 50);
+  ctx.fillStyle = '#4f4';
+  ctx.fillRect(offX + 80, GH - 56, 6, 6);
+
+  ctx.fillStyle = '#888';
+  ctx.fillText('BOSS', offX + 100, GH - 50);
+  ctx.fillStyle = '#f44';
+  ctx.fillRect(offX + 130, GH - 56, 6, 6);
+
+  // Upgrades collected
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#aaa';
+  ctx.font = '9px monospace';
+  const totalItems = 9 + 8 + 10; // upgrades + etanks + missiles
+  let collected = 0;
+  for (const key in items) {
+    for (const item of items[key]) { if (item.collected) collected++; }
+  }
+  ctx.fillText('ITEMS: ' + collected + '/' + totalItems + ' (' + Math.floor(collected/totalItems*100) + '%)', GW/2, GH - 30);
+
+  // Upgrades list
+  ctx.textAlign = 'left';
+  ctx.font = '7px monospace';
+  let ux = 10, uy = GH - 18;
+  for (const upg of UPGRADES) {
+    ctx.fillStyle = player.upgrades[upg] ? '#4f4' : '#333';
+    ctx.fillText(UPGRADE_NAMES[upg] || upg, ux, uy);
+    ux += 60;
+    if (ux > GW - 60) { ux = 10; uy += 10; }
+  }
+
+  // Close hint
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#666';
+  ctx.font = '8px monospace';
+  ctx.fillText('PRESS M/TAB TO CLOSE', GW/2, GH - 4);
+}
+
+function drawDeath() {
+  ctx.fillStyle = 'rgba(20,0,0,0.8)';
+  ctx.fillRect(0, 0, GW, GH);
+
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#f44';
+  ctx.font = 'bold 20px monospace';
+  ctx.fillText('DESTROYED', GW/2, GH/2 - 10);
+
+  ctx.fillStyle = '#888';
+  ctx.font = '10px monospace';
+  ctx.fillText('The Iron Maw claims another...', GW/2, GH/2 + 15);
+
+  if (deathTimer > 2) {
+    const pulse = Math.sin(frame * 0.08) * 0.3 + 0.7;
+    ctx.globalAlpha = pulse;
+    ctx.fillStyle = '#aaa';
+    ctx.fillText('Returning to title...', GW/2, GH/2 + 40);
+    ctx.globalAlpha = 1;
+  }
+}
+
+function drawEnding() {
+  const t = endTimer;
+  ctx.fillStyle = '#000';
+  ctx.fillRect(0, 0, GW, GH);
+
+  ctx.textAlign = 'center';
+
+  if (t < 2) {
+    ctx.fillStyle = '#fff';
+    ctx.globalAlpha = Math.min(t, 1);
+    ctx.font = 'bold 16px monospace';
+    ctx.fillText('THE MAW IS SILENCED', GW/2, GH/2);
+    ctx.globalAlpha = 1;
+  } else if (t < 5) {
+    ctx.fillStyle = '#4f4';
+    ctx.font = 'bold 14px monospace';
+    ctx.fillText('MISSION COMPLETE', GW/2, 60);
+
+    ctx.fillStyle = '#aaa';
+    ctx.font = '10px monospace';
+
+    // Stats
+    let collected = 0, total = 27;
+    for (const key in items) {
+      for (const item of items[key]) { if (item.collected) collected++; }
+    }
+    ctx.fillText('Items: ' + collected + '/' + total + ' (' + Math.floor(collected/total*100) + '%)', GW/2, 100);
+    ctx.fillText('Energy Tanks: ' + player.etanks, GW/2, 120);
+    ctx.fillText('Missiles: ' + player.maxMissiles, GW/2, 140);
+
+    // Upgrades
+    ctx.fillStyle = '#888';
+    ctx.font = '9px monospace';
+    let y = 170;
+    for (const upg of UPGRADES) {
+      ctx.fillStyle = player.upgrades[upg] ? '#4f4' : '#633';
+      ctx.fillText((player.upgrades[upg] ? '[X] ' : '[ ] ') + (UPGRADE_NAMES[upg] || upg), GW/2, y);
+      y += 12;
+    }
+  } else {
+    ctx.fillStyle = '#ffdd44';
+    ctx.font = 'bold 12px monospace';
+    ctx.fillText('THE IRON MAW', GW/2, GH/2 - 20);
+    ctx.fillStyle = '#888';
+    ctx.font = '9px monospace';
+    ctx.fillText('A Tasern Tale', GW/2, GH/2);
+    ctx.fillText('Thanks for playing', GW/2, GH/2 + 20);
+
+    const pulse = Math.sin(frame * 0.05) * 0.3 + 0.7;
+    ctx.globalAlpha = pulse;
+    ctx.fillStyle = '#aaa';
+    ctx.fillText('Press any key...', GW/2, GH - 30);
+    ctx.globalAlpha = 1;
+  }
+}
+
+// === START LOOP ===
+TAS.loop.start(update, draw);
+
+})();
+</script>
+</body>
+</html>

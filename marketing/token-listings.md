@@ -22,11 +22,11 @@ Apply: https://www.coingecko.com/en/coins/new
 |-------|--------|----------|-----|
 | MfT | MfT | 0x8FB87d13B40B1A67B22ED1a17e2835fe7e3a9bA3 | Core infrastructure token |
 | EARTH | EARTH | 0x5CfBecf0209F7ada1EdF1fC0D2Fce3a809C0aE08 | Environmental impact story |
-| CHAR | CHAR | 0x20b048fA035D5763685D695e66aDF62c5D9F5055 | Carbon retirement angle |
+| CHAR | CHAR | 0x20b048fA035D5763685D695e66aDF62c5D9F5055 | Carbon credit removal from markets |
 | POOP | POOP | 0x126555aecBAC290b25644e4b7f29c016aE95f4dc | Game economy token, meme appeal |
 
 **Description for MfT:**
-> MfT is the infrastructure token of the Unruggable reactor network on Base. 27 autonomous reactors fire every 2 hours across 180+ pools, collecting trading fees, buying MfT, and burning supply permanently. Five reactors are fully renounced and immutable. Every token launched on MycoPad creates floor pools paired against MfT. Built toward registered charity status with automated carbon credit retirement via CHAR burns.
+> MfT is the infrastructure token of the Unrugable reactor network on Base. Autonomous reactors fire every 2 hours across hundreds of pools, collecting trading fees, buying MfT, and burning supply permanently. Five reactors are fully renounced and immutable. Every token launched on Unrugable creates floor pools paired against MfT. Built toward registered charity status with automated carbon credit removal from markets via CHAR.
 
 **Status:** READY — needs human to fill application form with logo + description.
 
@@ -105,8 +105,8 @@ Docs: https://docs.llama.fi/list-your-project/submit-a-project
 
 **How to list:**
 1. Fork https://github.com/DefiLlama/DefiLlama-Adapters
-2. Create `projects/unruggable/` folder with TVL adapter
-3. Adapter should track: locked LP value across all 27 reactors + gardens
+2. Create `projects/unrugable/` folder with TVL adapter
+3. Adapter should track: locked LP value across all reactors + gardens
 4. Submit PR with brief explanation
 5. Merged within ~24hrs, appears on DeFiLlama dashboard
 

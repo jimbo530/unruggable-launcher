@@ -34,7 +34,7 @@ const TOKENS = {
   cbBTC:   { addr: '0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf', dec: 8 },
 
   // Money for Trees V2 stablecoin
-  MfT:     { addr: '0x85C78B8104D874d17e698b8c5678e3B8072347B1', dec: 6 },
+  MfT:     { addr: '0xe3dd3881477c20C17Df080cEec0C1bD0C065A072', dec: 6 },
 
   // Tree tokens
   TETH:    { addr: '0x7D545427c8f548F3A00C1c09B5360BF3D4B842ef', dec: 18 },

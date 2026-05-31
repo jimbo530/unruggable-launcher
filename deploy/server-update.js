@@ -124,7 +124,7 @@ const CARDS_CACHE_PATH = path.join(__dirname, "reactor-cards.json");
 
 // Load from disk on startup
 if (fs.existsSync(CARDS_CACHE_PATH)) {
-  try { reactorCardsCache = JSON.parse(fs.readFileSync(CARDS_CACHE_PATH, "utf8")); } catch {}
+  try { reactorCardsCache = JSON.parse(fs.readFileSync(CARDS_CACHE_PATH, "utf8")); } catch (e) { console.warn('server-update: failed to load reactor cards cache:', e.message || e); }
 }
 
 async function refreshReactorCards() {
@@ -135,12 +135,12 @@ async function refreshReactorCards() {
     for (const factoryAddr of FACTORIES) {
       const factory = getFactory(factoryAddr);
       let count;
-      try { count = Number(await factory.launchCount()); } catch { continue; }
+      try { count = Number(await factory.launchCount()); } catch (e) { console.warn('server-update: failed to read launchCount:', e.message || e); continue; }
       for (let i = 0; i < count; i++) {
         try {
           const l = await factory.getLaunch(i);
           reactors.push(l.reactor, l.charReactor);
-        } catch {}
+        } catch (e) { console.warn('server-update: failed to getLaunch index', i, e.message || e); }
       }
     }
     // For each reactor, read pools and collect xTokens
@@ -148,14 +148,14 @@ async function refreshReactorCards() {
       const key = addr.toLowerCase();
       const rx = new ethers.Contract(addr, REACTOR_POOL_ABI, provider);
       let poolCount;
-      try { poolCount = Number(await rx.poolCount()); } catch { continue; }
+      try { poolCount = Number(await rx.poolCount()); } catch (e) { console.warn('server-update: failed to read poolCount for', addr, e.message || e); continue; }
       const existing = new Set(reactorCardsCache[key] || []);
       for (let i = 0; i < poolCount; i++) {
         try {
           const pool = await rx.pools(i);
           const xt = pool.xToken.toLowerCase();
           existing.add(xt);
-        } catch {}
+        } catch (e) { console.warn('server-update: failed to read pool', i, 'from reactor', addr, e.message || e); }
       }
       reactorCardsCache[key] = [...existing];
     }
@@ -349,15 +349,15 @@ const server = http.createServer(async (req, res) => {
   if (req.method === "GET" && parts[0] === "share" && parts[1]) {
     const addr = parts[1].toLowerCase();
     const metaPath = getMetaPath(addr);
-    const baseUrl = "https://tasern.quest/api/unruggable";
+    const baseUrl = "https://tasern.quest/api/unrugable";
     const launcherUrl = "https://tasern.quest/launcher/unrugable.html";
-    let title = "MfT Unruggable Launcher";
-    let desc = "Launch an unruggable token. Liquidity locked forever.";
+    let title = "MfT Unrugable Launcher";
+    let desc = "Launch an unrugable token. Liquidity locked forever.";
     let image = "https://tasern.quest/launcher/og-launcher.png";
     let redirect = launcherUrl;
     if (fs.existsSync(metaPath)) {
       const meta = JSON.parse(fs.readFileSync(metaPath, "utf8"));
-      title = (meta.name || meta.symbol || "Token") + " on MfT Unruggable Launcher";
+      title = (meta.name || meta.symbol || "Token") + " on MfT Unrugable Launcher";
       desc = (meta.description || meta.symbol + " launched on MfT.") + " Liquidity locked forever. Join the network!";
       if (meta.image) image = baseUrl + meta.image;
       if (meta.reactor) redirect = launcherUrl + "?ref=" + meta.reactor;
@@ -385,14 +385,14 @@ const server = http.createServer(async (req, res) => {
   // GET /tokenomics
   if (req.method === "GET" && parts[0] === "tokenomics") {
     return json(res, 200, {
-      network: "Unruggable Launcher",
+      network: "Unrugable Launcher",
       chain: "Base (8453)",
       factory: FACTORIES[FACTORIES.length - 1],
       description: "Every token launched creates permanently locked liquidity paired against MfT, BB, and EB.",
       links: {
         launcher: "https://tasern.quest/launcher/unrugable.html",
         reactorDashboard: "https://tasern.quest/launcher/reactor-dashboard.html",
-        api: "https://tasern.quest/api/unruggable"
+        api: "https://tasern.quest/api/unrugable"
       }
     });
   }

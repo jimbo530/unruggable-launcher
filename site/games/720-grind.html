@@ -1,0 +1,1922 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>720 Grind</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body { width: 100%; height: 100%; overflow: hidden; background: #111; touch-action: none; }
+canvas { display: block; margin: 0 auto; }
+#back-link { position: fixed; bottom: 8px; left: 50%; transform: translateX(-50%); color: #666; font-family: monospace; font-size: 12px; text-decoration: none; z-index: 10; }
+#back-link:hover { color: #aaa; }
+</style>
+</head>
+<body>
+<canvas id="gc"></canvas>
+<a id="back-link" href="/games">Back to Arcade</a>
+<script src="nft-loader.js"></script>
+<script>if(window.NftLoader)NftLoader.gate();</script>
+<script src="tasern-engine.js"></script>
+<script>
+(function(){
+"use strict";
+
+// === CONSTANTS ===
+var GW = 480, GH = 320;
+var ctx = TAS.ctx;
+TAS.initCanvas(GW, GH);
+TAS.input.initTouch({ buttons: ['a','b'], labels: { a: 'JUMP', b: 'TRICK' } });
+
+var PI = Math.PI, PI2 = PI * 2;
+var CITY_W = 1200, CITY_H = 900;
+var TILE = 30;
+
+// === MfT SPLASH ===
+var splashTimer = 2.0;
+var splashDone = false;
+
+// === INPUT DEBOUNCE ===
+// Prevents instant state transitions when a key is still held from previous state
+var inputCooldown = 0;
+
+function clearAllInput() {
+  var k = TAS.input.keys;
+  for (var key in k) { k[key] = false; }
+  TAS.input.touch.left = TAS.input.touch.right = TAS.input.touch.up = TAS.input.touch.down = TAS.input.touch.a = TAS.input.touch.b = false;
+  inputCooldown = 0.3;
+}
+
+function anyKeyPressed() {
+  if (inputCooldown > 0) return false;
+  if (TAS.input.touch.a || TAS.input.touch.b) return true;
+  var k = TAS.input.keys;
+  for (var key in k) { if (k[key]) return true; }
+  return false;
+}
+
+// === GAME STATE ===
+var state = 'splash';
+var score = 0;
+var highScore = TAS.score.load('720grind_hi');
+var frame = 0;
+var lives = 3;
+var cityTimer = 45;
+var beeActive = false;
+var beeTimer = 0;
+var parkTickets = [false, false, false, false];
+var parkMedals = [0, 0, 0, 0]; // 0=none,1=bronze,2=silver,3=gold
+var currentPark = -1;
+var parkState = null;
+var shopOpen = false;
+var championshipUnlocked = false;
+var gameWon = false;
+var wasChampionship = false; // track if we just completed championship
+
+// Board stats
+var boards = [
+  { name: 'STARTER', speed: 1.0, air: 1.0, spin: 1.0, cost: 0 },
+  { name: 'STREET HAWK', speed: 1.3, air: 1.1, spin: 1.2, cost: 500 },
+  { name: 'AIR MASTER', speed: 1.1, air: 1.5, spin: 1.3, cost: 1200 },
+  { name: 'SPIN KING', speed: 1.2, air: 1.3, spin: 1.8, cost: 2000 },
+  { name: 'LEGEND 720', speed: 1.5, air: 1.6, spin: 2.0, cost: 4000 }
+];
+var currentBoard = 0;
+var boardsOwned = [true, false, false, false, false]; // track individual ownership
+var money = 0;
+
+// Player (city mode)
+var player = { x: 600, y: 450, vx: 0, vy: 0, angle: 0, pushing: false, pushFrame: 0 };
+var PLAYER_SPEED = 160;
+var FRICTION = 0.94;
+
+// Camera
+var camX = 0, camY = 0;
+
+// City objects
+var parks = [];
+var tokens = [];
+var cars = [];
+var pedestrians = [];
+var bees = [];
+var shops = [];
+var buildings = [];
+
+// Car hit invincibility
+var carHitTimer = 0;
+
+// Park event state
+var parkPlayer = { x: 0, y: 0, vx: 0, vy: 0, airborne: false, airTime: 0, rotation: 0, height: 0, grinding: false };
+var trickQueue = [];
+var currentTrick = '';
+var trickScore = 0;
+var comboCount = 0;
+var comboMultiplier = 1;
+var parkScore = 0;
+var parkTimer = 30;
+var parkCrashes = 0;
+var parkObstacles = [];
+var parkRails = [];
+var parkTokens = [];
+var parkGates = [];
+var gateIndex = 0;
+var halfpipePos = 0;
+var halfpipeVel = 0;
+var halfpipeHeight = 0;
+var rampSpeed = 0;
+var rampLaunched = false;
+var downhillScroll = 0;
+var trickDisplay = '';
+var trickDisplayTimer = 0;
+var landingTimer = 0;
+
+// Trick definitions
+var TRICKS = [
+  { name: '360', keys: ['left','left'], score: 100, minAir: 0.3 },
+  { name: '540', keys: ['left','left','left'], score: 200, minAir: 0.5 },
+  { name: '720', keys: ['left','left','left','left'], score: 500, minAir: 0.8 },
+  { name: 'KICKFLIP', keys: ['down','up'], score: 150, minAir: 0.2 },
+  { name: 'HEELFLIP', keys: ['up','down'], score: 150, minAir: 0.2 },
+  { name: 'HANDPLANT', keys: ['up','up'], score: 250, minAir: 0.4 },
+  { name: 'INDY GRAB', keys: ['down','down'], score: 200, minAir: 0.3 },
+  { name: 'MADONNA', keys: ['left','down','right'], score: 350, minAir: 0.6 },
+  { name: 'MCTWIST', keys: ['right','right','left'], score: 400, minAir: 0.7 }
+];
+
+// Park types
+var PARK_HALFPIPE = 0, PARK_DOWNHILL = 1, PARK_SLALOM = 2, PARK_JUMP = 3;
+var parkTypes = [PARK_HALFPIPE, PARK_DOWNHILL, PARK_SLALOM, PARK_JUMP];
+var parkNames = ['HALFPIPE', 'DOWNHILL', 'SLALOM', 'JUMP RAMP'];
+var parkTargets = [
+  [800, 1500, 2500],  // halfpipe bronze/silver/gold
+  [600, 1200, 2000],  // downhill
+  [500, 1000, 1800],  // slalom
+  [700, 1400, 2200]   // jump
+];
+
+// === CITY GENERATION ===
+function generateCity() {
+  parks = [
+    { x: 200, y: 150, type: 0, icon: '#ff4444' },
+    { x: 950, y: 200, type: 1, icon: '#44ff44' },
+    { x: 250, y: 700, type: 2, icon: '#4488ff' },
+    { x: 900, y: 750, type: 3, icon: '#ffaa00' }
+  ];
+  shops = [
+    { x: 580, y: 420, w: 50, h: 40 }
+  ];
+  tokens = [];
+  for (var i = 0; i < 40; i++) {
+    tokens.push({ x: 80 + Math.random() * (CITY_W - 160), y: 80 + Math.random() * (CITY_H - 160), collected: false });
+  }
+  cars = [];
+  for (var i = 0; i < 6; i++) {
+    var horizontal = Math.random() > 0.5;
+    cars.push({
+      x: horizontal ? -60 : 200 + Math.random() * 800,
+      y: horizontal ? 150 + Math.random() * 600 : -60,
+      vx: horizontal ? (60 + Math.random() * 40) * (Math.random() > 0.5 ? 1 : -1) : 0,
+      vy: horizontal ? 0 : (60 + Math.random() * 40) * (Math.random() > 0.5 ? 1 : -1),
+      w: horizontal ? 50 : 24,
+      h: horizontal ? 24 : 50,
+      color: ['#cc3333','#3333cc','#33cc33','#cccc33','#cc33cc','#ffffff'][i]
+    });
+  }
+  pedestrians = [];
+  for (var i = 0; i < 8; i++) {
+    pedestrians.push({
+      x: 100 + Math.random() * 1000, y: 100 + Math.random() * 700,
+      vx: (Math.random() - 0.5) * 30, vy: (Math.random() - 0.5) * 30,
+      timer: Math.random() * 3
+    });
+  }
+  buildings = [];
+  for (var i = 0; i < 20; i++) {
+    var bx = 60 + Math.random() * (CITY_W - 120);
+    var by = 60 + Math.random() * (CITY_H - 120);
+    var bw = 40 + Math.random() * 60;
+    var bh = 40 + Math.random() * 60;
+    var overlap = false;
+    for (var j = 0; j < parks.length; j++) { var p = parks[j]; if (TAS.hit.rectOverlap(bx, by, bw, bh, p.x - 50, p.y - 50, 100, 100)) overlap = true; }
+    for (var j = 0; j < shops.length; j++) { var s = shops[j]; if (TAS.hit.rectOverlap(bx, by, bw, bh, s.x - 20, s.y - 20, s.w + 40, s.h + 40)) overlap = true; }
+    if (!overlap) buildings.push({ x: bx, y: by, w: bw, h: bh, color: ['#445','#454','#544','#455','#545'][i % 5] });
+  }
+  bees = [];
+  beeActive = false;
+  beeTimer = 0;
+}
+
+// === PARK GENERATION ===
+function initPark(type) {
+  parkScore = 0;
+  parkTimer = type === PARK_DOWNHILL ? 25 : type === PARK_SLALOM ? 20 : 30;
+  parkCrashes = 0;
+  comboCount = 0;
+  comboMultiplier = 1;
+  trickDisplay = '';
+  trickDisplayTimer = 0;
+  trickQueue = [];
+  currentTrick = '';
+  parkObstacles = [];
+  parkRails = [];
+  parkTokens = [];
+  parkGates = [];
+  gateIndex = 0;
+
+  if (type === PARK_HALFPIPE) {
+    parkPlayer = { x: GW / 2, y: 220, vx: 0, vy: 0, airborne: false, airTime: 0, rotation: 0, height: 0, grinding: false };
+    halfpipePos = 0.5;
+    halfpipeVel = 0;
+    halfpipeHeight = 0;
+  } else if (type === PARK_DOWNHILL) {
+    parkPlayer = { x: 100, y: 200, vx: 0, vy: 0, airborne: false, airTime: 0, rotation: 0, height: 0, grinding: false };
+    downhillScroll = 0;
+    for (var i = 0; i < 20; i++) {
+      parkObstacles.push({ x: 200 + i * 150 + Math.random() * 80, y: 140 + Math.random() * 120, w: 20 + Math.random() * 20, h: 16, type: Math.random() > 0.5 ? 'rock' : 'cone' });
+    }
+    for (var i = 0; i < 8; i++) {
+      parkRails.push({ x: 300 + i * 250, y: 180 + Math.random() * 60, w: 80 + Math.random() * 40 });
+    }
+    for (var i = 0; i < 15; i++) {
+      parkTokens.push({ x: 250 + i * 180 + Math.random() * 60, y: 140 + Math.random() * 100, collected: false });
+    }
+  } else if (type === PARK_SLALOM) {
+    parkPlayer = { x: 60, y: 200, vx: 3, vy: 0, airborne: false, airTime: 0, rotation: 0, height: 0, grinding: false };
+    for (var i = 0; i < 12; i++) {
+      parkGates.push({ x: 100 + i * 100, y: 140 + Math.sin(i * 0.8) * 60, passed: false, side: i % 2 === 0 ? 'left' : 'right' });
+    }
+  } else if (type === PARK_JUMP) {
+    parkPlayer = { x: 60, y: 240, vx: 0, vy: 0, airborne: false, airTime: 0, rotation: 0, height: 0, grinding: false };
+    rampSpeed = 0;
+    rampLaunched = false;
+  }
+}
+
+// === START/RESET ===
+function startGame() {
+  state = 'city';
+  score = 0;
+  lives = 3;
+  money = 0;
+  currentBoard = 0;
+  boardsOwned = [true, false, false, false, false];
+  parkTickets = [false, false, false, false];
+  parkMedals = [0, 0, 0, 0];
+  championshipUnlocked = false;
+  gameWon = false;
+  wasChampionship = false;
+  cityTimer = 45;
+  carHitTimer = 0;
+  player.x = 600; player.y = 450; player.vx = 0; player.vy = 0; player.angle = 0;
+  generateCity();
+  TAS.particles.clear();
+  clearAllInput();
+}
+
+function enterPark(idx) {
+  currentPark = idx;
+  state = 'park';
+  wasChampionship = false;
+  initPark(parkTypes[idx]);
+  TAS.audio.playTone(440, 0.1, 'square', 0.08);
+  setTimeout(function() { TAS.audio.playTone(660, 0.1, 'square', 0.08); }, 100);
+}
+
+function exitPark(completed) {
+  if (completed) {
+    score += parkScore;
+    money += Math.floor(parkScore / 2);
+
+    if (wasChampionship) {
+      // Championship completed -- go to win state
+      state = 'win';
+      gameWon = true;
+      if (score > highScore) {
+        highScore = score;
+        TAS.score.save('720grind_hi', highScore);
+      }
+      TAS.audio.playMelody([[523,0.1],[659,0.1],[784,0.1],[1047,0.15]], 120);
+      clearAllInput();
+      return;
+    }
+
+    var medal = 0;
+    var targets = parkTargets[currentPark];
+    if (parkScore >= targets[2]) medal = 3;
+    else if (parkScore >= targets[1]) medal = 2;
+    else if (parkScore >= targets[0]) medal = 1;
+    if (medal > parkMedals[currentPark]) parkMedals[currentPark] = medal;
+    if (medal > 0) parkTickets[currentPark] = true;
+    TAS.audio.playMelody([[523,0.1],[659,0.1],[784,0.15]], 120);
+  }
+  state = 'parkResult';
+  // Check championship unlock
+  championshipUnlocked = parkTickets.every(function(t) { return t; });
+  clearAllInput();
+}
+
+function returnToCity() {
+  state = 'city';
+  cityTimer = 40;
+  beeActive = false;
+  bees = [];
+  clearAllInput();
+}
+
+// === CITY UPDATE ===
+function updateCity(dt) {
+  var inp = TAS.input;
+  var spd = PLAYER_SPEED * boards[currentBoard].speed;
+  var ax = 0, ay = 0;
+
+  // Invincibility timer after car hit
+  if (carHitTimer > 0) carHitTimer -= dt;
+
+  if (inp.keys['ArrowLeft'] || inp.keys['KeyA'] || inp.touch.left) ax -= 1;
+  if (inp.keys['ArrowRight'] || inp.keys['KeyD'] || inp.touch.right) ax += 1;
+  if (inp.keys['ArrowUp'] || inp.keys['KeyW'] || inp.touch.up) ay -= 1;
+  if (inp.keys['ArrowDown'] || inp.keys['KeyS'] || inp.touch.down) ay += 1;
+
+  if (ax || ay) {
+    var len = Math.sqrt(ax * ax + ay * ay);
+    player.vx += (ax / len) * spd * dt * 3;
+    player.vy += (ay / len) * spd * dt * 3;
+    player.angle = Math.atan2(ay, ax);
+    player.pushing = true;
+    player.pushFrame += dt * 8;
+  } else {
+    player.pushing = false;
+  }
+
+  player.vx *= FRICTION;
+  player.vy *= FRICTION;
+  var maxSpd = spd * 1.5;
+  var vel = Math.sqrt(player.vx * player.vx + player.vy * player.vy);
+  if (vel > maxSpd) { player.vx *= maxSpd / vel; player.vy *= maxSpd / vel; }
+
+  var nx = player.x + player.vx * dt;
+  var ny = player.y + player.vy * dt;
+
+  // Building collision
+  for (var bi = 0; bi < buildings.length; bi++) {
+    var b = buildings[bi];
+    if (TAS.hit.rectOverlap(nx - 8, ny - 8, 16, 16, b.x, b.y, b.w, b.h)) {
+      nx = player.x; ny = player.y;
+      player.vx *= -0.3; player.vy *= -0.3;
+      break;
+    }
+  }
+
+  player.x = TAS.math.clamp(nx, 10, CITY_W - 10);
+  player.y = TAS.math.clamp(ny, 10, CITY_H - 10);
+
+  // Emit trail particles when moving fast
+  if (vel > 40 && frame % 3 === 0) {
+    TAS.particles.spawn(player.x - Math.cos(player.angle) * 6, player.y - Math.sin(player.angle) * 6, '#aaa', 1, 0.5, { size: 1, sizeVar: 1 });
+  }
+
+  // Skating sound when pushing
+  if (player.pushing && frame % 20 === 0) {
+    TAS.audio.playNoise(0.04, 0.02, 2000);
+  }
+
+  // Token collection
+  for (var ti = 0; ti < tokens.length; ti++) {
+    var t = tokens[ti];
+    if (!t.collected && TAS.math.dist(player.x, player.y, t.x, t.y) < 15) {
+      t.collected = true;
+      score += 25;
+      money += 10;
+      TAS.audio.playTone(880, 0.06, 'square', 0.06);
+      TAS.particles.spawn(t.x, t.y, '#ffdd44', 6, 2, { size: 2 });
+    }
+  }
+
+  // Car updates
+  for (var ci = 0; ci < cars.length; ci++) {
+    var c = cars[ci];
+    c.x += c.vx * dt;
+    c.y += c.vy * dt;
+    if (c.x > CITY_W + 60) c.x = -60;
+    if (c.x < -60) c.x = CITY_W + 60;
+    if (c.y > CITY_H + 60) c.y = -60;
+    if (c.y < -60) c.y = CITY_H + 60;
+    // Only allow hit if invincibility expired
+    if (carHitTimer <= 0 && TAS.hit.rectOverlap(player.x - 8, player.y - 8, 16, 16, c.x - c.w / 2, c.y - c.h / 2, c.w, c.h)) {
+      cityTimer -= 5;
+      carHitTimer = 1.5; // 1.5 seconds of invincibility
+      player.vx = -player.vx * 2; player.vy = -player.vy * 2;
+      TAS.fx.shake(8, 0.85);
+      TAS.fx.flash('#ff0000', 0.3);
+      TAS.audio.playNoise(0.3, 0.1, 400);
+      TAS.particles.spawn(player.x, player.y, '#ff4444', 10, 3);
+    }
+  }
+
+  // Pedestrian updates
+  for (var pi = 0; pi < pedestrians.length; pi++) {
+    var p = pedestrians[pi];
+    p.timer -= dt;
+    if (p.timer <= 0) {
+      p.vx = (Math.random() - 0.5) * 40;
+      p.vy = (Math.random() - 0.5) * 40;
+      p.timer = 2 + Math.random() * 3;
+    }
+    p.x += p.vx * dt;
+    p.y += p.vy * dt;
+    p.x = TAS.math.clamp(p.x, 20, CITY_W - 20);
+    p.y = TAS.math.clamp(p.y, 20, CITY_H - 20);
+  }
+
+  // Timer & bees
+  cityTimer -= dt;
+  if (cityTimer <= 10 && !beeActive) {
+    beeActive = true;
+    for (var i = 0; i < 3; i++) {
+      bees.push({ x: Math.random() > 0.5 ? 0 : CITY_W, y: Math.random() * CITY_H, speed: 50 + i * 20 });
+    }
+    TAS.audio.playTone(200, 0.3, 'sawtooth', 0.06);
+  }
+
+  if (beeActive) {
+    for (var bi2 = 0; bi2 < bees.length; bi2++) {
+      var bee = bees[bi2];
+      var ang = TAS.math.angle(bee.x, bee.y, player.x, player.y);
+      bee.x += Math.cos(ang) * bee.speed * dt;
+      bee.y += Math.sin(ang) * bee.speed * dt;
+      bee.speed += dt * 8; // Get faster
+      if (TAS.math.dist(bee.x, bee.y, player.x, player.y) < 12) {
+        lives--;
+        TAS.fx.shake(12, 0.8);
+        TAS.fx.flash('#ffff00', 0.5);
+        TAS.audio.playNoise(0.4, 0.15, 800);
+        if (lives <= 0) { gameOver(); return; }
+        cityTimer = 40;
+        beeActive = false;
+        bees = [];
+        break;
+      }
+    }
+  }
+
+  if (cityTimer <= 0) {
+    lives--;
+    TAS.fx.flash('#ff0000', 0.5);
+    if (lives <= 0) { gameOver(); return; }
+    cityTimer = 40;
+    beeActive = false;
+    bees = [];
+  }
+
+  // Park entry (consume the key press to prevent re-entry)
+  for (var i = 0; i < parks.length; i++) {
+    var pk = parks[i];
+    if (TAS.math.dist(player.x, player.y, pk.x, pk.y) < 30) {
+      if (inp.keys['KeyE'] || inp.keys['Enter'] || inp.touch.a) {
+        inp.keys['KeyE'] = false;
+        inp.keys['Enter'] = false;
+        inp.touch.a = false;
+        enterPark(i);
+        return;
+      }
+    }
+  }
+
+  // Shop
+  for (var si = 0; si < shops.length; si++) {
+    var s = shops[si];
+    if (TAS.hit.rectOverlap(player.x - 8, player.y - 8, 16, 16, s.x, s.y, s.w, s.h)) {
+      if (inp.keys['KeyE'] || inp.keys['Enter'] || inp.touch.a) {
+        inp.keys['KeyE'] = false;
+        inp.keys['Enter'] = false;
+        inp.touch.a = false;
+        shopOpen = true;
+        state = 'shop';
+        return;
+      }
+    }
+  }
+
+  // Championship entrance (center of map)
+  if (championshipUnlocked && TAS.math.dist(player.x, player.y, 600, 450) < 30) {
+    if (inp.keys['KeyE'] || inp.keys['Enter'] || inp.touch.a) {
+      inp.keys['KeyE'] = false;
+      inp.keys['Enter'] = false;
+      inp.touch.a = false;
+      state = 'championship';
+      wasChampionship = true;
+      initPark(PARK_HALFPIPE);
+      parkTimer = 60;
+    }
+  }
+
+  // Camera
+  camX = TAS.math.lerp(camX, player.x - GW / 2, dt * 4);
+  camY = TAS.math.lerp(camY, player.y - GH / 2, dt * 4);
+  camX = TAS.math.clamp(camX, 0, CITY_W - GW);
+  camY = TAS.math.clamp(camY, 0, CITY_H - GH);
+}
+
+// === HALFPIPE UPDATE ===
+function updateHalfpipe(dt) {
+  var inp = TAS.input;
+  var airMod = boards[currentBoard].air;
+  var spinMod = boards[currentBoard].spin;
+
+  if (!parkPlayer.airborne) {
+    // On surface of halfpipe
+    if (inp.keys['ArrowLeft'] || inp.touch.left) halfpipeVel -= 6 * dt;
+    if (inp.keys['ArrowRight'] || inp.touch.right) halfpipeVel += 6 * dt;
+    halfpipeVel *= 0.995;
+    halfpipePos += halfpipeVel * dt;
+
+    // Height based on position on curve (parabolic)
+    var distFromCenter = (halfpipePos - 0.5) * 2;
+    halfpipeHeight = distFromCenter * distFromCenter * 120;
+
+    // Launch when reaching edge with enough speed
+    if ((halfpipePos <= 0.05 || halfpipePos >= 0.95) && Math.abs(halfpipeVel) > 1.5) {
+      parkPlayer.airborne = true;
+      parkPlayer.airTime = 0;
+      // height starts at 0 and goes UP (positive = higher)
+      parkPlayer.height = 0;
+      parkPlayer.vy = Math.abs(halfpipeVel) * 40 * airMod; // positive = going up
+      parkPlayer.rotation = 0;
+      trickQueue = [];
+      TAS.audio.playTone(300, 0.1, 'triangle', 0.06, 600);
+    }
+
+    halfpipePos = TAS.math.clamp(halfpipePos, 0, 1);
+    parkPlayer.x = 60 + halfpipePos * (GW - 120);
+    parkPlayer.y = 240 - halfpipeHeight * 0.3;
+  } else {
+    // Airborne: height is positive (up), vy starts positive and gravity pulls it down
+    parkPlayer.airTime += dt;
+    parkPlayer.vy -= 400 * dt; // gravity reduces upward velocity
+    parkPlayer.height += parkPlayer.vy * dt; // height changes by velocity
+
+    // Trick input (consume key on press)
+    if (inp.keys['ArrowLeft'] || inp.touch.left) { trickQueue.push('left'); inp.keys['ArrowLeft'] = false; }
+    if (inp.keys['ArrowRight'] || inp.touch.right) { trickQueue.push('right'); inp.keys['ArrowRight'] = false; }
+    if (inp.keys['ArrowUp'] || inp.touch.up) { trickQueue.push('up'); inp.keys['ArrowUp'] = false; }
+    if (inp.keys['ArrowDown'] || inp.touch.down) { trickQueue.push('down'); inp.keys['ArrowDown'] = false; }
+
+    // Spin visual
+    if (trickQueue.length > 0) {
+      parkPlayer.rotation += spinMod * 8 * dt;
+    }
+
+    // Check trick completion
+    if ((inp.keys['KeyZ'] || inp.keys['Space'] || inp.touch.b) && trickQueue.length > 0) {
+      matchTrick();
+      inp.keys['KeyZ'] = false; inp.keys['Space'] = false;
+    }
+
+    // Landing: height drops back to 0
+    if (parkPlayer.height <= 0 && parkPlayer.vy < 0) {
+      parkPlayer.airborne = false;
+      parkPlayer.height = 0;
+      // Check landing rotation
+      var rotNorm = (parkPlayer.rotation % PI2 + PI2) % PI2;
+      if (rotNorm > 0.5 && rotNorm < PI2 - 0.5) {
+        // Bad landing
+        crashPark();
+      } else {
+        // Clean landing - finalize combo
+        if (comboCount > 0) {
+          var bonus = comboCount * comboMultiplier * 50;
+          parkScore += Math.floor(bonus);
+          trickDisplay = 'COMBO x' + comboMultiplier.toFixed(1) + '! +' + Math.floor(bonus);
+          trickDisplayTimer = 1.5;
+          TAS.audio.playMelody([[523,0.08],[659,0.08],[784,0.1]], 80);
+          TAS.particles.spawn(parkPlayer.x, parkPlayer.y, '#ffdd44', 12, 3, { size: 2 });
+        }
+        comboCount = 0;
+        comboMultiplier = 1;
+        landingTimer = 0.2;
+        TAS.audio.playTone(200, 0.05, 'triangle', 0.05);
+      }
+      parkPlayer.rotation = 0;
+      halfpipePos = parkPlayer.x < GW / 2 ? 0.1 : 0.9;
+      halfpipeVel = parkPlayer.x < GW / 2 ? 1.5 : -1.5;
+    }
+
+    // Visual position during air
+    parkPlayer.x = 60 + halfpipePos * (GW - 120);
+    parkPlayer.y = 130 - Math.max(0, parkPlayer.height) * 0.5;
+  }
+}
+
+// === DOWNHILL UPDATE ===
+function updateDownhill(dt) {
+  var inp = TAS.input;
+  var spdMod = boards[currentBoard].speed;
+
+  downhillScroll += 200 * spdMod * dt;
+  parkPlayer.x = 100;
+
+  if (inp.keys['ArrowUp'] || inp.touch.up) parkPlayer.y -= 120 * dt;
+  if (inp.keys['ArrowDown'] || inp.touch.down) parkPlayer.y += 120 * dt;
+  parkPlayer.y = TAS.math.clamp(parkPlayer.y, 140, 280);
+
+  // Jump
+  if ((inp.keys['KeyZ'] || inp.keys['Space'] || inp.touch.a) && !parkPlayer.airborne) {
+    parkPlayer.airborne = true;
+    parkPlayer.vy = 200 * boards[currentBoard].air; // positive = going up
+    parkPlayer.height = 0;
+    parkPlayer.airTime = 0;
+    trickQueue = [];
+    TAS.audio.playTone(400, 0.08, 'triangle', 0.05, 800);
+  }
+
+  if (parkPlayer.airborne) {
+    parkPlayer.airTime += dt;
+    parkPlayer.vy -= 500 * dt; // gravity
+    parkPlayer.height += parkPlayer.vy * dt;
+    if (parkPlayer.height <= 0) {
+      parkPlayer.airborne = false;
+      parkPlayer.height = 0;
+      parkPlayer.vy = 0;
+      landingTimer = 0.1;
+      TAS.audio.playTone(150, 0.04, 'triangle', 0.04);
+    }
+    // Trick input while airborne
+    if (inp.touch.b || inp.keys['KeyX']) {
+      if (inp.keys['ArrowLeft'] || inp.touch.left) trickQueue.push('left');
+      if (inp.keys['ArrowRight'] || inp.touch.right) trickQueue.push('right');
+      if (inp.keys['ArrowUp'] || inp.touch.up) trickQueue.push('up');
+      if (inp.keys['ArrowDown'] || inp.touch.down) trickQueue.push('down');
+      matchTrick();
+    }
+  }
+
+  // Grinding
+  parkPlayer.grinding = false;
+  for (var ri = 0; ri < parkRails.length; ri++) {
+    var r = parkRails[ri];
+    var rx = r.x - downhillScroll;
+    if (rx > -r.w && rx < GW) {
+      if (!parkPlayer.airborne && Math.abs(parkPlayer.y - r.y) < 12 && parkPlayer.x > rx && parkPlayer.x < rx + r.w) {
+        parkPlayer.grinding = true;
+        parkPlayer.y = r.y;
+        parkScore += Math.floor(30 * dt);
+        if (frame % 4 === 0) TAS.particles.spawn(parkPlayer.x, parkPlayer.y + 8, '#ffaa00', 2, 1.5, { size: 1, gravity: 1 });
+        if (frame % 10 === 0) TAS.audio.playTone(1200 + Math.random() * 400, 0.03, 'sawtooth', 0.02);
+      }
+    }
+  }
+
+  // Obstacles
+  for (var oi = 0; oi < parkObstacles.length; oi++) {
+    var o = parkObstacles[oi];
+    var ox = o.x - downhillScroll;
+    if (ox > -40 && ox < GW + 40) {
+      if (!parkPlayer.airborne && TAS.hit.rectOverlap(parkPlayer.x - 8, parkPlayer.y - 8, 16, 16, ox, o.y, o.w, o.h)) {
+        crashPark();
+        o.x = -999;
+      }
+    }
+  }
+
+  // Tokens
+  for (var ti = 0; ti < parkTokens.length; ti++) {
+    var t = parkTokens[ti];
+    if (t.collected) continue;
+    var tx = t.x - downhillScroll;
+    if (tx > -20 && tx < GW + 20) {
+      if (TAS.math.dist(parkPlayer.x, parkPlayer.y - parkPlayer.height, tx, t.y) < 16) {
+        t.collected = true;
+        parkScore += 50;
+        TAS.audio.playTone(880, 0.05, 'square', 0.05);
+        TAS.particles.spawn(tx, t.y, '#ffdd44', 5, 2);
+      }
+    }
+  }
+
+  // End condition
+  if (downhillScroll > 3200) {
+    exitPark(true);
+  }
+}
+
+// === SLALOM UPDATE ===
+function updateSlalom(dt) {
+  var inp = TAS.input;
+  var spdMod = boards[currentBoard].speed;
+
+  parkPlayer.x += 150 * spdMod * dt;
+  if (inp.keys['ArrowUp'] || inp.touch.up) parkPlayer.y -= 160 * dt;
+  if (inp.keys['ArrowDown'] || inp.touch.down) parkPlayer.y += 160 * dt;
+  parkPlayer.y = TAS.math.clamp(parkPlayer.y, 120, 280);
+
+  // Gates
+  for (var i = 0; i < parkGates.length; i++) {
+    var g = parkGates[i];
+    if (g.passed) continue;
+    if (parkPlayer.x > g.x) {
+      var inGate = Math.abs(parkPlayer.y - g.y) < 25;
+      if (inGate) {
+        g.passed = true;
+        parkScore += 100 + (i === gateIndex ? 50 : 0);
+        gateIndex = i + 1;
+        TAS.audio.playTone(660, 0.06, 'square', 0.05);
+        TAS.particles.spawn(g.x, g.y, '#44ff44', 6, 2);
+      } else {
+        g.passed = true;
+        parkScore -= 50;
+        TAS.audio.playTone(150, 0.15, 'sawtooth', 0.06);
+      }
+    }
+  }
+
+  // End condition
+  if (parkPlayer.x > 1400) {
+    exitPark(true);
+  }
+}
+
+// === JUMP RAMP UPDATE ===
+function updateJumpRamp(dt) {
+  var inp = TAS.input;
+  var airMod = boards[currentBoard].air;
+  var spinMod = boards[currentBoard].spin;
+
+  if (!rampLaunched) {
+    // Building speed phase
+    if (inp.keys['ArrowRight'] || inp.touch.right) {
+      rampSpeed += 200 * dt;
+    }
+    rampSpeed *= 0.99;
+    rampSpeed = Math.min(rampSpeed, 300);
+    parkPlayer.x += rampSpeed * dt;
+
+    // Speed lines
+    if (rampSpeed > 100 && frame % 2 === 0) {
+      TAS.particles.spawn(parkPlayer.x - 10, parkPlayer.y + Math.random() * 10 - 5, '#88ccff', 1, rampSpeed * 0.01, { size: 1, shape: 'rect' });
+    }
+
+    // Speed sound
+    if (rampSpeed > 50 && frame % 15 === 0) {
+      TAS.audio.playNoise(0.03, 0.01 + rampSpeed * 0.0001, 3000);
+    }
+
+    // Hit ramp at x = 300
+    if (parkPlayer.x >= 300) {
+      rampLaunched = true;
+      parkPlayer.airborne = true;
+      parkPlayer.vy = rampSpeed * 0.8 * airMod; // positive = going up
+      parkPlayer.vx = rampSpeed * 0.4;
+      parkPlayer.height = 0;
+      parkPlayer.airTime = 0;
+      parkPlayer.rotation = 0;
+      trickQueue = [];
+      TAS.audio.playTone(250, 0.15, 'triangle', 0.06, 800);
+    }
+  } else if (parkPlayer.airborne) {
+    // In the air
+    parkPlayer.airTime += dt;
+    parkPlayer.vy -= 300 * dt; // gravity pulls down
+    parkPlayer.x += parkPlayer.vx * dt;
+    parkPlayer.height += parkPlayer.vy * dt; // height tracks vertical position
+
+    // Trick inputs
+    if (inp.keys['ArrowLeft'] || inp.touch.left) { trickQueue.push('left'); inp.keys['ArrowLeft'] = false; }
+    if (inp.keys['ArrowRight'] || inp.touch.right) { trickQueue.push('right'); inp.keys['ArrowRight'] = false; }
+    if (inp.keys['ArrowUp'] || inp.touch.up) { trickQueue.push('up'); inp.keys['ArrowUp'] = false; }
+    if (inp.keys['ArrowDown'] || inp.touch.down) { trickQueue.push('down'); inp.keys['ArrowDown'] = false; }
+
+    if (trickQueue.length > 0) parkPlayer.rotation += spinMod * 8 * dt;
+
+    if ((inp.keys['KeyZ'] || inp.keys['Space'] || inp.touch.b) && trickQueue.length > 0) {
+      matchTrick();
+      inp.keys['KeyZ'] = false; inp.keys['Space'] = false;
+    }
+
+    // Landing: when height comes back to 0 while falling
+    if (parkPlayer.height <= 0 && parkPlayer.vy < 0) {
+      parkPlayer.airborne = false;
+      parkPlayer.height = 0;
+      var rotNorm = (parkPlayer.rotation % PI2 + PI2) % PI2;
+      if (rotNorm > 0.5 && rotNorm < PI2 - 0.5) {
+        crashPark();
+      } else {
+        if (comboCount > 0) {
+          var bonus = comboCount * comboMultiplier * 50;
+          parkScore += Math.floor(bonus);
+          trickDisplay = 'LANDED! +' + Math.floor(bonus);
+          trickDisplayTimer = 1.5;
+          TAS.audio.playMelody([[523,0.08],[659,0.08],[784,0.1],[1047,0.12]], 80);
+          TAS.particles.spawn(parkPlayer.x, 240, '#ffdd44', 20, 4, { size: 3 });
+        }
+        comboCount = 0;
+        comboMultiplier = 1;
+        TAS.audio.playTone(200, 0.06, 'triangle', 0.05);
+      }
+      parkPlayer.rotation = 0;
+      // Reset for another run
+      setTimeout(function() {
+        if (state === 'park' || state === 'championship') {
+          parkPlayer.x = 60;
+          rampSpeed = 0;
+          rampLaunched = false;
+          parkPlayer.airborne = false;
+        }
+      }, 500);
+    }
+  }
+}
+
+// === TRICK MATCHING ===
+function matchTrick() {
+  if (trickQueue.length < 2) return;
+  var matched = null;
+  for (var ti = 0; ti < TRICKS.length; ti++) {
+    var t = TRICKS[ti];
+    if (trickQueue.length >= t.keys.length && parkPlayer.airTime >= t.minAir) {
+      var match = true;
+      var start = trickQueue.length - t.keys.length;
+      for (var i = 0; i < t.keys.length; i++) {
+        if (trickQueue[start + i] !== t.keys[i]) { match = false; break; }
+      }
+      if (match && (!matched || t.score > matched.score)) matched = t;
+    }
+  }
+  if (matched) {
+    var pts = Math.floor(matched.score * comboMultiplier);
+    parkScore += pts;
+    comboCount++;
+    comboMultiplier = Math.min(comboMultiplier + 0.5, 5);
+    trickDisplay = matched.name + '! +' + pts;
+    trickDisplayTimer = 1.2;
+    trickQueue = [];
+    TAS.audio.playTone(600 + comboCount * 100, 0.1, 'square', 0.07);
+    TAS.particles.spawn(parkPlayer.x, parkPlayer.y - 20, '#ff88ff', 8, 2.5, { size: 2 });
+    TAS.fx.flash('#ffffff', 0.15);
+  }
+}
+
+// === CRASH ===
+function crashPark() {
+  parkCrashes++;
+  comboCount = 0;
+  comboMultiplier = 1;
+  trickDisplay = 'BAIL!';
+  trickDisplayTimer = 1.0;
+  TAS.fx.shake(10, 0.8);
+  TAS.fx.flash('#ff4400', 0.4);
+  TAS.audio.playNoise(0.3, 0.12, 300);
+  TAS.particles.spawn(parkPlayer.x, parkPlayer.y, '#ff4444', 15, 3, { size: 2, gravity: 2 });
+  parkPlayer.rotation = 0;
+  parkPlayer.airborne = false;
+  parkPlayer.height = 0;
+  if (parkCrashes >= 3) {
+    exitPark(true);
+  }
+}
+
+function gameOver() {
+  state = 'gameOver';
+  if (score > highScore) {
+    highScore = score;
+    TAS.score.save('720grind_hi', highScore);
+  }
+  clearAllInput();
+}
+
+// === UPDATE ===
+function update(dt) {
+  frame++;
+  if (inputCooldown > 0) inputCooldown -= dt;
+  TAS.particles.update(dt);
+  TAS.fx.updateEffects(dt);
+  if (trickDisplayTimer > 0) trickDisplayTimer -= dt;
+  if (landingTimer > 0) landingTimer -= dt;
+
+  // MfT Splash
+  if (state === 'splash') {
+    splashTimer -= dt;
+    if (splashTimer <= 0) {
+      state = 'title';
+      splashDone = true;
+      clearAllInput();
+    }
+    return;
+  }
+
+  if (state === 'title') {
+    if (anyKeyPressed()) { startGame(); }
+    return;
+  }
+  if (state === 'gameOver') {
+    if (anyKeyPressed()) { state = 'title'; clearAllInput(); }
+    return;
+  }
+  if (state === 'city') {
+    updateCity(dt);
+    return;
+  }
+  if (state === 'shop') {
+    updateShop(dt);
+    return;
+  }
+  if (state === 'parkResult') {
+    if (anyKeyPressed()) { returnToCity(); }
+    return;
+  }
+  if (state === 'park' || state === 'championship') {
+    parkTimer -= dt;
+    if (parkTimer <= 0) { exitPark(true); return; }
+    var type = state === 'championship' ? PARK_HALFPIPE : parkTypes[currentPark];
+    if (type === PARK_HALFPIPE) updateHalfpipe(dt);
+    else if (type === PARK_DOWNHILL) updateDownhill(dt);
+    else if (type === PARK_SLALOM) updateSlalom(dt);
+    else if (type === PARK_JUMP) updateJumpRamp(dt);
+    return;
+  }
+  if (state === 'win') {
+    if (anyKeyPressed()) { state = 'title'; clearAllInput(); }
+    return;
+  }
+}
+
+// === SHOP UPDATE ===
+function updateShop(dt) {
+  var inp = TAS.input;
+  if (inp.keys['Escape'] || inp.keys['Backspace'] || inp.touch.b) {
+    state = 'city';
+    inp.keys['Escape'] = false;
+    inp.keys['Backspace'] = false;
+    inp.touch.b = false;
+    clearAllInput();
+    return;
+  }
+  for (var i = 0; i < boards.length; i++) {
+    var key = 'Digit' + (i + 1);
+    if (inp.keys[key]) {
+      inp.keys[key] = false;
+      if (i === currentBoard) continue;
+      if (boardsOwned[i]) {
+        // Already own it, just equip
+        currentBoard = i;
+        TAS.audio.playTone(440, 0.06, 'square', 0.05);
+      } else if (boards[i].cost <= money) {
+        money -= boards[i].cost;
+        boardsOwned[i] = true;
+        currentBoard = i;
+        TAS.audio.playMelody([[440,0.08],[550,0.08],[660,0.1]], 100);
+        TAS.fx.flash('#44dd88', 0.2);
+      } else {
+        TAS.audio.playTone(100, 0.2, 'sawtooth', 0.06);
+      }
+    }
+  }
+  // Touch/mobile: use A to cycle through and buy next board
+  if (inp.touch.a) {
+    inp.touch.a = false;
+    var nextIdx = (currentBoard + 1) % boards.length;
+    if (boardsOwned[nextIdx]) {
+      currentBoard = nextIdx;
+      TAS.audio.playTone(440, 0.06, 'square', 0.05);
+    } else if (boards[nextIdx].cost <= money) {
+      money -= boards[nextIdx].cost;
+      boardsOwned[nextIdx] = true;
+      currentBoard = nextIdx;
+      TAS.audio.playMelody([[440,0.08],[550,0.08],[660,0.1]], 100);
+    } else {
+      TAS.audio.playTone(100, 0.15, 'sawtooth', 0.05);
+    }
+  }
+}
+
+// === DRAW ===
+function draw(dt) {
+  ctx.fillStyle = '#1a1a2e';
+  ctx.fillRect(0, 0, GW, GH);
+
+  if (state === 'splash') { drawSplash(); return; }
+  if (state === 'title') { drawTitle(); return; }
+  if (state === 'gameOver') { TAS.ui.drawGameOver(score, highScore, GW, GH, { frame: frame, extra: 'Medals: ' + parkMedals.filter(function(m){return m > 0;}).length + '/4' }); return; }
+  if (state === 'city') { drawCity(); return; }
+  if (state === 'shop') { drawShop(); return; }
+  if (state === 'parkResult') { drawParkResult(); return; }
+  if (state === 'park' || state === 'championship') { drawPark(); return; }
+  if (state === 'win') { drawWin(); return; }
+}
+
+// === DRAW MfT SPLASH ===
+function drawSplash() {
+  ctx.fillStyle = '#0a0a0f';
+  ctx.fillRect(0, 0, GW, GH);
+
+  var progress = 1 - (splashTimer / 2);
+  var alpha = progress < 0.3 ? progress / 0.3 : progress > 0.7 ? (1 - progress) / 0.3 : 1;
+  ctx.globalAlpha = TAS.math.clamp(alpha, 0, 1);
+
+  // MfT Logo
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#44dd88';
+  ctx.font = 'bold 32px monospace';
+  ctx.fillText('MfT', GW / 2, GH / 2 - 10);
+
+  ctx.fillStyle = '#888';
+  ctx.font = '11px monospace';
+  ctx.fillText('Memes for Trees', GW / 2, GH / 2 + 15);
+
+  ctx.fillStyle = '#555';
+  ctx.font = '9px monospace';
+  ctx.fillText('tasern.quest', GW / 2, GH / 2 + 35);
+
+  ctx.globalAlpha = 1;
+}
+
+// === DRAW TITLE ===
+function drawTitle() {
+  // Background with moving lines
+  ctx.fillStyle = '#0a0a1a';
+  ctx.fillRect(0, 0, GW, GH);
+  for (var i = 0; i < 15; i++) {
+    ctx.strokeStyle = 'rgba(68,200,136,' + (0.1 + Math.sin(frame * 0.02 + i) * 0.05) + ')';
+    ctx.beginPath();
+    ctx.moveTo(0, 30 + i * 22 + Math.sin(frame * 0.03 + i) * 5);
+    ctx.lineTo(GW, 30 + i * 22 + Math.cos(frame * 0.03 + i) * 5);
+    ctx.stroke();
+  }
+
+  // Draw a baseling skater
+  drawBaselingSkater(GW / 2, GH * 0.55, 2.5, frame * 0.05);
+
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#000';
+  ctx.font = 'bold 28px monospace';
+  ctx.fillText('720 GRIND', GW / 2 + 2, 52);
+  ctx.fillStyle = '#44dd88';
+  ctx.fillText('720 GRIND', GW / 2, 50);
+
+  ctx.fillStyle = '#aaa';
+  ctx.font = '10px monospace';
+  ctx.fillText('A Tasern City Skate Tale', GW / 2, 70);
+
+  // High score
+  if (highScore > 0) {
+    ctx.fillStyle = '#ffdd44';
+    ctx.font = '10px monospace';
+    ctx.fillText('HIGH SCORE: ' + highScore, GW / 2, 88);
+  }
+
+  ctx.fillStyle = '#888';
+  ctx.font = '11px monospace';
+  ctx.fillText('ARROWS: Move  |  SPACE: Jump  |  Z/B: Trick', GW / 2, GH - 60);
+  ctx.fillText('Combos in air: Direction keys then TRICK to land it', GW / 2, GH - 45);
+
+  var pulse = Math.sin(frame * 0.05) * 0.3 + 0.7;
+  ctx.globalAlpha = pulse;
+  ctx.fillStyle = '#ffdd44';
+  ctx.font = 'bold 14px monospace';
+  ctx.fillText('PRESS ANY KEY TO START', GW / 2, GH - 20);
+  ctx.globalAlpha = 1;
+}
+
+// === DRAW BASELING SKATER ===
+function drawBaselingSkater(x, y, sc, rot) {
+  ctx.save();
+  ctx.translate(x, y);
+  var s = sc || 1;
+
+  // Body (round blob)
+  ctx.fillStyle = '#66cc88';
+  ctx.beginPath();
+  ctx.ellipse(0, -8 * s, 10 * s, 12 * s, 0, 0, PI2);
+  ctx.fill();
+  // Eyes
+  ctx.fillStyle = '#fff';
+  ctx.beginPath(); ctx.arc(-4 * s, -12 * s, 3 * s, 0, PI2); ctx.fill();
+  ctx.beginPath(); ctx.arc(4 * s, -12 * s, 3 * s, 0, PI2); ctx.fill();
+  ctx.fillStyle = '#111';
+  ctx.beginPath(); ctx.arc(-3.5 * s, -11.5 * s, 1.5 * s, 0, PI2); ctx.fill();
+  ctx.beginPath(); ctx.arc(4.5 * s, -11.5 * s, 1.5 * s, 0, PI2); ctx.fill();
+  // Cap (backwards)
+  ctx.fillStyle = '#ff4466';
+  ctx.fillRect(-6 * s, -22 * s, 12 * s, 5 * s);
+  ctx.fillRect(5 * s, -20 * s, 5 * s, 3 * s); // brim
+
+  // Skateboard
+  ctx.save();
+  ctx.rotate(Math.sin(rot) * 0.1);
+  ctx.fillStyle = '#8B4513';
+  ctx.fillRect(-12 * s, 6 * s, 24 * s, 4 * s);
+  // Wheels
+  ctx.fillStyle = '#333';
+  ctx.beginPath(); ctx.arc(-8 * s, 12 * s, 2.5 * s, 0, PI2); ctx.fill();
+  ctx.beginPath(); ctx.arc(8 * s, 12 * s, 2.5 * s, 0, PI2); ctx.fill();
+  ctx.restore();
+
+  ctx.restore();
+}
+
+// === DRAW CITY ===
+function drawCity() {
+  ctx.save();
+  TAS.fx.applyShake();
+  ctx.translate(-camX, -camY);
+
+  // Ground
+  ctx.fillStyle = '#2a2a3a';
+  ctx.fillRect(0, 0, CITY_W, CITY_H);
+
+  // Grid roads
+  ctx.strokeStyle = '#3a3a4a';
+  ctx.lineWidth = 1;
+  for (var i = 0; i < CITY_W; i += TILE) {
+    ctx.beginPath(); ctx.moveTo(i, 0); ctx.lineTo(i, CITY_H); ctx.stroke();
+  }
+  for (var i = 0; i < CITY_H; i += TILE) {
+    ctx.beginPath(); ctx.moveTo(0, i); ctx.lineTo(CITY_W, i); ctx.stroke();
+  }
+
+  // Road markings
+  ctx.strokeStyle = '#555';
+  ctx.setLineDash([10, 10]);
+  ctx.beginPath(); ctx.moveTo(0, CITY_H / 2); ctx.lineTo(CITY_W, CITY_H / 2); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(CITY_W / 2, 0); ctx.lineTo(CITY_W / 2, CITY_H); ctx.stroke();
+  ctx.setLineDash([]);
+
+  // Buildings
+  for (var bi = 0; bi < buildings.length; bi++) {
+    var b = buildings[bi];
+    ctx.fillStyle = b.color;
+    ctx.fillRect(b.x, b.y, b.w, b.h);
+    ctx.strokeStyle = '#222';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(b.x, b.y, b.w, b.h);
+    // Windows
+    ctx.fillStyle = 'rgba(255,255,100,0.3)';
+    for (var wx = b.x + 5; wx < b.x + b.w - 5; wx += 10) {
+      for (var wy = b.y + 5; wy < b.y + b.h - 5; wy += 10) {
+        ctx.fillRect(wx, wy, 5, 5);
+      }
+    }
+  }
+
+  // Parks
+  for (var i = 0; i < parks.length; i++) {
+    var pk = parks[i];
+    ctx.fillStyle = parkTickets[i] ? 'rgba(68,255,68,0.2)' : 'rgba(255,255,255,0.1)';
+    ctx.beginPath(); ctx.arc(pk.x, pk.y, 35, 0, PI2); ctx.fill();
+    ctx.strokeStyle = pk.icon;
+    ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.arc(pk.x, pk.y, 35, 0, PI2); ctx.stroke();
+    // Icon
+    ctx.fillStyle = pk.icon;
+    ctx.font = 'bold 10px monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText(parkNames[i], pk.x, pk.y - 8);
+    // Medal indicator
+    if (parkMedals[i] > 0) {
+      var mc = ['', '#cd7f32', '#c0c0c0', '#ffd700'][parkMedals[i]];
+      ctx.fillStyle = mc;
+      ctx.beginPath(); ctx.arc(pk.x, pk.y + 12, 5, 0, PI2); ctx.fill();
+    }
+    // Enter prompt
+    if (TAS.math.dist(player.x, player.y, pk.x, pk.y) < 30) {
+      ctx.fillStyle = '#ffdd44';
+      ctx.font = '9px monospace';
+      ctx.fillText('[E / ENTER]', pk.x, pk.y + 28);
+    }
+  }
+
+  // Championship (center)
+  if (championshipUnlocked) {
+    var champPulse = 0.6 + Math.sin(frame * 0.04) * 0.4;
+    ctx.fillStyle = 'rgba(255,215,0,' + (0.15 * champPulse) + ')';
+    ctx.beginPath(); ctx.arc(600, 450, 25, 0, PI2); ctx.fill();
+    ctx.strokeStyle = '#ffd700';
+    ctx.lineWidth = 2;
+    ctx.setLineDash([4,4]);
+    ctx.beginPath(); ctx.arc(600, 450, 25, 0, PI2); ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle = '#ffd700';
+    ctx.font = 'bold 9px monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText('CHAMPIONSHIP', 600, 448);
+    ctx.fillText('FINALS', 600, 458);
+    if (TAS.math.dist(player.x, player.y, 600, 450) < 30) {
+      ctx.fillStyle = '#ffdd44';
+      ctx.font = '9px monospace';
+      ctx.fillText('[E / ENTER]', 600, 475);
+    }
+  }
+
+  // Shops
+  for (var si = 0; si < shops.length; si++) {
+    var s = shops[si];
+    ctx.fillStyle = '#553388';
+    ctx.fillRect(s.x, s.y, s.w, s.h);
+    ctx.fillStyle = '#ffaa00';
+    ctx.font = 'bold 8px monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText('SHOP', s.x + s.w / 2, s.y + s.h / 2 + 3);
+    if (TAS.hit.rectOverlap(player.x - 8, player.y - 8, 16, 16, s.x - 10, s.y - 10, s.w + 20, s.h + 20)) {
+      ctx.fillStyle = '#ffdd44';
+      ctx.font = '9px monospace';
+      ctx.fillText('[E / ENTER]', s.x + s.w / 2, s.y + s.h + 14);
+    }
+  }
+
+  // Tokens
+  for (var ti = 0; ti < tokens.length; ti++) {
+    var t = tokens[ti];
+    if (t.collected) continue;
+    ctx.fillStyle = '#ffdd44';
+    ctx.beginPath();
+    ctx.arc(t.x, t.y, 5 + Math.sin(frame * 0.08 + t.x) * 1, 0, PI2);
+    ctx.fill();
+    ctx.fillStyle = '#aa8800';
+    ctx.font = 'bold 6px monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText('M', t.x, t.y + 2);
+  }
+
+  // Cars
+  for (var ci = 0; ci < cars.length; ci++) {
+    var c = cars[ci];
+    ctx.fillStyle = c.color;
+    ctx.fillRect(c.x - c.w / 2, c.y - c.h / 2, c.w, c.h);
+    ctx.fillStyle = '#222';
+    if (c.w > c.h) {
+      ctx.fillRect(c.x - c.w / 2 + 2, c.y - c.h / 2, 6, c.h);
+      ctx.fillRect(c.x + c.w / 2 - 8, c.y - c.h / 2, 6, c.h);
+    } else {
+      ctx.fillRect(c.x - c.w / 2, c.y - c.h / 2 + 2, c.w, 6);
+      ctx.fillRect(c.x - c.w / 2, c.y + c.h / 2 - 8, c.w, 6);
+    }
+  }
+
+  // Pedestrians
+  for (var pi = 0; pi < pedestrians.length; pi++) {
+    var p = pedestrians[pi];
+    ctx.fillStyle = '#aa8866';
+    ctx.beginPath(); ctx.arc(p.x, p.y, 5, 0, PI2); ctx.fill();
+    ctx.fillStyle = '#664422';
+    ctx.beginPath(); ctx.arc(p.x, p.y - 4, 3, 0, PI2); ctx.fill();
+  }
+
+  // Bees
+  for (var bi2 = 0; bi2 < bees.length; bi2++) {
+    var bee = bees[bi2];
+    ctx.fillStyle = '#ffcc00';
+    ctx.beginPath(); ctx.ellipse(bee.x, bee.y, 6, 4, 0, 0, PI2); ctx.fill();
+    ctx.fillStyle = '#000';
+    ctx.fillRect(bee.x - 4, bee.y - 1, 2, 3);
+    ctx.fillRect(bee.x, bee.y - 1, 2, 3);
+    // Wings
+    ctx.fillStyle = 'rgba(200,200,255,0.5)';
+    ctx.beginPath();
+    ctx.ellipse(bee.x - 2, bee.y - 5 + Math.sin(frame * 0.5) * 2, 4, 3, -0.3, 0, PI2);
+    ctx.fill();
+    ctx.beginPath();
+    ctx.ellipse(bee.x + 2, bee.y - 5 + Math.sin(frame * 0.5 + 1) * 2, 4, 3, 0.3, 0, PI2);
+    ctx.fill();
+  }
+
+  // Player (flash when invincible from car hit)
+  if (carHitTimer <= 0 || Math.floor(frame * 0.5) % 2 === 0) {
+    drawBaselingSkater(player.x, player.y, 0.8, frame * 0.1);
+  }
+
+  // Speed lines when fast
+  var spd = Math.sqrt(player.vx * player.vx + player.vy * player.vy);
+  if (spd > 80) {
+    ctx.strokeStyle = 'rgba(100,200,255,0.3)';
+    ctx.lineWidth = 1;
+    for (var i = 0; i < 3; i++) {
+      var lx = player.x - Math.cos(player.angle) * (10 + i * 8);
+      var ly = player.y - Math.sin(player.angle) * (10 + i * 8);
+      ctx.beginPath();
+      ctx.moveTo(lx, ly);
+      ctx.lineTo(lx - Math.cos(player.angle) * 12, ly - Math.sin(player.angle) * 12);
+      ctx.stroke();
+    }
+  }
+
+  TAS.particles.draw();
+  ctx.restore();
+
+  TAS.fx.drawFlash(GW, GH);
+
+  // HUD
+  ctx.fillStyle = 'rgba(10,5,20,0.8)';
+  ctx.fillRect(0, 0, GW, 28);
+  ctx.font = 'bold 11px monospace';
+  ctx.textAlign = 'left';
+  ctx.fillStyle = '#ffdd44';
+  ctx.fillText('SCORE: ' + score, 6, 18);
+  ctx.fillStyle = '#88ccff';
+  ctx.textAlign = 'center';
+  ctx.fillText('M: ' + money, GW / 2 - 40, 18);
+  // Timer
+  ctx.fillStyle = cityTimer < 10 ? '#ff4444' : '#44dd88';
+  ctx.fillText('TIME: ' + Math.ceil(cityTimer), GW / 2 + 50, 18);
+  // Lives
+  ctx.textAlign = 'right';
+  ctx.fillStyle = '#ff6688';
+  for (var i = 0; i < lives; i++) {
+    ctx.fillText('\u2665', GW - 8 - i * 16, 18);
+  }
+  // Tickets
+  ctx.textAlign = 'left';
+  ctx.fillStyle = '#666';
+  ctx.font = '9px monospace';
+  var ticketStr = 'PARKS: ';
+  for (var i = 0; i < 4; i++) ticketStr += parkTickets[i] ? '\u2713' : '\u2717';
+  ctx.fillText(ticketStr, 6, GH - 6);
+
+  // Board name
+  ctx.textAlign = 'right';
+  ctx.fillStyle = '#aaa';
+  ctx.fillText(boards[currentBoard].name, GW - 6, GH - 6);
+
+  // Bee warning
+  if (beeActive) {
+    var warn = Math.sin(frame * 0.15) > 0;
+    if (warn) {
+      ctx.fillStyle = '#ff4444';
+      ctx.font = 'bold 14px monospace';
+      ctx.textAlign = 'center';
+      ctx.fillText('!! BEES !!', GW / 2, GH / 2 - 40);
+    }
+  }
+
+  // City timer warning at low time
+  if (cityTimer < 15 && cityTimer > 10 && !beeActive) {
+    ctx.fillStyle = '#ffaa44';
+    ctx.font = '10px monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText('Enter a park before time runs out!', GW / 2, 42);
+  }
+
+  TAS.input.drawTouchControls(GW, GH);
+}
+
+// === DRAW SHOP ===
+function drawShop() {
+  ctx.fillStyle = '#1a0a2a';
+  ctx.fillRect(0, 0, GW, GH);
+
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#ffaa00';
+  ctx.font = 'bold 18px monospace';
+  ctx.fillText('BOARD SHOP', GW / 2, 30);
+
+  ctx.fillStyle = '#88ccff';
+  ctx.font = '12px monospace';
+  ctx.fillText('Money: M' + money, GW / 2, 50);
+
+  for (var i = 0; i < boards.length; i++) {
+    var b = boards[i];
+    var y = 75 + i * 45;
+    var owned = boardsOwned[i];
+    var selected = i === currentBoard;
+    var affordable = b.cost <= money;
+
+    ctx.fillStyle = selected ? 'rgba(68,221,136,0.2)' : 'rgba(255,255,255,0.05)';
+    ctx.fillRect(40, y, GW - 80, 40);
+    if (selected) { ctx.strokeStyle = '#44dd88'; ctx.lineWidth = 2; ctx.strokeRect(40, y, GW - 80, 40); }
+
+    ctx.textAlign = 'left';
+    ctx.fillStyle = selected ? '#44dd88' : owned ? '#aaa' : affordable ? '#ffdd44' : '#555';
+    ctx.font = 'bold 11px monospace';
+    ctx.fillText((i + 1) + '. ' + b.name, 50, y + 16);
+
+    ctx.fillStyle = '#888';
+    ctx.font = '9px monospace';
+    ctx.fillText('SPD:' + b.speed.toFixed(1) + ' AIR:' + b.air.toFixed(1) + ' SPIN:' + b.spin.toFixed(1), 50, y + 32);
+
+    ctx.textAlign = 'right';
+    if (selected) { ctx.fillStyle = '#44dd88'; ctx.fillText('[EQUIPPED]', GW - 50, y + 22); }
+    else if (owned) { ctx.fillStyle = '#888'; ctx.fillText('OWNED', GW - 50, y + 22); }
+    else { ctx.fillStyle = affordable ? '#ffdd44' : '#555'; ctx.fillText('M' + b.cost, GW - 50, y + 22); }
+  }
+
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#666';
+  ctx.font = '10px monospace';
+  ctx.fillText('Press 1-5 to buy/equip | ESC/B to exit', GW / 2, GH - 15);
+}
+
+// === DRAW PARK ===
+function drawPark() {
+  var type = state === 'championship' ? PARK_HALFPIPE : parkTypes[currentPark];
+
+  ctx.save();
+  TAS.fx.applyShake();
+
+  if (type === PARK_HALFPIPE) drawHalfpipe();
+  else if (type === PARK_DOWNHILL) drawDownhill();
+  else if (type === PARK_SLALOM) drawSlalom();
+  else if (type === PARK_JUMP) drawJumpRamp();
+
+  TAS.particles.draw();
+  ctx.restore();
+
+  TAS.fx.drawFlash(GW, GH);
+
+  // Park HUD
+  ctx.fillStyle = 'rgba(10,5,20,0.8)';
+  ctx.fillRect(0, 0, GW, 28);
+  ctx.font = 'bold 11px monospace';
+  ctx.textAlign = 'left';
+  ctx.fillStyle = '#ffdd44';
+  ctx.fillText((state === 'championship' ? 'CHAMPIONSHIP: ' : 'PARK: ') + parkScore, 6, 18);
+  ctx.textAlign = 'center';
+  ctx.fillStyle = parkTimer < 5 ? '#ff4444' : '#44dd88';
+  ctx.fillText('TIME: ' + Math.ceil(parkTimer), GW / 2, 18);
+  ctx.textAlign = 'right';
+  ctx.fillStyle = '#ff6688';
+  ctx.fillText('CRASHES: ' + parkCrashes + '/3', GW - 6, 18);
+
+  // Combo display
+  if (comboCount > 0) {
+    ctx.textAlign = 'center';
+    ctx.fillStyle = '#ff88ff';
+    ctx.font = 'bold 10px monospace';
+    ctx.fillText('COMBO x' + comboMultiplier.toFixed(1), GW / 2, 42);
+  }
+
+  // Trick display
+  if (trickDisplayTimer > 0) {
+    var alpha = Math.min(1, trickDisplayTimer * 2);
+    ctx.globalAlpha = alpha;
+    ctx.textAlign = 'center';
+    var isBail = trickDisplay.indexOf('BAIL') >= 0;
+    ctx.fillStyle = isBail ? '#ff4444' : '#ffdd44';
+    ctx.font = 'bold ' + (isBail ? 20 : 16) + 'px monospace';
+    ctx.fillText(trickDisplay, GW / 2, GH / 2 - 20);
+    ctx.globalAlpha = 1;
+  }
+
+  // Target scores
+  if (state === 'park') {
+    var targets = parkTargets[currentPark];
+    ctx.textAlign = 'left';
+    ctx.font = '8px monospace';
+    ctx.fillStyle = parkScore >= targets[0] ? '#cd7f32' : '#444';
+    ctx.fillText('B:' + targets[0], 6, GH - 20);
+    ctx.fillStyle = parkScore >= targets[1] ? '#c0c0c0' : '#444';
+    ctx.fillText('S:' + targets[1], 60, GH - 20);
+    ctx.fillStyle = parkScore >= targets[2] ? '#ffd700' : '#444';
+    ctx.fillText('G:' + targets[2], 114, GH - 20);
+  }
+
+  TAS.input.drawTouchControls(GW, GH);
+}
+
+// === DRAW HALFPIPE ===
+function drawHalfpipe() {
+  // Sky gradient
+  ctx.fillStyle = '#1a0a3a';
+  ctx.fillRect(0, 28, GW, GH - 28);
+
+  // Crowd (background)
+  for (var i = 0; i < 20; i++) {
+    ctx.fillStyle = ['#664444','#446644','#444466','#666644','#664466'][i % 5];
+    ctx.beginPath();
+    ctx.arc(24 * i + 12, 80 + Math.sin(i + frame * 0.05) * 3, 6, 0, PI2);
+    ctx.fill();
+  }
+
+  // Halfpipe structure
+  ctx.fillStyle = '#333';
+  ctx.beginPath();
+  ctx.moveTo(30, 280);
+  ctx.quadraticCurveTo(30, 180, 80, 130);
+  ctx.lineTo(80, 280);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.moveTo(GW - 30, 280);
+  ctx.quadraticCurveTo(GW - 30, 180, GW - 80, 130);
+  ctx.lineTo(GW - 80, 280);
+  ctx.fill();
+  // Floor
+  ctx.fillStyle = '#444';
+  ctx.fillRect(80, 260, GW - 160, 25);
+  // Coping (lips)
+  ctx.fillStyle = '#888';
+  ctx.fillRect(60, 125, 30, 5);
+  ctx.fillRect(GW - 90, 125, 30, 5);
+  // Surface curve
+  ctx.strokeStyle = '#555';
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.moveTo(60, 130);
+  ctx.quadraticCurveTo(GW / 2, 270, GW - 60, 130);
+  ctx.stroke();
+
+  // Skater
+  var sx = parkPlayer.x;
+  var sy;
+  if (parkPlayer.airborne) {
+    // height is positive going up, map it to screen Y going up
+    sy = 130 - Math.max(0, parkPlayer.height) * 0.5;
+  } else {
+    sy = parkPlayer.y;
+  }
+  ctx.save();
+  ctx.translate(sx, sy);
+  ctx.rotate(parkPlayer.rotation);
+  drawBaselingSkater(0, 0, 1.0, frame * 0.1);
+  ctx.restore();
+
+  // Air height indicator
+  if (parkPlayer.airborne) {
+    ctx.fillStyle = 'rgba(255,136,255,0.5)';
+    ctx.font = '10px monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText('AIR: ' + parkPlayer.airTime.toFixed(1) + 's', sx, sy - 30);
+
+    // Trick input hint
+    if (trickQueue.length === 0) {
+      ctx.fillStyle = '#555';
+      ctx.font = '8px monospace';
+      ctx.fillText('Press directions, then TRICK!', sx, sy + 25);
+    } else {
+      ctx.fillStyle = '#88ff88';
+      ctx.font = '8px monospace';
+      ctx.fillText(trickQueue.join(' ') + ' ...', sx, sy + 25);
+    }
+  }
+
+  // Input hints (first few seconds only)
+  if (!parkPlayer.airborne && frame < 180) {
+    ctx.fillStyle = '#555';
+    ctx.font = '9px monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText('LEFT/RIGHT to pump, gain speed at edges!', GW / 2, GH - 8);
+  }
+}
+
+// === DRAW DOWNHILL ===
+function drawDownhill() {
+  ctx.fillStyle = '#1a2a1a';
+  ctx.fillRect(0, 28, GW, GH - 28);
+
+  // Road
+  ctx.fillStyle = '#333';
+  ctx.fillRect(0, 130, GW, 170);
+  // Lane markings
+  ctx.strokeStyle = '#555';
+  ctx.setLineDash([15, 10]);
+  ctx.lineWidth = 1;
+  var offset = -(downhillScroll % 25);
+  ctx.beginPath();
+  for (var lx = offset; lx < GW; lx += 25) {
+    ctx.moveTo(lx, 200); ctx.lineTo(lx + 12, 200);
+    ctx.moveTo(lx, 250); ctx.lineTo(lx + 12, 250);
+  }
+  ctx.stroke();
+  ctx.setLineDash([]);
+
+  // Rails
+  for (var ri = 0; ri < parkRails.length; ri++) {
+    var r = parkRails[ri];
+    var rx = r.x - downhillScroll;
+    if (rx > -r.w && rx < GW) {
+      ctx.fillStyle = '#888';
+      ctx.fillRect(rx, r.y, r.w, 4);
+      ctx.fillStyle = '#666';
+      ctx.fillRect(rx, r.y + 4, 3, 10);
+      ctx.fillRect(rx + r.w - 3, r.y + 4, 3, 10);
+    }
+  }
+
+  // Obstacles
+  for (var oi = 0; oi < parkObstacles.length; oi++) {
+    var o = parkObstacles[oi];
+    var ox = o.x - downhillScroll;
+    if (ox > -40 && ox < GW + 40) {
+      if (o.type === 'rock') {
+        ctx.fillStyle = '#666';
+        ctx.beginPath(); ctx.arc(ox + o.w / 2, o.y + o.h / 2, o.w / 2, 0, PI2); ctx.fill();
+      } else {
+        ctx.fillStyle = '#ff6600';
+        ctx.beginPath();
+        ctx.moveTo(ox + o.w / 2, o.y);
+        ctx.lineTo(ox, o.y + o.h);
+        ctx.lineTo(ox + o.w, o.y + o.h);
+        ctx.fill();
+      }
+    }
+  }
+
+  // Tokens
+  for (var ti = 0; ti < parkTokens.length; ti++) {
+    var t = parkTokens[ti];
+    if (t.collected) continue;
+    var tx = t.x - downhillScroll;
+    if (tx > -20 && tx < GW + 20) {
+      ctx.fillStyle = '#ffdd44';
+      ctx.beginPath(); ctx.arc(tx, t.y, 6, 0, PI2); ctx.fill();
+      ctx.fillStyle = '#aa8800';
+      ctx.font = 'bold 7px monospace';
+      ctx.textAlign = 'center';
+      ctx.fillText('M', tx, t.y + 3);
+    }
+  }
+
+  // Skater
+  var sy = parkPlayer.y - parkPlayer.height;
+  ctx.save();
+  ctx.translate(parkPlayer.x, sy);
+  if (parkPlayer.grinding) {
+    ctx.rotate(Math.sin(frame * 0.3) * 0.05);
+  }
+  drawBaselingSkater(0, 0, 1.0, frame * 0.15);
+  ctx.restore();
+
+  // Grind sparks
+  if (parkPlayer.grinding) {
+    ctx.fillStyle = '#ffaa00';
+    for (var i = 0; i < 3; i++) {
+      ctx.fillRect(parkPlayer.x - 5 + Math.random() * 10, parkPlayer.y + 8, 2, 2);
+    }
+  }
+
+  // Progress bar
+  ctx.fillStyle = '#333';
+  ctx.fillRect(20, GH - 12, GW - 40, 6);
+  ctx.fillStyle = '#44dd88';
+  ctx.fillRect(20, GH - 12, (GW - 40) * Math.min(1, downhillScroll / 3200), 6);
+}
+
+// === DRAW SLALOM ===
+function drawSlalom() {
+  ctx.fillStyle = '#1a1a3a';
+  ctx.fillRect(0, 28, GW, GH - 28);
+
+  // Snow/ice surface
+  ctx.fillStyle = '#2a3a4a';
+  ctx.fillRect(0, 100, GW, 200);
+
+  var scrollX = Math.max(0, parkPlayer.x - 100);
+
+  // Gates
+  for (var gi = 0; gi < parkGates.length; gi++) {
+    var g = parkGates[gi];
+    var gx = g.x - scrollX;
+    if (gx < -20 || gx > GW + 20) continue;
+    ctx.strokeStyle = g.passed ? '#44ff44' : '#ff4444';
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.moveTo(gx, g.y - 20);
+    ctx.lineTo(gx, g.y + 20);
+    ctx.stroke();
+    // Flag
+    ctx.fillStyle = g.passed ? '#44ff44' : g.side === 'left' ? '#ff4444' : '#4444ff';
+    ctx.beginPath();
+    ctx.moveTo(gx, g.y - 20);
+    ctx.lineTo(gx + 12, g.y - 15);
+    ctx.lineTo(gx, g.y - 10);
+    ctx.fill();
+  }
+
+  // Skater
+  var sx = parkPlayer.x - scrollX;
+  ctx.save();
+  ctx.translate(sx, parkPlayer.y);
+  drawBaselingSkater(0, 0, 1.0, frame * 0.12);
+  ctx.restore();
+
+  // Speed lines
+  ctx.strokeStyle = 'rgba(136,204,255,0.3)';
+  ctx.lineWidth = 1;
+  for (var i = 0; i < 5; i++) {
+    ctx.beginPath();
+    ctx.moveTo(sx - 15 - i * 8, parkPlayer.y + Math.random() * 10 - 5);
+    ctx.lineTo(sx - 25 - i * 8, parkPlayer.y + Math.random() * 10 - 5);
+    ctx.stroke();
+  }
+
+  // Progress
+  ctx.fillStyle = '#333';
+  ctx.fillRect(20, GH - 12, GW - 40, 6);
+  ctx.fillStyle = '#4488ff';
+  ctx.fillRect(20, GH - 12, (GW - 40) * Math.min(1, parkPlayer.x / 1400), 6);
+
+  // Gate counter
+  ctx.fillStyle = '#fff';
+  ctx.font = '10px monospace';
+  ctx.textAlign = 'center';
+  var passed = parkGates.filter(function(g){return g.passed;}).length;
+  ctx.fillText('GATES: ' + passed + '/' + parkGates.length, GW / 2, GH - 20);
+}
+
+// === DRAW JUMP RAMP ===
+function drawJumpRamp() {
+  ctx.fillStyle = '#0a1a2a';
+  ctx.fillRect(0, 28, GW, GH - 28);
+
+  // Ground
+  ctx.fillStyle = '#333';
+  ctx.fillRect(0, 250, GW, 70);
+
+  // Ramp
+  ctx.fillStyle = '#555';
+  ctx.beginPath();
+  ctx.moveTo(260, 250);
+  ctx.lineTo(320, 170);
+  ctx.lineTo(340, 170);
+  ctx.lineTo(340, 250);
+  ctx.fill();
+  // Ramp surface
+  ctx.strokeStyle = '#777';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(260, 250);
+  ctx.lineTo(320, 170);
+  ctx.stroke();
+
+  // Landing zone
+  ctx.fillStyle = 'rgba(68,221,136,0.1)';
+  ctx.fillRect(360, 240, 100, 15);
+  ctx.strokeStyle = '#44dd88';
+  ctx.setLineDash([4,4]);
+  ctx.strokeRect(360, 240, 100, 15);
+  ctx.setLineDash([]);
+
+  // Speed meter
+  if (!rampLaunched) {
+    ctx.fillStyle = '#333';
+    ctx.fillRect(30, GH - 30, 100, 10);
+    ctx.fillStyle = rampSpeed > 200 ? '#44dd88' : rampSpeed > 100 ? '#ffdd44' : '#ff4444';
+    ctx.fillRect(30, GH - 30, Math.min(100, rampSpeed / 3), 10);
+    ctx.fillStyle = '#fff';
+    ctx.font = '8px monospace';
+    ctx.textAlign = 'left';
+    ctx.fillText('SPEED', 30, GH - 34);
+    ctx.fillStyle = '#888';
+    ctx.fillText('Hold RIGHT to build speed!', 30, GH - 5);
+  }
+
+  // Skater
+  var sx = parkPlayer.x;
+  var sy;
+  if (parkPlayer.airborne) {
+    // height is positive going up, map to screen Y going up
+    sy = 170 - Math.max(0, parkPlayer.height) * 0.3;
+  } else if (parkPlayer.x >= 260 && parkPlayer.x < 320 && !rampLaunched) {
+    // On ramp surface
+    var rampProgress = (parkPlayer.x - 260) / 60;
+    sy = 250 - rampProgress * 80;
+  } else {
+    sy = 240;
+  }
+
+  ctx.save();
+  ctx.translate(sx, sy);
+  ctx.rotate(parkPlayer.rotation);
+  drawBaselingSkater(0, 0, 1.2, frame * 0.12);
+  ctx.restore();
+
+  // Air indicator
+  if (parkPlayer.airborne) {
+    var airHeight = Math.max(0, parkPlayer.height);
+    ctx.fillStyle = 'rgba(136,204,255,0.6)';
+    ctx.font = 'bold 12px monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText('HEIGHT: ' + airHeight.toFixed(0), sx, sy - 35);
+
+    // Trick queue feedback
+    if (trickQueue.length > 0) {
+      ctx.fillStyle = '#88ff88';
+      ctx.font = '9px monospace';
+      ctx.fillText(trickQueue.join(' ') + ' -> TRICK!', sx, sy + 30);
+    } else {
+      ctx.fillStyle = '#888';
+      ctx.font = '9px monospace';
+      ctx.fillText('Arrows then TRICK!', sx, sy + 30);
+    }
+  }
+}
+
+// === DRAW PARK RESULT ===
+function drawParkResult() {
+  ctx.fillStyle = '#0a0a2a';
+  ctx.fillRect(0, 0, GW, GH);
+
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#44dd88';
+  ctx.font = 'bold 20px monospace';
+  ctx.fillText(parkNames[currentPark] + ' COMPLETE', GW / 2, 50);
+
+  ctx.fillStyle = '#ffdd44';
+  ctx.font = 'bold 16px monospace';
+  ctx.fillText('SCORE: ' + parkScore, GW / 2, 90);
+
+  // Medal earned
+  var medal = 0;
+  var targets = parkTargets[currentPark] || parkTargets[0];
+  if (parkScore >= targets[2]) medal = 3;
+  else if (parkScore >= targets[1]) medal = 2;
+  else if (parkScore >= targets[0]) medal = 1;
+
+  var medalNames = ['NO MEDAL', 'BRONZE', 'SILVER', 'GOLD'];
+  var medalColors = ['#555', '#cd7f32', '#c0c0c0', '#ffd700'];
+  ctx.fillStyle = medalColors[medal];
+  ctx.font = 'bold 18px monospace';
+  ctx.fillText(medalNames[medal], GW / 2, 130);
+
+  if (medal > 0) {
+    ctx.beginPath();
+    ctx.arc(GW / 2, 160, 15, 0, PI2);
+    ctx.fillStyle = medalColors[medal];
+    ctx.fill();
+    ctx.strokeStyle = '#fff';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+  }
+
+  ctx.fillStyle = '#88ccff';
+  ctx.font = '12px monospace';
+  ctx.fillText('Money earned: M' + Math.floor(parkScore / 2), GW / 2, 200);
+  ctx.fillText('Crashes: ' + parkCrashes, GW / 2, 220);
+
+  // Target breakdown
+  ctx.fillStyle = '#666';
+  ctx.font = '10px monospace';
+  ctx.fillText('Bronze: ' + targets[0] + '  Silver: ' + targets[1] + '  Gold: ' + targets[2], GW / 2, 250);
+
+  if (championshipUnlocked) {
+    ctx.fillStyle = '#ffd700';
+    ctx.font = 'bold 12px monospace';
+    ctx.fillText('CHAMPIONSHIP UNLOCKED!', GW / 2, 275);
+  }
+
+  var pulse = Math.sin(frame * 0.05) * 0.3 + 0.7;
+  ctx.globalAlpha = pulse;
+  ctx.fillStyle = '#aaa';
+  ctx.font = '11px monospace';
+  ctx.fillText('PRESS ANY KEY TO CONTINUE', GW / 2, GH - 20);
+  ctx.globalAlpha = 1;
+}
+
+// === DRAW WIN ===
+function drawWin() {
+  ctx.fillStyle = '#0a0a1a';
+  ctx.fillRect(0, 0, GW, GH);
+
+  // Fireworks
+  if (frame % 10 === 0) {
+    TAS.particles.spawn(100 + Math.random() * 280, 50 + Math.random() * 100, ['#ff4444','#ffdd44','#44ff44','#4488ff','#ff44ff'][Math.floor(Math.random() * 5)], 20, 3, { size: 2, gravity: 1 });
+    TAS.audio.playTone(400 + Math.random() * 600, 0.08, 'triangle', 0.03);
+  }
+
+  TAS.particles.draw();
+
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#ffd700';
+  ctx.font = 'bold 24px monospace';
+  ctx.fillText('CHAMPION!', GW / 2, 60);
+
+  ctx.fillStyle = '#fff';
+  ctx.font = '14px monospace';
+  ctx.fillText('Final Score: ' + score, GW / 2, 100);
+
+  if (score >= highScore && score > 0) {
+    var hsPulse = Math.sin(frame * 0.08) * 0.3 + 0.7;
+    ctx.globalAlpha = hsPulse;
+    ctx.fillStyle = '#ffdd44';
+    ctx.font = 'bold 12px monospace';
+    ctx.fillText('NEW HIGH SCORE!', GW / 2, 120);
+    ctx.globalAlpha = 1;
+  }
+
+  drawBaselingSkater(GW / 2, 180, 2.5, frame * 0.03);
+
+  // Medal summary
+  ctx.fillStyle = '#aaa';
+  ctx.font = '10px monospace';
+  var medalSummary = '';
+  for (var i = 0; i < 4; i++) {
+    var mc = ['--', 'B', 'S', 'G'][parkMedals[i]];
+    medalSummary += parkNames[i] + ':' + mc + '  ';
+  }
+  ctx.fillText(medalSummary, GW / 2, 225);
+
+  ctx.fillStyle = '#44dd88';
+  ctx.font = '12px monospace';
+  ctx.fillText('The baseling shreds eternal!', GW / 2, 255);
+
+  var pulse = Math.sin(frame * 0.05) * 0.3 + 0.7;
+  ctx.globalAlpha = pulse;
+  ctx.fillStyle = '#aaa';
+  ctx.font = '11px monospace';
+  ctx.fillText('PRESS ANY KEY', GW / 2, GH - 20);
+  ctx.globalAlpha = 1;
+}
+
+// === MAIN LOOP ===
+TAS.loop.start(update, draw);
+
+})();
+</script>
+</body>
+</html>

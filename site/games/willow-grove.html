@@ -1,0 +1,1958 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Willow Grove</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body { width: 100%; height: 100%; overflow: hidden; background: #111; touch-action: none; }
+canvas { display: block; margin: 0 auto; }
+#back-link {
+  position: fixed; bottom: 8px; left: 50%; transform: translateX(-50%);
+  color: #666; font-family: monospace; font-size: 12px; text-decoration: none; z-index: 10;
+}
+#back-link:hover { color: #aaa; }
+</style>
+</head>
+<body>
+<canvas id="gc"></canvas>
+<a id="back-link" href="/games">Back to Arcade</a>
+<script src="nft-loader.js"></script>
+<script>if(window.NftLoader)NftLoader.gate();</script>
+<script src="tasern-engine.js"></script>
+<script>
+(function(){
+"use strict";
+
+// ============================================================
+// CONSTANTS
+// ============================================================
+var GW = 480, GH = 320;
+var ctx = TAS.ctx;
+TAS.initCanvas(GW, GH);
+TAS.input.initTouch({ buttons: ['a', 'b'], labels: { a: 'JUMP', b: 'MAGIC' } });
+
+var TILE = 16;
+var GRAVITY = 850;
+var JUMP_VEL = -320;
+var WALK_SPEED = 110;
+var SWIM_SPEED = 70;
+var SWORD_DUR = 0.25;
+var SWORD_RANGE = [28, 38, 50];
+var MAGIC_MAX = 100;
+var MAGIC_REGEN = 5;
+var MAGIC_COSTS = [20, 30, 35, 50];
+var SPELL_NAMES = ['THUNDER', 'BOMBARD', 'TRANSFORM', 'NOCKMAAR'];
+var STAGE_COUNT = 8;
+var SAVE_KEY = 'willow_grove_save';
+
+// ============================================================
+// GAME STATE
+// ============================================================
+var state = 'title';
+var frame = 0;
+var score = 0;
+var highScore = TAS.score.load('willowgrove_hi');
+
+var player = {};
+var enemies = [];
+var platforms = [];
+var projectiles = [];
+var pickups = [];
+var particles = [];
+var npcs = [];
+var transformedObjs = [];
+var arrowRain = [];
+
+var stage = 0;
+var screenIdx = 0;
+var screensPerStage = [2, 3, 3, 3, 3, 4, 4, 3];
+var lives = 3;
+var hearts = 3;
+var maxHearts = 3;
+var magic = MAGIC_MAX;
+var swordLevel = 0;
+var spells = [];
+var activeSpell = 0;
+var camX = 0;
+var stageWidth = 0;
+var bossActive = false;
+var boss = null;
+var stageComplete = false;
+var stageCompleteTimer = 0;
+var deathTimer = 0;
+var invTimer = 0;
+var shieldTimer = 0;
+var underwater = false;
+var dialogText = '';
+var dialogTimer = 0;
+var transitionTimer = 0;
+var transitionDir = 0;
+var flashTimer = 0;
+var shakeTimer = 0;
+var shakeAmt = 0;
+
+// ============================================================
+// STAGE THEMES
+// ============================================================
+var STAGE_THEMES = [
+  { name: 'Village Outskirts', bg: '#1a2a0a', ground: '#3a5520', accent: '#5a8833', sky: '#1a3322' },
+  { name: 'Enchanted Forest', bg: '#0a1a0a', ground: '#224411', accent: '#33aa44', sky: '#0a2a10' },
+  { name: 'Mountain Pass', bg: '#1a2030', ground: '#4a5566', accent: '#8899aa', sky: '#1a2535' },
+  { name: 'Underground Lake', bg: '#0a0a20', ground: '#1a2244', accent: '#3355aa', sky: '#050510' },
+  { name: 'Dark Castle Exterior', bg: '#1a0a0a', ground: '#3a2222', accent: '#662222', sky: '#200808' },
+  { name: 'Castle Dungeons', bg: '#0a0808', ground: '#2a1a1a', accent: '#553322', sky: '#0a0606' },
+  { name: 'Tower Ascent', bg: '#140a1a', ground: '#332244', accent: '#6644aa', sky: '#1a0a20' },
+  { name: 'Throne Room', bg: '#1a0010', ground: '#440022', accent: '#aa0044', sky: '#200015' }
+];
+
+// ============================================================
+// SEEDED RNG
+// ============================================================
+var rngSeed = 42;
+function seedRng(s) { rngSeed = s; }
+function rng() { rngSeed = (rngSeed * 1664525 + 1013904223) & 0x7FFFFFFF; return rngSeed / 0x7FFFFFFF; }
+
+// ============================================================
+// AUDIO
+// ============================================================
+function sfxJump() { TAS.audio.playTone(280, 0.1, 'square', 0.08, 420); }
+function sfxSword() { TAS.audio.playTone(180, 0.08, 'sawtooth', 0.1, 90); }
+function sfxHit() { TAS.audio.playTone(120, 0.15, 'square', 0.12, 60); }
+function sfxMagic() { TAS.audio.playTone(440, 0.3, 'sine', 0.1, 880); }
+function sfxTransform() { TAS.audio.playTone(660, 0.4, 'sine', 0.08, 1320); }
+function sfxPickup() { TAS.audio.playTone(520, 0.1, 'square', 0.08, 780); }
+function sfxBossHit() { TAS.audio.playTone(80, 0.2, 'sawtooth', 0.15, 40); }
+function sfxDeath() { TAS.audio.playTone(200, 0.5, 'sawtooth', 0.15, 50); }
+function sfxThunder() { TAS.audio.playTone(60, 0.4, 'sawtooth', 0.2, 30); }
+function sfxBombard() { TAS.audio.playTone(100, 0.3, 'square', 0.15, 50); }
+function sfxNockmaar() { TAS.audio.playTone(150, 0.5, 'sawtooth', 0.2, 300); }
+
+// ============================================================
+// PLAYER INIT
+// ============================================================
+function resetPlayer() {
+  player = {
+    x: 40, y: 200, vx: 0, vy: 0, w: 14, h: 22,
+    dir: 1, onGround: false, swordTimer: 0,
+    dead: false, swimming: false
+  };
+}
+
+// ============================================================
+// LEVEL GENERATION
+// ============================================================
+function generateStage(stageNum, screenNum) {
+  platforms = [];
+  enemies = [];
+  projectiles = [];
+  pickups = [];
+  npcs = [];
+  transformedObjs = [];
+  arrowRain = [];
+  boss = null;
+  bossActive = false;
+  underwater = false;
+
+  seedRng(stageNum * 1000 + screenNum * 77 + 13);
+  var floorY = GH - 32;
+  stageWidth = GW;
+  var isLast = screenNum === screensPerStage[stageNum] - 1;
+
+  // Ground
+  platforms.push({ x: 0, y: floorY, w: stageWidth, h: 32, type: 'ground' });
+
+  if (stageNum === 0) { // Village Outskirts
+    platforms.push({ x: 80, y: floorY - 40, w: 60, h: 8, type: 'plat' });
+    platforms.push({ x: 200, y: floorY - 70, w: 70, h: 8, type: 'plat' });
+    platforms.push({ x: 340, y: floorY - 50, w: 60, h: 8, type: 'plat' });
+    if (screenNum === 0) {
+      npcs.push({ x: 350, y: floorY - 24, type: 'elder', msg: 'Take this sword, young sorcerer!', gives: 'sword' });
+      enemies.push(createEnemy('slime', 150, floorY - 16));
+      enemies.push(createEnemy('slime', 260, floorY - 16));
+    } else {
+      for (var i = 0; i < 3 + screenNum; i++) {
+        enemies.push(createEnemy(rng() < 0.5 ? 'slime' : 'goblin', 80 + rng() * 340, floorY - 16));
+      }
+      pickups.push({ x: 200 + rng() * 100, y: floorY - 80, type: 'acorn' });
+    }
+  } else if (stageNum === 1) { // Enchanted Forest
+    platforms.push({ x: 40, y: floorY - 55, w: 50, h: 8, type: 'plat' });
+    platforms.push({ x: 140, y: floorY - 95, w: 60, h: 8, type: 'plat' });
+    platforms.push({ x: 260, y: floorY - 65, w: 70, h: 8, type: 'plat' });
+    platforms.push({ x: 360, y: floorY - 110, w: 50, h: 8, type: 'plat' });
+    if (screenNum === 0) {
+      npcs.push({ x: 400, y: floorY - 24, type: 'fairy', msg: 'Thunder spell unlocked!', gives: 'thunder' });
+    }
+    for (var i = 0; i < 3 + screenNum; i++) {
+      var t = rng() < 0.4 ? 'treant' : (rng() < 0.5 ? 'vine' : 'goblin');
+      enemies.push(createEnemy(t, 80 + rng() * 350, t === 'vine' ? floorY - 50 - rng() * 40 : floorY - 16));
+    }
+    if (screenNum > 0) pickups.push({ x: 150 + rng() * 200, y: floorY - 100, type: 'acorn' });
+    if (isLast) { boss = createBoss(stageNum); bossActive = true; }
+  } else if (stageNum === 2) { // Mountain Pass
+    platforms.push({ x: 30, y: floorY - 50, w: 55, h: 8, type: 'plat' });
+    platforms.push({ x: 130, y: floorY - 90, w: 50, h: 8, type: 'ice' });
+    platforms.push({ x: 240, y: floorY - 60, w: 60, h: 8, type: 'ice' });
+    platforms.push({ x: 350, y: floorY - 100, w: 55, h: 8, type: 'plat' });
+    platforms.push({ x: 180, y: floorY - 140, w: 50, h: 8, type: 'plat' });
+    for (var i = 0; i < 2 + screenNum * 2; i++) {
+      var t = rng() < 0.5 ? 'iceSprite' : 'eagle';
+      enemies.push(createEnemy(t, 80 + rng() * 350, t === 'eagle' ? floorY - 100 - rng() * 60 : floorY - 16));
+    }
+    if (rng() < 0.4) pickups.push({ x: 200 + rng() * 100, y: floorY - 130, type: 'healthPotion' });
+    pickups.push({ x: 100 + rng() * 200, y: floorY - 80, type: 'acorn' });
+  } else if (stageNum === 3) { // Underground Lake
+    underwater = true;
+    platforms[0].y = GH - 20;
+    platforms.push({ x: 50, y: floorY - 30, w: 80, h: 8, type: 'plat' });
+    platforms.push({ x: 200, y: floorY - 70, w: 70, h: 8, type: 'plat' });
+    platforms.push({ x: 330, y: floorY - 45, w: 60, h: 8, type: 'plat' });
+    platforms.push({ x: 120, y: floorY - 110, w: 55, h: 8, type: 'plat' });
+    if (screenNum === 1) {
+      npcs.push({ x: 380, y: floorY - 44, type: 'merman', msg: 'Bombard spell unlocked!', gives: 'bombard' });
+    }
+    for (var i = 0; i < 3 + screenNum; i++) {
+      var t = rng() < 0.5 ? 'jellyfish' : 'fish';
+      enemies.push(createEnemy(t, 60 + rng() * 360, floorY - 30 - rng() * 80));
+    }
+    if (isLast) { boss = createBoss(stageNum); bossActive = true; }
+    pickups.push({ x: 250 + rng() * 100, y: floorY - 90, type: 'magicPotion' });
+  } else if (stageNum === 4) { // Dark Castle Exterior
+    platforms.push({ x: 60, y: floorY - 55, w: 70, h: 8, type: 'plat' });
+    platforms.push({ x: 180, y: floorY - 90, w: 60, h: 8, type: 'plat' });
+    platforms.push({ x: 300, y: floorY - 60, w: 80, h: 8, type: 'plat' });
+    platforms.push({ x: 400, y: floorY - 110, w: 50, h: 8, type: 'plat' });
+    for (var i = 0; i < 3 + screenNum * 2; i++) {
+      var t = rng() < 0.3 ? 'archer' : (rng() < 0.5 ? 'knight' : 'goblin');
+      enemies.push(createEnemy(t, 80 + rng() * 350, floorY - 16));
+    }
+    if (screenNum >= 1) { arrowRain = [{ timer: 2 + rng() * 3 }]; }
+    if (rng() < 0.3) pickups.push({ x: 200, y: floorY - 100, type: 'shield' });
+    pickups.push({ x: 350 + rng() * 80, y: floorY - 70, type: 'acorn' });
+  } else if (stageNum === 5) { // Castle Dungeons
+    platforms.push({ x: 40, y: floorY - 45, w: 55, h: 8, type: 'plat' });
+    platforms.push({ x: 150, y: floorY - 85, w: 60, h: 8, type: 'plat' });
+    platforms.push({ x: 270, y: floorY - 55, w: 65, h: 8, type: 'plat' });
+    platforms.push({ x: 370, y: floorY - 105, w: 55, h: 8, type: 'plat' });
+    platforms.push({ x: 100, y: floorY - 135, w: 50, h: 8, type: 'plat' });
+    if (screenNum === 0) {
+      npcs.push({ x: 420, y: floorY - 24, type: 'prisoner', msg: 'Transform spell unlocked!', gives: 'transform' });
+    }
+    for (var i = 0; i < 3 + screenNum; i++) {
+      var t = rng() < 0.4 ? 'ghost' : (rng() < 0.5 ? 'knight' : 'skeleton');
+      enemies.push(createEnemy(t, 80 + rng() * 350, t === 'ghost' ? floorY - 60 - rng() * 50 : floorY - 16));
+    }
+    // Locked door puzzle on later screens
+    if (screenNum >= 2) {
+      platforms.push({ x: 420, y: floorY - 60, w: 16, h: 60, type: 'door' });
+    }
+    if (isLast) { boss = createBoss(stageNum); bossActive = true; }
+  } else if (stageNum === 6) { // Tower Ascent
+    // Vertical oriented
+    platforms.push({ x: 30, y: floorY - 50, w: 60, h: 8, type: 'plat' });
+    platforms.push({ x: 150, y: floorY - 100, w: 55, h: 8, type: 'plat' });
+    platforms.push({ x: 280, y: floorY - 60, w: 60, h: 8, type: 'plat' });
+    platforms.push({ x: 80, y: floorY - 145, w: 50, h: 8, type: 'plat' });
+    platforms.push({ x: 220, y: floorY - 140, w: 55, h: 8, type: 'plat' });
+    platforms.push({ x: 350, y: floorY - 120, w: 50, h: 8, type: 'plat' });
+    platforms.push({ x: 130, y: floorY - 185, w: 60, h: 8, type: 'plat' });
+    platforms.push({ x: 300, y: floorY - 180, w: 50, h: 8, type: 'plat' });
+    for (var i = 0; i < 4 + screenNum; i++) {
+      var t = rng() < 0.5 ? 'bat' : 'gargoyle';
+      enemies.push(createEnemy(t, 60 + rng() * 360, floorY - 50 - rng() * 150));
+    }
+    if (screenNum === 2) {
+      npcs.push({ x: 300, y: floorY - 204, type: 'wizard', msg: 'Nockmaar fire unlocked!', gives: 'nockmaar' });
+    }
+    if (rng() < 0.4) pickups.push({ x: 200, y: floorY - 160, type: 'healthPotion' });
+  } else if (stageNum === 7) { // Throne Room
+    platforms.push({ x: 80, y: floorY - 50, w: 70, h: 8, type: 'plat' });
+    platforms.push({ x: 220, y: floorY - 90, w: 80, h: 8, type: 'plat' });
+    platforms.push({ x: 360, y: floorY - 60, w: 65, h: 8, type: 'plat' });
+    platforms.push({ x: 140, y: floorY - 130, w: 60, h: 8, type: 'plat' });
+    platforms.push({ x: 300, y: floorY - 140, w: 55, h: 8, type: 'plat' });
+    if (!isLast) {
+      for (var i = 0; i < 4 + screenNum * 2; i++) {
+        var t = rng() < 0.3 ? 'darkKnight' : (rng() < 0.5 ? 'ghost' : 'gargoyle');
+        enemies.push(createEnemy(t, 80 + rng() * 350, t === 'ghost' || t === 'gargoyle' ? floorY - 60 - rng() * 60 : floorY - 16));
+      }
+    }
+    if (isLast) { boss = createBoss(stageNum); bossActive = true; }
+  }
+
+  // Sword upgrade NPCs in certain stages
+  if (stageNum === 2 && screenNum === 0 && swordLevel < 1) {
+    npcs.push({ x: 60, y: floorY - 24, type: 'smith', msg: 'Iron Sword! More range.', gives: 'sword1' });
+  }
+  if (stageNum === 4 && screenNum === 0 && swordLevel < 2) {
+    npcs.push({ x: 60, y: floorY - 24, type: 'smith', msg: 'Steel Sword! Maximum power.', gives: 'sword2' });
+  }
+}
+
+// ============================================================
+// ENEMY FACTORY
+// ============================================================
+function createEnemy(type, x, y) {
+  var e = { type: type, x: x, y: y, vx: 0, vy: 0, w: 14, h: 18, dir: -1, hp: 1,
+    timer: 0, startX: x, startY: y, active: true, shootTimer: 2 + Math.random() * 3,
+    transformable: true };
+  switch(type) {
+    case 'slime': e.hp = 1; e.vx = -25; e.w = 12; e.h = 10; break;
+    case 'goblin': e.hp = 2; e.vx = -40; break;
+    case 'treant': e.hp = 4; e.vx = -15; e.w = 20; e.h = 28; break;
+    case 'vine': e.hp = 2; e.w = 8; e.h = 30; e.vx = 0; break;
+    case 'iceSprite': e.hp = 2; e.vx = -35; e.w = 12; e.h = 14; break;
+    case 'eagle': e.hp = 1; e.w = 16; e.h = 10; e.timer = Math.random() * 6.28; break;
+    case 'jellyfish': e.hp = 2; e.w = 12; e.h = 14; e.timer = Math.random() * 6.28; break;
+    case 'fish': e.hp = 1; e.vx = -50; e.w = 14; e.h = 8; break;
+    case 'archer': e.hp = 3; e.vx = 0; e.shootTimer = 2; break;
+    case 'knight': e.hp = 4; e.vx = -30; e.w = 16; e.h = 22; break;
+    case 'ghost': e.hp = 2; e.w = 14; e.h = 16; e.timer = Math.random() * 6.28; break;
+    case 'skeleton': e.hp = 2; e.vx = -35; break;
+    case 'bat': e.hp = 1; e.w = 12; e.h = 8; e.timer = Math.random() * 6.28; break;
+    case 'gargoyle': e.hp = 3; e.w = 16; e.h = 18; e.timer = Math.random() * 6.28; break;
+    case 'darkKnight': e.hp = 5; e.vx = -25; e.w = 18; e.h = 24; break;
+  }
+  return e;
+}
+
+// ============================================================
+// BOSS FACTORY
+// ============================================================
+function createBoss(stageNum) {
+  var floorY = GH - 32;
+  var b = { x: 360, y: floorY - 40, w: 36, h: 40, hp: 0, maxHp: 0, phase: 0,
+    timer: 0, attackTimer: 2, vx: 0, vy: 0, dir: -1, type: '', active: true,
+    invTimer: 0, flashTimer: 0 };
+  switch(stageNum) {
+    case 1: // Forest Guardian
+      b.type = 'forestGuardian'; b.hp = 20; b.maxHp = 20; b.w = 30; b.h = 44; b.y = floorY - 44; break;
+    case 3: // Lake Serpent
+      b.type = 'lakeSerpent'; b.hp = 25; b.maxHp = 25; b.w = 40; b.h = 20; b.y = floorY - 40; break;
+    case 5: // Dungeon Warden
+      b.type = 'dungeonWarden'; b.hp = 30; b.maxHp = 30; b.w = 28; b.h = 36; b.y = floorY - 36; break;
+    case 7: // Dark Queen
+      b.type = 'darkQueen'; b.hp = 40; b.maxHp = 40; b.w = 24; b.h = 34; b.y = floorY - 34;
+      b.phase = 0; break;
+  }
+  return b;
+}
+
+// ============================================================
+// COLLISION
+// ============================================================
+function rectOverlap(a, b) {
+  return a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
+}
+
+function pointInRect(px, py, r) {
+  return px >= r.x && px <= r.x + r.w && py >= r.y && py <= r.y + r.h;
+}
+
+// ============================================================
+// START / SAVE / LOAD
+// ============================================================
+function startGame(fromSave) {
+  state = 'playing';
+  score = 0;
+  frame = 0;
+  if (!fromSave) {
+    stage = 0; screenIdx = 0; lives = 3; hearts = 3; maxHearts = 3;
+    magic = MAGIC_MAX; swordLevel = 0; spells = []; activeSpell = 0;
+  }
+  resetPlayer();
+  generateStage(stage, screenIdx);
+  transitionTimer = 1.0;
+  transitionDir = 1;
+  TAS.particles.clear();
+}
+
+function saveGame() {
+  var data = { stage: stage, screen: screenIdx, lives: lives, hearts: hearts,
+    maxHearts: maxHearts, swordLevel: swordLevel, spells: spells, score: score };
+  try { localStorage.setItem(SAVE_KEY, JSON.stringify(data)); } catch(e) { console.error('Save failed:', e); }
+}
+
+function loadGame() {
+  try {
+    var d = JSON.parse(localStorage.getItem(SAVE_KEY));
+    if (d) {
+      stage = d.stage || 0; screenIdx = d.screen || 0; lives = d.lives || 3;
+      hearts = d.hearts || 3; maxHearts = d.maxHearts || 3;
+      swordLevel = d.swordLevel || 0; spells = d.spells || []; score = d.score || 0;
+      return true;
+    }
+  } catch(e) { console.error('Load failed:', e); }
+  return false;
+}
+
+// ============================================================
+// ADVANCE / DEATH
+// ============================================================
+function advanceScreen() {
+  screenIdx++;
+  if (screenIdx >= screensPerStage[stage]) {
+    stage++;
+    screenIdx = 0;
+    if (stage >= STAGE_COUNT) {
+      state = 'victory';
+      if (score > highScore) { highScore = score; TAS.score.save('willowgrove_hi', highScore); }
+      saveGame();
+      return;
+    }
+  }
+  saveGame();
+  resetPlayer();
+  generateStage(stage, screenIdx);
+  transitionTimer = 1.0;
+  transitionDir = 1;
+}
+
+function killPlayer() {
+  player.dead = true;
+  deathTimer = 1.5;
+  sfxDeath();
+  TAS.fx.shake(8, 0.4);
+  for (var i = 0; i < 15; i++) {
+    TAS.particles.spawn(player.x + player.w / 2, player.y + player.h / 2,
+      (Math.random() - 0.5) * 150, (Math.random() - 0.5) * 150,
+      0.6 + Math.random() * 0.4, '#ffaa00', 3);
+  }
+}
+
+function respawn() {
+  lives--;
+  if (lives <= 0) {
+    state = 'gameOver';
+    if (score > highScore) { highScore = score; TAS.score.save('willowgrove_hi', highScore); }
+    return;
+  }
+  hearts = maxHearts;
+  magic = MAGIC_MAX;
+  resetPlayer();
+  generateStage(stage, screenIdx);
+  invTimer = 2.0;
+}
+
+// ============================================================
+// DAMAGE
+// ============================================================
+function damagePlayer(dmg) {
+  if (invTimer > 0 || shieldTimer > 0 || player.dead) return;
+  hearts -= dmg;
+  invTimer = 1.5;
+  sfxHit();
+  TAS.fx.flash('#ff0000', 0.15);
+  if (hearts <= 0) { hearts = 0; killPlayer(); }
+}
+
+function damageEnemy(e, dmg) {
+  e.hp -= dmg;
+  TAS.particles.spawn(e.x + e.w / 2, e.y + e.h / 2, 0, -30, 0.3, '#fff', 2);
+  if (e.hp <= 0) {
+    e.active = false;
+    score += 10;
+    sfxHit();
+    for (var i = 0; i < 6; i++) {
+      TAS.particles.spawn(e.x + e.w / 2, e.y + e.h / 2,
+        (Math.random() - 0.5) * 100, (Math.random() - 0.5) * 100,
+        0.4, '#ffcc00', 2);
+    }
+  }
+}
+
+function damageBoss(dmg) {
+  if (!boss || boss.invTimer > 0) return;
+  boss.hp -= dmg;
+  boss.invTimer = 0.3;
+  boss.flashTimer = 0.2;
+  sfxBossHit();
+  TAS.fx.shake(4, 0.2);
+  score += 5;
+  if (boss.hp <= 0) {
+    boss.active = false;
+    bossActive = false;
+    score += 200;
+    stageComplete = true;
+    stageCompleteTimer = 3.0;
+    for (var i = 0; i < 30; i++) {
+      TAS.particles.spawn(boss.x + boss.w / 2, boss.y + boss.h / 2,
+        (Math.random() - 0.5) * 200, (Math.random() - 0.5) * 200,
+        0.8 + Math.random() * 0.5, i % 2 === 0 ? '#ff4400' : '#ffcc00', 4);
+    }
+  }
+}
+
+// ============================================================
+// TRANSFORM ENEMY
+// ============================================================
+function transformEnemy(e) {
+  e.active = false;
+  sfxTransform();
+  score += 25;
+  var tType = 'frog';
+  if (stage >= 2 && stage <= 3) tType = 'snowflake';
+  if (stage >= 5) tType = 'flower';
+  // Special: in dungeon, transforms become keys
+  var isKey = (stage === 5 && screenIdx >= 2);
+  if (isKey) tType = 'key';
+  transformedObjs.push({ x: e.x, y: e.y + e.h - 12, w: 12, h: 12, type: tType, timer: 0 });
+  // Sparkle effect
+  for (var i = 0; i < 12; i++) {
+    TAS.particles.spawn(e.x + e.w / 2, e.y + e.h / 2,
+      (Math.random() - 0.5) * 80, (Math.random() - 0.5) * 80,
+      0.6, i % 3 === 0 ? '#aa44ff' : (i % 3 === 1 ? '#ffaaff' : '#ffffff'), 3);
+  }
+}
+
+// ============================================================
+// SPELL CASTING
+// ============================================================
+function castSpell() {
+  if (spells.length === 0) return;
+  var spellIdx = spells[activeSpell];
+  if (magic < MAGIC_COSTS[spellIdx]) return;
+  magic -= MAGIC_COSTS[spellIdx];
+
+  if (spellIdx === 0) { // Thunder
+    sfxThunder();
+    var closest = null, closestDist = 999;
+    for (var i = 0; i < enemies.length; i++) {
+      if (!enemies[i].active) continue;
+      var dx = enemies[i].x - player.x;
+      var dy = enemies[i].y - player.y;
+      var d = Math.sqrt(dx * dx + dy * dy);
+      if (d < closestDist) { closestDist = d; closest = enemies[i]; }
+    }
+    if (closest && closestDist < 200) {
+      damageEnemy(closest, 3);
+      // Lightning visual
+      for (var i = 0; i < 8; i++) {
+        TAS.particles.spawn(closest.x + closest.w / 2, closest.y - 20 - i * 15,
+          (Math.random() - 0.5) * 20, -10, 0.3, '#88ccff', 2);
+      }
+      TAS.fx.flash('#aaddff', 0.1);
+    }
+    if (bossActive && boss && closestDist >= 200) {
+      damageBoss(3);
+      for (var i = 0; i < 8; i++) {
+        TAS.particles.spawn(boss.x + boss.w / 2, boss.y - 20 - i * 15,
+          (Math.random() - 0.5) * 20, -10, 0.3, '#88ccff', 2);
+      }
+      TAS.fx.flash('#aaddff', 0.1);
+    }
+  } else if (spellIdx === 1) { // Bombard
+    sfxBombard();
+    for (var i = 0; i < 5; i++) {
+      projectiles.push({ x: player.x + (i - 2) * 40 + Math.random() * 30, y: -10 - i * 20,
+        vx: (Math.random() - 0.5) * 30, vy: 200 + Math.random() * 100,
+        w: 8, h: 8, type: 'bomb', timer: 0, dmg: 2, friendly: true });
+    }
+  } else if (spellIdx === 2) { // Transform
+    sfxTransform();
+    // Transform nearest enemy
+    var closest = null, closestDist = 999;
+    for (var i = 0; i < enemies.length; i++) {
+      if (!enemies[i].active || !enemies[i].transformable) continue;
+      var d = Math.abs(enemies[i].x - player.x) + Math.abs(enemies[i].y - player.y);
+      if (d < closestDist) { closestDist = d; closest = enemies[i]; }
+    }
+    if (closest && closestDist < 150) {
+      transformEnemy(closest);
+    }
+  } else if (spellIdx === 3) { // Nockmaar
+    sfxNockmaar();
+    var dir = player.dir;
+    projectiles.push({ x: player.x + (dir > 0 ? player.w : -20), y: player.y + 4,
+      vx: dir * 250, vy: 0, w: 20, h: 14, type: 'fire', timer: 0, dmg: 5, friendly: true });
+    TAS.fx.flash('#ff4400', 0.1);
+  }
+  sfxMagic();
+}
+
+// ============================================================
+// INPUT HANDLING
+// ============================================================
+var keys = {};
+var prevKeys = {};
+function keyDown(k) { return TAS.input.keys[k]; }
+function keyJustPressed(k) { return TAS.input.keys[k] && !prevKeys[k]; }
+
+// ============================================================
+// UPDATE
+// ============================================================
+function update(dt) {
+  frame++;
+
+  if (state === 'title') {
+    if (Object.values(TAS.input.keys).some(Boolean) || TAS.input.touch.a) {
+      if (loadGame()) startGame(true);
+      else startGame(false);
+    }
+    return;
+  }
+
+  if (state === 'gameOver' || state === 'victory') {
+    if (Object.values(TAS.input.keys).some(Boolean) || TAS.input.touch.a) {
+      state = 'title';
+    }
+    return;
+  }
+
+  if (state !== 'playing') return;
+
+  // Transition
+  if (transitionTimer > 0) { transitionTimer -= dt; return; }
+
+  // Stage complete
+  if (stageComplete) {
+    stageCompleteTimer -= dt;
+    if (stageCompleteTimer <= 0) {
+      stageComplete = false;
+      advanceScreen();
+    }
+    return;
+  }
+
+  // Death
+  if (player.dead) {
+    deathTimer -= dt;
+    if (deathTimer <= 0) respawn();
+    TAS.particles.update(dt);
+    return;
+  }
+
+  // Dialog
+  if (dialogTimer > 0) {
+    dialogTimer -= dt;
+    if (dialogTimer <= 0) dialogText = '';
+    return;
+  }
+
+  // Timers
+  if (invTimer > 0) invTimer -= dt;
+  if (shieldTimer > 0) shieldTimer -= dt;
+
+  // Magic regen
+  magic = Math.min(MAGIC_MAX, magic + MAGIC_REGEN * dt);
+
+  // === PLAYER MOVEMENT ===
+  var moveL = keyDown('ArrowLeft') || TAS.input.touch.left;
+  var moveR = keyDown('ArrowRight') || TAS.input.touch.right;
+  var jumpBtn = keyDown('ArrowUp') || keyJustPressed(' ') || TAS.input.touch.a;
+  var attackBtn = keyJustPressed('z') || keyJustPressed('Z');
+  var magicBtn = keyJustPressed('x') || keyJustPressed('X') || TAS.input.touch.b;
+  var spellSwitch = keyJustPressed('c') || keyJustPressed('C');
+
+  if (moveL) { player.vx = -(underwater ? SWIM_SPEED : WALK_SPEED); player.dir = -1; }
+  else if (moveR) { player.vx = (underwater ? SWIM_SPEED : WALK_SPEED); player.dir = 1; }
+  else { player.vx = 0; }
+
+  // Swimming
+  if (underwater) {
+    var swimUp = keyDown('ArrowUp') || TAS.input.touch.a;
+    var swimDown = keyDown('ArrowDown');
+    if (swimUp) player.vy = -SWIM_SPEED;
+    else if (swimDown) player.vy = SWIM_SPEED;
+    else player.vy *= 0.9;
+    player.swimming = true;
+  } else {
+    player.swimming = false;
+    // Jump
+    if (jumpBtn && player.onGround) {
+      player.vy = JUMP_VEL;
+      player.onGround = false;
+      sfxJump();
+    }
+    // Gravity
+    player.vy += GRAVITY * dt;
+  }
+
+  // Apply velocity
+  player.x += player.vx * dt;
+  player.y += player.vy * dt;
+
+  // Platform collision
+  player.onGround = false;
+  for (var i = 0; i < platforms.length; i++) {
+    var p = platforms[i];
+    if (p.type === 'door') continue;
+    if (rectOverlap({ x: player.x, y: player.y, w: player.w, h: player.h }, p)) {
+      if (player.vy > 0 && player.y + player.h - player.vy * dt <= p.y + 4) {
+        player.y = p.y - player.h;
+        player.vy = 0;
+        player.onGround = true;
+        // Ice slide
+        if (p.type === 'ice' && player.vx === 0) {
+          player.x += player.dir * 20 * dt;
+        }
+      } else if (player.vy < 0 && p.type === 'ground') {
+        player.y = p.y + p.h;
+        player.vy = 0;
+      }
+    }
+  }
+
+  // Bounds
+  if (player.x < 0) player.x = 0;
+  if (player.x > GW - player.w) {
+    if (!bossActive) {
+      advanceScreen();
+      return;
+    }
+    player.x = GW - player.w;
+  }
+  if (player.y > GH + 20) { killPlayer(); return; }
+  if (player.y < 0 && !underwater) player.y = 0;
+
+  // === SWORD ATTACK ===
+  if (attackBtn && player.swordTimer <= 0) {
+    player.swordTimer = SWORD_DUR;
+    sfxSword();
+  }
+  if (player.swordTimer > 0) {
+    player.swordTimer -= dt;
+    var sx = player.dir > 0 ? player.x + player.w : player.x - SWORD_RANGE[swordLevel];
+    var sy = player.y + 4;
+    var sw = SWORD_RANGE[swordLevel];
+    var sh = 10;
+    var swordRect = { x: sx, y: sy, w: sw, h: sh };
+    // Hit enemies
+    for (var i = 0; i < enemies.length; i++) {
+      if (!enemies[i].active) continue;
+      if (rectOverlap(swordRect, enemies[i])) {
+        damageEnemy(enemies[i], 1 + swordLevel);
+      }
+    }
+    // Hit boss
+    if (bossActive && boss && boss.active) {
+      if (rectOverlap(swordRect, boss)) {
+        damageBoss(1 + swordLevel);
+      }
+    }
+  }
+
+  // === MAGIC ===
+  if (magicBtn) castSpell();
+  if (spellSwitch && spells.length > 0) {
+    activeSpell = (activeSpell + 1) % spells.length;
+  }
+
+  // === ENEMIES ===
+  for (var i = 0; i < enemies.length; i++) {
+    var e = enemies[i];
+    if (!e.active) continue;
+    e.timer += dt;
+
+    switch(e.type) {
+      case 'slime':
+      case 'goblin':
+      case 'skeleton':
+      case 'knight':
+      case 'darkKnight':
+        e.x += e.vx * dt;
+        if (e.x < 20 || e.x > GW - 30) { e.vx = -e.vx; e.dir = -e.dir; }
+        break;
+      case 'treant':
+        e.x += e.vx * dt;
+        if (Math.abs(e.x - e.startX) > 40) e.vx = -e.vx;
+        break;
+      case 'eagle':
+      case 'bat':
+      case 'gargoyle':
+        e.x += Math.cos(e.timer * 2) * 60 * dt;
+        e.y = e.startY + Math.sin(e.timer * 3) * 25;
+        break;
+      case 'ghost':
+        e.x += Math.sin(e.timer * 1.5) * 40 * dt;
+        e.y = e.startY + Math.cos(e.timer * 2) * 20;
+        break;
+      case 'jellyfish':
+        e.y = e.startY + Math.sin(e.timer * 2) * 20;
+        e.x += Math.cos(e.timer) * 15 * dt;
+        break;
+      case 'fish':
+        e.x += e.vx * dt;
+        if (e.x < 10 || e.x > GW - 20) e.vx = -e.vx;
+        break;
+      case 'iceSprite':
+        e.x += e.vx * dt;
+        if (e.x < 20 || e.x > GW - 30) e.vx = -e.vx;
+        // Shoot ice
+        e.shootTimer -= dt;
+        if (e.shootTimer <= 0) {
+          e.shootTimer = 2.5;
+          var dx = player.x - e.x;
+          projectiles.push({ x: e.x, y: e.y, vx: dx > 0 ? 100 : -100, vy: 0, w: 6, h: 6, type: 'ice', timer: 0, dmg: 1, friendly: false });
+        }
+        break;
+      case 'archer':
+        e.shootTimer -= dt;
+        if (e.shootTimer <= 0) {
+          e.shootTimer = 2.0;
+          var dx = player.x - e.x;
+          projectiles.push({ x: e.x, y: e.y + 4, vx: dx > 0 ? 140 : -140, vy: -40, w: 8, h: 4, type: 'arrow', timer: 0, dmg: 1, friendly: false });
+        }
+        break;
+      case 'vine':
+        // Stays in place, periodic lash
+        if (Math.sin(e.timer * 3) > 0.8) {
+          e.w = 20;
+        } else {
+          e.w = 8;
+        }
+        break;
+    }
+
+    // Enemy-player collision
+    if (rectOverlap(player, e)) {
+      damagePlayer(1);
+    }
+  }
+
+  // === BOSS AI ===
+  if (bossActive && boss && boss.active) {
+    boss.timer += dt;
+    if (boss.invTimer > 0) boss.invTimer -= dt;
+    if (boss.flashTimer > 0) boss.flashTimer -= dt;
+    boss.attackTimer -= dt;
+
+    switch(boss.type) {
+      case 'forestGuardian':
+        boss.x = 300 + Math.sin(boss.timer * 0.8) * 60;
+        boss.y = GH - 32 - boss.h + Math.sin(boss.timer * 1.2) * 10;
+        if (boss.attackTimer <= 0) {
+          boss.attackTimer = 2.0;
+          for (var i = 0; i < 3; i++) {
+            projectiles.push({ x: boss.x + boss.w / 2, y: boss.y + 10,
+              vx: -80 - i * 20, vy: -30 + i * 20, w: 8, h: 8, type: 'leaf', timer: 0, dmg: 1, friendly: false });
+          }
+        }
+        break;
+      case 'lakeSerpent':
+        boss.x = 280 + Math.sin(boss.timer) * 80;
+        boss.y = GH - 80 + Math.cos(boss.timer * 1.5) * 30;
+        if (boss.attackTimer <= 0) {
+          boss.attackTimer = 1.5;
+          projectiles.push({ x: boss.x, y: boss.y,
+            vx: (player.x - boss.x) * 0.8, vy: (player.y - boss.y) * 0.8,
+            w: 10, h: 10, type: 'bubble', timer: 0, dmg: 1, friendly: false });
+        }
+        break;
+      case 'dungeonWarden':
+        if (boss.timer % 4 < 2) {
+          boss.x += (boss.x > player.x ? -1 : 1) * 50 * dt;
+        }
+        boss.y = GH - 32 - boss.h;
+        if (boss.attackTimer <= 0) {
+          boss.attackTimer = 1.8;
+          for (var i = 0; i < 4; i++) {
+            var angle = (i / 4) * Math.PI * 2;
+            projectiles.push({ x: boss.x + boss.w / 2, y: boss.y + boss.h / 2,
+              vx: Math.cos(angle) * 100, vy: Math.sin(angle) * 100,
+              w: 6, h: 6, type: 'dark', timer: 0, dmg: 1, friendly: false });
+          }
+        }
+        break;
+      case 'darkQueen':
+        // Multi-phase boss
+        if (boss.hp > boss.maxHp * 0.6) {
+          boss.phase = 0;
+          boss.x = 350 + Math.sin(boss.timer) * 50;
+          boss.y = GH - 32 - boss.h;
+        } else if (boss.hp > boss.maxHp * 0.3) {
+          boss.phase = 1;
+          boss.x = 250 + Math.sin(boss.timer * 1.5) * 100;
+          boss.y = GH - 80 + Math.sin(boss.timer * 2) * 30;
+        } else {
+          boss.phase = 2;
+          boss.x = 240 + Math.cos(boss.timer * 2) * 120;
+          boss.y = GH - 100 + Math.sin(boss.timer * 3) * 40;
+        }
+        if (boss.attackTimer <= 0) {
+          boss.attackTimer = boss.phase === 2 ? 0.8 : (boss.phase === 1 ? 1.2 : 1.8);
+          var numProj = 2 + boss.phase * 2;
+          for (var i = 0; i < numProj; i++) {
+            var angle = (i / numProj) * Math.PI * 2 + boss.timer;
+            projectiles.push({ x: boss.x + boss.w / 2, y: boss.y + boss.h / 2,
+              vx: Math.cos(angle) * (80 + boss.phase * 30),
+              vy: Math.sin(angle) * (80 + boss.phase * 30),
+              w: 7, h: 7, type: 'darkMagic', timer: 0, dmg: 1, friendly: false });
+          }
+          // Phase 2: summon minions
+          if (boss.phase === 2 && Math.random() < 0.3) {
+            enemies.push(createEnemy('ghost', boss.x + (Math.random() - 0.5) * 60, boss.y));
+          }
+        }
+        break;
+    }
+
+    // Boss-player collision
+    if (rectOverlap(player, boss)) {
+      damagePlayer(2);
+    }
+  }
+
+  // === PROJECTILES ===
+  for (var i = projectiles.length - 1; i >= 0; i--) {
+    var p = projectiles[i];
+    p.x += p.vx * dt;
+    p.y += p.vy * dt;
+    p.timer += dt;
+    if (p.type === 'bomb') p.vy += 300 * dt;
+
+    // Off screen
+    if (p.x < -20 || p.x > GW + 20 || p.y < -40 || p.y > GH + 20 || p.timer > 4) {
+      projectiles.splice(i, 1);
+      continue;
+    }
+
+    if (p.friendly) {
+      // Hit enemies
+      for (var j = 0; j < enemies.length; j++) {
+        if (!enemies[j].active) continue;
+        if (rectOverlap(p, enemies[j])) {
+          damageEnemy(enemies[j], p.dmg);
+          projectiles.splice(i, 1);
+          i = -1; break;
+        }
+      }
+      if (i < 0) continue;
+      // Hit boss
+      if (bossActive && boss && boss.active && rectOverlap(p, boss)) {
+        damageBoss(p.dmg);
+        projectiles.splice(i, 1);
+        continue;
+      }
+      // Bomb hits ground
+      if (p.type === 'bomb') {
+        for (var j = 0; j < platforms.length; j++) {
+          if (rectOverlap(p, platforms[j])) {
+            for (var k = 0; k < 6; k++) {
+              TAS.particles.spawn(p.x, p.y, (Math.random() - 0.5) * 100, -Math.random() * 80, 0.4, '#ff6600', 3);
+            }
+            projectiles.splice(i, 1);
+            sfxBombard();
+            // Damage nearby enemies
+            for (var k = 0; k < enemies.length; k++) {
+              if (!enemies[k].active) continue;
+              var edx = enemies[k].x - p.x;
+              var edy = enemies[k].y - p.y;
+              if (Math.sqrt(edx * edx + edy * edy) < 40) {
+                damageEnemy(enemies[k], p.dmg);
+              }
+            }
+            if (bossActive && boss && boss.active) {
+              var bdx = boss.x - p.x;
+              var bdy = boss.y - p.y;
+              if (Math.sqrt(bdx * bdx + bdy * bdy) < 50) damageBoss(p.dmg);
+            }
+            break;
+          }
+        }
+      }
+    } else {
+      // Enemy projectile hits player
+      if (rectOverlap(p, player)) {
+        damagePlayer(p.dmg);
+        projectiles.splice(i, 1);
+      }
+    }
+  }
+
+  // === ARROW RAIN (stage 4) ===
+  for (var i = 0; i < arrowRain.length; i++) {
+    arrowRain[i].timer -= dt;
+    if (arrowRain[i].timer <= 0) {
+      arrowRain[i].timer = 1.5 + Math.random() * 2;
+      for (var j = 0; j < 3; j++) {
+        projectiles.push({ x: 50 + Math.random() * 380, y: -10,
+          vx: (Math.random() - 0.5) * 20, vy: 150 + Math.random() * 50,
+          w: 3, h: 10, type: 'arrow', timer: 0, dmg: 1, friendly: false });
+      }
+    }
+  }
+
+  // === PICKUPS ===
+  for (var i = pickups.length - 1; i >= 0; i--) {
+    var pk = pickups[i];
+    if (rectOverlap(player, pk)) {
+      sfxPickup();
+      switch(pk.type) {
+        case 'acorn': score += 50; break;
+        case 'healthPotion': hearts = Math.min(maxHearts, hearts + 2); break;
+        case 'magicPotion': magic = Math.min(MAGIC_MAX, magic + 40); break;
+        case 'shield': shieldTimer = 8; break;
+        case 'heartUp': maxHearts = Math.min(6, maxHearts + 1); hearts = maxHearts; break;
+      }
+      TAS.particles.spawn(pk.x, pk.y, 0, -20, 0.5, '#ffff00', 3);
+      pickups.splice(i, 1);
+    }
+  }
+
+  // === NPCS ===
+  for (var i = 0; i < npcs.length; i++) {
+    var n = npcs[i];
+    if (rectOverlap(player, { x: n.x - 10, y: n.y - 10, w: 30, h: 30 })) {
+      dialogText = n.msg;
+      dialogTimer = 2.5;
+      switch(n.gives) {
+        case 'sword': swordLevel = 0; break;
+        case 'sword1': swordLevel = 1; break;
+        case 'sword2': swordLevel = 2; break;
+        case 'thunder': if (spells.indexOf(0) < 0) spells.push(0); break;
+        case 'bombard': if (spells.indexOf(1) < 0) spells.push(1); break;
+        case 'transform': if (spells.indexOf(2) < 0) spells.push(2); break;
+        case 'nockmaar': if (spells.indexOf(3) < 0) spells.push(3); break;
+      }
+      npcs.splice(i, 1);
+      break;
+    }
+  }
+
+  // === TRANSFORMED OBJECTS ===
+  for (var i = 0; i < transformedObjs.length; i++) {
+    transformedObjs[i].timer += dt;
+    // Key unlocks doors
+    if (transformedObjs[i].type === 'key') {
+      if (rectOverlap(player, transformedObjs[i])) {
+        // Remove door platforms
+        for (var j = platforms.length - 1; j >= 0; j--) {
+          if (platforms[j].type === 'door') platforms.splice(j, 1);
+        }
+        transformedObjs.splice(i, 1);
+        sfxPickup();
+        score += 50;
+        break;
+      }
+    }
+    // Frog/flower as stepping platform
+    if (transformedObjs[i].type === 'frog' || transformedObjs[i].type === 'flower') {
+      var to = transformedObjs[i];
+      if (player.vy > 0 && player.y + player.h >= to.y && player.y + player.h <= to.y + 8 &&
+          player.x + player.w > to.x && player.x < to.x + to.w) {
+        player.y = to.y - player.h;
+        player.vy = 0;
+        player.onGround = true;
+      }
+    }
+  }
+
+  // === DOOR COLLISION ===
+  for (var i = 0; i < platforms.length; i++) {
+    if (platforms[i].type === 'door') {
+      if (rectOverlap(player, platforms[i])) {
+        if (player.vx > 0) player.x = platforms[i].x - player.w;
+        else if (player.vx < 0) player.x = platforms[i].x + platforms[i].w;
+      }
+    }
+  }
+
+  TAS.particles.update(dt);
+  TAS.fx.updateEffects(dt);
+
+  // Store prev keys
+  prevKeys = {};
+  for (var k in TAS.input.keys) prevKeys[k] = TAS.input.keys[k];
+}
+
+// ============================================================
+// DRAWING HELPERS
+// ============================================================
+function drawPlayer() {
+  if (player.dead) return;
+  if (invTimer > 0 && Math.floor(invTimer * 10) % 2 === 0) return;
+
+  var px = player.x, py = player.y;
+  // Body (small baseling sorcerer)
+  ctx.fillStyle = shieldTimer > 0 ? '#66aaff' : '#8844cc';
+  ctx.fillRect(px + 2, py + 6, 10, 12); // body
+  // Head
+  ctx.fillStyle = '#bb88ee';
+  ctx.beginPath();
+  ctx.arc(px + 7, py + 5, 5, 0, Math.PI * 2);
+  ctx.fill();
+  // Hat (wizard)
+  ctx.fillStyle = '#5522aa';
+  ctx.beginPath();
+  ctx.moveTo(px + 3, py + 2);
+  ctx.lineTo(px + 7, py - 6);
+  ctx.lineTo(px + 11, py + 2);
+  ctx.fill();
+  // Eyes
+  ctx.fillStyle = '#fff';
+  ctx.fillRect(px + (player.dir > 0 ? 8 : 4), py + 4, 2, 2);
+  // Staff/Sword
+  if (player.swordTimer > 0) {
+    ctx.fillStyle = swordLevel === 2 ? '#88ccff' : (swordLevel === 1 ? '#cccccc' : '#aa8844');
+    var sLen = SWORD_RANGE[swordLevel];
+    var sx = player.dir > 0 ? px + player.w : px - sLen;
+    ctx.fillRect(sx, py + 6, sLen, 3);
+    // Sword glow
+    ctx.fillStyle = 'rgba(255,255,200,0.3)';
+    ctx.fillRect(sx, py + 4, sLen, 7);
+  }
+  // Shield glow
+  if (shieldTimer > 0) {
+    ctx.strokeStyle = 'rgba(100,180,255,' + (0.3 + Math.sin(frame * 0.2) * 0.2) + ')';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.arc(px + 7, py + 11, 14, 0, Math.PI * 2);
+    ctx.stroke();
+  }
+}
+
+function drawEnemy(e) {
+  if (!e.active) return;
+  var ex = e.x, ey = e.y;
+  switch(e.type) {
+    case 'slime':
+      ctx.fillStyle = '#44cc44';
+      ctx.beginPath();
+      ctx.ellipse(ex + e.w / 2, ey + e.h, e.w / 2, e.h / 2, 0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = '#fff';
+      ctx.fillRect(ex + 3, ey + 4, 2, 2);
+      ctx.fillRect(ex + 7, ey + 4, 2, 2);
+      break;
+    case 'goblin':
+      ctx.fillStyle = '#448844';
+      ctx.fillRect(ex + 2, ey + 6, 10, 12);
+      ctx.fillStyle = '#66aa66';
+      ctx.beginPath(); ctx.arc(ex + 7, ey + 5, 5, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = '#ff4444';
+      ctx.fillRect(ex + 5, ey + 3, 2, 2);
+      ctx.fillRect(ex + 8, ey + 3, 2, 2);
+      break;
+    case 'treant':
+      ctx.fillStyle = '#554422';
+      ctx.fillRect(ex + 4, ey + 8, 12, 20);
+      ctx.fillStyle = '#336622';
+      ctx.beginPath(); ctx.arc(ex + 10, ey + 6, 8, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = '#ff6600';
+      ctx.fillRect(ex + 6, ey + 4, 3, 2);
+      ctx.fillRect(ex + 12, ey + 4, 3, 2);
+      break;
+    case 'vine':
+      ctx.fillStyle = '#228822';
+      ctx.fillRect(ex, ey, e.w, e.h);
+      ctx.fillStyle = '#44ff44';
+      for (var i = 0; i < 3; i++) ctx.fillRect(ex + 2, ey + i * 10, 4, 4);
+      break;
+    case 'iceSprite':
+      ctx.fillStyle = '#88ccff';
+      ctx.beginPath(); ctx.arc(ex + e.w / 2, ey + e.h / 2, 6, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(ex + 4, ey + 4, 2, 2);
+      ctx.fillRect(ex + 8, ey + 4, 2, 2);
+      break;
+    case 'eagle':
+      ctx.fillStyle = '#884400';
+      ctx.beginPath();
+      ctx.moveTo(ex, ey + e.h / 2);
+      ctx.lineTo(ex + e.w / 2, ey);
+      ctx.lineTo(ex + e.w, ey + e.h / 2);
+      ctx.lineTo(ex + e.w / 2, ey + e.h);
+      ctx.fill();
+      break;
+    case 'jellyfish':
+      ctx.fillStyle = '#cc66ff';
+      ctx.beginPath(); ctx.arc(ex + e.w / 2, ey + 5, 6, Math.PI, 0); ctx.fill();
+      ctx.strokeStyle = '#aa44dd';
+      ctx.lineWidth = 1;
+      for (var i = 0; i < 3; i++) {
+        ctx.beginPath(); ctx.moveTo(ex + 3 + i * 4, ey + 8);
+        ctx.lineTo(ex + 3 + i * 4 + Math.sin(frame * 0.1 + i) * 2, ey + 14);
+        ctx.stroke();
+      }
+      break;
+    case 'fish':
+      ctx.fillStyle = '#4488aa';
+      ctx.beginPath();
+      ctx.ellipse(ex + e.w / 2, ey + e.h / 2, e.w / 2, e.h / 2, 0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = '#ffcc00';
+      ctx.fillRect(ex + 10, ey + 2, 2, 2);
+      break;
+    case 'archer':
+      ctx.fillStyle = '#884444';
+      ctx.fillRect(ex + 2, ey + 4, 10, 14);
+      ctx.fillStyle = '#aa6644';
+      ctx.beginPath(); ctx.arc(ex + 7, ey + 3, 4, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = '#ffcc44';
+      ctx.fillRect(ex + 12, ey + 6, 6, 2); // bow
+      break;
+    case 'knight':
+      ctx.fillStyle = '#555566';
+      ctx.fillRect(ex + 2, ey + 4, 12, 18);
+      ctx.fillStyle = '#8888aa';
+      ctx.fillRect(ex + 3, ey, 10, 6);
+      ctx.fillStyle = '#ff4444';
+      ctx.fillRect(ex + 6, ey + 2, 3, 2);
+      break;
+    case 'ghost':
+      ctx.fillStyle = 'rgba(200,200,255,' + (0.5 + Math.sin(frame * 0.1) * 0.2) + ')';
+      ctx.beginPath(); ctx.arc(ex + e.w / 2, ey + 5, 7, Math.PI, 0); ctx.fill();
+      ctx.fillRect(ex + 2, ey + 5, 10, 10);
+      ctx.fillStyle = '#000';
+      ctx.fillRect(ex + 4, ey + 4, 2, 3);
+      ctx.fillRect(ex + 9, ey + 4, 2, 3);
+      break;
+    case 'skeleton':
+      ctx.fillStyle = '#ccccaa';
+      ctx.fillRect(ex + 4, ey + 6, 6, 12);
+      ctx.fillStyle = '#eeeedd';
+      ctx.beginPath(); ctx.arc(ex + 7, ey + 4, 4, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = '#000';
+      ctx.fillRect(ex + 5, ey + 3, 2, 2);
+      ctx.fillRect(ex + 8, ey + 3, 2, 2);
+      break;
+    case 'bat':
+      ctx.fillStyle = '#442244';
+      ctx.beginPath();
+      ctx.moveTo(ex, ey + e.h / 2);
+      ctx.quadTo(ex + e.w / 4, ey, ex + e.w / 2, ey + e.h / 2);
+      ctx.quadTo(ex + e.w * 3 / 4, ey, ex + e.w, ey + e.h / 2);
+      ctx.lineTo(ex + e.w / 2, ey + e.h);
+      ctx.fill();
+      break;
+    case 'gargoyle':
+      ctx.fillStyle = '#556677';
+      ctx.fillRect(ex + 3, ey + 5, 10, 13);
+      ctx.fillStyle = '#778899';
+      ctx.beginPath(); ctx.arc(ex + 8, ey + 4, 5, 0, Math.PI * 2); ctx.fill();
+      // Wings
+      ctx.fillStyle = '#445566';
+      ctx.beginPath();
+      ctx.moveTo(ex, ey + 8);
+      ctx.lineTo(ex - 4, ey + 3);
+      ctx.lineTo(ex + 3, ey + 6);
+      ctx.fill();
+      ctx.beginPath();
+      ctx.moveTo(ex + e.w, ey + 8);
+      ctx.lineTo(ex + e.w + 4, ey + 3);
+      ctx.lineTo(ex + e.w - 3, ey + 6);
+      ctx.fill();
+      ctx.fillStyle = '#ff4400';
+      ctx.fillRect(ex + 5, ey + 3, 2, 2);
+      ctx.fillRect(ex + 9, ey + 3, 2, 2);
+      break;
+    case 'darkKnight':
+      ctx.fillStyle = '#222233';
+      ctx.fillRect(ex + 2, ey + 4, 14, 20);
+      ctx.fillStyle = '#333344';
+      ctx.fillRect(ex + 4, ey, 10, 7);
+      ctx.fillStyle = '#ff0000';
+      ctx.fillRect(ex + 7, ey + 2, 4, 3);
+      // Sword
+      ctx.fillStyle = '#666688';
+      ctx.fillRect(ex + (e.dir > 0 ? 16 : -6), ey + 8, 6, 2);
+      break;
+  }
+}
+
+function drawBoss() {
+  if (!boss || !boss.active) return;
+  var bx = boss.x, by = boss.y;
+  if (boss.flashTimer > 0 && Math.floor(boss.flashTimer * 20) % 2 === 0) {
+    ctx.globalAlpha = 0.5;
+  }
+
+  switch(boss.type) {
+    case 'forestGuardian':
+      ctx.fillStyle = '#442200';
+      ctx.fillRect(bx + 8, by + 14, 14, 30);
+      ctx.fillStyle = '#225500';
+      ctx.beginPath(); ctx.arc(bx + 15, by + 10, 14, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = '#ff6600';
+      ctx.fillRect(bx + 9, by + 6, 4, 4);
+      ctx.fillRect(bx + 17, by + 6, 4, 4);
+      // Branches
+      ctx.strokeStyle = '#553300';
+      ctx.lineWidth = 3;
+      ctx.beginPath(); ctx.moveTo(bx + 5, by + 20); ctx.lineTo(bx - 8, by + 10); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(bx + 25, by + 20); ctx.lineTo(bx + 38, by + 10); ctx.stroke();
+      break;
+    case 'lakeSerpent':
+      ctx.fillStyle = '#2244aa';
+      for (var i = 0; i < 5; i++) {
+        ctx.beginPath();
+        ctx.arc(bx + i * 8, by + Math.sin(frame * 0.1 + i) * 5, 8 - i, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      ctx.fillStyle = '#ff4444';
+      ctx.fillRect(bx + 2, by - 3, 3, 3);
+      ctx.fillRect(bx + 8, by - 3, 3, 3);
+      break;
+    case 'dungeonWarden':
+      ctx.fillStyle = '#442222';
+      ctx.fillRect(bx + 4, by + 8, 20, 28);
+      ctx.fillStyle = '#663333';
+      ctx.fillRect(bx + 6, by, 16, 12);
+      ctx.fillStyle = '#ff0000';
+      ctx.fillRect(bx + 10, by + 3, 3, 4);
+      ctx.fillRect(bx + 16, by + 3, 3, 4);
+      // Chains
+      ctx.strokeStyle = '#888';
+      ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.moveTo(bx + 2, by + 15); ctx.lineTo(bx - 8, by + 25); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(bx + 26, by + 15); ctx.lineTo(bx + 36, by + 25); ctx.stroke();
+      break;
+    case 'darkQueen':
+      // Crown
+      ctx.fillStyle = '#ffcc00';
+      ctx.beginPath();
+      ctx.moveTo(bx + 4, by + 2);
+      ctx.lineTo(bx + 7, by - 6);
+      ctx.lineTo(bx + 10, by);
+      ctx.lineTo(bx + 13, by - 8);
+      ctx.lineTo(bx + 16, by);
+      ctx.lineTo(bx + 19, by - 6);
+      ctx.lineTo(bx + 22, by + 2);
+      ctx.fill();
+      // Head
+      ctx.fillStyle = '#220022';
+      ctx.beginPath(); ctx.arc(bx + 12, by + 6, 7, 0, Math.PI * 2); ctx.fill();
+      // Body/dress
+      ctx.fillStyle = '#440044';
+      ctx.beginPath();
+      ctx.moveTo(bx + 4, by + 12);
+      ctx.lineTo(bx + 20, by + 12);
+      ctx.lineTo(bx + 24, by + 34);
+      ctx.lineTo(bx, by + 34);
+      ctx.fill();
+      // Eyes
+      ctx.fillStyle = boss.phase === 2 ? '#ff0000' : '#ff44ff';
+      ctx.fillRect(bx + 8, by + 5, 3, 3);
+      ctx.fillRect(bx + 14, by + 5, 3, 3);
+      // Aura in later phases
+      if (boss.phase >= 1) {
+        ctx.strokeStyle = 'rgba(255,0,100,' + (0.3 + Math.sin(frame * 0.15) * 0.2) + ')';
+        ctx.lineWidth = 2;
+        ctx.beginPath(); ctx.arc(bx + 12, by + 17, 20 + boss.phase * 5, 0, Math.PI * 2); ctx.stroke();
+      }
+      break;
+  }
+  ctx.globalAlpha = 1.0;
+
+  // Boss HP bar
+  ctx.fillStyle = '#333';
+  ctx.fillRect(bx - 5, by - 12, boss.w + 10, 5);
+  ctx.fillStyle = '#ff2222';
+  ctx.fillRect(bx - 5, by - 12, (boss.w + 10) * (boss.hp / boss.maxHp), 5);
+}
+
+function drawProjectile(p) {
+  switch(p.type) {
+    case 'bomb':
+      ctx.fillStyle = '#ff6600';
+      ctx.beginPath(); ctx.arc(p.x + 4, p.y + 4, 4, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = '#ffcc00';
+      ctx.beginPath(); ctx.arc(p.x + 4, p.y + 4, 2, 0, Math.PI * 2); ctx.fill();
+      break;
+    case 'fire':
+      ctx.fillStyle = '#ff4400';
+      ctx.fillRect(p.x, p.y, p.w, p.h);
+      ctx.fillStyle = '#ffcc00';
+      ctx.fillRect(p.x + 4, p.y + 3, p.w - 8, p.h - 6);
+      TAS.particles.spawn(p.x + Math.random() * p.w, p.y + Math.random() * p.h,
+        (Math.random() - 0.5) * 20, -20, 0.2, '#ff8800', 2);
+      break;
+    case 'arrow':
+      ctx.fillStyle = '#884422';
+      ctx.fillRect(p.x, p.y, p.w, p.h);
+      break;
+    case 'ice':
+      ctx.fillStyle = '#88ddff';
+      ctx.fillRect(p.x, p.y, p.w, p.h);
+      break;
+    case 'leaf':
+      ctx.fillStyle = '#44aa22';
+      ctx.beginPath(); ctx.ellipse(p.x + 4, p.y + 4, 4, 2, p.timer, 0, Math.PI * 2); ctx.fill();
+      break;
+    case 'bubble':
+      ctx.strokeStyle = '#66aaff';
+      ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.arc(p.x + 5, p.y + 5, 5, 0, Math.PI * 2); ctx.stroke();
+      break;
+    case 'dark':
+    case 'darkMagic':
+      ctx.fillStyle = '#aa00aa';
+      ctx.beginPath(); ctx.arc(p.x + 3, p.y + 3, 3, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = '#ff00ff';
+      ctx.beginPath(); ctx.arc(p.x + 3, p.y + 3, 1.5, 0, Math.PI * 2); ctx.fill();
+      break;
+  }
+}
+
+function drawTransformed(t) {
+  var tx = t.x, ty = t.y;
+  var bob = Math.sin(t.timer * 3) * 2;
+  switch(t.type) {
+    case 'frog':
+      ctx.fillStyle = '#44cc44';
+      ctx.beginPath(); ctx.ellipse(tx + 6, ty + 8 + bob, 6, 4, 0, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = '#66ff66';
+      ctx.fillRect(tx + 3, ty + 5 + bob, 2, 2);
+      ctx.fillRect(tx + 8, ty + 5 + bob, 2, 2);
+      break;
+    case 'flower':
+      ctx.fillStyle = '#228822';
+      ctx.fillRect(tx + 5, ty + 6, 2, 6);
+      ctx.fillStyle = '#ff66aa';
+      ctx.beginPath(); ctx.arc(tx + 6, ty + 4, 4, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = '#ffcc00';
+      ctx.beginPath(); ctx.arc(tx + 6, ty + 4, 2, 0, Math.PI * 2); ctx.fill();
+      break;
+    case 'snowflake':
+      ctx.strokeStyle = '#aaddff';
+      ctx.lineWidth = 1;
+      for (var i = 0; i < 6; i++) {
+        var a = (i / 6) * Math.PI * 2 + t.timer;
+        ctx.beginPath();
+        ctx.moveTo(tx + 6, ty + 6);
+        ctx.lineTo(tx + 6 + Math.cos(a) * 5, ty + 6 + Math.sin(a) * 5);
+        ctx.stroke();
+      }
+      break;
+    case 'key':
+      ctx.fillStyle = '#ffcc00';
+      ctx.fillRect(tx + 2, ty + 3, 8, 3);
+      ctx.fillRect(tx + 8, ty + 1, 3, 7);
+      ctx.fillRect(tx + 1, ty + 2, 3, 5);
+      // Sparkle
+      if (Math.floor(t.timer * 4) % 2 === 0) {
+        ctx.fillStyle = '#fff';
+        ctx.fillRect(tx + 4, ty, 2, 2);
+      }
+      break;
+  }
+}
+
+function drawNPC(n) {
+  var nx = n.x, ny = n.y;
+  switch(n.type) {
+    case 'elder':
+    case 'wizard':
+      ctx.fillStyle = '#4444aa';
+      ctx.fillRect(nx + 2, ny + 6, 10, 14);
+      ctx.fillStyle = '#6666cc';
+      ctx.beginPath(); ctx.arc(nx + 7, ny + 5, 5, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = '#3333aa';
+      ctx.beginPath(); ctx.moveTo(nx + 3, ny + 2); ctx.lineTo(nx + 7, ny - 6); ctx.lineTo(nx + 11, ny + 2); ctx.fill();
+      ctx.fillStyle = '#fff';
+      ctx.fillRect(nx + 5, ny + 4, 2, 2);
+      ctx.fillRect(nx + 8, ny + 4, 2, 2);
+      break;
+    case 'fairy':
+      ctx.fillStyle = '#ffaaff';
+      ctx.beginPath(); ctx.arc(nx + 6, ny + 6, 4, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = 'rgba(255,200,255,' + (0.3 + Math.sin(frame * 0.2) * 0.2) + ')';
+      ctx.beginPath(); ctx.arc(nx + 6, ny + 6, 8, 0, Math.PI * 2); ctx.fill();
+      break;
+    case 'merman':
+      ctx.fillStyle = '#22aaaa';
+      ctx.fillRect(nx + 2, ny + 4, 10, 12);
+      ctx.fillStyle = '#44cccc';
+      ctx.beginPath(); ctx.arc(nx + 7, ny + 4, 5, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = '#88ffff';
+      ctx.fillRect(nx + 1, ny + 14, 12, 6);
+      break;
+    case 'prisoner':
+      ctx.fillStyle = '#888866';
+      ctx.fillRect(nx + 2, ny + 6, 10, 14);
+      ctx.fillStyle = '#aaaa88';
+      ctx.beginPath(); ctx.arc(nx + 7, ny + 5, 5, 0, Math.PI * 2); ctx.fill();
+      ctx.strokeStyle = '#666';
+      ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(nx + 2, ny + 8); ctx.lineTo(nx + 12, ny + 8); ctx.stroke();
+      break;
+    case 'smith':
+      ctx.fillStyle = '#884422';
+      ctx.fillRect(nx + 2, ny + 5, 12, 15);
+      ctx.fillStyle = '#aa6644';
+      ctx.beginPath(); ctx.arc(nx + 8, ny + 4, 5, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = '#cccccc';
+      ctx.fillRect(nx + 13, ny + 8, 6, 2); // hammer
+      break;
+  }
+  // Exclamation
+  ctx.fillStyle = '#ffcc00';
+  ctx.font = '8px monospace';
+  ctx.fillText('!', nx + 5, ny - 6 + Math.sin(frame * 0.1) * 2);
+}
+
+function drawPickup(pk) {
+  var bob = Math.sin(frame * 0.08 + pk.x) * 2;
+  switch(pk.type) {
+    case 'acorn':
+      ctx.fillStyle = '#886622';
+      ctx.beginPath(); ctx.arc(pk.x + 5, pk.y + 6 + bob, 4, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = '#44aa22';
+      ctx.fillRect(pk.x + 3, pk.y + bob, 4, 4);
+      break;
+    case 'healthPotion':
+      ctx.fillStyle = '#ff4444';
+      ctx.fillRect(pk.x + 3, pk.y + 3 + bob, 6, 8);
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(pk.x + 4, pk.y + bob, 4, 4);
+      break;
+    case 'magicPotion':
+      ctx.fillStyle = '#4444ff';
+      ctx.fillRect(pk.x + 3, pk.y + 3 + bob, 6, 8);
+      ctx.fillStyle = '#aaaaff';
+      ctx.fillRect(pk.x + 4, pk.y + bob, 4, 4);
+      break;
+    case 'shield':
+      ctx.fillStyle = '#66aaff';
+      ctx.beginPath();
+      ctx.moveTo(pk.x + 5, pk.y + bob);
+      ctx.lineTo(pk.x + 10, pk.y + 3 + bob);
+      ctx.lineTo(pk.x + 10, pk.y + 8 + bob);
+      ctx.lineTo(pk.x + 5, pk.y + 11 + bob);
+      ctx.lineTo(pk.x, pk.y + 8 + bob);
+      ctx.lineTo(pk.x, pk.y + 3 + bob);
+      ctx.fill();
+      break;
+  }
+}
+
+// ============================================================
+// BACKGROUND DRAWING
+// ============================================================
+function drawBackground() {
+  var theme = STAGE_THEMES[stage];
+  // Sky gradient
+  var grad = ctx.createLinearGradient(0, 0, 0, GH);
+  grad.addColorStop(0, theme.sky);
+  grad.addColorStop(1, theme.bg);
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, GW, GH);
+
+  // Stage-specific decorations
+  if (stage === 0 || stage === 1) {
+    // Trees
+    for (var i = 0; i < 5; i++) {
+      var tx = 30 + i * 100 + Math.sin(i * 2.5) * 20;
+      ctx.fillStyle = '#3a2211';
+      ctx.fillRect(tx, GH - 80, 6, 48);
+      ctx.fillStyle = stage === 1 ? '#116633' : '#337722';
+      ctx.beginPath(); ctx.arc(tx + 3, GH - 85, 18, 0, Math.PI * 2); ctx.fill();
+    }
+  } else if (stage === 2) {
+    // Mountains
+    ctx.fillStyle = '#3a4455';
+    ctx.beginPath();
+    ctx.moveTo(0, GH - 60);
+    ctx.lineTo(80, GH - 140);
+    ctx.lineTo(160, GH - 80);
+    ctx.lineTo(250, GH - 160);
+    ctx.lineTo(350, GH - 90);
+    ctx.lineTo(430, GH - 130);
+    ctx.lineTo(GW, GH - 70);
+    ctx.lineTo(GW, GH);
+    ctx.lineTo(0, GH);
+    ctx.fill();
+    // Snow caps
+    ctx.fillStyle = '#ccddee';
+    ctx.beginPath(); ctx.arc(80, GH - 140, 10, Math.PI, 0); ctx.fill();
+    ctx.beginPath(); ctx.arc(250, GH - 160, 12, Math.PI, 0); ctx.fill();
+  } else if (stage === 3) {
+    // Water effect
+    ctx.fillStyle = 'rgba(30,60,120,0.3)';
+    ctx.fillRect(0, 0, GW, GH);
+    // Bubbles
+    for (var i = 0; i < 8; i++) {
+      var bx = (i * 67 + frame * 0.3) % GW;
+      var by = GH - ((i * 43 + frame * 0.5) % GH);
+      ctx.strokeStyle = 'rgba(100,180,255,0.3)';
+      ctx.beginPath(); ctx.arc(bx, by, 3 + i % 3, 0, Math.PI * 2); ctx.stroke();
+    }
+  } else if (stage === 4 || stage === 5 || stage === 6 || stage === 7) {
+    // Castle elements
+    for (var i = 0; i < 3; i++) {
+      var bx = 50 + i * 170;
+      ctx.fillStyle = theme.ground;
+      ctx.fillRect(bx, GH - 120 - i * 20, 40, 120 + i * 20);
+      // Battlements
+      for (var j = 0; j < 4; j++) {
+        ctx.fillRect(bx + j * 10, GH - 130 - i * 20, 7, 10);
+      }
+      // Window
+      ctx.fillStyle = stage >= 6 ? '#442266' : '#220000';
+      ctx.fillRect(bx + 15, GH - 100 - i * 20, 10, 14);
+      ctx.fillStyle = '#ffaa00';
+      if (Math.sin(frame * 0.05 + i) > 0) {
+        ctx.fillRect(bx + 17, GH - 98 - i * 20, 6, 10);
+      }
+    }
+  }
+}
+
+function drawPlatforms() {
+  var theme = STAGE_THEMES[stage];
+  for (var i = 0; i < platforms.length; i++) {
+    var p = platforms[i];
+    if (p.type === 'ground') {
+      ctx.fillStyle = theme.ground;
+      ctx.fillRect(p.x, p.y, p.w, p.h);
+      ctx.fillStyle = theme.accent;
+      ctx.fillRect(p.x, p.y, p.w, 3);
+      // Grass tufts for outdoor stages
+      if (stage < 4) {
+        for (var j = 0; j < p.w; j += 12) {
+          ctx.fillStyle = '#44aa33';
+          ctx.fillRect(p.x + j, p.y - 3, 3, 4);
+          ctx.fillRect(p.x + j + 5, p.y - 2, 2, 3);
+        }
+      }
+    } else if (p.type === 'ice') {
+      ctx.fillStyle = '#aaccee';
+      ctx.fillRect(p.x, p.y, p.w, p.h);
+      ctx.fillStyle = '#ddeeff';
+      ctx.fillRect(p.x + 2, p.y, p.w - 4, 2);
+    } else if (p.type === 'door') {
+      ctx.fillStyle = '#553311';
+      ctx.fillRect(p.x, p.y, p.w, p.h);
+      ctx.fillStyle = '#aa8844';
+      ctx.fillRect(p.x + 4, p.y + 10, 8, 8);
+      ctx.fillStyle = '#ffcc00';
+      ctx.beginPath(); ctx.arc(p.x + 8, p.y + 25, 3, 0, Math.PI * 2); ctx.fill();
+    } else {
+      ctx.fillStyle = theme.accent;
+      ctx.fillRect(p.x, p.y, p.w, p.h);
+      ctx.fillStyle = theme.ground;
+      ctx.fillRect(p.x + 1, p.y + 2, p.w - 2, p.h - 2);
+    }
+  }
+}
+
+// ============================================================
+// HUD
+// ============================================================
+function drawHUD() {
+  // Hearts
+  for (var i = 0; i < maxHearts; i++) {
+    ctx.fillStyle = i < hearts ? '#ff2222' : '#333';
+    ctx.beginPath();
+    var hx = 10 + i * 16, hy = 10;
+    ctx.arc(hx + 3, hy + 3, 3, Math.PI, 0);
+    ctx.arc(hx + 9, hy + 3, 3, Math.PI, 0);
+    ctx.lineTo(hx + 12, hy + 4);
+    ctx.lineTo(hx + 6, hy + 11);
+    ctx.lineTo(hx, hy + 4);
+    ctx.fill();
+  }
+
+  // Magic meter
+  ctx.fillStyle = '#222';
+  ctx.fillRect(10, 22, 60, 6);
+  ctx.fillStyle = '#4488ff';
+  ctx.fillRect(10, 22, 60 * (magic / MAGIC_MAX), 6);
+  ctx.strokeStyle = '#666';
+  ctx.lineWidth = 1;
+  ctx.strokeRect(10, 22, 60, 6);
+
+  // Active spell
+  if (spells.length > 0) {
+    ctx.fillStyle = '#fff';
+    ctx.font = '8px monospace';
+    ctx.fillText(SPELL_NAMES[spells[activeSpell]], 10, 38);
+  }
+
+  // Sword level
+  ctx.fillStyle = '#aaa';
+  ctx.font = '8px monospace';
+  var swordName = swordLevel === 0 ? 'WOOD' : (swordLevel === 1 ? 'IRON' : 'STEEL');
+  ctx.fillText('SWD:' + swordName, 10, 48);
+
+  // Score
+  ctx.fillStyle = '#fff';
+  ctx.font = '10px monospace';
+  ctx.textAlign = 'right';
+  ctx.fillText('SCORE:' + score, GW - 10, 14);
+  ctx.fillText('LIVES:' + lives, GW - 10, 26);
+  ctx.textAlign = 'left';
+
+  // Stage name
+  ctx.fillStyle = '#888';
+  ctx.font = '8px monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText(STAGE_THEMES[stage].name + ' ' + (screenIdx + 1) + '/' + screensPerStage[stage], GW / 2, 12);
+  ctx.textAlign = 'left';
+
+  // Mini-map
+  var mmX = GW - 80, mmY = 34, mmW = 70, mmH = 10;
+  ctx.fillStyle = '#222';
+  ctx.fillRect(mmX, mmY, mmW, mmH);
+  var totalScreens = 0;
+  for (var i = 0; i < STAGE_COUNT; i++) totalScreens += screensPerStage[i];
+  var currentScreen = 0;
+  for (var i = 0; i < stage; i++) currentScreen += screensPerStage[i];
+  currentScreen += screenIdx;
+  var progW = (currentScreen / totalScreens) * mmW;
+  ctx.fillStyle = '#44aa44';
+  ctx.fillRect(mmX, mmY, progW, mmH);
+  ctx.strokeStyle = '#666';
+  ctx.strokeRect(mmX, mmY, mmW, mmH);
+  // Stage markers
+  var acc = 0;
+  for (var i = 0; i < STAGE_COUNT; i++) {
+    acc += screensPerStage[i];
+    var mx = mmX + (acc / totalScreens) * mmW;
+    ctx.fillStyle = '#888';
+    ctx.fillRect(mx, mmY, 1, mmH);
+  }
+
+  // Shield indicator
+  if (shieldTimer > 0) {
+    ctx.fillStyle = '#66aaff';
+    ctx.font = '8px monospace';
+    ctx.fillText('SHIELD:' + Math.ceil(shieldTimer), GW - 80, 56);
+  }
+}
+
+// ============================================================
+// DRAW
+// ============================================================
+function draw(dt) {
+  ctx.fillStyle = '#111';
+  ctx.fillRect(0, 0, GW, GH);
+
+  if (state === 'title') {
+    drawTitleScreen();
+    return;
+  }
+
+  if (state === 'gameOver') {
+    drawGameOverScreen();
+    return;
+  }
+
+  if (state === 'victory') {
+    drawVictoryScreen();
+    return;
+  }
+
+  // === GAME RENDERING ===
+  ctx.save();
+  TAS.fx.applyShake();
+
+  drawBackground();
+  drawPlatforms();
+
+  // Transformed objects
+  for (var i = 0; i < transformedObjs.length; i++) drawTransformed(transformedObjs[i]);
+
+  // NPCs
+  for (var i = 0; i < npcs.length; i++) drawNPC(npcs[i]);
+
+  // Pickups
+  for (var i = 0; i < pickups.length; i++) drawPickup(pickups[i]);
+
+  // Enemies
+  for (var i = 0; i < enemies.length; i++) drawEnemy(enemies[i]);
+
+  // Boss
+  if (bossActive) drawBoss();
+
+  // Player
+  drawPlayer();
+
+  // Projectiles
+  for (var i = 0; i < projectiles.length; i++) drawProjectile(projectiles[i]);
+
+  TAS.particles.draw();
+  ctx.restore();
+
+  TAS.fx.drawFlash(GW, GH);
+
+  // HUD
+  drawHUD();
+
+  // Dialog
+  if (dialogTimer > 0 && dialogText) {
+    ctx.fillStyle = 'rgba(0,0,0,0.8)';
+    ctx.fillRect(40, GH - 60, GW - 80, 40);
+    ctx.strokeStyle = '#8866cc';
+    ctx.lineWidth = 2;
+    ctx.strokeRect(40, GH - 60, GW - 80, 40);
+    ctx.fillStyle = '#fff';
+    ctx.font = '10px monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText(dialogText, GW / 2, GH - 36);
+    ctx.textAlign = 'left';
+  }
+
+  // Transition fade
+  if (transitionTimer > 0) {
+    ctx.fillStyle = 'rgba(0,0,0,' + Math.min(1, transitionTimer) + ')';
+    ctx.fillRect(0, 0, GW, GH);
+    if (transitionTimer > 0.5) {
+      ctx.fillStyle = '#fff';
+      ctx.font = '14px monospace';
+      ctx.textAlign = 'center';
+      ctx.fillText(STAGE_THEMES[stage].name, GW / 2, GH / 2 - 10);
+      ctx.font = '10px monospace';
+      ctx.fillText('Stage ' + (stage + 1) + '-' + (screenIdx + 1), GW / 2, GH / 2 + 10);
+      ctx.textAlign = 'left';
+    }
+  }
+
+  // Stage complete
+  if (stageComplete) {
+    ctx.fillStyle = 'rgba(0,0,0,0.5)';
+    ctx.fillRect(0, 0, GW, GH);
+    ctx.fillStyle = '#ffcc00';
+    ctx.font = '16px monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText('STAGE CLEAR!', GW / 2, GH / 2 - 10);
+    ctx.fillStyle = '#fff';
+    ctx.font = '10px monospace';
+    ctx.fillText('+200 SCORE', GW / 2, GH / 2 + 10);
+    ctx.textAlign = 'left';
+  }
+
+  TAS.input.drawTouchControls(GW, GH);
+}
+
+// ============================================================
+// TITLE / GAME OVER / VICTORY SCREENS
+// ============================================================
+function drawTitleScreen() {
+  // Background magic swirls
+  var grad = ctx.createRadialGradient(GW / 2, GH / 2, 20, GW / 2, GH / 2, 200);
+  grad.addColorStop(0, '#220044');
+  grad.addColorStop(1, '#0a001a');
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, GW, GH);
+
+  // Sparkles
+  for (var i = 0; i < 20; i++) {
+    var sx = (i * 47 + frame * 0.5) % GW;
+    var sy = (i * 31 + Math.sin(frame * 0.02 + i) * 30) % GH;
+    ctx.fillStyle = 'rgba(200,150,255,' + (0.3 + Math.sin(frame * 0.05 + i) * 0.2) + ')';
+    ctx.fillRect(sx, sy, 2, 2);
+  }
+
+  // Title
+  ctx.fillStyle = '#bb88ff';
+  ctx.font = 'bold 28px monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText('WILLOW GROVE', GW / 2, 80);
+
+  ctx.fillStyle = '#8866aa';
+  ctx.font = '12px monospace';
+  ctx.fillText('A Tasern Tale', GW / 2, 105);
+
+  // Little baseling
+  ctx.fillStyle = '#8844cc';
+  ctx.fillRect(GW / 2 - 6, 140, 12, 14);
+  ctx.fillStyle = '#bb88ee';
+  ctx.beginPath(); ctx.arc(GW / 2, 137, 6, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = '#5522aa';
+  ctx.beginPath();
+  ctx.moveTo(GW / 2 - 5, 133);
+  ctx.lineTo(GW / 2, 124);
+  ctx.lineTo(GW / 2 + 5, 133);
+  ctx.fill();
+
+  ctx.fillStyle = '#aaa';
+  ctx.font = '10px monospace';
+  ctx.fillText('Rescue the stolen baby baselings', GW / 2, 180);
+  ctx.fillText('from the Dark Queen!', GW / 2, 195);
+
+  ctx.fillStyle = '#fff';
+  ctx.font = '11px monospace';
+  ctx.fillText('PRESS ANY KEY TO START', GW / 2, 240);
+
+  if (localStorage.getItem(SAVE_KEY)) {
+    ctx.fillStyle = '#88ff88';
+    ctx.font = '9px monospace';
+    ctx.fillText('(Save data found - will resume)', GW / 2, 260);
+  }
+
+  ctx.fillStyle = '#666';
+  ctx.font = '8px monospace';
+  ctx.fillText('ARROWS=Move  Z=Sword  X=Magic  C=Cycle Spell', GW / 2, 290);
+  ctx.fillText('HIGH SCORE: ' + highScore, GW / 2, 305);
+  ctx.textAlign = 'left';
+}
+
+function drawGameOverScreen() {
+  ctx.fillStyle = '#1a0000';
+  ctx.fillRect(0, 0, GW, GH);
+  ctx.fillStyle = '#ff4444';
+  ctx.font = 'bold 24px monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText('GAME OVER', GW / 2, 100);
+  ctx.fillStyle = '#fff';
+  ctx.font = '12px monospace';
+  ctx.fillText('Score: ' + score, GW / 2, 140);
+  ctx.fillText('High Score: ' + highScore, GW / 2, 160);
+  ctx.fillText('Stage Reached: ' + STAGE_THEMES[stage].name, GW / 2, 180);
+  ctx.fillStyle = '#aaa';
+  ctx.font = '10px monospace';
+  ctx.fillText('Press any key to continue', GW / 2, 230);
+  ctx.textAlign = 'left';
+}
+
+function drawVictoryScreen() {
+  // Celebration
+  var grad = ctx.createRadialGradient(GW / 2, GH / 2, 10, GW / 2, GH / 2, 200);
+  grad.addColorStop(0, '#221144');
+  grad.addColorStop(1, '#0a0022');
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, GW, GH);
+
+  // Sparkles
+  for (var i = 0; i < 30; i++) {
+    var sx = (i * 37 + frame) % GW;
+    var sy = (i * 23 + frame * 0.3) % GH;
+    ctx.fillStyle = ['#ffcc00', '#ff66aa', '#66ffcc', '#aa88ff'][i % 4];
+    ctx.fillRect(sx, sy, 3, 3);
+  }
+
+  ctx.fillStyle = '#ffcc00';
+  ctx.font = 'bold 20px monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText('VICTORY!', GW / 2, 60);
+
+  ctx.fillStyle = '#fff';
+  ctx.font = '11px monospace';
+  ctx.fillText('The Dark Queen is defeated!', GW / 2, 100);
+  ctx.fillText('The baby baselings are saved!', GW / 2, 120);
+
+  ctx.fillStyle = '#bb88ff';
+  ctx.font = '12px monospace';
+  ctx.fillText('Final Score: ' + score, GW / 2, 160);
+  ctx.fillText('High Score: ' + highScore, GW / 2, 180);
+
+  // Baby baselings celebrating
+  for (var i = 0; i < 5; i++) {
+    var bx = GW / 2 - 60 + i * 30;
+    var by = 210 + Math.sin(frame * 0.1 + i) * 5;
+    ctx.fillStyle = ['#ff88aa', '#88ff88', '#88aaff', '#ffcc44', '#cc88ff'][i];
+    ctx.beginPath(); ctx.arc(bx, by, 5, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#fff';
+    ctx.fillRect(bx - 1, by - 2, 2, 2);
+    ctx.fillRect(bx + 1, by - 2, 2, 2);
+  }
+
+  ctx.fillStyle = '#aaa';
+  ctx.font = '10px monospace';
+  ctx.fillText('Press any key to return to title', GW / 2, 270);
+  ctx.textAlign = 'left';
+}
+
+// ============================================================
+// GAME LOOP
+// ============================================================
+TAS.loop.start(update, draw);
+
+})();
+</script>
+</body>
+</html>

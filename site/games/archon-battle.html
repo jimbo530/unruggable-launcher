@@ -1,0 +1,1807 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Archon Battle</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body { width: 100%; height: 100%; overflow: hidden; background: #0a0a12; touch-action: none; }
+canvas { display: block; margin: 0 auto; }
+#back-link {
+  position: fixed; bottom: 8px; left: 50%; transform: translateX(-50%);
+  color: #666; font-family: monospace; font-size: 12px; text-decoration: none; z-index: 10;
+}
+#back-link:hover { color: #aaa; }
+</style>
+</head>
+<body>
+<canvas id="gc"></canvas>
+<a id="back-link" href="/games">Back to Arcade</a>
+<script src="nft-loader.js"></script>
+<script>if(window.NftLoader)NftLoader.gate();</script>
+<script src="tasern-engine.js"></script>
+<script>
+(function() {
+"use strict";
+
+// === GAME CONSTANTS ===
+var GW = 480, GH = 320;
+var ctx = TAS.ctx;
+TAS.initCanvas(GW, GH);
+TAS.input.initTouch({ buttons: ['a', 'b'], labels: { a: 'FIRE', b: 'SELECT' } });
+
+// Board constants
+var BOARD_SIZE = 9;
+var TILE_SIZE = 30;
+var BOARD_OFFSET_X = 15;
+var BOARD_OFFSET_Y = 20;
+
+// Combat arena constants
+var ARENA_W = 280;
+var ARENA_H = 200;
+var ARENA_X = (GW - ARENA_W) / 2;
+var ARENA_Y = (GH - ARENA_H) / 2 + 10;
+var COMBAT_TIME = 15;
+
+// Teams
+var LIGHT = 0;
+var DARK = 1;
+
+// Unit types
+var WIZARD = 0, VALKYRIE = 1, GOLEM = 2, ARCHER = 3;
+var KNIGHT = 4, UNICORN = 5, DJINN = 6, PHOENIX = 7;
+
+// Unit definitions
+var UNIT_DEFS = [
+  { name: 'Wizard',    hp: 80,  speed: 1.8, damage: 18, attack: 'magic',  range: 3, move: 'any', special: 'blink' },
+  { name: 'Valkyrie',  hp: 70,  speed: 2.5, damage: 15, attack: 'blast',  range: 5, move: 'diag', special: 'rush' },
+  { name: 'Golem',     hp: 150, speed: 0.9, damage: 30, attack: 'melee',  range: 2, move: 'orth', special: 'stomp' },
+  { name: 'Archer',    hp: 50,  speed: 2.2, damage: 12, attack: 'ranged', range: 4, move: 'any', special: 'volley' },
+  { name: 'Knight',    hp: 100, speed: 1.5, damage: 22, attack: 'fire',   range: 0, move: 'L', special: 'breath' },
+  { name: 'Unicorn',   hp: 90,  speed: 2.0, damage: 16, attack: 'charge', range: 4, move: 'diag', special: 'heal' },
+  { name: 'Djinn',     hp: 65,  speed: 2.3, damage: 14, attack: 'copy',   range: 3, move: 'any', special: 'mimic' },
+  { name: 'Phoenix',   hp: 45,  speed: 3.0, damage: 10, attack: 'ranged', range: 5, move: 'any', special: 'revive' }
+];
+
+var DARK_NAMES = ['Sorceress', 'Banshee', 'Troll', 'Crossbow', 'Dragon', 'Basilisk', 'Shapeshifter', 'Goblin'];
+
+// Power square positions (center + 4 corners of inner area)
+var POWER_SQUARES = [[4,4], [1,1], [1,7], [7,1], [7,7]];
+
+// Shifting tiles (cycle light/dark each turn)
+var SHIFTING_TILES = [[2,4],[4,2],[4,6],[6,4],[3,3],[3,5],[5,3],[5,5]];
+
+// === GAME STATE ===
+var state = 'splash';
+var splashTimer = 2.0;
+var frame = 0;
+var difficulty = 1;
+var campaignLevel = 0;
+var campaignProgress = loadProgress();
+var twoPlayer = false;
+var stateChangeDebounce = 0;
+
+// Board state
+var board = [];
+var selectedUnit = null;
+var validMoves = [];
+var currentTeam = LIGHT;
+var turnCount = 0;
+var boardMessage = '';
+var boardMessageTimer = 0;
+var aiTurnPending = false;
+var aiTurnDelay = 0;
+
+// Keyboard board cursor
+var boardCursor = { row: 4, col: 4 };
+var boardCursorVisible = false;
+
+// Combat state
+var combat = null;
+var combatResult = null;
+var combatReturnTimer = 0;
+
+// Hover state
+var hoverTile = { row: -1, col: -1 };
+
+// Menu state
+var menuSelection = 0;
+var MENU_ITEMS = ['Campaign', '2-Player', 'Easy', 'Normal', 'Hard'];
+
+// === HELPER FUNCTIONS ===
+function loadProgress() {
+  try { return parseInt(localStorage.getItem('archon_campaign') || '0', 10); }
+  catch(e) { console.warn('Failed to load progress:', e); return 0; }
+}
+
+function saveProgress(level) {
+  try { localStorage.setItem('archon_campaign', String(level)); }
+  catch(e) { console.warn('Failed to save progress:', e); }
+}
+
+function isPowerSquare(r, c) {
+  for (var i = 0; i < POWER_SQUARES.length; i++) {
+    if (POWER_SQUARES[i][0] === r && POWER_SQUARES[i][1] === c) return true;
+  }
+  return false;
+}
+
+function isShiftingTile(r, c) {
+  for (var i = 0; i < SHIFTING_TILES.length; i++) {
+    if (SHIFTING_TILES[i][0] === r && SHIFTING_TILES[i][1] === c) return true;
+  }
+  return false;
+}
+
+function getTileColor(r, c) {
+  if (isShiftingTile(r, c)) {
+    return (turnCount % 2 === 0) ? 'light' : 'dark';
+  }
+  return ((r + c) % 2 === 0) ? 'light' : 'dark';
+}
+
+// === BOARD INITIALIZATION ===
+function initBoard() {
+  board = [];
+  for (var r = 0; r < BOARD_SIZE; r++) {
+    board[r] = [];
+    for (var c = 0; c < BOARD_SIZE; c++) {
+      board[r][c] = null;
+    }
+  }
+
+  var lightLayout = [ARCHER, KNIGHT, VALKYRIE, GOLEM, WIZARD, GOLEM, VALKYRIE, KNIGHT, ARCHER];
+  var lightRow2 = [PHOENIX, UNICORN, DJINN, null, null, null, DJINN, UNICORN, PHOENIX];
+
+  for (var c = 0; c < 9; c++) {
+    if (lightLayout[c] !== undefined) {
+      var def = UNIT_DEFS[lightLayout[c]];
+      board[0][c] = { team: LIGHT, type: lightLayout[c], hp: def.hp, maxHp: def.hp, revived: false };
+    }
+    if (lightRow2[c] !== null && lightRow2[c] !== undefined) {
+      var def2 = UNIT_DEFS[lightRow2[c]];
+      board[1][c] = { team: LIGHT, type: lightRow2[c], hp: def2.hp, maxHp: def2.hp, revived: false };
+    }
+  }
+
+  var darkLayout = [ARCHER, KNIGHT, VALKYRIE, GOLEM, WIZARD, GOLEM, VALKYRIE, KNIGHT, ARCHER];
+  var darkRow2 = [PHOENIX, UNICORN, DJINN, null, null, null, DJINN, UNICORN, PHOENIX];
+
+  for (var c2 = 0; c2 < 9; c2++) {
+    if (darkLayout[c2] !== undefined) {
+      var def3 = UNIT_DEFS[darkLayout[c2]];
+      board[8][c2] = { team: DARK, type: darkLayout[c2], hp: def3.hp, maxHp: def3.hp, revived: false };
+    }
+    if (darkRow2[c2] !== null && darkRow2[c2] !== undefined) {
+      var def4 = UNIT_DEFS[darkRow2[c2]];
+      board[7][c2] = { team: DARK, type: darkRow2[c2], hp: def4.hp, maxHp: def4.hp, revived: false };
+    }
+  }
+
+  selectedUnit = null;
+  validMoves = [];
+  currentTeam = LIGHT;
+  turnCount = 0;
+  boardMessage = '';
+  boardMessageTimer = 0;
+  aiTurnPending = false;
+  aiTurnDelay = 0;
+  boardCursor = { row: 4, col: 4 };
+}
+
+// === MOVEMENT LOGIC ===
+function getValidMoves(row, col) {
+  var unit = board[row][col];
+  if (!unit) return [];
+  var def = UNIT_DEFS[unit.type];
+  var moves = [];
+  var range = def.range;
+
+  function inBounds(r, c) { return r >= 0 && r < BOARD_SIZE && c >= 0 && c < BOARD_SIZE; }
+  function canMoveTo(r, c) {
+    if (!inBounds(r, c)) return false;
+    var target = board[r][c];
+    if (target && target.team === unit.team) return false;
+    return true;
+  }
+
+  function addRay(dr, dc) {
+    for (var i = 1; i <= range; i++) {
+      var nr = row + dr * i, nc = col + dc * i;
+      if (!inBounds(nr, nc)) break;
+      var target = board[nr][nc];
+      if (target) {
+        if (target.team !== unit.team) moves.push({ row: nr, col: nc });
+        break;
+      }
+      moves.push({ row: nr, col: nc });
+    }
+  }
+
+  if (def.move === 'any' || def.move === 'adj') {
+    for (var dr = -1; dr <= 1; dr++) {
+      for (var dc = -1; dc <= 1; dc++) {
+        if (dr === 0 && dc === 0) continue;
+        if (def.move === 'adj') {
+          var nr = row + dr, nc = col + dc;
+          if (canMoveTo(nr, nc)) moves.push({ row: nr, col: nc });
+        } else {
+          addRay(dr, dc);
+        }
+      }
+    }
+  } else if (def.move === 'diag') {
+    addRay(-1, -1); addRay(-1, 1); addRay(1, -1); addRay(1, 1);
+    var orthDirs = [[-1,0],[1,0],[0,-1],[0,1]];
+    for (var oi = 0; oi < orthDirs.length; oi++) {
+      var onr = row + orthDirs[oi][0], onc = col + orthDirs[oi][1];
+      if (canMoveTo(onr, onc)) moves.push({ row: onr, col: onc });
+    }
+  } else if (def.move === 'orth') {
+    addRay(-1, 0); addRay(1, 0); addRay(0, -1); addRay(0, 1);
+    var diagDirs = [[-1,-1],[-1,1],[1,-1],[1,1]];
+    for (var di = 0; di < diagDirs.length; di++) {
+      var dnr = row + diagDirs[di][0], dnc = col + diagDirs[di][1];
+      if (canMoveTo(dnr, dnc)) moves.push({ row: dnr, col: dnc });
+    }
+  } else if (def.move === 'L') {
+    var lMoves = [[-2,-1],[-2,1],[2,-1],[2,1],[-1,-2],[-1,2],[1,-2],[1,2]];
+    for (var li = 0; li < lMoves.length; li++) {
+      var lnr = row + lMoves[li][0], lnc = col + lMoves[li][1];
+      if (canMoveTo(lnr, lnc)) moves.push({ row: lnr, col: lnc });
+    }
+    for (var kr = -1; kr <= 1; kr++) {
+      for (var kc = -1; kc <= 1; kc++) {
+        if (kr === 0 && kc === 0) continue;
+        var knr = row + kr, knc = col + kc;
+        if (canMoveTo(knr, knc)) moves.push({ row: knr, col: knc });
+      }
+    }
+  }
+
+  return moves;
+}
+
+// === POWER SQUARE HEALING ===
+function applyPowerSquareHealing() {
+  for (var i = 0; i < POWER_SQUARES.length; i++) {
+    var pr = POWER_SQUARES[i][0], pc = POWER_SQUARES[i][1];
+    var unit = board[pr][pc];
+    if (unit) {
+      unit.hp = Math.min(unit.maxHp, unit.hp + Math.floor(unit.maxHp * 0.1));
+    }
+  }
+}
+
+// === SHIFTING TILE HEALING ===
+function applyShiftingTileHealing() {
+  for (var i = 0; i < SHIFTING_TILES.length; i++) {
+    var sr = SHIFTING_TILES[i][0], sc = SHIFTING_TILES[i][1];
+    var unit = board[sr][sc];
+    if (unit) {
+      var tileColor = getTileColor(sr, sc);
+      if ((unit.team === LIGHT && tileColor === 'light') || (unit.team === DARK && tileColor === 'dark')) {
+        unit.hp = Math.min(unit.maxHp, unit.hp + Math.floor(unit.maxHp * 0.05));
+      }
+    }
+  }
+}
+
+// === WIN CONDITION CHECK ===
+function checkWinCondition() {
+  var lightKing = false, darkKing = false;
+  var lightPowerCount = 0, darkPowerCount = 0;
+
+  for (var r = 0; r < BOARD_SIZE; r++) {
+    for (var c = 0; c < BOARD_SIZE; c++) {
+      var unit = board[r][c];
+      if (unit) {
+        if (unit.team === LIGHT && unit.type === WIZARD) lightKing = true;
+        if (unit.team === DARK && unit.type === WIZARD) darkKing = true;
+      }
+    }
+  }
+
+  for (var i = 0; i < POWER_SQUARES.length; i++) {
+    var pr = POWER_SQUARES[i][0], pc = POWER_SQUARES[i][1];
+    var punit = board[pr][pc];
+    if (punit) {
+      if (punit.team === LIGHT) lightPowerCount++;
+      if (punit.team === DARK) darkPowerCount++;
+    }
+  }
+
+  if (!darkKing || lightPowerCount === 5) return LIGHT;
+  if (!lightKing || darkPowerCount === 5) return DARK;
+  return -1;
+}
+
+// === COMBAT SYSTEM ===
+function initCombat(attackerRow, attackerCol, defenderRow, defenderCol) {
+  var attacker = board[attackerRow][attackerCol];
+  var defender = board[defenderRow][defenderCol];
+  var aDef = UNIT_DEFS[attacker.type];
+  var dDef = UNIT_DEFS[defender.type];
+
+  var tileColor = getTileColor(defenderRow, defenderCol);
+  var aBonus = 1.0, dBonus = 1.0;
+  if (tileColor === 'light' && attacker.team === LIGHT) aBonus = 1.25;
+  if (tileColor === 'dark' && attacker.team === DARK) aBonus = 1.25;
+  if (tileColor === 'light' && defender.team === LIGHT) dBonus = 1.25;
+  if (tileColor === 'dark' && defender.team === DARK) dBonus = 1.25;
+
+  combat = {
+    attacker: {
+      x: ARENA_W * 0.25, y: ARENA_H * 0.5,
+      vx: 0, vy: 0,
+      hp: Math.floor(attacker.hp * aBonus), maxHp: Math.floor(attacker.maxHp * aBonus),
+      type: attacker.type, team: attacker.team,
+      speed: aDef.speed * 60,
+      damage: aDef.damage,
+      attackType: aDef.attack,
+      special: aDef.special,
+      cooldown: 0,
+      specialCooldown: 0,
+      revived: attacker.revived,
+      facing: 1,
+      animFrame: 0,
+      invuln: 0
+    },
+    defender: {
+      x: ARENA_W * 0.75, y: ARENA_H * 0.5,
+      vx: 0, vy: 0,
+      hp: Math.floor(defender.hp * dBonus), maxHp: Math.floor(defender.maxHp * dBonus),
+      type: defender.type, team: defender.team,
+      speed: dDef.speed * 60,
+      damage: dDef.damage,
+      attackType: dDef.attack,
+      special: dDef.special,
+      cooldown: 0,
+      specialCooldown: 0,
+      revived: defender.revived,
+      facing: -1,
+      animFrame: 0,
+      invuln: 0
+    },
+    timer: COMBAT_TIME,
+    projectiles: [],
+    effects: [],
+    tileColor: tileColor,
+    attackerPos: { row: attackerRow, col: attackerCol },
+    defenderPos: { row: defenderRow, col: defenderCol },
+    playerControlled: attacker.team === currentTeam ? 'attacker' : 'defender',
+    concluded: false
+  };
+
+  if (twoPlayer) {
+    combat.playerControlled = 'attacker';
+  }
+
+  combatResult = null;
+  combatReturnTimer = 0;
+  state = 'combat';
+  TAS.particles.clear();
+  TAS.audio.playTone(200, 0.3, 'sawtooth', 0.08, 400);
+}
+
+function updateCombat(dt) {
+  // Handle combat conclusion with timer instead of setTimeout
+  if (combat.concluded) {
+    combatReturnTimer -= dt;
+    if (combatReturnTimer <= 0) {
+      state = 'board';
+      combat = null;
+      TAS.particles.clear();
+      endTurn();
+    }
+    return;
+  }
+
+  combat.timer -= dt;
+
+  if (combat.timer <= 0) {
+    concludeCombat();
+    return;
+  }
+
+  var player = combat[combat.playerControlled];
+  var enemy = combat.playerControlled === 'attacker' ? combat.defender : combat.attacker;
+
+  // Update invulnerability timers
+  player.invuln = Math.max(0, player.invuln - dt);
+  enemy.invuln = Math.max(0, enemy.invuln - dt);
+
+  // Player input
+  var keys = TAS.input.keys;
+  var touch = TAS.input.touch;
+  var pdx = 0, pdy = 0;
+  if (keys['ArrowLeft'] || keys['KeyA'] || touch.left) pdx = -1;
+  if (keys['ArrowRight'] || keys['KeyD'] || touch.right) pdx = 1;
+  if (keys['ArrowUp'] || keys['KeyW'] || touch.up) pdy = -1;
+  if (keys['ArrowDown'] || keys['KeyS'] || touch.down) pdy = 1;
+
+  player.x += pdx * player.speed * dt;
+  player.y += pdy * player.speed * dt;
+  player.x = TAS.math.clamp(player.x, 10, ARENA_W - 10);
+  player.y = TAS.math.clamp(player.y, 10, ARENA_H - 10);
+  if (pdx !== 0) player.facing = pdx;
+
+  // Player attack
+  if (keys['Space'] || keys['KeyZ'] || touch.a) {
+    if (player.cooldown <= 0) {
+      fireAttack(player, enemy);
+      player.cooldown = 0.4;
+    }
+  }
+
+  // AI for enemy
+  updateCombatAI(enemy, player, dt);
+
+  // Update cooldowns
+  player.cooldown = Math.max(0, player.cooldown - dt);
+  enemy.cooldown = Math.max(0, enemy.cooldown - dt);
+  player.specialCooldown = Math.max(0, player.specialCooldown - dt);
+  enemy.specialCooldown = Math.max(0, enemy.specialCooldown - dt);
+  player.animFrame += dt * 8;
+  enemy.animFrame += dt * 8;
+
+  // Update projectiles
+  for (var i = combat.projectiles.length - 1; i >= 0; i--) {
+    var p = combat.projectiles[i];
+
+    // Magic projectiles have slight homing
+    if (p.homing) {
+      var homingTarget = p.owner === 'attacker' ? combat.defender : combat.attacker;
+      var toTargetAngle = TAS.math.angle(p.x, p.y, homingTarget.x, homingTarget.y);
+      var currentAngle = Math.atan2(p.vy, p.vx);
+      var angleDiff = toTargetAngle - currentAngle;
+      while (angleDiff > Math.PI) angleDiff -= Math.PI * 2;
+      while (angleDiff < -Math.PI) angleDiff += Math.PI * 2;
+      currentAngle += angleDiff * 2.0 * dt;
+      var spd = Math.sqrt(p.vx * p.vx + p.vy * p.vy);
+      p.vx = Math.cos(currentAngle) * spd;
+      p.vy = Math.sin(currentAngle) * spd;
+    }
+
+    p.x += p.vx * dt;
+    p.y += p.vy * dt;
+    p.life -= dt;
+
+    if (p.life <= 0 || p.x < -20 || p.x > ARENA_W + 20 || p.y < -20 || p.y > ARENA_H + 20) {
+      combat.projectiles.splice(i, 1);
+      continue;
+    }
+
+    // Check hit
+    var hitTarget = p.owner === 'attacker' ? combat.defender : combat.attacker;
+    if (TAS.math.dist(p.x, p.y, hitTarget.x, hitTarget.y) < 15) {
+      // Respect invulnerability frames
+      if (hitTarget.invuln > 0) {
+        continue;
+      }
+      hitTarget.hp -= p.damage;
+      hitTarget.invuln = 0.15;
+      combat.projectiles.splice(i, 1);
+      TAS.particles.spawn(hitTarget.x + ARENA_X, hitTarget.y + ARENA_Y, p.owner === 'attacker' ? '#ff8844' : '#8844ff', 8, 2.5);
+      TAS.audio.playTone(150, 0.1, 'square', 0.06);
+      TAS.fx.shake(3, 0.8);
+      TAS.fx.flash(p.owner === 'attacker' ? '#ff4400' : '#4400ff', 0.15);
+
+      if (hitTarget.hp <= 0) {
+        if (hitTarget.type === PHOENIX && !hitTarget.revived) {
+          hitTarget.hp = Math.floor(hitTarget.maxHp * 0.4);
+          hitTarget.revived = true;
+          hitTarget.invuln = 0.5;
+          TAS.particles.spawn(hitTarget.x + ARENA_X, hitTarget.y + ARENA_Y, '#ffdd00', 15, 3);
+          TAS.audio.playTone(600, 0.3, 'sine', 0.08, 800);
+        } else {
+          concludeCombat();
+          return;
+        }
+      }
+    }
+  }
+
+  // Update effects
+  for (var ei = combat.effects.length - 1; ei >= 0; ei--) {
+    combat.effects[ei].life -= dt;
+    if (combat.effects[ei].life <= 0) combat.effects.splice(ei, 1);
+  }
+}
+
+function fireAttack(attacker, target) {
+  var owner = attacker === combat.attacker ? 'attacker' : 'defender';
+  var angle = TAS.math.angle(attacker.x, attacker.y, target.x, target.y);
+
+  switch (attacker.attackType) {
+    case 'magic': {
+      var mspeed = 180;
+      combat.projectiles.push({
+        x: attacker.x, y: attacker.y,
+        vx: Math.cos(angle) * mspeed, vy: Math.sin(angle) * mspeed,
+        damage: attacker.damage, owner: owner, life: 1.5,
+        color: attacker.team === LIGHT ? '#88ddff' : '#cc44ff', size: 5,
+        homing: true
+      });
+      TAS.audio.playTone(440, 0.15, 'sine', 0.06, 880);
+      break;
+    }
+    case 'blast': {
+      for (var bi = -1; bi <= 1; bi++) {
+        var ba = angle + bi * 0.3;
+        combat.projectiles.push({
+          x: attacker.x, y: attacker.y,
+          vx: Math.cos(ba) * 200, vy: Math.sin(ba) * 200,
+          damage: Math.floor(attacker.damage * 0.7), owner: owner, life: 0.5, color: '#ff88cc', size: 4
+        });
+      }
+      TAS.audio.playNoise(0.1, 0.06, 2000);
+      break;
+    }
+    case 'melee': {
+      var md = TAS.math.dist(attacker.x, attacker.y, target.x, target.y);
+      if (md < 35) {
+        if (target.invuln <= 0) {
+          target.hp -= attacker.damage;
+          target.invuln = 0.2;
+          TAS.particles.spawn(target.x + ARENA_X, target.y + ARENA_Y, '#ffaa00', 10, 2.5);
+          TAS.audio.playTone(80, 0.15, 'sawtooth', 0.08);
+          TAS.fx.shake(4, 0.85);
+          TAS.fx.flash('#ff8800', 0.2);
+          if (target.hp <= 0 && target.type === PHOENIX && !target.revived) {
+            target.hp = Math.floor(target.maxHp * 0.4);
+            target.revived = true;
+            target.invuln = 0.5;
+          } else if (target.hp <= 0) {
+            concludeCombat();
+          }
+        }
+      } else {
+        attacker.x += Math.cos(angle) * 20;
+        attacker.y += Math.sin(angle) * 20;
+      }
+      break;
+    }
+    case 'ranged': {
+      var rspeed = 250;
+      combat.projectiles.push({
+        x: attacker.x, y: attacker.y,
+        vx: Math.cos(angle) * rspeed, vy: Math.sin(angle) * rspeed,
+        damage: attacker.damage, owner: owner, life: 1.2, color: '#ffdd44', size: 3
+      });
+      TAS.audio.playTone(800, 0.08, 'square', 0.05, 400);
+      break;
+    }
+    case 'fire': {
+      for (var fi = -2; fi <= 2; fi++) {
+        var fa = angle + fi * 0.2;
+        var fspeed = 150 + Math.abs(fi) * 20;
+        combat.projectiles.push({
+          x: attacker.x, y: attacker.y,
+          vx: Math.cos(fa) * fspeed, vy: Math.sin(fa) * fspeed,
+          damage: Math.floor(attacker.damage * 0.5), owner: owner, life: 0.7, color: '#ff4400', size: 4
+        });
+      }
+      TAS.audio.playNoise(0.2, 0.07, 800);
+      break;
+    }
+    case 'charge': {
+      var cspeed = 300;
+      attacker.x += Math.cos(angle) * cspeed * 0.05;
+      attacker.y += Math.sin(angle) * cspeed * 0.05;
+      var cd = TAS.math.dist(attacker.x, attacker.y, target.x, target.y);
+      if (cd < 25 && target.invuln <= 0) {
+        target.hp -= attacker.damage;
+        target.invuln = 0.2;
+        TAS.particles.spawn(target.x + ARENA_X, target.y + ARENA_Y, '#44ffaa', 10, 3);
+        TAS.audio.playTone(300, 0.15, 'triangle', 0.07);
+        TAS.fx.shake(3, 0.85);
+        if (target.hp <= 0 && target.type === PHOENIX && !target.revived) {
+          target.hp = Math.floor(target.maxHp * 0.4);
+          target.revived = true;
+          target.invuln = 0.5;
+        } else if (target.hp <= 0) {
+          concludeCombat();
+          return;
+        }
+      }
+      combat.projectiles.push({
+        x: attacker.x, y: attacker.y,
+        vx: Math.cos(angle) * 220, vy: Math.sin(angle) * 220,
+        damage: Math.floor(attacker.damage * 0.6), owner: owner, life: 0.6, color: '#44ff88', size: 5
+      });
+      TAS.audio.playTone(500, 0.1, 'triangle', 0.05, 200);
+      break;
+    }
+    case 'copy': {
+      combat.projectiles.push({
+        x: attacker.x, y: attacker.y,
+        vx: Math.cos(angle) * 200, vy: Math.sin(angle) * 200,
+        damage: attacker.damage, owner: owner, life: 1.0, color: '#aa88ff', size: 4
+      });
+      TAS.audio.playTone(600, 0.12, 'sine', 0.05, 300);
+      break;
+    }
+  }
+}
+
+function updateCombatAI(enemy, player, dt) {
+  var diffMult = [0.4, 0.7, 1.0][difficulty];
+  var d = TAS.math.dist(enemy.x, enemy.y, player.x, player.y);
+  var aiAngle = TAS.math.angle(enemy.x, enemy.y, player.x, player.y);
+
+  var moveAngle = aiAngle;
+  if (enemy.attackType === 'melee') {
+    moveAngle = aiAngle;
+  } else if (enemy.attackType === 'ranged' || enemy.attackType === 'magic') {
+    if (d < 60) moveAngle = aiAngle + Math.PI;
+    else if (d > 120) moveAngle = aiAngle;
+    else moveAngle = aiAngle + Math.PI / 2;
+  } else {
+    if (d < 40) moveAngle = aiAngle + Math.PI * 0.7;
+    else moveAngle = aiAngle + Math.sin(frame * 0.03) * 0.8;
+  }
+
+  // Dodge incoming projectiles
+  for (var pi = 0; pi < combat.projectiles.length; pi++) {
+    var proj = combat.projectiles[pi];
+    var projOwnerFighter = proj.owner === 'attacker' ? combat.attacker : combat.defender;
+    if (projOwnerFighter === enemy) continue;
+    var projDist = TAS.math.dist(proj.x, proj.y, enemy.x, enemy.y);
+    if (projDist < 50) {
+      var projAngle = Math.atan2(proj.vy, proj.vx);
+      moveAngle = projAngle + Math.PI / 2 * (Math.random() > 0.5 ? 1 : -1);
+      break;
+    }
+  }
+
+  moveAngle += (Math.random() - 0.5) * (1.5 - diffMult);
+
+  enemy.x += Math.cos(moveAngle) * enemy.speed * dt * diffMult;
+  enemy.y += Math.sin(moveAngle) * enemy.speed * dt * diffMult;
+  enemy.x = TAS.math.clamp(enemy.x, 10, ARENA_W - 10);
+  enemy.y = TAS.math.clamp(enemy.y, 10, ARENA_H - 10);
+
+  if (Math.cos(aiAngle) > 0) enemy.facing = 1; else enemy.facing = -1;
+
+  var attackChance = diffMult * 0.8;
+  if (enemy.cooldown <= 0 && Math.random() < attackChance * dt * 3) {
+    fireAttack(enemy, player);
+    enemy.cooldown = 0.5 + (1 - diffMult) * 0.5;
+  }
+}
+
+function concludeCombat() {
+  // Guard against multiple calls
+  if (combat.concluded) return;
+  combat.concluded = true;
+
+  var attacker = combat.attacker;
+  var defender = combat.defender;
+
+  var winner;
+  if (attacker.hp <= 0 && defender.hp <= 0) {
+    winner = null;
+  } else if (attacker.hp <= 0) {
+    winner = 'defender';
+  } else if (defender.hp <= 0) {
+    winner = 'attacker';
+  } else {
+    var aPct = attacker.hp / attacker.maxHp;
+    var dPct = defender.hp / defender.maxHp;
+    winner = aPct >= dPct ? 'attacker' : 'defender';
+  }
+
+  combatResult = winner;
+
+  var aPos = combat.attackerPos;
+  var dPos = combat.defenderPos;
+
+  if (winner === 'attacker') {
+    var aUnit = board[aPos.row][aPos.col];
+    aUnit.hp = Math.max(1, Math.floor(attacker.hp / (attacker.maxHp / aUnit.maxHp)));
+    aUnit.revived = attacker.revived;
+    board[dPos.row][dPos.col] = aUnit;
+    board[aPos.row][aPos.col] = null;
+    TAS.audio.playMelody([[440,0.1],[550,0.1],[660,0.15]], 100);
+    TAS.particles.spawn(GW / 2, GH / 2, attacker.team === LIGHT ? '#88ccff' : '#cc44ff', 20, 3);
+  } else if (winner === 'defender') {
+    var dUnit = board[dPos.row][dPos.col];
+    dUnit.hp = Math.max(1, Math.floor(defender.hp / (defender.maxHp / dUnit.maxHp)));
+    dUnit.revived = defender.revived;
+    board[aPos.row][aPos.col] = null;
+    TAS.audio.playMelody([[300,0.1],[200,0.15]], 100);
+    TAS.particles.spawn(GW / 2, GH / 2, defender.team === LIGHT ? '#88ccff' : '#cc44ff', 20, 3);
+  } else {
+    board[aPos.row][aPos.col] = null;
+    board[dPos.row][dPos.col] = null;
+    TAS.audio.playTone(100, 0.3, 'sawtooth', 0.08);
+    TAS.particles.spawn(GW / 2, GH / 2, '#888', 15, 2);
+  }
+
+  TAS.fx.shake(5, 0.85);
+  TAS.fx.flash('#fff', 0.3);
+
+  // Use timer instead of setTimeout
+  combatReturnTimer = 1.5;
+}
+
+// === TURN MANAGEMENT ===
+function endTurn() {
+  turnCount++;
+  applyPowerSquareHealing();
+  applyShiftingTileHealing();
+
+  var win = checkWinCondition();
+  if (win !== -1) {
+    state = 'victory';
+    stateChangeDebounce = 0.5;
+    boardMessage = win === LIGHT ? 'LIGHT VICTORIOUS!' : 'DARK TRIUMPHANT!';
+    if (win === LIGHT && !twoPlayer) {
+      campaignLevel++;
+      if (campaignLevel > campaignProgress) {
+        campaignProgress = campaignLevel;
+        saveProgress(campaignProgress);
+      }
+    }
+    TAS.audio.playMelody([[523,0.12],[659,0.12],[784,0.12],[1047,0.2]], 150);
+    TAS.particles.clear();
+    return;
+  }
+
+  currentTeam = currentTeam === LIGHT ? DARK : LIGHT;
+  selectedUnit = null;
+  validMoves = [];
+
+  if (!twoPlayer && currentTeam === DARK) {
+    aiTurnPending = true;
+    aiTurnDelay = 0;
+  }
+}
+
+// AI turn scheduling with guard
+function scheduleAITurn(dt) {
+  if (!aiTurnPending) return;
+  aiTurnDelay += dt;
+  if (aiTurnDelay >= 0.5) {
+    aiTurnDelay = 0;
+    aiTurnPending = false;
+    doAITurn();
+  }
+}
+
+// === AI BOARD STRATEGY ===
+function doAITurn() {
+  if (state !== 'board') return;
+
+  var myUnits = [];
+  for (var r = 0; r < BOARD_SIZE; r++) {
+    for (var c = 0; c < BOARD_SIZE; c++) {
+      if (board[r][c] && board[r][c].team === DARK) {
+        myUnits.push({ row: r, col: c, unit: board[r][c] });
+      }
+    }
+  }
+
+  if (myUnits.length === 0) return;
+
+  var bestScore = -Infinity;
+  var bestMove = null;
+  var bestUnitEntry = null;
+
+  for (var ui = 0; ui < myUnits.length; ui++) {
+    var u = myUnits[ui];
+    var moves = getValidMoves(u.row, u.col);
+    for (var mi = 0; mi < moves.length; mi++) {
+      var m = moves[mi];
+      var score = 0;
+      var target = board[m.row][m.col];
+
+      if (target) {
+        score += 50 + (target.hp < u.unit.hp ? 30 : -10);
+        if (target.type === WIZARD) score += 200;
+        if (u.unit.type === WIZARD) score -= 40;
+      }
+
+      if (isPowerSquare(m.row, m.col)) score += 25;
+
+      var centerDist = Math.abs(m.row - 4) + Math.abs(m.col - 4);
+      score += (8 - centerDist) * 2;
+
+      score += Math.random() * [40, 20, 5][difficulty];
+
+      if (score > bestScore) {
+        bestScore = score;
+        bestMove = m;
+        bestUnitEntry = u;
+      }
+    }
+  }
+
+  if (bestMove && bestUnitEntry) {
+    var aiTarget = board[bestMove.row][bestMove.col];
+    if (aiTarget && aiTarget.team === LIGHT) {
+      initCombat(bestUnitEntry.row, bestUnitEntry.col, bestMove.row, bestMove.col);
+    } else {
+      board[bestMove.row][bestMove.col] = board[bestUnitEntry.row][bestUnitEntry.col];
+      board[bestUnitEntry.row][bestUnitEntry.col] = null;
+      TAS.audio.playTone(200, 0.08, 'triangle', 0.04);
+      var moveX = BOARD_OFFSET_X + bestMove.col * TILE_SIZE + TILE_SIZE / 2;
+      var moveY = BOARD_OFFSET_Y + bestMove.row * TILE_SIZE + TILE_SIZE / 2;
+      TAS.particles.spawn(moveX, moveY, '#cc44ff', 4, 1.5);
+      endTurn();
+    }
+  } else {
+    endTurn();
+  }
+}
+
+// === BOARD CLICK HANDLING ===
+function handleBoardClick(mx, my) {
+  if (state !== 'board') return;
+  if (!twoPlayer && currentTeam === DARK) return;
+
+  var col = Math.floor((mx - BOARD_OFFSET_X) / TILE_SIZE);
+  var row = Math.floor((my - BOARD_OFFSET_Y) / TILE_SIZE);
+
+  if (row < 0 || row >= BOARD_SIZE || col < 0 || col >= BOARD_SIZE) {
+    selectedUnit = null;
+    validMoves = [];
+    return;
+  }
+
+  if (selectedUnit) {
+    var isValid = false;
+    for (var vi = 0; vi < validMoves.length; vi++) {
+      if (validMoves[vi].row === row && validMoves[vi].col === col) {
+        isValid = true;
+        break;
+      }
+    }
+    if (isValid) {
+      var target = board[row][col];
+      if (target && target.team !== currentTeam) {
+        initCombat(selectedUnit.row, selectedUnit.col, row, col);
+      } else {
+        board[row][col] = board[selectedUnit.row][selectedUnit.col];
+        board[selectedUnit.row][selectedUnit.col] = null;
+        TAS.audio.playTone(300, 0.08, 'triangle', 0.04);
+        var px = BOARD_OFFSET_X + col * TILE_SIZE + TILE_SIZE / 2;
+        var py = BOARD_OFFSET_Y + row * TILE_SIZE + TILE_SIZE / 2;
+        TAS.particles.spawn(px, py, currentTeam === LIGHT ? '#88ccff' : '#cc44ff', 4, 1.5);
+        selectedUnit = null;
+        validMoves = [];
+        endTurn();
+      }
+      return;
+    }
+  }
+
+  var clickedUnit = board[row][col];
+  if (clickedUnit && clickedUnit.team === currentTeam) {
+    selectedUnit = { row: row, col: col };
+    validMoves = getValidMoves(row, col);
+    TAS.audio.playTone(500, 0.05, 'sine', 0.04);
+  } else {
+    selectedUnit = null;
+    validMoves = [];
+  }
+}
+
+// === MOUSE/TOUCH INPUT ===
+var mouseX = 0, mouseY = 0;
+
+TAS.canvas.addEventListener('click', function(e) {
+  TAS.audio.ensureAudio();
+  var rect = TAS.canvas.getBoundingClientRect();
+  var dpr = window.devicePixelRatio || 1;
+  var scaleX = (TAS.canvas.width / dpr) / rect.width;
+  var scaleY = (TAS.canvas.height / dpr) / rect.height;
+  mouseX = (e.clientX - rect.left) * scaleX;
+  mouseY = (e.clientY - rect.top) * scaleY;
+
+  if (stateChangeDebounce > 0) return;
+
+  if (state === 'splash') {
+    splashTimer = 0;
+    return;
+  }
+
+  if (state === 'title') {
+    handleMenuClick(mouseX, mouseY);
+  } else if (state === 'board') {
+    handleBoardClick(mouseX, mouseY);
+  } else if (state === 'victory') {
+    stateChangeDebounce = 0.3;
+    if (!twoPlayer && campaignLevel < 5) {
+      difficulty = Math.min(2, Math.floor(campaignLevel / 2));
+      startGame();
+    } else {
+      state = 'title';
+    }
+  }
+});
+
+TAS.canvas.addEventListener('mousemove', function(e) {
+  var rect = TAS.canvas.getBoundingClientRect();
+  var dpr = window.devicePixelRatio || 1;
+  var scaleX = (TAS.canvas.width / dpr) / rect.width;
+  var scaleY = (TAS.canvas.height / dpr) / rect.height;
+  mouseX = (e.clientX - rect.left) * scaleX;
+  mouseY = (e.clientY - rect.top) * scaleY;
+
+  if (state === 'board') {
+    hoverTile.col = Math.floor((mouseX - BOARD_OFFSET_X) / TILE_SIZE);
+    hoverTile.row = Math.floor((mouseY - BOARD_OFFSET_Y) / TILE_SIZE);
+  }
+});
+
+function handleMenuClick(mx, my) {
+  var startY = 140;
+  for (var i = 0; i < MENU_ITEMS.length; i++) {
+    var itemY = startY + i * 28;
+    if (my >= itemY - 12 && my <= itemY + 12 && mx > GW * 0.3 && mx < GW * 0.7) {
+      menuSelection = i;
+      selectMenuItem(i);
+      return;
+    }
+  }
+}
+
+function selectMenuItem(idx) {
+  TAS.audio.playTone(400, 0.08, 'square', 0.05);
+  switch(idx) {
+    case 0:
+      twoPlayer = false;
+      campaignLevel = 0;
+      difficulty = Math.min(2, Math.floor(campaignProgress / 2));
+      startGame();
+      break;
+    case 1:
+      twoPlayer = true;
+      startGame();
+      break;
+    case 2: difficulty = 0; break;
+    case 3: difficulty = 1; break;
+    case 4: difficulty = 2; break;
+  }
+}
+
+// === KEYBOARD INPUT DEBOUNCING ===
+var lastKeyState = {};
+
+function checkKeyPress(key) {
+  var pressed = TAS.input.keys[key] && !lastKeyState[key];
+  lastKeyState[key] = !!TAS.input.keys[key];
+  return pressed;
+}
+
+// === GAME START ===
+function startGame() {
+  state = 'board';
+  stateChangeDebounce = 0.3;
+  initBoard();
+  TAS.particles.clear();
+  boardMessage = currentTeam === LIGHT ? 'LIGHT MOVES FIRST' : 'DARK MOVES FIRST';
+  boardMessageTimer = 2;
+}
+
+// === UPDATE ===
+function update(dt) {
+  frame++;
+  TAS.particles.update(dt);
+  TAS.fx.updateEffects(dt);
+
+  if (stateChangeDebounce > 0) stateChangeDebounce -= dt;
+  if (boardMessageTimer > 0) boardMessageTimer -= dt;
+
+  // MfT Splash screen
+  if (state === 'splash') {
+    splashTimer -= dt;
+    if (splashTimer <= 0) {
+      state = 'title';
+      stateChangeDebounce = 0.3;
+    }
+    return;
+  }
+
+  if (state === 'title') {
+    if (checkKeyPress('ArrowUp') || checkKeyPress('KeyW')) {
+      menuSelection = (menuSelection - 1 + MENU_ITEMS.length) % MENU_ITEMS.length;
+      TAS.audio.playTone(300, 0.05, 'sine', 0.03);
+    }
+    if (checkKeyPress('ArrowDown') || checkKeyPress('KeyS')) {
+      menuSelection = (menuSelection + 1) % MENU_ITEMS.length;
+      TAS.audio.playTone(300, 0.05, 'sine', 0.03);
+    }
+    if (checkKeyPress('Enter') || checkKeyPress('Space')) {
+      selectMenuItem(menuSelection);
+    }
+    return;
+  }
+
+  if (state === 'combat') {
+    updateCombat(dt);
+    return;
+  }
+
+  if (state === 'victory') {
+    if (stateChangeDebounce <= 0) {
+      if (checkKeyPress('Enter') || checkKeyPress('Space')) {
+        stateChangeDebounce = 0.3;
+        if (!twoPlayer && campaignLevel < 5) {
+          difficulty = Math.min(2, Math.floor(campaignLevel / 2));
+          startGame();
+        } else {
+          state = 'title';
+        }
+      }
+    }
+    return;
+  }
+
+  if (state === 'board') {
+    scheduleAITurn(dt);
+
+    // Keyboard board navigation
+    if (!(!twoPlayer && currentTeam === DARK)) {
+      if (checkKeyPress('ArrowUp') || checkKeyPress('KeyW')) {
+        boardCursorVisible = true;
+        boardCursor.row = Math.max(0, boardCursor.row - 1);
+        TAS.audio.playTone(200, 0.03, 'sine', 0.02);
+      }
+      if (checkKeyPress('ArrowDown') || checkKeyPress('KeyS')) {
+        boardCursorVisible = true;
+        boardCursor.row = Math.min(BOARD_SIZE - 1, boardCursor.row + 1);
+        TAS.audio.playTone(200, 0.03, 'sine', 0.02);
+      }
+      if (checkKeyPress('ArrowLeft') || checkKeyPress('KeyA')) {
+        boardCursorVisible = true;
+        boardCursor.col = Math.max(0, boardCursor.col - 1);
+        TAS.audio.playTone(200, 0.03, 'sine', 0.02);
+      }
+      if (checkKeyPress('ArrowRight') || checkKeyPress('KeyD')) {
+        boardCursorVisible = true;
+        boardCursor.col = Math.min(BOARD_SIZE - 1, boardCursor.col + 1);
+        TAS.audio.playTone(200, 0.03, 'sine', 0.02);
+      }
+      if (checkKeyPress('Enter') || checkKeyPress('Space')) {
+        boardCursorVisible = true;
+        var cx = BOARD_OFFSET_X + boardCursor.col * TILE_SIZE + TILE_SIZE / 2;
+        var cy = BOARD_OFFSET_Y + boardCursor.row * TILE_SIZE + TILE_SIZE / 2;
+        handleBoardClick(cx, cy);
+      }
+      if (checkKeyPress('Escape')) {
+        if (selectedUnit) {
+          selectedUnit = null;
+          validMoves = [];
+          TAS.audio.playTone(200, 0.05, 'sine', 0.03);
+        } else {
+          state = 'title';
+          stateChangeDebounce = 0.3;
+        }
+      }
+    }
+  }
+}
+
+// === DRAWING FUNCTIONS ===
+
+function drawUnit(x, y, unit, size, selected) {
+  var isLight = unit.team === LIGHT;
+  var baseColor = isLight ? '#88ccff' : '#cc44ff';
+  var bodyColor = isLight ? '#aaddff' : '#aa33dd';
+  var accentColor = isLight ? '#ffffff' : '#440066';
+
+  if (selected) {
+    ctx.shadowBlur = 8;
+    ctx.shadowColor = isLight ? '#44aaff' : '#aa44ff';
+  }
+
+  var s = size * 0.4;
+  ctx.save();
+  ctx.translate(x, y);
+
+  switch(unit.type) {
+    case WIZARD:
+      ctx.fillStyle = bodyColor;
+      ctx.beginPath();
+      ctx.moveTo(0, -s);
+      ctx.lineTo(s * 0.3, -s * 0.3);
+      ctx.lineTo(s, -s * 0.2);
+      ctx.lineTo(s * 0.4, s * 0.2);
+      ctx.lineTo(s * 0.5, s);
+      ctx.lineTo(0, s * 0.5);
+      ctx.lineTo(-s * 0.5, s);
+      ctx.lineTo(-s * 0.4, s * 0.2);
+      ctx.lineTo(-s, -s * 0.2);
+      ctx.lineTo(-s * 0.3, -s * 0.3);
+      ctx.closePath();
+      ctx.fill();
+      ctx.fillStyle = accentColor;
+      ctx.beginPath();
+      ctx.arc(0, 0, s * 0.3, 0, Math.PI * 2);
+      ctx.fill();
+      break;
+    case VALKYRIE:
+      ctx.fillStyle = bodyColor;
+      ctx.beginPath();
+      ctx.ellipse(0, 0, s * 0.4, s * 0.8, 0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = baseColor;
+      ctx.beginPath();
+      ctx.moveTo(-s * 0.3, -s * 0.3);
+      ctx.lineTo(-s, -s * 0.8);
+      ctx.lineTo(-s * 0.1, -s * 0.1);
+      ctx.fill();
+      ctx.beginPath();
+      ctx.moveTo(s * 0.3, -s * 0.3);
+      ctx.lineTo(s, -s * 0.8);
+      ctx.lineTo(s * 0.1, -s * 0.1);
+      ctx.fill();
+      break;
+    case GOLEM:
+      ctx.fillStyle = bodyColor;
+      ctx.fillRect(-s * 0.6, -s * 0.7, s * 1.2, s * 1.4);
+      ctx.fillStyle = accentColor;
+      ctx.fillRect(-s * 0.4, -s * 0.4, s * 0.3, s * 0.3);
+      ctx.fillRect(s * 0.1, -s * 0.4, s * 0.3, s * 0.3);
+      break;
+    case ARCHER:
+      ctx.fillStyle = bodyColor;
+      ctx.beginPath();
+      ctx.ellipse(0, 0, s * 0.3, s * 0.6, 0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.strokeStyle = baseColor;
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(s * 0.3, 0, s * 0.7, -Math.PI * 0.4, Math.PI * 0.4);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.moveTo(s * 0.3, -s * 0.4);
+      ctx.lineTo(s * 0.3, s * 0.4);
+      ctx.stroke();
+      break;
+    case KNIGHT:
+      ctx.fillStyle = bodyColor;
+      ctx.beginPath();
+      ctx.moveTo(0, -s);
+      ctx.lineTo(s * 0.6, -s * 0.3);
+      ctx.lineTo(s * 0.8, s * 0.2);
+      ctx.lineTo(s * 0.3, s * 0.8);
+      ctx.lineTo(-s * 0.3, s * 0.8);
+      ctx.lineTo(-s * 0.5, s * 0.2);
+      ctx.lineTo(-s * 0.3, -s * 0.5);
+      ctx.closePath();
+      ctx.fill();
+      ctx.fillStyle = accentColor;
+      ctx.beginPath();
+      ctx.arc(s * 0.2, -s * 0.2, s * 0.15, 0, Math.PI * 2);
+      ctx.fill();
+      break;
+    case UNICORN:
+      ctx.fillStyle = bodyColor;
+      ctx.beginPath();
+      ctx.ellipse(0, s * 0.1, s * 0.5, s * 0.6, 0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = '#ffdd44';
+      ctx.beginPath();
+      ctx.moveTo(0, -s * 0.5);
+      ctx.lineTo(s * 0.08, -s);
+      ctx.lineTo(-s * 0.08, -s);
+      ctx.closePath();
+      ctx.fill();
+      break;
+    case DJINN:
+      ctx.fillStyle = bodyColor;
+      ctx.globalAlpha = 0.7;
+      ctx.beginPath();
+      ctx.ellipse(0, -s * 0.2, s * 0.5, s * 0.4, 0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.beginPath();
+      ctx.moveTo(-s * 0.3, s * 0.1);
+      ctx.quadraticCurveTo(0, s * 1.2, s * 0.3, s * 0.1);
+      ctx.fill();
+      ctx.globalAlpha = 1;
+      ctx.fillStyle = '#ffffff';
+      ctx.beginPath();
+      ctx.arc(-s * 0.15, -s * 0.3, s * 0.1, 0, Math.PI * 2);
+      ctx.arc(s * 0.15, -s * 0.3, s * 0.1, 0, Math.PI * 2);
+      ctx.fill();
+      break;
+    case PHOENIX:
+      ctx.fillStyle = isLight ? '#ff8844' : '#44cc44';
+      ctx.beginPath();
+      ctx.moveTo(0, -s * 0.3);
+      ctx.lineTo(s, -s * 0.8);
+      ctx.lineTo(s * 0.5, s * 0.1);
+      ctx.lineTo(s * 0.3, s * 0.8);
+      ctx.lineTo(0, s * 0.4);
+      ctx.lineTo(-s * 0.3, s * 0.8);
+      ctx.lineTo(-s * 0.5, s * 0.1);
+      ctx.lineTo(-s, -s * 0.8);
+      ctx.closePath();
+      ctx.fill();
+      ctx.fillStyle = '#ffff44';
+      ctx.beginPath();
+      ctx.arc(0, -s * 0.1, s * 0.2, 0, Math.PI * 2);
+      ctx.fill();
+      break;
+  }
+
+  ctx.restore();
+  ctx.shadowBlur = 0;
+
+  // HP bar
+  if (unit.hp < unit.maxHp) {
+    var barW = size * 0.7;
+    var barH = 3;
+    var barX = x - barW / 2;
+    var barY = y + size * 0.45;
+    ctx.fillStyle = '#333';
+    ctx.fillRect(barX, barY, barW, barH);
+    var pct = unit.hp / unit.maxHp;
+    ctx.fillStyle = pct > 0.5 ? '#44dd44' : pct > 0.25 ? '#dddd44' : '#dd4444';
+    ctx.fillRect(barX, barY, barW * pct, barH);
+  }
+}
+
+function drawBoard() {
+  for (var r = 0; r < BOARD_SIZE; r++) {
+    for (var c = 0; c < BOARD_SIZE; c++) {
+      var x = BOARD_OFFSET_X + c * TILE_SIZE;
+      var y = BOARD_OFFSET_Y + r * TILE_SIZE;
+      var tileColor = getTileColor(r, c);
+      var isPower = isPowerSquare(r, c);
+      var isShifting = isShiftingTile(r, c);
+
+      if (tileColor === 'light') {
+        ctx.fillStyle = isPower ? '#334455' : '#2a3040';
+      } else {
+        ctx.fillStyle = isPower ? '#1a1530' : '#151520';
+      }
+      ctx.fillRect(x, y, TILE_SIZE, TILE_SIZE);
+
+      ctx.strokeStyle = '#333344';
+      ctx.lineWidth = 0.5;
+      ctx.strokeRect(x, y, TILE_SIZE, TILE_SIZE);
+
+      if (isPower) {
+        var pulse = Math.sin(frame * 0.05) * 0.15 + 0.25;
+        ctx.fillStyle = 'rgba(255, 215, 0, ' + pulse + ')';
+        ctx.fillRect(x + 2, y + 2, TILE_SIZE - 4, TILE_SIZE - 4);
+        ctx.strokeStyle = 'rgba(255, 215, 0, 0.5)';
+        ctx.lineWidth = 1;
+        ctx.strokeRect(x + 1, y + 1, TILE_SIZE - 2, TILE_SIZE - 2);
+      }
+
+      if (isShifting) {
+        var shimmer = Math.sin(frame * 0.08 + r + c) * 0.1 + 0.15;
+        ctx.fillStyle = tileColor === 'light' ?
+          'rgba(100, 180, 255, ' + shimmer + ')' :
+          'rgba(180, 80, 255, ' + shimmer + ')';
+        ctx.fillRect(x + 1, y + 1, TILE_SIZE - 2, TILE_SIZE - 2);
+      }
+
+      // Valid move highlights
+      var isValidMove = false;
+      for (var vi = 0; vi < validMoves.length; vi++) {
+        if (validMoves[vi].row === r && validMoves[vi].col === c) { isValidMove = true; break; }
+      }
+      if (isValidMove) {
+        var target = board[r][c];
+        var alpha = Math.sin(frame * 0.08) * 0.15 + 0.3;
+        if (target) {
+          ctx.fillStyle = 'rgba(255, 80, 80, ' + alpha + ')';
+        } else {
+          ctx.fillStyle = 'rgba(80, 200, 80, ' + alpha + ')';
+        }
+        ctx.fillRect(x + 2, y + 2, TILE_SIZE - 4, TILE_SIZE - 4);
+      }
+
+      // Hover highlight
+      if (hoverTile.row === r && hoverTile.col === c) {
+        ctx.strokeStyle = 'rgba(255, 255, 255, 0.3)';
+        ctx.lineWidth = 1.5;
+        ctx.strokeRect(x + 1, y + 1, TILE_SIZE - 2, TILE_SIZE - 2);
+      }
+
+      // Keyboard cursor
+      if (boardCursorVisible && boardCursor.row === r && boardCursor.col === c) {
+        var cursorAlpha = Math.sin(frame * 0.1) * 0.2 + 0.5;
+        ctx.strokeStyle = 'rgba(255, 255, 100, ' + cursorAlpha + ')';
+        ctx.lineWidth = 2;
+        ctx.strokeRect(x, y, TILE_SIZE, TILE_SIZE);
+      }
+    }
+  }
+
+  // Draw units
+  for (var ur = 0; ur < BOARD_SIZE; ur++) {
+    for (var uc = 0; uc < BOARD_SIZE; uc++) {
+      var unit = board[ur][uc];
+      if (unit) {
+        var ux = BOARD_OFFSET_X + uc * TILE_SIZE + TILE_SIZE / 2;
+        var uy = BOARD_OFFSET_Y + ur * TILE_SIZE + TILE_SIZE / 2;
+        var isSelected = selectedUnit && selectedUnit.row === ur && selectedUnit.col === uc;
+        drawUnit(ux, uy, unit, TILE_SIZE, isSelected);
+      }
+    }
+  }
+
+  // Particles on the board
+  TAS.particles.draw();
+
+  // Info panel (right side)
+  var panelX = BOARD_OFFSET_X + BOARD_SIZE * TILE_SIZE + 12;
+
+  ctx.fillStyle = currentTeam === LIGHT ? '#88ccff' : '#cc44ff';
+  ctx.font = 'bold 11px monospace';
+  ctx.textAlign = 'left';
+  ctx.fillText(currentTeam === LIGHT ? 'LIGHT TURN' : 'DARK TURN', panelX, 35);
+
+  ctx.fillStyle = '#666';
+  ctx.font = '9px monospace';
+  ctx.fillText('Turn: ' + turnCount, panelX, 48);
+  ctx.fillText(['Easy','Normal','Hard'][difficulty], panelX + 50, 48);
+
+  if (selectedUnit) {
+    var selUnit = board[selectedUnit.row][selectedUnit.col];
+    if (selUnit) {
+      var selDef = UNIT_DEFS[selUnit.type];
+      var selName = selUnit.team === LIGHT ? selDef.name : DARK_NAMES[selUnit.type];
+      ctx.fillStyle = selUnit.team === LIGHT ? '#88ccff' : '#cc44ff';
+      ctx.font = 'bold 10px monospace';
+      ctx.fillText(selName, panelX, 70);
+      ctx.fillStyle = '#aaa';
+      ctx.font = '9px monospace';
+      ctx.fillText('HP: ' + selUnit.hp + '/' + selUnit.maxHp, panelX, 83);
+      ctx.fillText('ATK: ' + selDef.damage, panelX, 95);
+      ctx.fillText('SPD: ' + selDef.speed.toFixed(1), panelX, 107);
+      ctx.fillText('Type: ' + selDef.attack, panelX, 119);
+      ctx.fillText('Move: ' + selDef.move, panelX, 131);
+    }
+  }
+
+  ctx.fillStyle = '#997722';
+  ctx.font = '8px monospace';
+  ctx.fillText('* = Power Square', panelX, 152);
+  ctx.fillStyle = '#556688';
+  ctx.fillText('~ = Shifting Tile', panelX, 164);
+
+  ctx.fillStyle = '#555';
+  ctx.font = '8px monospace';
+  ctx.fillText('Capture King or', panelX, 184);
+  ctx.fillText('hold 5 Power Sq.', panelX, 195);
+
+  if (!twoPlayer) {
+    ctx.fillStyle = '#666';
+    ctx.font = '9px monospace';
+    ctx.fillText('Campaign: ' + campaignLevel + '/5', panelX, 215);
+    for (var ci = 0; ci < 5; ci++) {
+      ctx.fillStyle = ci < campaignLevel ? '#44dd88' : '#333';
+      ctx.fillRect(panelX + ci * 16, 222, 12, 8);
+    }
+  }
+
+  var lightPower = 0, darkPower = 0;
+  for (var psi = 0; psi < POWER_SQUARES.length; psi++) {
+    var psU = board[POWER_SQUARES[psi][0]][POWER_SQUARES[psi][1]];
+    if (psU) {
+      if (psU.team === LIGHT) lightPower++;
+      else darkPower++;
+    }
+  }
+  ctx.fillStyle = '#88ccff';
+  ctx.font = '9px monospace';
+  ctx.fillText('L:' + lightPower, panelX, 250);
+  ctx.fillStyle = '#cc44ff';
+  ctx.fillText('D:' + darkPower, panelX + 30, 250);
+  ctx.fillStyle = '#997722';
+  ctx.fillText('/5', panelX + 55, 250);
+
+  ctx.fillStyle = '#444';
+  ctx.font = '8px monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText('Arrows+Enter or Click | ESC=Back', GW / 2, GH - 5);
+  ctx.textAlign = 'left';
+
+  if (boardMessageTimer > 0) {
+    ctx.fillStyle = 'rgba(0,0,0,0.7)';
+    ctx.fillRect(BOARD_OFFSET_X, GH / 2 - 15, BOARD_SIZE * TILE_SIZE, 30);
+    ctx.fillStyle = '#ffdd44';
+    ctx.font = 'bold 12px monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText(boardMessage, BOARD_OFFSET_X + BOARD_SIZE * TILE_SIZE / 2, GH / 2 + 4);
+    ctx.textAlign = 'left';
+  }
+}
+
+function drawCombatUnit(fighter, size) {
+  var unit = { team: fighter.team, type: fighter.type, hp: fighter.hp, maxHp: fighter.maxHp };
+  // Flash during invulnerability
+  if (fighter.invuln > 0 && Math.floor(fighter.invuln * 20) % 2 === 0) {
+    ctx.globalAlpha = 0.5;
+  }
+  var bob = Math.sin(fighter.animFrame) * 2;
+  drawUnit(fighter.x + ARENA_X, fighter.y + ARENA_Y + bob, unit, size, false);
+  ctx.globalAlpha = 1;
+}
+
+function drawCombat() {
+  ctx.fillStyle = '#0a0a18';
+  ctx.fillRect(0, 0, GW, GH);
+
+  ctx.strokeStyle = '#333355';
+  ctx.lineWidth = 2;
+  ctx.strokeRect(ARENA_X - 2, ARENA_Y - 2, ARENA_W + 4, ARENA_H + 4);
+
+  var tileIsLight = combat.tileColor === 'light';
+  ctx.fillStyle = tileIsLight ? '#1a2030' : '#180a20';
+  ctx.fillRect(ARENA_X, ARENA_Y, ARENA_W, ARENA_H);
+
+  ctx.strokeStyle = tileIsLight ? '#223344' : '#221133';
+  ctx.lineWidth = 0.5;
+  for (var gx = 0; gx < ARENA_W; gx += 20) {
+    ctx.beginPath();
+    ctx.moveTo(ARENA_X + gx, ARENA_Y);
+    ctx.lineTo(ARENA_X + gx, ARENA_Y + ARENA_H);
+    ctx.stroke();
+  }
+  for (var gy = 0; gy < ARENA_H; gy += 20) {
+    ctx.beginPath();
+    ctx.moveTo(ARENA_X, ARENA_Y + gy);
+    ctx.lineTo(ARENA_X + ARENA_W, ARENA_Y + gy);
+    ctx.stroke();
+  }
+
+  if (tileIsLight) {
+    ctx.fillStyle = 'rgba(80, 150, 255, 0.05)';
+  } else {
+    ctx.fillStyle = 'rgba(180, 60, 255, 0.05)';
+  }
+  ctx.fillRect(ARENA_X, ARENA_Y, ARENA_W, ARENA_H);
+
+  // Draw projectiles with trails
+  for (var pi = 0; pi < combat.projectiles.length; pi++) {
+    var p = combat.projectiles[pi];
+    ctx.globalAlpha = 0.3;
+    ctx.fillStyle = p.color || '#fff';
+    ctx.beginPath();
+    ctx.arc(p.x + ARENA_X - p.vx * 0.02, p.y + ARENA_Y - p.vy * 0.02, (p.size || 3) * 0.7, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.globalAlpha = 0.15;
+    ctx.beginPath();
+    ctx.arc(p.x + ARENA_X - p.vx * 0.04, p.y + ARENA_Y - p.vy * 0.04, (p.size || 3) * 0.4, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.globalAlpha = 1;
+    ctx.fillStyle = p.color || '#fff';
+    ctx.shadowBlur = 6;
+    ctx.shadowColor = p.color || '#fff';
+    ctx.beginPath();
+    ctx.arc(p.x + ARENA_X, p.y + ARENA_Y, p.size || 3, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.shadowBlur = 0;
+  }
+
+  // Draw fighters
+  drawCombatUnit(combat.attacker, 36);
+  drawCombatUnit(combat.defender, 36);
+
+  // Timer
+  ctx.fillStyle = combat.timer < 5 ? '#ff4444' : '#ffdd44';
+  ctx.font = 'bold 14px monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText(Math.ceil(Math.max(0, combat.timer)) + 's', GW / 2, ARENA_Y - 8);
+
+  // Attacker HP bar
+  var aHpPct = Math.max(0, combat.attacker.hp / combat.attacker.maxHp);
+  var aName = combat.attacker.team === LIGHT ?
+    UNIT_DEFS[combat.attacker.type].name : DARK_NAMES[combat.attacker.type];
+  ctx.fillStyle = combat.attacker.team === LIGHT ? '#88ccff' : '#cc44ff';
+  ctx.font = '10px monospace';
+  ctx.textAlign = 'left';
+  ctx.fillText(aName, ARENA_X, ARENA_Y + ARENA_H + 15);
+  ctx.fillStyle = '#333';
+  ctx.fillRect(ARENA_X, ARENA_Y + ARENA_H + 20, 100, 8);
+  ctx.fillStyle = aHpPct > 0.5 ? '#44dd44' : aHpPct > 0.25 ? '#dddd44' : '#dd4444';
+  ctx.fillRect(ARENA_X, ARENA_Y + ARENA_H + 20, 100 * aHpPct, 8);
+
+  // Defender HP bar (FIXED: bar always starts at left edge, width = proportion)
+  var dHpPct = Math.max(0, combat.defender.hp / combat.defender.maxHp);
+  var dName = combat.defender.team === LIGHT ?
+    UNIT_DEFS[combat.defender.type].name : DARK_NAMES[combat.defender.type];
+  ctx.fillStyle = combat.defender.team === LIGHT ? '#88ccff' : '#cc44ff';
+  ctx.textAlign = 'right';
+  ctx.fillText(dName, ARENA_X + ARENA_W, ARENA_Y + ARENA_H + 15);
+  ctx.fillStyle = '#333';
+  ctx.fillRect(ARENA_X + ARENA_W - 100, ARENA_Y + ARENA_H + 20, 100, 8);
+  ctx.fillStyle = dHpPct > 0.5 ? '#44dd44' : dHpPct > 0.25 ? '#dddd44' : '#dd4444';
+  ctx.fillRect(ARENA_X + ARENA_W - 100, ARENA_Y + ARENA_H + 20, 100 * dHpPct, 8);
+
+  // VS
+  ctx.fillStyle = '#fff';
+  ctx.font = 'bold 10px monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText('VS', GW / 2, ARENA_Y + ARENA_H + 25);
+
+  // Controls hint
+  ctx.fillStyle = '#555';
+  ctx.font = '8px monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText('ARROWS=Move  SPACE=Attack', GW / 2, GH - 10);
+
+  // Terrain advantage label
+  ctx.fillStyle = tileIsLight ? '#88aacc' : '#aa88cc';
+  ctx.font = '8px monospace';
+  ctx.textAlign = 'left';
+  ctx.fillText(tileIsLight ? 'LIGHT TERRAIN +25%' : 'DARK TERRAIN +25%', ARENA_X, ARENA_Y - 8);
+
+  // Player indicator
+  var playerFighter = combat[combat.playerControlled];
+  ctx.fillStyle = '#44ff44';
+  ctx.font = '8px monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText('YOU', playerFighter.x + ARENA_X, playerFighter.y + ARENA_Y - 22);
+
+  // Combat result overlay
+  if (combat.concluded) {
+    ctx.fillStyle = 'rgba(0,0,0,0.6)';
+    ctx.fillRect(0, 0, GW, GH);
+    ctx.textAlign = 'center';
+    ctx.font = 'bold 18px monospace';
+    if (combatResult === 'attacker') {
+      ctx.fillStyle = combat.attacker.team === LIGHT ? '#88ccff' : '#cc44ff';
+      var wName = combat.attacker.team === LIGHT ?
+        UNIT_DEFS[combat.attacker.type].name : DARK_NAMES[combat.attacker.type];
+      ctx.fillText(wName + ' WINS!', GW / 2, GH / 2);
+    } else if (combatResult === 'defender') {
+      ctx.fillStyle = combat.defender.team === LIGHT ? '#88ccff' : '#cc44ff';
+      var wName2 = combat.defender.team === LIGHT ?
+        UNIT_DEFS[combat.defender.type].name : DARK_NAMES[combat.defender.type];
+      ctx.fillText(wName2 + ' WINS!', GW / 2, GH / 2);
+    } else {
+      ctx.fillStyle = '#888';
+      ctx.fillText('MUTUAL DESTRUCTION!', GW / 2, GH / 2);
+    }
+  }
+
+  TAS.particles.draw();
+}
+
+// MfT splash screen
+function drawSplash() {
+  ctx.fillStyle = '#0a0a12';
+  ctx.fillRect(0, 0, GW, GH);
+
+  var progress = 1.0 - (splashTimer / 2.0);
+  var fadeIn = Math.min(1, progress * 3);
+  var fadeOut = Math.max(0, 1 - (progress - 0.7) * 4);
+  var alpha = Math.min(fadeIn, fadeOut);
+
+  ctx.globalAlpha = alpha;
+
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#44dd88';
+  ctx.font = 'bold 28px monospace';
+  ctx.fillText('MfT', GW / 2, GH / 2 - 10);
+
+  ctx.fillStyle = '#88ccff';
+  ctx.font = '10px monospace';
+  ctx.fillText('Meme for Trees', GW / 2, GH / 2 + 12);
+
+  var lineW = 120 * alpha;
+  ctx.strokeStyle = '#44dd88';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(GW / 2 - lineW / 2, GH / 2 + 22);
+  ctx.lineTo(GW / 2 + lineW / 2, GH / 2 + 22);
+  ctx.stroke();
+
+  if (frame % 4 === 0 && splashTimer > 0.5) {
+    TAS.particles.spawn(
+      GW / 2 + (Math.random() - 0.5) * 100,
+      GH / 2 + (Math.random() - 0.5) * 40,
+      Math.random() > 0.5 ? '#44dd88' : '#88ccff',
+      1, 0.8, { size: 1, sizeVar: 1 }
+    );
+  }
+
+  TAS.particles.draw();
+  ctx.globalAlpha = 1;
+}
+
+function drawTitleScreen() {
+  ctx.fillStyle = '#0a0a12';
+  ctx.fillRect(0, 0, GW, GH);
+
+  for (var bi = 0; bi < 30; bi++) {
+    var bx = (frame * 0.3 + bi * 47) % GW;
+    var by = (Math.sin(frame * 0.02 + bi) * 30 + 160);
+    var balpha = Math.sin(frame * 0.03 + bi * 0.5) * 0.15 + 0.15;
+    ctx.fillStyle = bi % 2 === 0 ?
+      'rgba(100, 180, 255, ' + balpha + ')' :
+      'rgba(180, 80, 255, ' + balpha + ')';
+    ctx.beginPath();
+    ctx.arc(bx, by, 2, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#000';
+  ctx.font = 'bold 22px monospace';
+  ctx.fillText('ARCHON BATTLE', GW / 2 + 2, 52);
+  ctx.fillStyle = '#ffdd44';
+  ctx.fillText('ARCHON BATTLE', GW / 2, 50);
+
+  ctx.fillStyle = '#888';
+  ctx.font = '10px monospace';
+  ctx.fillText('A Tasern Tale - Light vs Dark', GW / 2, 70);
+
+  var leftUnit = { team: LIGHT, type: WIZARD, hp: 80, maxHp: 80 };
+  var rightUnit = { team: DARK, type: WIZARD, hp: 80, maxHp: 80 };
+  drawUnit(GW * 0.25, 100, leftUnit, 40, false);
+  drawUnit(GW * 0.75, 100, rightUnit, 40, false);
+
+  ctx.fillStyle = '#ff4444';
+  ctx.font = 'bold 16px monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText('VS', GW / 2, 105);
+
+  ctx.font = '12px monospace';
+  for (var mi = 0; mi < MENU_ITEMS.length; mi++) {
+    var my = 140 + mi * 28;
+    var isMenuSelected = mi === menuSelection;
+    var isDifficulty = mi >= 2;
+
+    if (isDifficulty) {
+      var isActive = (mi - 2) === difficulty;
+      ctx.fillStyle = isActive ? '#44dd88' : (isMenuSelected ? '#aaa' : '#555');
+      if (isMenuSelected) {
+        ctx.fillStyle = '#ffdd44';
+        ctx.textAlign = 'center';
+        ctx.fillText('> ', GW / 2 - 60, my + 4);
+      }
+      ctx.textAlign = 'center';
+      ctx.fillText((isActive ? '[*] ' : '[ ] ') + MENU_ITEMS[mi], GW / 2 - 40, my + 4);
+    } else {
+      ctx.fillStyle = isMenuSelected ? '#ffdd44' : '#aaa';
+      if (isMenuSelected) {
+        ctx.textAlign = 'center';
+        ctx.fillText('> ', GW / 2 - 60, my + 4);
+      }
+      ctx.textAlign = 'center';
+      ctx.fillText(MENU_ITEMS[mi], GW / 2 - 40, my + 4);
+    }
+  }
+
+  ctx.fillStyle = '#666';
+  ctx.font = '9px monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText('Campaign Best: Level ' + campaignProgress + '/5', GW / 2, 290);
+
+  ctx.fillStyle = '#444';
+  ctx.font = '8px monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText('Click/Arrows to select - Enter to confirm', GW / 2, 310);
+}
+
+function drawVictory() {
+  ctx.fillStyle = '#0a0a12';
+  ctx.fillRect(0, 0, GW, GH);
+
+  var winner = checkWinCondition();
+  var isLight = winner === LIGHT;
+
+  if (frame % 8 === 0) {
+    TAS.particles.spawn(
+      Math.random() * GW, Math.random() * GH * 0.5,
+      isLight ? '#88ccff' : '#cc44ff', 3, 1.5
+    );
+  }
+
+  TAS.particles.draw();
+
+  ctx.textAlign = 'center';
+  ctx.fillStyle = isLight ? '#88ccff' : '#cc44ff';
+  ctx.font = 'bold 20px monospace';
+  ctx.fillText(boardMessage, GW / 2, GH * 0.3);
+
+  if (!twoPlayer) {
+    if (isLight) {
+      ctx.fillStyle = '#44dd88';
+      ctx.font = '12px monospace';
+      if (campaignLevel < 5) {
+        ctx.fillText('Campaign Level ' + campaignLevel + '/5 Complete!', GW / 2, GH * 0.45);
+        ctx.fillStyle = '#ffdd44';
+        ctx.font = '10px monospace';
+        var pp1 = Math.sin(frame * 0.05) * 0.3 + 0.7;
+        ctx.globalAlpha = pp1;
+        ctx.fillText('Press ENTER for next battle...', GW / 2, GH * 0.6);
+        ctx.globalAlpha = 1;
+      } else {
+        ctx.fillText('CAMPAIGN COMPLETE!', GW / 2, GH * 0.45);
+        ctx.fillStyle = '#ffdd44';
+        ctx.font = '10px monospace';
+        ctx.fillText('You have mastered the board!', GW / 2, GH * 0.55);
+        var pp2 = Math.sin(frame * 0.05) * 0.3 + 0.7;
+        ctx.globalAlpha = pp2;
+        ctx.fillText('Press ENTER to return', GW / 2, GH * 0.65);
+        ctx.globalAlpha = 1;
+      }
+    } else {
+      ctx.fillStyle = '#cc4444';
+      ctx.font = '12px monospace';
+      ctx.fillText('DEFEATED', GW / 2, GH * 0.45);
+      ctx.fillStyle = '#888';
+      ctx.font = '10px monospace';
+      var pp3 = Math.sin(frame * 0.05) * 0.3 + 0.7;
+      ctx.globalAlpha = pp3;
+      ctx.fillText('Press ENTER to return', GW / 2, GH * 0.6);
+      ctx.globalAlpha = 1;
+    }
+  } else {
+    ctx.fillStyle = '#ffdd44';
+    ctx.font = '10px monospace';
+    var pp4 = Math.sin(frame * 0.05) * 0.3 + 0.7;
+    ctx.globalAlpha = pp4;
+    ctx.fillText('Press ENTER to return', GW / 2, GH * 0.55);
+    ctx.globalAlpha = 1;
+  }
+
+  ctx.fillStyle = '#555';
+  ctx.font = '9px monospace';
+  ctx.fillText('Turns: ' + turnCount, GW / 2, GH * 0.8);
+}
+
+// === DRAW ===
+function draw(dt) {
+  ctx.fillStyle = '#0a0a12';
+  ctx.fillRect(0, 0, GW, GH);
+
+  if (state === 'splash') {
+    drawSplash();
+    return;
+  }
+
+  if (state === 'title') {
+    drawTitleScreen();
+    TAS.input.drawTouchControls(GW, GH);
+    return;
+  }
+
+  if (state === 'board') {
+    ctx.save();
+    TAS.fx.applyShake();
+    drawBoard();
+    ctx.restore();
+    TAS.fx.drawFlash(GW, GH);
+    TAS.input.drawTouchControls(GW, GH);
+    return;
+  }
+
+  if (state === 'combat') {
+    ctx.save();
+    TAS.fx.applyShake();
+    drawCombat();
+    ctx.restore();
+    TAS.fx.drawFlash(GW, GH);
+    TAS.input.drawTouchControls(GW, GH);
+    return;
+  }
+
+  if (state === 'victory') {
+    drawVictory();
+    TAS.input.drawTouchControls(GW, GH);
+    return;
+  }
+}
+
+// === START ===
+TAS.loop.start(update, draw);
+
+})();
+</script>
+</body>
+</html>

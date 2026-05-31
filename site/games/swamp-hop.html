@@ -1,0 +1,1206 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Swamp Hop</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body { width: 100%; height: 100%; overflow: hidden; background: #111; touch-action: none; }
+canvas { display: block; margin: 0 auto; }
+#back-link {
+  position: fixed; bottom: 8px; left: 50%; transform: translateX(-50%);
+  color: #666; font-family: monospace; font-size: 12px; text-decoration: none; z-index: 10;
+}
+#back-link:hover { color: #aaa; }
+</style>
+</head>
+<body>
+<canvas id="gc"></canvas>
+<a id="back-link" href="/games">Back to Arcade</a>
+<script src="nft-loader.js"></script>
+<script>if(window.NftLoader)NftLoader.gate();</script>
+<script src="tasern-engine.js"></script>
+<script>
+(function() {
+"use strict";
+
+// === GAME CONSTANTS ===
+var GW = 480, GH = 320;
+var ctx = TAS.ctx;
+TAS.initCanvas(GW, GH);
+TAS.input.initTouch({ buttons: ['a'], labels: { a: 'HOP' } });
+
+// Grid setup: 15 columns, 13 rows
+var COLS = 15;
+var ROWS = 13;
+var CELL_W = Math.floor(GW / COLS); // 32
+var CELL_H = Math.floor((GH - 28) / ROWS); // ~22 (minus HUD bar)
+var HUD_H = 28;
+var GRID_TOP = HUD_H;
+
+// === GAME STATE ===
+var state = 'title';
+var score = 0;
+var highScore = TAS.score.load('swamphop_hi');
+var lives = 3;
+var level = 1;
+var frame = 0;
+var bonusLifeThreshold = 10000;
+
+// Player
+var frog = { col: 7, row: 12, x: 0, y: 0, dir: 0, hopAnim: 0, dead: false, riding: null };
+var hopCooldown = 0;
+var HOP_COOLDOWN = 0.15; // seconds between hops
+var deathTimer = 0;
+var DEATH_DURATION = 1.2;
+
+// Timer bar
+var timeLeft = 0;
+var TIME_PER_LIFE = 30; // seconds
+
+// Home slots
+var HOME_COUNT = 5;
+var homes = [];
+
+// Lanes
+var lanes = [];
+
+// Bonus items
+var bonusItems = []; // flies, companion baselings
+
+// Level-complete state
+var levelCompleteTimer = 0;
+var LEVEL_COMPLETE_DURATION = 2.0;
+
+// Track previous input to detect fresh presses
+var prevKeys = {};
+var prevTouch = {};
+
+// === COLORS ===
+var COL_GRASS = '#2d5a1e';
+var COL_ROAD = '#3a3a3a';
+var COL_ROAD_LINE = '#555';
+var COL_WATER = '#1a4a6a';
+var COL_WATER_DARK = '#0e3048';
+var COL_MEDIAN = '#4a7a2a';
+var COL_SAFE = '#3a6a2a';
+var COL_HOME_BG = '#0e3048';
+var COL_HOME_PAD = '#2a7040';
+
+// === INIT HELPERS ===
+function cellX(col) { return col * CELL_W; }
+function cellY(row) { return GRID_TOP + row * CELL_H; }
+
+function initHomes() {
+  homes = [];
+  // 5 homes evenly spaced across top row
+  var spacing = COLS / HOME_COUNT;
+  for (var i = 0; i < HOME_COUNT; i++) {
+    homes.push({
+      col: Math.floor(spacing * i + spacing / 2),
+      filled: false,
+      hasBonus: false,
+      bonusType: null // 'fly' or 'gator'
+    });
+  }
+  // Randomly place hazards/bonuses in some homes
+  if (level > 1) {
+    var gatorHome = TAS.math.randInt(0, HOME_COUNT - 1);
+    homes[gatorHome].bonusType = 'gator';
+  }
+  if (Math.random() < 0.5) {
+    var flyHome = TAS.math.randInt(0, HOME_COUNT - 1);
+    if (!homes[flyHome].bonusType) {
+      homes[flyHome].bonusType = 'fly';
+      homes[flyHome].hasBonus = true;
+    }
+  }
+}
+
+function initLanes() {
+  lanes = [];
+  var speedMult = 1 + (level - 1) * 0.15;
+
+  // Row 0: home row (handled separately)
+  lanes.push({ type: 'home', row: 0, objects: [] });
+
+  // Rows 1-5: water/swamp lanes
+  for (var r = 1; r <= 5; r++) {
+    var dir = (r % 2 === 0) ? 1 : -1;
+    var laneType;
+    var speed;
+    var objs = [];
+
+    if (r === 1 || r === 4) {
+      // Log lanes
+      laneType = 'log';
+      speed = (0.6 + Math.random() * 0.4) * speedMult;
+      var logCount = Math.max(2, 4 - Math.floor(level / 3));
+      var logLen = TAS.math.randInt(3, 5);
+      for (var i = 0; i < logCount; i++) {
+        var lx = (i * (GW / logCount)) + TAS.math.randRange(-20, 20);
+        objs.push({
+          x: lx, w: logLen * CELL_W, h: CELL_H - 2,
+          hasSnake: (level > 2 && Math.random() < 0.2),
+          snakePos: Math.random()
+        });
+      }
+    } else if (r === 2 || r === 5) {
+      // Turtle lanes
+      laneType = 'turtle';
+      speed = (0.4 + Math.random() * 0.3) * speedMult;
+      var turtleGroups = Math.max(2, 4 - Math.floor(level / 4));
+      var groupSize = TAS.math.randInt(2, 3);
+      for (var i = 0; i < turtleGroups; i++) {
+        var tx = i * (GW / turtleGroups) + TAS.math.randRange(-10, 10);
+        objs.push({
+          x: tx, w: groupSize * CELL_W, h: CELL_H - 2,
+          submerge: Math.random() < (0.2 + level * 0.05), // can this group submerge?
+          submergeTimer: Math.random() * 6,
+          submerged: false,
+          submergeDuration: 1.5 + Math.random()
+        });
+      }
+    } else {
+      // Lily pad lane (row 3)
+      laneType = 'lily';
+      speed = (0.3 + Math.random() * 0.3) * speedMult;
+      var lilyCount = Math.max(3, 5 - Math.floor(level / 3));
+      for (var i = 0; i < lilyCount; i++) {
+        objs.push({
+          x: i * (GW / lilyCount) + TAS.math.randRange(-10, 10),
+          w: CELL_W + 4, h: CELL_H - 2
+        });
+      }
+    }
+
+    lanes.push({ type: laneType, row: r, dir: dir, speed: speed, objects: objs });
+  }
+
+  // Row 6: safe median
+  lanes.push({ type: 'median', row: 6, objects: [] });
+
+  // Rows 7-11: road lanes
+  for (var r = 7; r <= 11; r++) {
+    var dir = (r % 2 === 0) ? 1 : -1;
+    var speed;
+    var objs = [];
+    var vehicleType;
+
+    if (r === 7 || r === 10) {
+      // Slow carts
+      vehicleType = 'cart';
+      speed = (0.8 + Math.random() * 0.5) * speedMult;
+      var count = TAS.math.randInt(2, 3);
+      for (var i = 0; i < count; i++) {
+        objs.push({
+          x: i * (GW / count) + TAS.math.randRange(0, 40),
+          w: CELL_W * 1.5, h: CELL_H - 4, vtype: 'cart'
+        });
+      }
+    } else if (r === 8 || r === 11) {
+      // Mushroom trucks (medium)
+      vehicleType = 'truck';
+      speed = (1.0 + Math.random() * 0.6) * speedMult;
+      var count = TAS.math.randInt(2, 3);
+      for (var i = 0; i < count; i++) {
+        objs.push({
+          x: i * (GW / count) + TAS.math.randRange(0, 50),
+          w: CELL_W * 2.2, h: CELL_H - 2, vtype: 'truck'
+        });
+      }
+    } else {
+      // Fast racers (row 9)
+      vehicleType = 'racer';
+      speed = (1.8 + Math.random() * 0.8) * speedMult;
+      var count = TAS.math.randInt(1, 2);
+      for (var i = 0; i < count; i++) {
+        objs.push({
+          x: i * (GW / count) + TAS.math.randRange(0, 80),
+          w: CELL_W * 1.2, h: CELL_H - 4, vtype: 'racer'
+        });
+      }
+    }
+
+    lanes.push({ type: 'road', row: r, dir: dir, speed: speed, objects: objs, vehicleType: vehicleType });
+  }
+
+  // Row 12: starting safe zone
+  lanes.push({ type: 'safe', row: 12, objects: [] });
+}
+
+function initBonusItems() {
+  bonusItems = [];
+}
+
+function spawnBonus() {
+  // Random fly on a water lane
+  if (Math.random() < 0.008 && bonusItems.length < 2) {
+    var laneIdx = TAS.math.randInt(1, 5);
+    var lane = lanes[laneIdx];
+    if (lane && lane.objects.length > 0) {
+      var obj = lane.objects[TAS.math.randInt(0, lane.objects.length - 1)];
+      bonusItems.push({
+        type: 'fly',
+        laneIdx: laneIdx,
+        objIdx: lane.objects.indexOf(obj),
+        relX: Math.random() * (obj.w - CELL_W * 0.5),
+        timer: 8 + Math.random() * 4,
+        points: 200
+      });
+    }
+  }
+  // Companion baseling on median
+  if (Math.random() < 0.003 && !bonusItems.some(function(b) { return b.type === 'companion'; })) {
+    bonusItems.push({
+      type: 'companion',
+      x: TAS.math.randRange(CELL_W, GW - CELL_W * 2),
+      y: cellY(6) + 2,
+      timer: 10,
+      points: 500,
+      carried: false
+    });
+  }
+}
+
+// === START / RESET ===
+function startGame() {
+  state = 'playing';
+  score = 0;
+  lives = 3;
+  level = 1;
+  bonusLifeThreshold = 10000;
+  TAS.particles.clear();
+  initLevel();
+}
+
+function initLevel() {
+  initHomes();
+  initLanes();
+  initBonusItems();
+  resetFrog();
+  timeLeft = TIME_PER_LIFE;
+}
+
+function resetFrog() {
+  frog.col = 7;
+  frog.row = 12;
+  frog.x = cellX(7);
+  frog.y = cellY(12);
+  frog.dir = 0; // 0=up, 1=right, 2=down, 3=left
+  frog.hopAnim = 0;
+  frog.dead = false;
+  frog.riding = null;
+  hopCooldown = 0.3;
+  deathTimer = 0;
+  timeLeft = TIME_PER_LIFE;
+}
+
+function killFrog(reason) {
+  if (frog.dead) return;
+  frog.dead = true;
+  deathTimer = DEATH_DURATION;
+  lives--;
+
+  TAS.audio.playTone(200, 0.3, 'sawtooth', 0.12, 80);
+  TAS.particles.spawn(frog.x + CELL_W / 2, frog.y + CELL_H / 2, '#ff4444', 15, 3, { gravity: 0.05 });
+  TAS.fx.shake(4, 0.85);
+  TAS.fx.flash('#ff0000', 0.25);
+}
+
+function addScore(pts) {
+  score += pts;
+  if (score >= bonusLifeThreshold) {
+    lives++;
+    bonusLifeThreshold += 10000;
+    TAS.audio.playMelody([[523, 0.1], [659, 0.1], [784, 0.15]], 100);
+    TAS.fx.flash('#44ff44', 0.2);
+  }
+}
+
+// === INPUT HANDLING ===
+function justPressed(key) {
+  var now = TAS.input.keys[key];
+  var was = prevKeys[key];
+  return now && !was;
+}
+
+function justTouched(dir) {
+  var now = TAS.input.touch[dir];
+  var was = prevTouch[dir];
+  return now && !was;
+}
+
+function saveInputState() {
+  prevKeys = {};
+  for (var k in TAS.input.keys) {
+    prevKeys[k] = TAS.input.keys[k];
+  }
+  prevTouch = {
+    left: TAS.input.touch.left,
+    right: TAS.input.touch.right,
+    up: TAS.input.touch.up,
+    down: TAS.input.touch.down,
+    a: TAS.input.touch.a
+  };
+}
+
+// === UPDATE ===
+function update(dt) {
+  frame++;
+  TAS.particles.update(dt);
+  TAS.fx.updateEffects(dt);
+
+  if (state === 'title') {
+    if (Object.values(TAS.input.keys).some(Boolean) || TAS.input.touch.a) {
+      TAS.audio.ensureAudio();
+      startGame();
+    }
+    saveInputState();
+    return;
+  }
+
+  if (state === 'gameOver') {
+    if (Object.values(TAS.input.keys).some(Boolean) || TAS.input.touch.a) {
+      state = 'title';
+    }
+    saveInputState();
+    return;
+  }
+
+  if (state === 'levelComplete') {
+    levelCompleteTimer -= dt;
+    if (levelCompleteTimer <= 0) {
+      level++;
+      initLevel();
+      state = 'playing';
+    }
+    saveInputState();
+    return;
+  }
+
+  if (state === 'playing') {
+    // Handle death
+    if (frog.dead) {
+      deathTimer -= dt;
+      if (deathTimer <= 0) {
+        if (lives <= 0) {
+          if (score > highScore) {
+            highScore = score;
+            TAS.score.save('swamphop_hi', highScore);
+          }
+          state = 'gameOver';
+        } else {
+          resetFrog();
+        }
+      }
+      saveInputState();
+      return;
+    }
+
+    // Timer
+    timeLeft -= dt;
+    if (timeLeft <= 0) {
+      killFrog('time');
+      saveInputState();
+      return;
+    }
+
+    // Hop cooldown
+    if (hopCooldown > 0) hopCooldown -= dt;
+
+    // Movement input
+    if (hopCooldown <= 0) {
+      var moved = false;
+      if (justPressed('ArrowUp') || justPressed('KeyW') || justTouched('up') || justTouched('a')) {
+        if (frog.row > 0) { frog.row--; frog.dir = 0; moved = true; }
+      } else if (justPressed('ArrowDown') || justPressed('KeyS') || justTouched('down')) {
+        if (frog.row < 12) { frog.row++; frog.dir = 2; moved = true; }
+      } else if (justPressed('ArrowLeft') || justPressed('KeyA') || justTouched('left')) {
+        if (frog.col > 0) { frog.col--; frog.dir = 3; moved = true; }
+      } else if (justPressed('ArrowRight') || justPressed('KeyD') || justTouched('right')) {
+        if (frog.col < COLS - 1) { frog.col++; frog.dir = 1; moved = true; }
+      }
+
+      if (moved) {
+        hopCooldown = HOP_COOLDOWN;
+        frog.hopAnim = 0.2;
+        frog.riding = null;
+        TAS.audio.playTone(440, 0.06, 'square', 0.06, 520);
+        // Forward movement score
+        if (frog.dir === 0) addScore(10);
+      }
+    }
+
+    // Animate hop
+    if (frog.hopAnim > 0) {
+      frog.hopAnim -= dt;
+      var t = 1 - (frog.hopAnim / 0.2);
+      frog.x = TAS.math.lerp(frog.x, cellX(frog.col), Math.min(1, t * 3));
+      frog.y = TAS.math.lerp(frog.y, cellY(frog.row), Math.min(1, t * 3));
+    } else {
+      frog.x = cellX(frog.col);
+      frog.y = cellY(frog.row);
+    }
+
+    // Update lane objects
+    for (var i = 0; i < lanes.length; i++) {
+      var lane = lanes[i];
+      if (!lane.objects || lane.type === 'home' || lane.type === 'median' || lane.type === 'safe') continue;
+
+      for (var j = 0; j < lane.objects.length; j++) {
+        var obj = lane.objects[j];
+        obj.x += lane.dir * lane.speed * dt * 60;
+
+        // Wrap around
+        if (lane.dir > 0 && obj.x > GW + 20) {
+          obj.x = -obj.w - 10;
+        } else if (lane.dir < 0 && obj.x + obj.w < -20) {
+          obj.x = GW + 10;
+        }
+
+        // Turtle submerge logic
+        if (lane.type === 'turtle' && obj.submerge) {
+          obj.submergeTimer -= dt;
+          if (obj.submergeTimer <= 0) {
+            obj.submerged = !obj.submerged;
+            obj.submergeTimer = obj.submerged ? obj.submergeDuration : (3 + Math.random() * 3);
+          }
+        }
+      }
+    }
+
+    // Check collisions with frog
+    var frogX = frog.x + 2;
+    var frogY = frog.y + 2;
+    var frogW = CELL_W - 4;
+    var frogH = CELL_H - 4;
+
+    // Home row check (row 0)
+    if (frog.row === 0) {
+      var landedHome = false;
+      for (var i = 0; i < homes.length; i++) {
+        var h = homes[i];
+        var hx = cellX(h.col) - CELL_W * 0.3;
+        var hw = CELL_W * 1.6;
+        if (frog.x + CELL_W / 2 > hx && frog.x + CELL_W / 2 < hx + hw) {
+          if (h.filled) {
+            killFrog('filled');
+          } else if (h.bonusType === 'gator') {
+            killFrog('gator');
+            h.bonusType = null;
+          } else {
+            h.filled = true;
+            landedHome = true;
+            var pts = 50 + Math.floor(timeLeft) * 10;
+            if (h.hasBonus && h.bonusType === 'fly') {
+              pts += 200;
+              h.hasBonus = false;
+            }
+            addScore(pts);
+            TAS.audio.playMelody([[392, 0.08], [523, 0.08], [659, 0.12]], 80);
+            TAS.particles.spawn(cellX(h.col) + CELL_W / 2, cellY(0) + CELL_H / 2, '#44ff88', 12, 2);
+
+            // Check if all homes filled
+            var allFilled = homes.every(function(h) { return h.filled; });
+            if (allFilled) {
+              addScore(1000);
+              TAS.audio.playMelody([[523, 0.1], [659, 0.1], [784, 0.1], [1047, 0.2]], 100);
+              TAS.fx.flash('#44ff88', 0.3);
+              state = 'levelComplete';
+              levelCompleteTimer = LEVEL_COMPLETE_DURATION;
+            } else {
+              resetFrog();
+            }
+          }
+          break;
+        }
+      }
+      if (!landedHome && !frog.dead) {
+        killFrog('wall');
+      }
+    }
+
+    // Water lanes (rows 1-5): must be on a platform
+    if (frog.row >= 1 && frog.row <= 5 && !frog.dead) {
+      var lane = lanes[frog.row];
+      var onPlatform = false;
+
+      for (var j = 0; j < lane.objects.length; j++) {
+        var obj = lane.objects[j];
+        // Skip submerged turtles
+        if (lane.type === 'turtle' && obj.submerged) continue;
+
+        if (TAS.hit.rectOverlap(frogX, frogY, frogW, frogH, obj.x, cellY(lane.row), obj.w, obj.h)) {
+          onPlatform = true;
+          // Ride the platform
+          frog.x += lane.dir * lane.speed * dt * 60;
+          frog.col = Math.round(frog.x / CELL_W);
+          frog.col = TAS.math.clamp(frog.col, 0, COLS - 1);
+
+          // Snake on log kills
+          if (lane.type === 'log' && obj.hasSnake) {
+            var snakeX = obj.x + obj.snakePos * (obj.w - CELL_W * 0.5);
+            if (Math.abs(frog.x + CELL_W / 2 - snakeX - CELL_W * 0.25) < CELL_W * 0.5) {
+              killFrog('snake');
+            }
+          }
+          break;
+        }
+      }
+
+      // Drifted off screen
+      if (frog.x < -CELL_W || frog.x > GW) {
+        killFrog('offscreen');
+      }
+
+      if (!onPlatform && !frog.dead) {
+        killFrog('water');
+        TAS.audio.playNoise(0.2, 0.08, 400);
+        TAS.particles.spawn(frog.x + CELL_W / 2, frog.y + CELL_H / 2, '#4488cc', 10, 2);
+      }
+    }
+
+    // Road lanes (rows 7-11): vehicles kill
+    if (frog.row >= 7 && frog.row <= 11 && !frog.dead) {
+      var lane = lanes[frog.row];
+      for (var j = 0; j < lane.objects.length; j++) {
+        var obj = lane.objects[j];
+        if (TAS.hit.rectOverlap(frogX, frogY, frogW, frogH, obj.x, cellY(lane.row) + 2, obj.w, obj.h)) {
+          killFrog('vehicle');
+          break;
+        }
+      }
+    }
+
+    // Bonus items
+    spawnBonus();
+    for (var i = bonusItems.length - 1; i >= 0; i--) {
+      var b = bonusItems[i];
+      b.timer -= dt;
+
+      if (b.type === 'fly') {
+        // Fly sits on a water object
+        var lane = lanes[b.laneIdx];
+        if (lane && lane.objects[b.objIdx]) {
+          var obj = lane.objects[b.objIdx];
+          var fx = obj.x + b.relX;
+          var fy = cellY(lane.row) + 2;
+          if (TAS.hit.rectOverlap(frogX, frogY, frogW, frogH, fx, fy, CELL_W * 0.5, CELL_H * 0.5)) {
+            addScore(b.points);
+            TAS.audio.playTone(880, 0.08, 'square', 0.06);
+            TAS.particles.spawn(fx + 6, fy + 6, '#ffdd44', 6, 2);
+            bonusItems.splice(i, 1);
+            continue;
+          }
+        }
+      } else if (b.type === 'companion') {
+        if (!b.carried && TAS.hit.rectOverlap(frogX, frogY, frogW, frogH, b.x, b.y, CELL_W, CELL_H)) {
+          b.carried = true;
+          TAS.audio.playTone(660, 0.1, 'sine', 0.08);
+        }
+        if (b.carried) {
+          b.x = frog.x + 4;
+          b.y = frog.y - 2;
+        }
+      }
+
+      if (b.timer <= 0) {
+        bonusItems.splice(i, 1);
+      }
+    }
+
+    // Companion baseling: double points when reaching home
+    // (handled in home landing logic via score multiplier if companion is carried)
+  }
+
+  saveInputState();
+}
+
+// === DRAWING ===
+
+function drawBaseling(x, y, w, h, dir, hopAnim, isCompanion) {
+  // Cute baseling (mushroom frog creature)
+  var cx = x + w / 2;
+  var cy = y + h / 2;
+  var s = Math.min(w, h) * 0.45;
+  var hop = hopAnim > 0 ? Math.sin(hopAnim * Math.PI / 0.2) * 3 : 0;
+
+  ctx.save();
+  ctx.translate(cx, cy - hop);
+
+  // Body
+  ctx.fillStyle = isCompanion ? '#ff88cc' : '#44cc66';
+  ctx.beginPath();
+  ctx.ellipse(0, 1, s * 0.8, s * 0.65, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Mushroom cap
+  ctx.fillStyle = isCompanion ? '#ff4488' : '#cc3333';
+  ctx.beginPath();
+  ctx.ellipse(0, -s * 0.3, s * 0.9, s * 0.5, 0, Math.PI, 0);
+  ctx.fill();
+
+  // Spots on cap
+  ctx.fillStyle = '#ffeecc';
+  ctx.beginPath();
+  ctx.arc(-s * 0.3, -s * 0.45, s * 0.15, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.arc(s * 0.25, -s * 0.5, s * 0.12, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Eyes (direction-aware)
+  var eyeOffX = 0;
+  var eyeOffY = 0;
+  if (dir === 1) eyeOffX = 1;
+  else if (dir === 3) eyeOffX = -1;
+  else if (dir === 2) eyeOffY = 1;
+  else eyeOffY = -0.5;
+
+  ctx.fillStyle = '#fff';
+  ctx.beginPath();
+  ctx.arc(-s * 0.3, -s * 0.05, s * 0.2, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.arc(s * 0.3, -s * 0.05, s * 0.2, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.fillStyle = '#111';
+  ctx.beginPath();
+  ctx.arc(-s * 0.3 + eyeOffX * 1.5, -s * 0.05 + eyeOffY * 1, s * 0.1, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.arc(s * 0.3 + eyeOffX * 1.5, -s * 0.05 + eyeOffY * 1, s * 0.1, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Legs
+  ctx.fillStyle = isCompanion ? '#cc6699' : '#2a9944';
+  if (hopAnim > 0) {
+    // Legs stretched during hop
+    ctx.fillRect(-s * 0.6, s * 0.3, s * 0.3, s * 0.4);
+    ctx.fillRect(s * 0.3, s * 0.3, s * 0.3, s * 0.4);
+  } else {
+    // Legs tucked
+    ctx.fillRect(-s * 0.55, s * 0.35, s * 0.35, s * 0.25);
+    ctx.fillRect(s * 0.2, s * 0.35, s * 0.35, s * 0.25);
+  }
+
+  ctx.restore();
+}
+
+function drawLog(x, y, w, h, hasSnake, snakePos) {
+  // Brown log
+  ctx.fillStyle = '#6b4226';
+  ctx.fillRect(x, y + 2, w, h - 4);
+  // Bark texture lines
+  ctx.strokeStyle = '#553318';
+  ctx.lineWidth = 1;
+  for (var i = 0; i < w; i += 12) {
+    ctx.beginPath();
+    ctx.moveTo(x + i, y + 3);
+    ctx.lineTo(x + i, y + h - 3);
+    ctx.stroke();
+  }
+  // Log ends
+  ctx.fillStyle = '#8b5a2b';
+  ctx.beginPath();
+  ctx.ellipse(x, y + h / 2, 4, h / 2 - 2, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.ellipse(x + w, y + h / 2, 4, h / 2 - 2, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Snake on log
+  if (hasSnake) {
+    var sx = x + snakePos * (w - CELL_W * 0.5);
+    var sy = y + 3;
+    ctx.fillStyle = '#44bb44';
+    ctx.beginPath();
+    ctx.moveTo(sx, sy + h / 2);
+    for (var i = 0; i < 12; i++) {
+      ctx.lineTo(sx + i * 2, sy + h / 2 + Math.sin(i + frame * 0.15) * 3);
+    }
+    ctx.lineTo(sx + 24, sy + h / 2);
+    ctx.stroke();
+    // Snake head
+    ctx.fillStyle = '#228822';
+    ctx.beginPath();
+    ctx.arc(sx + 24, sy + h / 2, 3, 0, Math.PI * 2);
+    ctx.fill();
+    // Snake tongue
+    ctx.strokeStyle = '#ff3333';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(sx + 27, sy + h / 2);
+    ctx.lineTo(sx + 30, sy + h / 2 - 2);
+    ctx.moveTo(sx + 27, sy + h / 2);
+    ctx.lineTo(sx + 30, sy + h / 2 + 2);
+    ctx.stroke();
+  }
+}
+
+function drawTurtle(x, y, w, h, submerged) {
+  var count = Math.floor(w / CELL_W);
+  for (var i = 0; i < count; i++) {
+    var tx = x + i * CELL_W + CELL_W / 2;
+    var ty = y + h / 2;
+    var r = Math.min(CELL_W, h) * 0.38;
+
+    if (submerged) {
+      // Just ripples
+      ctx.strokeStyle = 'rgba(100, 180, 220, 0.5)';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.ellipse(tx, ty, r, r * 0.3, 0, 0, Math.PI * 2);
+      ctx.stroke();
+    } else {
+      // Shell
+      ctx.fillStyle = '#557744';
+      ctx.beginPath();
+      ctx.ellipse(tx, ty, r, r * 0.75, 0, 0, Math.PI * 2);
+      ctx.fill();
+      // Shell pattern
+      ctx.strokeStyle = '#446633';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(tx - r * 0.3, ty - r * 0.2);
+      ctx.lineTo(tx + r * 0.3, ty + r * 0.2);
+      ctx.moveTo(tx + r * 0.3, ty - r * 0.2);
+      ctx.lineTo(tx - r * 0.3, ty + r * 0.2);
+      ctx.stroke();
+      // Head
+      ctx.fillStyle = '#66884a';
+      ctx.beginPath();
+      ctx.arc(tx + r * 0.7, ty, r * 0.3, 0, Math.PI * 2);
+      ctx.fill();
+      // Eye
+      ctx.fillStyle = '#111';
+      ctx.beginPath();
+      ctx.arc(tx + r * 0.85, ty - 1, 1, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+}
+
+function drawLilyPad(x, y, w, h) {
+  var cx = x + w / 2;
+  var cy = y + h / 2;
+  var r = Math.min(w, h) * 0.42;
+  ctx.fillStyle = '#338844';
+  ctx.beginPath();
+  ctx.moveTo(cx, cy);
+  ctx.arc(cx, cy, r, 0.2, Math.PI * 2 - 0.2);
+  ctx.closePath();
+  ctx.fill();
+  // Vein
+  ctx.strokeStyle = '#226633';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(cx, cy);
+  ctx.lineTo(cx + r * 0.7, cy - r * 0.3);
+  ctx.moveTo(cx, cy);
+  ctx.lineTo(cx + r * 0.5, cy + r * 0.5);
+  ctx.moveTo(cx, cy);
+  ctx.lineTo(cx - r * 0.6, cy);
+  ctx.stroke();
+}
+
+function drawVehicle(x, y, w, h, vtype, dir) {
+  if (vtype === 'cart') {
+    // Wooden cart
+    ctx.fillStyle = '#8b6914';
+    ctx.fillRect(x + 2, y + 2, w - 4, h - 2);
+    // Wheels
+    ctx.fillStyle = '#444';
+    ctx.beginPath();
+    ctx.arc(x + 8, y + h, 4, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.beginPath();
+    ctx.arc(x + w - 8, y + h, 4, 0, Math.PI * 2);
+    ctx.fill();
+    // Cargo
+    ctx.fillStyle = '#aa8822';
+    ctx.fillRect(x + 6, y + 3, w - 12, h * 0.4);
+  } else if (vtype === 'truck') {
+    // Mushroom delivery truck
+    ctx.fillStyle = '#884422';
+    ctx.fillRect(x + 2, y + 2, w - 4, h - 2);
+    // Cab
+    var cabX = dir > 0 ? x + w - w * 0.3 : x + 2;
+    ctx.fillStyle = '#aa5533';
+    ctx.fillRect(cabX, y + 1, w * 0.28, h);
+    // Window
+    ctx.fillStyle = '#88ccff';
+    ctx.fillRect(cabX + 3, y + 3, w * 0.2, h * 0.4);
+    // Mushroom logo on side
+    ctx.fillStyle = '#cc3333';
+    var logoX = x + w * 0.35;
+    ctx.beginPath();
+    ctx.arc(logoX, y + h * 0.4, 5, Math.PI, 0);
+    ctx.fill();
+    ctx.fillStyle = '#ddd';
+    ctx.fillRect(logoX - 2, y + h * 0.4, 4, 5);
+    // Wheels
+    ctx.fillStyle = '#333';
+    ctx.beginPath();
+    ctx.arc(x + 10, y + h + 1, 4, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.beginPath();
+    ctx.arc(x + w - 10, y + h + 1, 4, 0, Math.PI * 2);
+    ctx.fill();
+  } else if (vtype === 'racer') {
+    // Fast racer
+    ctx.fillStyle = '#cc2244';
+    ctx.beginPath();
+    var rx = x, ry = y + 2, rw = w, rh = h - 2;
+    ctx.moveTo(rx + (dir > 0 ? 0 : rw * 0.15), ry + rh / 2);
+    ctx.lineTo(rx + (dir > 0 ? rw * 0.15 : 0), ry);
+    ctx.lineTo(rx + (dir > 0 ? rw : rw * 0.85), ry);
+    ctx.lineTo(rx + (dir > 0 ? rw : rw * 0.85), ry + rh);
+    ctx.lineTo(rx + (dir > 0 ? rw * 0.15 : 0), ry + rh);
+    ctx.closePath();
+    ctx.fill();
+    // Windshield
+    ctx.fillStyle = '#88ccee';
+    var wsx = dir > 0 ? rx + rw * 0.55 : rx + rw * 0.2;
+    ctx.fillRect(wsx, ry + 2, rw * 0.2, rh - 4);
+    // Speed lines
+    ctx.strokeStyle = 'rgba(255,255,255,0.3)';
+    ctx.lineWidth = 1;
+    var trailX = dir > 0 ? rx - 5 : rx + rw + 5;
+    for (var i = 0; i < 3; i++) {
+      ctx.beginPath();
+      ctx.moveTo(trailX - dir * i * 6, ry + 3 + i * (rh / 3));
+      ctx.lineTo(trailX - dir * (i * 6 + 10), ry + 3 + i * (rh / 3));
+      ctx.stroke();
+    }
+  }
+}
+
+function drawFly(x, y) {
+  var bob = Math.sin(frame * 0.2) * 2;
+  ctx.fillStyle = '#ffdd44';
+  ctx.beginPath();
+  ctx.arc(x + 6, y + 6 + bob, 4, 0, Math.PI * 2);
+  ctx.fill();
+  // Wings
+  ctx.fillStyle = 'rgba(255,255,200,0.6)';
+  ctx.beginPath();
+  ctx.ellipse(x + 2, y + 3 + bob, 3, 5, -0.3, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.ellipse(x + 10, y + 3 + bob, 3, 5, 0.3, 0, Math.PI * 2);
+  ctx.fill();
+}
+
+function drawGator(x, y, w, h) {
+  // Gator head in home slot
+  ctx.fillStyle = '#3a6630';
+  ctx.beginPath();
+  ctx.ellipse(x + w / 2, y + h / 2, w * 0.35, h * 0.4, 0, 0, Math.PI * 2);
+  ctx.fill();
+  // Eyes
+  ctx.fillStyle = '#ccaa00';
+  ctx.beginPath();
+  ctx.arc(x + w * 0.35, y + h * 0.3, 3, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.arc(x + w * 0.65, y + h * 0.3, 3, 0, Math.PI * 2);
+  ctx.fill();
+  // Pupils
+  ctx.fillStyle = '#111';
+  ctx.beginPath();
+  ctx.arc(x + w * 0.35, y + h * 0.3, 1.5, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.arc(x + w * 0.65, y + h * 0.3, 1.5, 0, Math.PI * 2);
+  ctx.fill();
+  // Jaws
+  ctx.fillStyle = '#2a5520';
+  ctx.fillRect(x + w * 0.2, y + h * 0.55, w * 0.6, h * 0.15);
+  // Teeth
+  ctx.fillStyle = '#eee';
+  for (var i = 0; i < 4; i++) {
+    ctx.fillRect(x + w * 0.25 + i * w * 0.14, y + h * 0.52, 3, 4);
+  }
+}
+
+function drawWaterBG(row) {
+  var y = cellY(row);
+  ctx.fillStyle = COL_WATER;
+  ctx.fillRect(0, y, GW, CELL_H);
+  // Ripple effect
+  ctx.strokeStyle = COL_WATER_DARK;
+  ctx.lineWidth = 1;
+  for (var rx = 0; rx < GW; rx += 20) {
+    var ry = y + CELL_H / 2 + Math.sin((rx + frame * 1.5) * 0.08) * 2;
+    ctx.beginPath();
+    ctx.moveTo(rx, ry);
+    ctx.quadraticCurveTo(rx + 10, ry + 2, rx + 20, ry);
+    ctx.stroke();
+  }
+}
+
+function draw(dt) {
+  // Background
+  ctx.fillStyle = '#111';
+  ctx.fillRect(0, 0, GW, GH);
+
+  if (state === 'title') {
+    drawTitleScreen();
+    return;
+  }
+
+  if (state === 'gameOver') {
+    drawGameWorld();
+    TAS.ui.drawGameOver(score, highScore, GW, GH, { frame: frame, extra: 'Level: ' + level });
+    return;
+  }
+
+  if (state === 'levelComplete') {
+    drawGameWorld();
+    // Level complete overlay
+    ctx.fillStyle = 'rgba(0,0,0,0.5)';
+    ctx.fillRect(0, 0, GW, GH);
+    ctx.textAlign = 'center';
+    var pulse = Math.sin(frame * 0.08) * 0.3 + 0.7;
+    ctx.globalAlpha = pulse;
+    ctx.fillStyle = '#44ff88';
+    ctx.font = 'bold 24px monospace';
+    ctx.fillText('LEVEL ' + level + ' COMPLETE!', GW / 2, GH * 0.4);
+    ctx.fillStyle = '#ffdd44';
+    ctx.font = 'bold 16px monospace';
+    ctx.fillText('+1000 BONUS', GW / 2, GH * 0.55);
+    ctx.globalAlpha = 1;
+    return;
+  }
+
+  drawGameWorld();
+}
+
+function drawTitleScreen() {
+  // Swampy background
+  ctx.fillStyle = COL_WATER_DARK;
+  ctx.fillRect(0, 0, GW, GH);
+
+  // Animated water
+  for (var wy = 0; wy < GH; wy += 30) {
+    ctx.strokeStyle = 'rgba(40, 100, 140, 0.3)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    for (var wx = 0; wx < GW; wx += 5) {
+      var wvy = wy + Math.sin((wx + frame * 2) * 0.04) * 4;
+      if (wx === 0) ctx.moveTo(wx, wvy);
+      else ctx.lineTo(wx, wvy);
+    }
+    ctx.stroke();
+  }
+
+  // Lily pads decoration
+  for (var i = 0; i < 6; i++) {
+    var lx = 40 + i * 80 + Math.sin(frame * 0.02 + i) * 5;
+    var ly = GH * 0.65 + Math.cos(frame * 0.015 + i * 2) * 8;
+    drawLilyPad(lx, ly, 28, 20);
+  }
+
+  // Baseling on title
+  drawBaseling(GW / 2 - 16, GH * 0.42, 32, 28, 0, Math.sin(frame * 0.05) > 0.8 ? 0.1 : 0, false);
+
+  // Title text
+  TAS.ui.drawTitle('SWAMP HOP', 'A Tasern Tale', GW, GH, { frame: frame, titleColor: '#44dd88' });
+
+  // Instructions
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#88aacc';
+  ctx.font = '10px monospace';
+  ctx.fillText('Arrow keys or D-pad to hop. Cross the swamp!', GW / 2, GH * 0.78);
+}
+
+function drawGameWorld() {
+  ctx.save();
+  TAS.fx.applyShake();
+
+  // === Draw lane backgrounds ===
+
+  // Row 0: Home row
+  ctx.fillStyle = COL_HOME_BG;
+  ctx.fillRect(0, cellY(0), GW, CELL_H);
+
+  // Home slots
+  for (var i = 0; i < homes.length; i++) {
+    var h = homes[i];
+    var hx = cellX(h.col) - CELL_W * 0.3;
+    var hy = cellY(0);
+    var hw = CELL_W * 1.6;
+
+    if (h.filled) {
+      // Filled: show little baseling
+      ctx.fillStyle = COL_HOME_PAD;
+      ctx.fillRect(hx + 4, hy + 2, hw - 8, CELL_H - 4);
+      drawBaseling(hx + hw / 2 - 10, hy + 1, 20, CELL_H - 2, 0, 0, false);
+    } else {
+      // Open slot
+      ctx.fillStyle = COL_HOME_PAD;
+      ctx.fillRect(hx + 4, hy + 2, hw - 8, CELL_H - 4);
+
+      if (h.bonusType === 'fly' && h.hasBonus) {
+        drawFly(hx + hw / 2 - 6, hy + 2);
+      }
+      if (h.bonusType === 'gator') {
+        drawGator(hx + 4, hy + 2, hw - 8, CELL_H - 4);
+      }
+    }
+
+    // Dividers between homes
+    ctx.fillStyle = COL_HOME_BG;
+    if (i < homes.length - 1) {
+      var nextH = homes[i + 1];
+      var divX = hx + hw;
+      var divW = cellX(nextH.col) - CELL_W * 0.3 - divX;
+      if (divW > 0) ctx.fillRect(divX, hy, divW, CELL_H);
+    }
+  }
+
+  // Rows 1-5: water
+  for (var r = 1; r <= 5; r++) {
+    drawWaterBG(r);
+  }
+
+  // Row 6: median (safe grass)
+  ctx.fillStyle = COL_MEDIAN;
+  ctx.fillRect(0, cellY(6), GW, CELL_H);
+  // Grass tufts
+  ctx.fillStyle = '#5a9a3a';
+  for (var gx = 0; gx < GW; gx += 18) {
+    ctx.beginPath();
+    ctx.moveTo(gx, cellY(6) + CELL_H);
+    ctx.lineTo(gx + 3, cellY(6) + CELL_H - 6);
+    ctx.lineTo(gx + 6, cellY(6) + CELL_H);
+    ctx.fill();
+  }
+
+  // Rows 7-11: road
+  for (var r = 7; r <= 11; r++) {
+    ctx.fillStyle = COL_ROAD;
+    ctx.fillRect(0, cellY(r), GW, CELL_H);
+    // Road markings
+    ctx.strokeStyle = COL_ROAD_LINE;
+    ctx.lineWidth = 1;
+    ctx.setLineDash([8, 8]);
+    ctx.beginPath();
+    ctx.moveTo(0, cellY(r) + CELL_H);
+    ctx.lineTo(GW, cellY(r) + CELL_H);
+    ctx.stroke();
+    ctx.setLineDash([]);
+  }
+
+  // Row 12: safe grass
+  ctx.fillStyle = COL_SAFE;
+  ctx.fillRect(0, cellY(12), GW, CELL_H);
+  // Grass detail
+  ctx.fillStyle = '#4a8a2a';
+  for (var gx = 5; gx < GW; gx += 14) {
+    ctx.beginPath();
+    ctx.moveTo(gx, cellY(12) + CELL_H);
+    ctx.lineTo(gx + 2, cellY(12) + CELL_H - 5);
+    ctx.lineTo(gx + 4, cellY(12) + CELL_H);
+    ctx.fill();
+  }
+
+  // === Draw lane objects ===
+  for (var i = 0; i < lanes.length; i++) {
+    var lane = lanes[i];
+    if (!lane.objects) continue;
+
+    for (var j = 0; j < lane.objects.length; j++) {
+      var obj = lane.objects[j];
+      var oy = cellY(lane.row);
+
+      if (lane.type === 'log') {
+        drawLog(obj.x, oy, obj.w, obj.h, obj.hasSnake, obj.snakePos);
+      } else if (lane.type === 'turtle') {
+        drawTurtle(obj.x, oy + 1, obj.w, obj.h, obj.submerged);
+      } else if (lane.type === 'lily') {
+        drawLilyPad(obj.x, oy + 1, obj.w, obj.h);
+      } else if (lane.type === 'road') {
+        drawVehicle(obj.x, oy, obj.w, obj.h, obj.vtype, lane.dir);
+      }
+    }
+  }
+
+  // === Draw bonus items ===
+  for (var i = 0; i < bonusItems.length; i++) {
+    var b = bonusItems[i];
+    if (b.type === 'fly') {
+      var lane = lanes[b.laneIdx];
+      if (lane && lane.objects[b.objIdx]) {
+        var obj = lane.objects[b.objIdx];
+        drawFly(obj.x + b.relX, cellY(lane.row) + 2);
+      }
+    } else if (b.type === 'companion' && !b.carried) {
+      drawBaseling(b.x, b.y, CELL_W, CELL_H, 0, 0, true);
+    }
+  }
+
+  // === Draw frog ===
+  if (!frog.dead) {
+    // Companion if carried
+    var hasCompanion = bonusItems.some(function(b) { return b.type === 'companion' && b.carried; });
+    if (hasCompanion) {
+      drawBaseling(frog.x + 4, frog.y - 4, CELL_W * 0.7, CELL_H * 0.7, frog.dir, 0, true);
+    }
+    drawBaseling(frog.x, frog.y, CELL_W, CELL_H, frog.dir, frog.hopAnim, false);
+  } else {
+    // Death animation: red X
+    var dx = frog.x + CELL_W / 2;
+    var dy = frog.y + CELL_H / 2;
+    ctx.strokeStyle = '#ff4444';
+    ctx.lineWidth = 3;
+    ctx.globalAlpha = Math.max(0, deathTimer / DEATH_DURATION);
+    ctx.beginPath();
+    ctx.moveTo(dx - 8, dy - 8);
+    ctx.lineTo(dx + 8, dy + 8);
+    ctx.moveTo(dx + 8, dy - 8);
+    ctx.lineTo(dx - 8, dy + 8);
+    ctx.stroke();
+    ctx.globalAlpha = 1;
+  }
+
+  TAS.particles.draw();
+  ctx.restore();
+
+  TAS.fx.drawFlash(GW, GH);
+
+  // === HUD ===
+  TAS.ui.drawHUD(score, level, lives, GW, { lifeColor: '#44cc66' });
+
+  // Timer bar at bottom
+  var timerBarY = GH - 6;
+  var timerBarW = GW - 20;
+  var timerPct = Math.max(0, timeLeft / TIME_PER_LIFE);
+  ctx.fillStyle = 'rgba(0,0,0,0.5)';
+  ctx.fillRect(10, timerBarY - 1, timerBarW, 5);
+  var timerColor = timerPct > 0.3 ? '#44cc66' : (timerPct > 0.15 ? '#ccaa22' : '#cc3322');
+  ctx.fillStyle = timerColor;
+  ctx.fillRect(10, timerBarY - 1, timerBarW * timerPct, 5);
+
+  // Timer warning flash
+  if (timeLeft < 5 && Math.floor(frame / 15) % 2 === 0) {
+    ctx.fillStyle = '#ff4444';
+    ctx.font = 'bold 10px monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText('TIME!', GW / 2, timerBarY - 5);
+  }
+
+  TAS.input.drawTouchControls(GW, GH);
+}
+
+// === START ===
+TAS.loop.start(update, draw);
+
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,1811 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Chain Reaction</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body { width: 100%; height: 100%; overflow: hidden; background: #111; touch-action: none; }
+canvas { display: block; margin: 0 auto; }
+#back-link {
+  position: fixed; bottom: 8px; left: 50%; transform: translateX(-50%);
+  color: #666; font-family: monospace; font-size: 12px; text-decoration: none; z-index: 10;
+}
+#back-link:hover { color: #aaa; }
+</style>
+</head>
+<body>
+<canvas id="gc"></canvas>
+<a id="back-link" href="/games">Back to Arcade</a>
+<script src="nft-loader.js"></script>
+<script>if(window.NftLoader)NftLoader.gate();</script>
+<script src="tasern-engine.js"></script>
+<script>
+(function() {
+"use strict";
+
+// === GAME CONSTANTS ===
+const GW = 480, GH = 320;
+const ctx = TAS.ctx;
+const { lerp, clamp, randRange, randInt, dist } = TAS.math;
+
+TAS.initCanvas(GW, GH);
+TAS.input.initTouch({ buttons: ['a', 'b'], labels: { a: 'GRAPPLE', b: 'SHOOT' } });
+
+// === CONSTANTS ===
+const GRAVITY = 980;
+const PLAYER_SPEED = 120;
+const GRAPPLE_SPEED = 600;
+const GRAPPLE_MAX_LEN = 180;
+const SWING_FORCE = 400;
+const BULLET_SPEED = 320;
+const TENDRIL_SEG = 8;
+
+// === STAGE DATA ===
+const STAGES = [
+  { name: 'Forest Outpost', bg: '#1a2e1a', ground: '#3d5c2e', accent: '#6b8f4e', enemies: 4, boss: 'mech_light' },
+  { name: 'Mountain Base', bg: '#2a2a3a', ground: '#5a5a6a', accent: '#8899aa', enemies: 5, boss: 'turret_boss' },
+  { name: 'Underground Lab', bg: '#1a1a2a', ground: '#3a3a5a', accent: '#6a6aff', enemies: 6, boss: 'drone_swarm' },
+  { name: 'Sky Platform', bg: '#1a2a3a', ground: '#4a6a8a', accent: '#88ccee', enemies: 5, boss: 'sky_carrier' },
+  { name: 'River Factory', bg: '#1a2a1a', ground: '#4a5a3a', accent: '#7a9a5a', enemies: 6, boss: 'crane_mech' },
+  { name: 'Comm Tower', bg: '#2a1a2a', ground: '#5a3a5a', accent: '#aa66cc', enemies: 7, boss: 'signal_jammer' },
+  { name: 'Armored Train', bg: '#2a2020', ground: '#5a4040', accent: '#aa6644', enemies: 8, boss: 'train_cannon' },
+  { name: 'Final Fortress', bg: '#1a1010', ground: '#3a2020', accent: '#cc3333', enemies: 10, boss: 'commander' }
+];
+
+// === GAME STATE ===
+let state = 'title';
+let frame = 0;
+let score = 0;
+let highScore = TAS.score.load('chain_reaction_hi');
+let lives = 3;
+let health = 6;
+let currentStage = -1;
+let stagesCleared = [];
+let intelCollected = [];
+let weapon = 'normal';
+let weaponAmmo = -1;
+let camera = { x: 0, y: 0 };
+
+// Player
+let player = null;
+// Grapple
+let grapple = null;
+// Level geometry
+let platforms = [];
+let grapplePoints = [];
+let enemies = [];
+let bullets = [];
+let playerBullets = [];
+let pickups = [];
+let explosions = [];
+let boss = null;
+let commRoom = null;
+let levelWidth = 0;
+let levelHeight = 0;
+let exitDoor = null;
+let stageComplete = false;
+let stageCompleteTimer = 0;
+let deathTimer = 0;
+let bossDefeated = false;
+let damageFlash = 0;
+let invincible = 0;
+
+// === SAVE/LOAD ===
+function saveGame() {
+  try {
+    localStorage.setItem('chain_reaction_save', JSON.stringify({
+      stagesCleared, intelCollected, highScore, weapon
+    }));
+  } catch(e) { console.error('Save failed:', e); }
+}
+
+function loadGame() {
+  try {
+    const d = JSON.parse(localStorage.getItem('chain_reaction_save') || '{}');
+    stagesCleared = d.stagesCleared || [];
+    intelCollected = d.intelCollected || [];
+    highScore = d.highScore || 0;
+  } catch(e) { console.error('Load failed:', e); }
+}
+loadGame();
+
+// === PLAYER ===
+function createPlayer(x, y) {
+  return {
+    x, y, vx: 0, vy: 0,
+    w: 14, h: 24, facing: 1,
+    grounded: false, crouching: false,
+    animFrame: 0, animTimer: 0,
+    shootCooldown: 0
+  };
+}
+
+// === GRAPPLE ===
+function createGrapple(x, y, angle) {
+  return {
+    x, y, tipX: x, tipY: y,
+    angle, attached: false,
+    attachX: 0, attachY: 0,
+    length: 0, maxLength: GRAPPLE_MAX_LEN,
+    ropeLen: 0, swingAngle: 0, swingVel: 0,
+    retracting: false, extending: true,
+    segments: [], timer: 0
+  };
+}
+
+// === LEVEL GENERATION ===
+function generateLevel(stageIdx) {
+  platforms = [];
+  grapplePoints = [];
+  enemies = [];
+  bullets = [];
+  playerBullets = [];
+  pickups = [];
+  explosions = [];
+  boss = null;
+  commRoom = null;
+  exitDoor = null;
+  stageComplete = false;
+  stageCompleteTimer = 0;
+  bossDefeated = false;
+
+  const stage = STAGES[stageIdx];
+  levelWidth = 2400 + stageIdx * 200;
+  levelHeight = GH;
+
+  // Ground
+  platforms.push({ x: 0, y: levelHeight - 16, w: levelWidth, h: 16, type: 'ground' });
+
+  // Starting platform
+  platforms.push({ x: 0, y: levelHeight - 16, w: 120, h: 16, type: 'ground' });
+
+  // Generate platforms with vertical sections requiring grapple
+  const sections = 8 + stageIdx * 2;
+  const sectionW = levelWidth / sections;
+
+  for (let i = 1; i < sections; i++) {
+    const sx = i * sectionW;
+    const isVertical = i % 3 === 0;
+
+    if (isVertical) {
+      // Vertical section - gap in ground, platforms above
+      // Remove ground segment
+      platforms[0] = null; // We will rebuild ground with gaps
+
+      // Upper platforms
+      platforms.push({ x: sx - 30, y: levelHeight - 100, w: 60, h: 12, type: 'platform' });
+      platforms.push({ x: sx + 40, y: levelHeight - 160, w: 60, h: 12, type: 'platform' });
+      platforms.push({ x: sx - 20, y: levelHeight - 220, w: 50, h: 12, type: 'platform' });
+
+      // Grapple points for crossing gaps
+      grapplePoints.push({ x: sx + 20, y: levelHeight - 250, r: 6 });
+      grapplePoints.push({ x: sx + 80, y: levelHeight - 200, r: 6 });
+    } else {
+      // Normal section with varied platforms
+      const numPlats = randInt(2, 4);
+      for (let j = 0; j < numPlats; j++) {
+        const px = sx + randRange(-sectionW * 0.3, sectionW * 0.3);
+        const py = levelHeight - randRange(60, 240);
+        const pw = randRange(40, 80);
+        platforms.push({ x: px, y: py, w: pw, h: 12, type: 'platform' });
+      }
+      // Ceiling grapple surfaces
+      if (Math.random() > 0.4) {
+        platforms.push({ x: sx - 40, y: 30 + randRange(0, 40), w: randRange(60, 140), h: 12, type: 'ceiling' });
+      }
+      // Grapple points
+      if (Math.random() > 0.3) {
+        grapplePoints.push({ x: sx + randRange(-40, 40), y: randRange(30, 120), r: 6 });
+      }
+    }
+  }
+
+  // Rebuild ground with gaps
+  platforms = platforms.filter(p => p !== null);
+  // Add ground segments with gaps for pits
+  const groundSegs = [];
+  let gx = 0;
+  for (let i = 0; i < sections; i++) {
+    const sx = i * sectionW;
+    if (i % 3 === 0 && i > 0) {
+      // Gap
+      if (gx < sx - 60) {
+        groundSegs.push({ x: gx, y: levelHeight - 16, w: sx - 60 - gx, h: 16, type: 'ground' });
+      }
+      gx = sx + 60;
+    }
+  }
+  if (gx < levelWidth) {
+    groundSegs.push({ x: gx, y: levelHeight - 16, w: levelWidth - gx, h: 16, type: 'ground' });
+  }
+  // Remove original ground, add segmented
+  platforms = platforms.filter(p => p.type !== 'ground');
+  platforms.push(...groundSegs);
+
+  // Add walls on edges
+  platforms.push({ x: -20, y: 0, w: 20, h: levelHeight, type: 'wall' });
+  platforms.push({ x: levelWidth, y: 0, w: 20, h: levelHeight, type: 'wall' });
+
+  // Add high ceiling
+  platforms.push({ x: 0, y: -10, w: levelWidth, h: 10, type: 'ceiling' });
+
+  // Enemies
+  const numEnemies = stage.enemies;
+  for (let i = 0; i < numEnemies; i++) {
+    const ex = 200 + (levelWidth - 400) * (i / numEnemies) + randRange(-50, 50);
+    const groundY = getGroundY(ex);
+    const etype = Math.random() > 0.7 ? (Math.random() > 0.5 ? 'drone' : 'sniper') : 'soldier';
+    enemies.push(createEnemy(ex, etype === 'drone' ? groundY - 80 : groundY - 20, etype));
+  }
+
+  // Turrets on some platforms
+  for (const p of platforms) {
+    if (p.type === 'platform' && Math.random() > 0.8) {
+      enemies.push(createEnemy(p.x + p.w / 2, p.y - 14, 'turret'));
+    }
+  }
+
+  // Boss at end
+  boss = createBoss(levelWidth - 200, levelHeight - 80, stage.boss);
+
+  // Comm room (intel pickup)
+  if (!intelCollected.includes(stageIdx)) {
+    const cx = levelWidth * 0.6 + randRange(-100, 100);
+    commRoom = { x: cx, y: levelHeight - 60, w: 32, h: 44, collected: false };
+  }
+
+  // Exit door
+  exitDoor = { x: levelWidth - 60, y: levelHeight - 56, w: 24, h: 40 };
+
+  // Weapon pickups
+  const weapons = ['spread', 'rapid', 'rocket'];
+  for (let i = 0; i < 2; i++) {
+    const px = randRange(300, levelWidth - 400);
+    pickups.push({
+      x: px, y: getGroundY(px) - 30, w: 16, h: 16,
+      type: 'weapon', weapon: weapons[randInt(0, 2)], collected: false
+    });
+  }
+
+  // Health pickups
+  for (let i = 0; i < 3; i++) {
+    const px = randRange(200, levelWidth - 200);
+    pickups.push({
+      x: px, y: getGroundY(px) - 20, w: 12, h: 12,
+      type: 'health', collected: false
+    });
+  }
+
+  // Player start
+  player = createPlayer(60, levelHeight - 60);
+  grapple = null;
+  camera.x = 0;
+  camera.y = 0;
+}
+
+function getGroundY(x) {
+  for (const p of platforms) {
+    if (p.type === 'ground' && x >= p.x && x <= p.x + p.w) {
+      return p.y;
+    }
+  }
+  return levelHeight - 16;
+}
+
+// === ENEMIES ===
+function createEnemy(x, y, type) {
+  return {
+    x, y, w: type === 'drone' ? 18 : 16, h: type === 'drone' ? 14 : 22,
+    type, hp: type === 'sniper' ? 2 : (type === 'turret' ? 4 : (type === 'drone' ? 1 : 2)),
+    vx: type === 'soldier' ? (Math.random() > 0.5 ? 1 : -1) * 30 : 0,
+    vy: 0, facing: -1,
+    shootTimer: randRange(1, 3), patrolTimer: 0,
+    patrolDist: type === 'soldier' ? randRange(40, 100) : 0,
+    startX: x, alive: true, hitFlash: 0,
+    floatPhase: Math.random() * Math.PI * 2
+  };
+}
+
+function createBoss(x, y, type) {
+  const bossHP = { mech_light: 20, turret_boss: 25, drone_swarm: 18, sky_carrier: 30,
+    crane_mech: 28, signal_jammer: 22, train_cannon: 35, commander: 50 };
+  return {
+    x, y, w: 48, h: 56, type, hp: bossHP[type] || 20, maxHp: bossHP[type] || 20,
+    vx: 0, vy: 0, phase: 0, timer: 0, shootTimer: 2,
+    alive: true, hitFlash: 0, facing: -1, attackPattern: 0
+  };
+}
+
+// === CORE PHYSICS ===
+function updatePlayer(dt) {
+  if (!player) return;
+  const keys = TAS.input.keys;
+  const touch = TAS.input.touch;
+
+  const left = keys['ArrowLeft'] || keys['KeyA'] || touch.left;
+  const right = keys['ArrowRight'] || keys['KeyD'] || touch.right;
+  const up = keys['ArrowUp'] || keys['KeyW'] || touch.up;
+  const down = keys['ArrowDown'] || keys['KeyS'] || touch.down;
+  const grappleBtn = keys['KeyZ'] || keys['Space'] || touch.a;
+  const shootBtn = keys['KeyX'] || keys['KeyC'] || touch.b;
+
+  // Facing
+  if (left) player.facing = -1;
+  if (right) player.facing = 1;
+
+  // Crouch
+  player.crouching = down && player.grounded;
+
+  // Movement (only if not swinging)
+  if (!grapple || !grapple.attached) {
+    if (!player.crouching) {
+      if (left) player.vx = -PLAYER_SPEED;
+      else if (right) player.vx = PLAYER_SPEED;
+      else player.vx *= 0.85;
+    } else {
+      player.vx *= 0.9;
+    }
+
+    // Gravity
+    player.vy += GRAVITY * dt;
+  }
+
+  // Grapple input
+  if (grappleBtn && !grapple && !player.crouching) {
+    fireGrapple();
+  }
+  if (!grappleBtn && grapple && grapple.attached) {
+    releaseGrapple();
+  }
+
+  // Shoot
+  if (shootBtn && player.shootCooldown <= 0) {
+    fireWeapon();
+  }
+  player.shootCooldown -= dt;
+
+  // Apply velocity
+  player.x += player.vx * dt;
+  player.y += player.vy * dt;
+
+  // Collision with platforms
+  player.grounded = false;
+  for (const p of platforms) {
+    if (!p || p.type === 'ceiling') continue;
+    if (TAS.hit.rectOverlap(player.x - player.w / 2, player.y - player.h, player.w, player.h,
+        p.x, p.y, p.w, p.h)) {
+      // Resolve collision
+      const overlapBottom = (player.y) - p.y;
+      const overlapTop = (p.y + p.h) - (player.y - player.h);
+      const overlapLeft = (player.x + player.w / 2) - p.x;
+      const overlapRight = (p.x + p.w) - (player.x - player.w / 2);
+
+      const minOverlap = Math.min(overlapBottom, overlapTop, overlapLeft, overlapRight);
+
+      if (minOverlap === overlapBottom && player.vy > 0) {
+        player.y = p.y;
+        player.vy = 0;
+        player.grounded = true;
+      } else if (minOverlap === overlapTop && player.vy < 0) {
+        player.y = p.y + p.h + player.h;
+        player.vy = 0;
+      } else if (minOverlap === overlapLeft) {
+        player.x = p.x - player.w / 2;
+        player.vx = 0;
+      } else if (minOverlap === overlapRight) {
+        player.x = p.x + p.w + player.w / 2;
+        player.vx = 0;
+      }
+    }
+  }
+
+  // Pit death
+  if (player.y > levelHeight + 50) {
+    playerHit(6);
+  }
+
+  // Clamp to level bounds
+  player.x = clamp(player.x, player.w / 2, levelWidth - player.w / 2);
+
+  // Animation
+  player.animTimer += dt;
+  if (player.animTimer > 0.12) {
+    player.animTimer = 0;
+    player.animFrame = (player.animFrame + 1) % 4;
+  }
+
+  // Invincibility
+  if (invincible > 0) invincible -= dt;
+}
+
+// === GRAPPLE PHYSICS ===
+function fireGrapple() {
+  // Fire at 45 degrees upward in facing direction
+  const angle = player.facing > 0 ? -Math.PI / 4 : -Math.PI * 3 / 4;
+  // If pressing up, fire more vertical
+  const up = TAS.input.keys['ArrowUp'] || TAS.input.keys['KeyW'] || TAS.input.touch.up;
+  const finalAngle = up ? (player.facing > 0 ? -Math.PI / 3 : -Math.PI * 2 / 3) : angle;
+
+  grapple = createGrapple(player.x, player.y - player.h * 0.7, finalAngle);
+  TAS.audio.playTone(200, 0.1, 'sawtooth', 0.06, 400);
+}
+
+function releaseGrapple() {
+  if (grapple && grapple.attached) {
+    // Fling player with current momentum
+    const flingMultiplier = 1.4;
+    player.vx = grapple.swingVel * Math.cos(grapple.swingAngle + Math.PI / 2) * flingMultiplier * grapple.ropeLen;
+    player.vy = grapple.swingVel * Math.sin(grapple.swingAngle + Math.PI / 2) * flingMultiplier * grapple.ropeLen;
+
+    // Cap velocity
+    player.vx = clamp(player.vx, -400, 400);
+    player.vy = clamp(player.vy, -500, 200);
+
+    TAS.audio.playTone(400, 0.08, 'sine', 0.05, 200);
+  }
+  grapple = null;
+}
+
+function updateGrapple(dt) {
+  if (!grapple) return;
+
+  if (grapple.extending) {
+    // Extend tendril
+    grapple.tipX += Math.cos(grapple.angle) * GRAPPLE_SPEED * dt;
+    grapple.tipY += Math.sin(grapple.angle) * GRAPPLE_SPEED * dt;
+    grapple.length = dist(player.x, player.y - player.h * 0.7, grapple.tipX, grapple.tipY);
+
+    // Check for attachment
+    let attached = false;
+
+    // Check grapple points first
+    for (const gp of grapplePoints) {
+      if (dist(grapple.tipX, grapple.tipY, gp.x, gp.y) < gp.r + 8) {
+        grapple.attachX = gp.x;
+        grapple.attachY = gp.y;
+        attached = true;
+        break;
+      }
+    }
+
+    // Check platforms/ceilings
+    if (!attached) {
+      for (const p of platforms) {
+        if (!p) continue;
+        if (TAS.hit.pointInRect(grapple.tipX, grapple.tipY, p.x, p.y, p.w, p.h)) {
+          grapple.attachX = grapple.tipX;
+          grapple.attachY = p.y + (p.type === 'ceiling' ? p.h : 0);
+          attached = true;
+          break;
+        }
+      }
+    }
+
+    // Check enemies (grapple stun)
+    if (!attached) {
+      for (const e of enemies) {
+        if (!e.alive) continue;
+        if (TAS.hit.rectOverlap(grapple.tipX - 4, grapple.tipY - 4, 8, 8, e.x - e.w / 2, e.y - e.h, e.w, e.h)) {
+          // Stun enemy, pull toward player
+          e.vx = (player.x - e.x) * 3;
+          e.hp--;
+          if (e.hp <= 0) { killEnemy(e); }
+          grapple = null;
+          return;
+        }
+      }
+    }
+
+    if (attached) {
+      grapple.attached = true;
+      grapple.extending = false;
+      grapple.ropeLen = dist(player.x, player.y - player.h * 0.5, grapple.attachX, grapple.attachY);
+      grapple.swingAngle = Math.atan2(player.y - player.h * 0.5 - grapple.attachY, player.x - grapple.attachX);
+      grapple.swingVel = 0;
+      TAS.audio.playTone(600, 0.05, 'sine', 0.08);
+    }
+
+    // Max length reached - retract
+    if (grapple && grapple.length > grapple.maxLength) {
+      grapple = null;
+      return;
+    }
+  }
+
+  if (grapple && grapple.attached) {
+    // Swing physics (pendulum)
+    const keys = TAS.input.keys;
+    const touch = TAS.input.touch;
+    const left = keys['ArrowLeft'] || keys['KeyA'] || touch.left;
+    const right = keys['ArrowRight'] || keys['KeyD'] || touch.right;
+    const up = keys['ArrowUp'] || keys['KeyW'] || touch.up;
+
+    // Gravity on pendulum
+    const gravEffect = GRAVITY * Math.cos(grapple.swingAngle) / grapple.ropeLen;
+    grapple.swingVel += gravEffect * dt;
+
+    // Player input adds swing force
+    if (left) grapple.swingVel -= SWING_FORCE / grapple.ropeLen * dt;
+    if (right) grapple.swingVel += SWING_FORCE / grapple.ropeLen * dt;
+
+    // Retract rope (climb up)
+    if (up && grapple.ropeLen > 30) {
+      grapple.ropeLen -= 100 * dt;
+    }
+
+    // Damping
+    grapple.swingVel *= 0.995;
+
+    // Update angle
+    grapple.swingAngle += grapple.swingVel * dt;
+
+    // Position player on rope
+    player.x = grapple.attachX + Math.cos(grapple.swingAngle) * grapple.ropeLen;
+    player.y = grapple.attachY + Math.sin(grapple.swingAngle) * grapple.ropeLen + player.h * 0.5;
+    player.vx = grapple.swingVel * Math.cos(grapple.swingAngle + Math.PI / 2) * grapple.ropeLen * 0.5;
+    player.vy = grapple.swingVel * Math.sin(grapple.swingAngle + Math.PI / 2) * grapple.ropeLen * 0.5;
+    player.grounded = false;
+
+    // Update facing based on swing direction
+    if (grapple.swingVel > 0.2) player.facing = 1;
+    else if (grapple.swingVel < -0.2) player.facing = -1;
+  }
+
+  // Update tendril segments for organic animation
+  if (grapple) {
+    grapple.timer += dt;
+    grapple.segments = [];
+    const startX = player.x;
+    const startY = player.y - player.h * 0.7;
+    const endX = grapple.attached ? grapple.attachX : grapple.tipX;
+    const endY = grapple.attached ? grapple.attachY : grapple.tipY;
+
+    for (let i = 0; i <= TENDRIL_SEG; i++) {
+      const t = i / TENDRIL_SEG;
+      const sx = lerp(startX, endX, t);
+      const sy = lerp(startY, endY, t);
+      // Organic wave
+      const wave = Math.sin(t * Math.PI * 3 + grapple.timer * 8) * (1 - t) * 4;
+      const perpX = -(endY - startY);
+      const perpY = (endX - startX);
+      const perpLen = Math.sqrt(perpX * perpX + perpY * perpY) || 1;
+      grapple.segments.push({
+        x: sx + (perpX / perpLen) * wave,
+        y: sy + (perpY / perpLen) * wave
+      });
+    }
+  }
+}
+
+// === WEAPONS ===
+function fireWeapon() {
+  const bx = player.x + player.facing * 10;
+  const by = player.y - player.h * 0.5;
+
+  switch (weapon) {
+    case 'normal':
+      playerBullets.push({ x: bx, y: by, vx: player.facing * BULLET_SPEED, vy: 0, dmg: 1, size: 3 });
+      player.shootCooldown = 0.25;
+      TAS.audio.playTone(300, 0.05, 'square', 0.06, 100);
+      break;
+    case 'rapid':
+      playerBullets.push({ x: bx, y: by, vx: player.facing * BULLET_SPEED * 1.2, vy: 0, dmg: 1, size: 2 });
+      player.shootCooldown = 0.1;
+      TAS.audio.playTone(400, 0.03, 'square', 0.04, 200);
+      if (weaponAmmo > 0) weaponAmmo--;
+      if (weaponAmmo === 0) { weapon = 'normal'; weaponAmmo = -1; }
+      break;
+    case 'spread':
+      for (let i = -1; i <= 1; i++) {
+        const angle = i * 0.25;
+        playerBullets.push({
+          x: bx, y: by,
+          vx: Math.cos(angle) * player.facing * BULLET_SPEED,
+          vy: Math.sin(angle) * BULLET_SPEED * 0.5,
+          dmg: 1, size: 3
+        });
+      }
+      player.shootCooldown = 0.3;
+      TAS.audio.playTone(250, 0.08, 'sawtooth', 0.06, 150);
+      if (weaponAmmo > 0) weaponAmmo--;
+      if (weaponAmmo === 0) { weapon = 'normal'; weaponAmmo = -1; }
+      break;
+    case 'rocket':
+      playerBullets.push({ x: bx, y: by, vx: player.facing * BULLET_SPEED * 0.7, vy: 0, dmg: 4, size: 6, rocket: true });
+      player.shootCooldown = 0.6;
+      TAS.audio.playTone(150, 0.15, 'sawtooth', 0.08, 80);
+      if (weaponAmmo > 0) weaponAmmo--;
+      if (weaponAmmo === 0) { weapon = 'normal'; weaponAmmo = -1; }
+      break;
+  }
+}
+
+// === ENEMY UPDATE ===
+function updateEnemies(dt) {
+  for (const e of enemies) {
+    if (!e.alive) continue;
+
+    e.hitFlash = Math.max(0, e.hitFlash - dt * 5);
+
+    switch (e.type) {
+      case 'soldier':
+        e.x += e.vx * dt;
+        if (Math.abs(e.x - e.startX) > e.patrolDist) {
+          e.vx *= -1;
+          e.facing = e.vx > 0 ? 1 : -1;
+        }
+        // Shoot at player if in range
+        e.shootTimer -= dt;
+        if (e.shootTimer <= 0 && Math.abs(e.x - player.x) < 200) {
+          const dir = player.x > e.x ? 1 : -1;
+          bullets.push({ x: e.x + dir * 10, y: e.y - e.h * 0.4, vx: dir * 180, vy: 0, size: 3 });
+          e.shootTimer = randRange(1.5, 3);
+          e.facing = dir;
+        }
+        break;
+
+      case 'sniper':
+        e.shootTimer -= dt;
+        if (e.shootTimer <= 0 && Math.abs(e.x - player.x) < 350) {
+          const dx = player.x - e.x, dy = (player.y - player.h / 2) - (e.y - e.h / 2);
+          const d = Math.sqrt(dx * dx + dy * dy) || 1;
+          bullets.push({ x: e.x, y: e.y - e.h * 0.4, vx: dx / d * 220, vy: dy / d * 220, size: 2 });
+          e.shootTimer = randRange(2, 4);
+        }
+        break;
+
+      case 'drone':
+        e.floatPhase += dt * 3;
+        e.y += Math.sin(e.floatPhase) * 0.5;
+        // Move toward player slowly
+        if (Math.abs(e.x - player.x) < 250) {
+          e.x += (player.x > e.x ? 1 : -1) * 40 * dt;
+        }
+        e.shootTimer -= dt;
+        if (e.shootTimer <= 0 && Math.abs(e.x - player.x) < 200) {
+          bullets.push({ x: e.x, y: e.y + 8, vx: 0, vy: 150, size: 3 });
+          e.shootTimer = randRange(1, 2.5);
+        }
+        break;
+
+      case 'turret':
+        e.shootTimer -= dt;
+        if (e.shootTimer <= 0 && Math.abs(e.x - player.x) < 300) {
+          const dx = player.x - e.x, dy = (player.y - player.h / 2) - e.y;
+          const d = Math.sqrt(dx * dx + dy * dy) || 1;
+          bullets.push({ x: e.x, y: e.y, vx: dx / d * 200, vy: dy / d * 200, size: 4 });
+          e.shootTimer = randRange(1.5, 2.5);
+        }
+        break;
+    }
+
+    // Hit player
+    if (invincible <= 0 && e.alive && TAS.hit.rectOverlap(
+      player.x - player.w / 2, player.y - player.h, player.w, player.h,
+      e.x - e.w / 2, e.y - e.h, e.w, e.h)) {
+      playerHit(1);
+    }
+  }
+}
+
+// === BOSS UPDATE ===
+function updateBoss(dt) {
+  if (!boss || !boss.alive) return;
+  boss.hitFlash = Math.max(0, boss.hitFlash - dt * 5);
+  boss.timer += dt;
+  boss.shootTimer -= dt;
+
+  // Move pattern
+  boss.phase += dt * 1.5;
+  boss.x += Math.sin(boss.phase) * 60 * dt;
+  boss.y += Math.cos(boss.phase * 0.7) * 20 * dt;
+  boss.y = clamp(boss.y, levelHeight - 200, levelHeight - 50);
+
+  // Shoot
+  if (boss.shootTimer <= 0) {
+    boss.attackPattern = (boss.attackPattern + 1) % 3;
+
+    switch (boss.attackPattern) {
+      case 0: // Triple shot
+        for (let i = -1; i <= 1; i++) {
+          bullets.push({ x: boss.x, y: boss.y - 10, vx: -180 + i * 20, vy: i * 60, size: 5 });
+        }
+        break;
+      case 1: // Aimed shot
+        const dx = player.x - boss.x, dy = player.y - boss.y;
+        const d = Math.sqrt(dx * dx + dy * dy) || 1;
+        bullets.push({ x: boss.x, y: boss.y, vx: dx / d * 200, vy: dy / d * 200, size: 6 });
+        break;
+      case 2: // Spread
+        for (let i = 0; i < 5; i++) {
+          const a = -Math.PI * 0.6 + (Math.PI * 1.2) * i / 4;
+          bullets.push({ x: boss.x, y: boss.y, vx: Math.cos(a) * 150, vy: Math.sin(a) * 150, size: 4 });
+        }
+        break;
+    }
+    boss.shootTimer = boss.hp < boss.maxHp / 2 ? 1.2 : 2;
+    TAS.audio.playTone(100, 0.1, 'sawtooth', 0.04);
+  }
+
+  // Hit player
+  if (invincible <= 0 && TAS.hit.rectOverlap(
+    player.x - player.w / 2, player.y - player.h, player.w, player.h,
+    boss.x - boss.w / 2, boss.y - boss.h, boss.w, boss.h)) {
+    playerHit(2);
+  }
+}
+
+// === BULLET UPDATE ===
+function updateBullets(dt) {
+  // Player bullets
+  for (let i = playerBullets.length - 1; i >= 0; i--) {
+    const b = playerBullets[i];
+    b.x += b.vx * dt;
+    b.y += b.vy * dt;
+
+    // Off screen
+    if (b.x < camera.x - 20 || b.x > camera.x + GW + 20 || b.y < -20 || b.y > GH + 20) {
+      playerBullets.splice(i, 1);
+      continue;
+    }
+
+    // Hit enemies
+    let hit = false;
+    for (const e of enemies) {
+      if (!e.alive) continue;
+      if (TAS.hit.rectOverlap(b.x - b.size, b.y - b.size, b.size * 2, b.size * 2,
+          e.x - e.w / 2, e.y - e.h, e.w, e.h)) {
+        e.hp -= b.dmg;
+        e.hitFlash = 1;
+        if (e.hp <= 0) killEnemy(e);
+        hit = true;
+        if (b.rocket) {
+          TAS.particles.spawn(b.x, b.y, '#ff6622', 12, 4, { gravity: 1 });
+          TAS.fx.shake(3, 0.85);
+        }
+        break;
+      }
+    }
+
+    // Hit boss
+    if (!hit && boss && boss.alive) {
+      if (TAS.hit.rectOverlap(b.x - b.size, b.y - b.size, b.size * 2, b.size * 2,
+          boss.x - boss.w / 2, boss.y - boss.h, boss.w, boss.h)) {
+        boss.hp -= b.dmg;
+        boss.hitFlash = 1;
+        hit = true;
+        if (b.rocket) {
+          TAS.particles.spawn(b.x, b.y, '#ff6622', 12, 4, { gravity: 1 });
+          TAS.fx.shake(4, 0.85);
+        }
+        if (boss.hp <= 0) {
+          killBoss();
+        }
+      }
+    }
+
+    // Hit platforms
+    if (!hit) {
+      for (const p of platforms) {
+        if (TAS.hit.pointInRect(b.x, b.y, p.x, p.y, p.w, p.h)) {
+          hit = true;
+          if (b.rocket) {
+            TAS.particles.spawn(b.x, b.y, '#ff6622', 8, 3, { gravity: 1 });
+          }
+          break;
+        }
+      }
+    }
+
+    if (hit) playerBullets.splice(i, 1);
+  }
+
+  // Enemy bullets
+  for (let i = bullets.length - 1; i >= 0; i--) {
+    const b = bullets[i];
+    b.x += b.vx * dt;
+    b.y += b.vy * dt;
+
+    if (b.x < camera.x - 50 || b.x > camera.x + GW + 50 || b.y < -50 || b.y > GH + 50) {
+      bullets.splice(i, 1);
+      continue;
+    }
+
+    // Hit player
+    if (invincible <= 0) {
+      const ph = player.crouching ? player.h * 0.5 : player.h;
+      if (TAS.hit.rectOverlap(b.x - b.size, b.y - b.size, b.size * 2, b.size * 2,
+          player.x - player.w / 2, player.y - ph, player.w, ph)) {
+        playerHit(1);
+        bullets.splice(i, 1);
+        continue;
+      }
+    }
+
+    // Hit platforms
+    for (const p of platforms) {
+      if (TAS.hit.pointInRect(b.x, b.y, p.x, p.y, p.w, p.h)) {
+        bullets.splice(i, 1);
+        break;
+      }
+    }
+  }
+}
+
+// === DAMAGE ===
+function playerHit(dmg) {
+  if (invincible > 0) return;
+  health -= dmg;
+  invincible = 1.5;
+  damageFlash = 0.3;
+  TAS.fx.shake(6, 0.8);
+  TAS.fx.flash('#ff0000', 0.3);
+  TAS.audio.playTone(100, 0.2, 'sawtooth', 0.1, 50);
+  TAS.particles.spawn(player.x, player.y - player.h / 2, '#ff4444', 6, 3);
+
+  if (health <= 0) {
+    lives--;
+    if (lives <= 0) {
+      gameOver();
+    } else {
+      // Respawn
+      health = 6;
+      player.x = 60;
+      player.y = levelHeight - 60;
+      player.vx = 0;
+      player.vy = 0;
+      grapple = null;
+      invincible = 3;
+    }
+  }
+}
+
+function killEnemy(e) {
+  e.alive = false;
+  score += e.type === 'drone' ? 50 : (e.type === 'sniper' ? 100 : (e.type === 'turret' ? 150 : 75));
+  TAS.particles.spawn(e.x, e.y - e.h / 2, '#ffaa00', 10, 3, { gravity: 2 });
+  TAS.audio.playTone(200, 0.15, 'square', 0.06, 80);
+}
+
+function killBoss() {
+  boss.alive = false;
+  bossDefeated = true;
+  score += 1000;
+  TAS.particles.spawn(boss.x, boss.y - boss.h / 2, '#ffdd00', 25, 5, { gravity: 1 });
+  TAS.particles.spawn(boss.x, boss.y - boss.h / 2, '#ff4400', 20, 4, { gravity: 2 });
+  TAS.fx.shake(10, 0.9);
+  TAS.fx.flash('#ffffff', 0.5);
+  TAS.audio.playTone(150, 0.4, 'sawtooth', 0.12, 40);
+  // Open exit
+  stageComplete = true;
+  stageCompleteTimer = 3;
+}
+
+function gameOver() {
+  state = 'gameOver';
+  if (score > highScore) {
+    highScore = score;
+    TAS.score.save('chain_reaction_hi', highScore);
+  }
+  saveGame();
+}
+
+// === PICKUPS ===
+function updatePickups(dt) {
+  for (const p of pickups) {
+    if (p.collected) continue;
+    if (TAS.hit.rectOverlap(player.x - player.w / 2, player.y - player.h, player.w, player.h,
+        p.x - p.w / 2, p.y - p.h / 2, p.w, p.h)) {
+      p.collected = true;
+      if (p.type === 'weapon') {
+        weapon = p.weapon;
+        weaponAmmo = p.weapon === 'rapid' ? 40 : (p.weapon === 'spread' ? 20 : 10);
+        TAS.audio.playMelody([[440, 0.08], [660, 0.08], [880, 0.12]], 80);
+      } else if (p.type === 'health') {
+        health = Math.min(6, health + 2);
+        TAS.audio.playTone(600, 0.1, 'sine', 0.06);
+      }
+      TAS.particles.spawn(p.x, p.y, '#44ff88', 6, 2);
+    }
+  }
+
+  // Comm room
+  if (commRoom && !commRoom.collected) {
+    if (TAS.hit.rectOverlap(player.x - player.w / 2, player.y - player.h, player.w, player.h,
+        commRoom.x, commRoom.y - commRoom.h, commRoom.w, commRoom.h)) {
+      commRoom.collected = true;
+      if (!intelCollected.includes(currentStage)) {
+        intelCollected.push(currentStage);
+      }
+      score += 500;
+      TAS.audio.playMelody([[330, 0.1], [440, 0.1], [550, 0.1], [660, 0.15]], 100);
+      TAS.particles.spawn(commRoom.x + 16, commRoom.y - 22, '#88ccff', 15, 3);
+    }
+  }
+
+  // Exit door
+  if (exitDoor && bossDefeated) {
+    if (TAS.hit.rectOverlap(player.x - player.w / 2, player.y - player.h, player.w, player.h,
+        exitDoor.x, exitDoor.y, exitDoor.w, exitDoor.h)) {
+      completeStage();
+    }
+  }
+}
+
+function completeStage() {
+  if (!stagesCleared.includes(currentStage)) {
+    stagesCleared.push(currentStage);
+  }
+  saveGame();
+  state = 'stageComplete';
+  stageCompleteTimer = 3;
+  TAS.audio.playMelody([[440, 0.1], [550, 0.1], [660, 0.1], [880, 0.2]], 120);
+}
+
+// === CAMERA ===
+function updateCamera(dt) {
+  const targetX = player.x - GW / 2;
+  const targetY = player.y - GH * 0.6;
+  camera.x = lerp(camera.x, clamp(targetX, 0, levelWidth - GW), 4 * dt);
+  camera.y = lerp(camera.y, clamp(targetY, 0, levelHeight - GH), 4 * dt);
+}
+
+// === MAP SCREEN ===
+function drawMap() {
+  ctx.fillStyle = '#0a0a15';
+  ctx.fillRect(0, 0, GW, GH);
+
+  // Title
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#44dd88';
+  ctx.font = 'bold 16px monospace';
+  ctx.fillText('CHAIN REACTION - AREA SELECT', GW / 2, 24);
+
+  // Intel counter
+  ctx.fillStyle = '#88ccff';
+  ctx.font = '10px monospace';
+  ctx.fillText('INTEL: ' + intelCollected.length + '/8', GW / 2, 38);
+
+  // Stage nodes
+  const cols = 4, rows = 2;
+  const startX = 60, startY = 70;
+  const spacingX = 100, spacingY = 110;
+
+  for (let i = 0; i < 8; i++) {
+    const col = i % cols;
+    const row = Math.floor(i / cols);
+    const x = startX + col * spacingX;
+    const y = startY + row * spacingY;
+
+    const cleared = stagesCleared.includes(i);
+    const locked = i === 7 && intelCollected.length < 7;
+    const selected = i === mapCursor;
+
+    // Node
+    ctx.fillStyle = locked ? '#333' : (cleared ? '#226622' : '#223344');
+    ctx.strokeStyle = selected ? '#ffdd44' : (cleared ? '#44aa44' : '#446688');
+    ctx.lineWidth = selected ? 3 : 1;
+    ctx.fillRect(x - 40, y - 20, 80, 40);
+    ctx.strokeRect(x - 40, y - 20, 80, 40);
+
+    // Name
+    ctx.fillStyle = locked ? '#555' : (selected ? '#ffffff' : '#aaccdd');
+    ctx.font = '9px monospace';
+    ctx.fillText(STAGES[i].name, x, y - 4);
+
+    // Status
+    if (cleared) {
+      ctx.fillStyle = '#44dd88';
+      ctx.fillText('CLEARED', x, y + 12);
+    } else if (locked) {
+      ctx.fillStyle = '#aa4444';
+      ctx.fillText('LOCKED', x, y + 12);
+    }
+
+    // Intel indicator
+    if (intelCollected.includes(i)) {
+      ctx.fillStyle = '#88ccff';
+      ctx.fillRect(x + 28, y - 18, 8, 8);
+    }
+  }
+
+  // Instructions
+  const pulse = Math.sin(frame * 0.05) * 0.3 + 0.7;
+  ctx.globalAlpha = pulse;
+  ctx.fillStyle = '#ffdd44';
+  ctx.font = 'bold 11px monospace';
+  ctx.fillText('ARROWS TO SELECT - FIRE TO ENTER', GW / 2, GH - 24);
+  ctx.globalAlpha = 1;
+
+  // Weapon display
+  ctx.textAlign = 'left';
+  ctx.fillStyle = '#aaa';
+  ctx.font = '9px monospace';
+  ctx.fillText('WEAPON: ' + weapon.toUpperCase() + (weaponAmmo > 0 ? ' [' + weaponAmmo + ']' : ''), 8, GH - 8);
+  ctx.textAlign = 'right';
+  ctx.fillText('LIVES: ' + lives + '  HP: ' + health, GW - 8, GH - 8);
+}
+
+let mapCursor = 0;
+let mapInputCooldown = 0;
+
+function updateMap(dt) {
+  mapInputCooldown -= dt;
+  if (mapInputCooldown > 0) return;
+
+  const keys = TAS.input.keys;
+  const touch = TAS.input.touch;
+
+  if (keys['ArrowRight'] || touch.right) {
+    mapCursor = Math.min(7, mapCursor + 1);
+    mapInputCooldown = 0.2;
+    TAS.audio.playTone(400, 0.04, 'square', 0.04);
+  }
+  if (keys['ArrowLeft'] || touch.left) {
+    mapCursor = Math.max(0, mapCursor - 1);
+    mapInputCooldown = 0.2;
+    TAS.audio.playTone(400, 0.04, 'square', 0.04);
+  }
+  if (keys['ArrowDown'] || touch.down) {
+    mapCursor = Math.min(7, mapCursor + 4);
+    mapInputCooldown = 0.2;
+    TAS.audio.playTone(400, 0.04, 'square', 0.04);
+  }
+  if (keys['ArrowUp'] || touch.up) {
+    mapCursor = Math.max(0, mapCursor - 4);
+    mapInputCooldown = 0.2;
+    TAS.audio.playTone(400, 0.04, 'square', 0.04);
+  }
+
+  if (keys['KeyZ'] || keys['Space'] || keys['Enter'] || touch.a || keys['KeyX'] || touch.b) {
+    const locked = mapCursor === 7 && intelCollected.length < 7;
+    if (!locked) {
+      currentStage = mapCursor;
+      generateLevel(currentStage);
+      state = 'playing';
+      TAS.audio.playTone(600, 0.1, 'sine', 0.06, 800);
+    } else {
+      TAS.audio.playTone(100, 0.2, 'square', 0.05);
+    }
+    mapInputCooldown = 0.3;
+  }
+}
+
+// === DRAWING ===
+function drawBackground() {
+  const stage = STAGES[currentStage];
+  ctx.fillStyle = stage.bg;
+  ctx.fillRect(0, 0, GW, GH);
+
+  // Parallax background elements
+  const parallax = camera.x * 0.3;
+  ctx.fillStyle = stage.accent + '22';
+  for (let i = 0; i < 12; i++) {
+    const bx = (i * 120 - parallax % 120);
+    const bh = 40 + (i * 37 % 60);
+    ctx.fillRect(bx, GH - 16 - bh - (camera.y * 0.2), 30 + (i * 13 % 40), bh);
+  }
+
+  // Far background shapes
+  ctx.fillStyle = stage.ground + '44';
+  const p2 = camera.x * 0.15;
+  for (let i = 0; i < 8; i++) {
+    const bx = (i * 180 - p2 % 180);
+    ctx.beginPath();
+    ctx.moveTo(bx, GH);
+    ctx.lineTo(bx + 40, GH - 80 - (i * 23 % 50));
+    ctx.lineTo(bx + 90, GH);
+    ctx.fill();
+  }
+}
+
+function drawPlatforms() {
+  for (const p of platforms) {
+    if (!p) continue;
+    // Cull offscreen
+    if (p.x + p.w < camera.x || p.x > camera.x + GW) continue;
+    if (p.y + p.h < camera.y || p.y > camera.y + GH) continue;
+
+    const sx = p.x - camera.x;
+    const sy = p.y - camera.y;
+    const stage = STAGES[currentStage];
+
+    if (p.type === 'ground') {
+      ctx.fillStyle = stage.ground;
+      ctx.fillRect(sx, sy, p.w, p.h);
+      // Top edge detail
+      ctx.fillStyle = stage.accent;
+      ctx.fillRect(sx, sy, p.w, 3);
+      // Texture
+      ctx.fillStyle = stage.ground + 'aa';
+      for (let i = 0; i < p.w; i += 8) {
+        if ((i + p.x) % 16 < 8) ctx.fillRect(sx + i, sy + 5, 4, 3);
+      }
+    } else if (p.type === 'platform') {
+      ctx.fillStyle = '#556655';
+      ctx.fillRect(sx, sy, p.w, p.h);
+      ctx.fillStyle = '#88aa88';
+      ctx.fillRect(sx, sy, p.w, 3);
+      // Supports
+      ctx.fillStyle = '#445544';
+      ctx.fillRect(sx + 4, sy + p.h, 3, 8);
+      ctx.fillRect(sx + p.w - 7, sy + p.h, 3, 8);
+    } else if (p.type === 'ceiling') {
+      ctx.fillStyle = '#444455';
+      ctx.fillRect(sx, sy, p.w, p.h);
+      ctx.fillStyle = '#555566';
+      ctx.fillRect(sx, sy + p.h - 3, p.w, 3);
+    } else if (p.type === 'wall') {
+      ctx.fillStyle = '#333344';
+      ctx.fillRect(sx, sy, p.w, p.h);
+    }
+  }
+}
+
+function drawGrapplePoints() {
+  for (const gp of grapplePoints) {
+    if (gp.x < camera.x - 20 || gp.x > camera.x + GW + 20) continue;
+    const sx = gp.x - camera.x;
+    const sy = gp.y - camera.y;
+
+    // Pulsing grapple node
+    const pulse = Math.sin(frame * 0.08) * 2;
+    ctx.fillStyle = '#66dd99';
+    ctx.beginPath();
+    ctx.arc(sx, sy, gp.r + pulse, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = '#aaffcc';
+    ctx.beginPath();
+    ctx.arc(sx, sy, gp.r * 0.5, 0, Math.PI * 2);
+    ctx.fill();
+    // Mycelium tendrils around node
+    ctx.strokeStyle = '#44aa6644';
+    ctx.lineWidth = 1;
+    for (let i = 0; i < 4; i++) {
+      const a = (frame * 0.02 + i * Math.PI / 2);
+      ctx.beginPath();
+      ctx.moveTo(sx, sy);
+      ctx.lineTo(sx + Math.cos(a) * (gp.r + 8), sy + Math.sin(a) * (gp.r + 8));
+      ctx.stroke();
+    }
+  }
+}
+
+function drawPlayer() {
+  if (!player) return;
+  const sx = player.x - camera.x;
+  const sy = player.y - camera.y;
+
+  // Blink when invincible
+  if (invincible > 0 && Math.floor(invincible * 10) % 2 === 0) return;
+
+  ctx.save();
+  ctx.translate(sx, sy);
+
+  const crouch = player.crouching ? 0.6 : 1;
+
+  // Body (military green baseling)
+  ctx.fillStyle = '#4a7a3a';
+  const bodyH = player.h * crouch;
+  ctx.fillRect(-player.w / 2, -bodyH, player.w, bodyH);
+
+  // Helmet
+  ctx.fillStyle = '#3a5a2a';
+  ctx.fillRect(-player.w / 2 - 1, -bodyH - 2, player.w + 2, 8);
+
+  // Visor
+  ctx.fillStyle = '#88ffaa';
+  ctx.fillRect(player.facing > 0 ? 2 : -7, -bodyH + 2, 5, 3);
+
+  // Arm/gun
+  ctx.fillStyle = '#5a8a4a';
+  const gunY = -bodyH * 0.5;
+  ctx.fillRect(player.facing > 0 ? player.w / 2 : -player.w / 2 - 8, gunY, 8, 4);
+  // Gun barrel
+  ctx.fillStyle = '#333';
+  ctx.fillRect(player.facing > 0 ? player.w / 2 + 6 : -player.w / 2 - 12, gunY + 1, 6, 2);
+
+  // Legs (animated)
+  if (!player.crouching && Math.abs(player.vx) > 10 && player.grounded) {
+    const legOff = Math.sin(player.animFrame * Math.PI / 2) * 4;
+    ctx.fillStyle = '#3a6a2a';
+    ctx.fillRect(-3, 0, 4, 2 + legOff);
+    ctx.fillRect(1, 0, 4, 2 - legOff);
+  }
+
+  // Mycelium grapple arm (shoulder tendril)
+  ctx.fillStyle = '#66cc88';
+  ctx.beginPath();
+  ctx.arc(player.facing > 0 ? -3 : 3, -bodyH * 0.7, 3, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.restore();
+}
+
+function drawGrapple() {
+  if (!grapple) return;
+
+  const segs = grapple.segments;
+  if (segs.length < 2) return;
+
+  // Draw tendril (organic mycelium rope)
+  ctx.strokeStyle = '#44cc77';
+  ctx.lineWidth = 3;
+  ctx.lineCap = 'round';
+  ctx.beginPath();
+  ctx.moveTo(segs[0].x - camera.x, segs[0].y - camera.y);
+  for (let i = 1; i < segs.length; i++) {
+    const prev = segs[i - 1];
+    const curr = segs[i];
+    const cpx = (prev.x + curr.x) / 2 - camera.x;
+    const cpy = (prev.y + curr.y) / 2 - camera.y;
+    ctx.quadraticCurveTo(prev.x - camera.x, prev.y - camera.y, cpx, cpy);
+  }
+  ctx.stroke();
+
+  // Inner glow
+  ctx.strokeStyle = '#88ffbb';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(segs[0].x - camera.x, segs[0].y - camera.y);
+  for (let i = 1; i < segs.length; i++) {
+    const prev = segs[i - 1];
+    const curr = segs[i];
+    const cpx = (prev.x + curr.x) / 2 - camera.x;
+    const cpy = (prev.y + curr.y) / 2 - camera.y;
+    ctx.quadraticCurveTo(prev.x - camera.x, prev.y - camera.y, cpx, cpy);
+  }
+  ctx.stroke();
+
+  // Attachment point glow
+  if (grapple.attached) {
+    const ax = grapple.attachX - camera.x;
+    const ay = grapple.attachY - camera.y;
+    ctx.fillStyle = '#aaffcc';
+    ctx.beginPath();
+    ctx.arc(ax, ay, 4 + Math.sin(frame * 0.15) * 2, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  // Tip (extending)
+  if (grapple.extending) {
+    const tx = grapple.tipX - camera.x;
+    const ty = grapple.tipY - camera.y;
+    ctx.fillStyle = '#ccffdd';
+    ctx.beginPath();
+    ctx.arc(tx, ty, 3, 0, Math.PI * 2);
+    ctx.fill();
+  }
+}
+
+function drawEnemies() {
+  for (const e of enemies) {
+    if (!e.alive) continue;
+    if (e.x < camera.x - 30 || e.x > camera.x + GW + 30) continue;
+
+    const sx = e.x - camera.x;
+    const sy = e.y - camera.y;
+    const flash = e.hitFlash > 0;
+
+    ctx.save();
+    ctx.translate(sx, sy);
+
+    switch (e.type) {
+      case 'soldier':
+        // Body
+        ctx.fillStyle = flash ? '#ffffff' : '#884444';
+        ctx.fillRect(-e.w / 2, -e.h, e.w, e.h);
+        // Helmet
+        ctx.fillStyle = flash ? '#ffffff' : '#663333';
+        ctx.fillRect(-e.w / 2 - 1, -e.h - 2, e.w + 2, 6);
+        // Gun
+        ctx.fillStyle = '#444';
+        ctx.fillRect(e.facing > 0 ? e.w / 2 : -e.w / 2 - 6, -e.h * 0.5, 6, 3);
+        break;
+
+      case 'sniper':
+        // Body (prone-like)
+        ctx.fillStyle = flash ? '#ffffff' : '#666644';
+        ctx.fillRect(-e.w / 2, -e.h * 0.6, e.w, e.h * 0.6);
+        // Scope glint
+        ctx.fillStyle = '#ff4444';
+        ctx.fillRect(e.facing > 0 ? e.w / 2 + 2 : -e.w / 2 - 4, -e.h * 0.4, 2, 2);
+        // Rifle
+        ctx.fillStyle = '#555';
+        ctx.fillRect(e.facing > 0 ? e.w / 2 : -e.w / 2 - 10, -e.h * 0.4, 10, 2);
+        break;
+
+      case 'drone':
+        // Body
+        ctx.fillStyle = flash ? '#ffffff' : '#666688';
+        ctx.fillRect(-e.w / 2, -e.h / 2, e.w, e.h);
+        // Rotors
+        const rotorOff = Math.sin(frame * 0.4) * 4;
+        ctx.fillStyle = '#8888aa';
+        ctx.fillRect(-e.w / 2 - 4 + rotorOff, -e.h / 2 - 3, 6, 2);
+        ctx.fillRect(e.w / 2 - 2 - rotorOff, -e.h / 2 - 3, 6, 2);
+        // Eye
+        ctx.fillStyle = '#ff4444';
+        ctx.fillRect(-2, -2, 4, 4);
+        break;
+
+      case 'turret':
+        // Base
+        ctx.fillStyle = flash ? '#ffffff' : '#555566';
+        ctx.fillRect(-e.w / 2, -8, e.w, 8);
+        // Barrel (aims at player)
+        const angle = Math.atan2(player.y - e.y, player.x - e.x);
+        ctx.save();
+        ctx.rotate(angle);
+        ctx.fillStyle = '#777788';
+        ctx.fillRect(0, -2, 16, 4);
+        ctx.restore();
+        // Red light
+        ctx.fillStyle = e.shootTimer < 0.5 ? '#ff0000' : '#880000';
+        ctx.fillRect(-2, -12, 4, 4);
+        break;
+    }
+
+    ctx.restore();
+  }
+}
+
+function drawBoss() {
+  if (!boss || !boss.alive) return;
+
+  const sx = boss.x - camera.x;
+  const sy = boss.y - camera.y;
+  const flash = boss.hitFlash > 0;
+
+  ctx.save();
+  ctx.translate(sx, sy);
+
+  // Main body
+  ctx.fillStyle = flash ? '#ffffff' : '#664422';
+  ctx.fillRect(-boss.w / 2, -boss.h, boss.w, boss.h);
+
+  // Armor plates
+  ctx.fillStyle = flash ? '#ffffff' : '#885533';
+  ctx.fillRect(-boss.w / 2 + 4, -boss.h + 4, boss.w - 8, 12);
+  ctx.fillRect(-boss.w / 2 + 4, -boss.h + 20, boss.w - 8, 12);
+
+  // Cockpit/eye
+  ctx.fillStyle = '#ff4444';
+  const eyePulse = Math.sin(frame * 0.1) * 2;
+  ctx.beginPath();
+  ctx.arc(0, -boss.h * 0.7, 6 + eyePulse, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Weapons
+  ctx.fillStyle = '#444';
+  ctx.fillRect(-boss.w / 2 - 8, -boss.h * 0.4, 10, 6);
+  ctx.fillRect(boss.w / 2 - 2, -boss.h * 0.4, 10, 6);
+
+  // Legs/treads
+  ctx.fillStyle = '#443322';
+  ctx.fillRect(-boss.w / 2, 0, boss.w * 0.3, 10);
+  ctx.fillRect(boss.w / 2 - boss.w * 0.3, 0, boss.w * 0.3, 10);
+
+  ctx.restore();
+
+  // Health bar
+  const barW = 60;
+  const barX = sx - barW / 2;
+  const barY = sy - boss.h - 14;
+  ctx.fillStyle = '#333';
+  ctx.fillRect(barX, barY, barW, 6);
+  ctx.fillStyle = boss.hp > boss.maxHp * 0.3 ? '#dd4444' : '#ff8800';
+  ctx.fillRect(barX, barY, barW * (boss.hp / boss.maxHp), 6);
+  ctx.strokeStyle = '#666';
+  ctx.lineWidth = 1;
+  ctx.strokeRect(barX, barY, barW, 6);
+}
+
+function drawBullets() {
+  // Player bullets
+  for (const b of playerBullets) {
+    const sx = b.x - camera.x;
+    const sy = b.y - camera.y;
+    ctx.fillStyle = b.rocket ? '#ff8844' : '#88ffaa';
+    ctx.beginPath();
+    ctx.arc(sx, sy, b.size, 0, Math.PI * 2);
+    ctx.fill();
+    if (b.rocket) {
+      // Trail
+      ctx.fillStyle = '#ff440044';
+      ctx.beginPath();
+      ctx.arc(sx - b.vx * 0.02, sy, b.size + 2, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+
+  // Enemy bullets
+  for (const b of bullets) {
+    const sx = b.x - camera.x;
+    const sy = b.y - camera.y;
+    ctx.fillStyle = '#ff4444';
+    ctx.beginPath();
+    ctx.arc(sx, sy, b.size, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = '#ffaa4488';
+    ctx.beginPath();
+    ctx.arc(sx, sy, b.size + 1, 0, Math.PI * 2);
+    ctx.fill();
+  }
+}
+
+function drawPickups() {
+  for (const p of pickups) {
+    if (p.collected) continue;
+    if (p.x < camera.x - 20 || p.x > camera.x + GW + 20) continue;
+
+    const sx = p.x - camera.x;
+    const sy = p.y - camera.y;
+    const bob = Math.sin(frame * 0.06 + p.x) * 3;
+
+    if (p.type === 'weapon') {
+      ctx.fillStyle = '#ffdd44';
+      ctx.fillRect(sx - p.w / 2, sy - p.h / 2 + bob, p.w, p.h);
+      ctx.fillStyle = '#886600';
+      ctx.font = '7px monospace';
+      ctx.textAlign = 'center';
+      ctx.fillText(p.weapon[0].toUpperCase(), sx, sy + 3 + bob);
+    } else {
+      ctx.fillStyle = '#44ff88';
+      ctx.beginPath();
+      ctx.arc(sx, sy + bob, p.w / 2, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(sx - 1, sy - 3 + bob, 2, 6);
+      ctx.fillRect(sx - 3, sy - 1 + bob, 6, 2);
+    }
+  }
+
+  // Comm room
+  if (commRoom && !commRoom.collected) {
+    const sx = commRoom.x - camera.x;
+    const sy = commRoom.y - camera.y;
+    // Terminal
+    ctx.fillStyle = '#2a3a4a';
+    ctx.fillRect(sx, sy - commRoom.h, commRoom.w, commRoom.h);
+    // Screen
+    const screenFlicker = Math.sin(frame * 0.1) > 0 ? '#88ccff' : '#6699cc';
+    ctx.fillStyle = screenFlicker;
+    ctx.fillRect(sx + 4, sy - commRoom.h + 4, commRoom.w - 8, 18);
+    // INTEL text
+    ctx.fillStyle = '#44ff88';
+    ctx.font = '7px monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText('INTEL', sx + commRoom.w / 2, sy - commRoom.h + 15);
+    // Antenna
+    ctx.strokeStyle = '#88ccff';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(sx + commRoom.w / 2, sy - commRoom.h);
+    ctx.lineTo(sx + commRoom.w / 2, sy - commRoom.h - 10);
+    ctx.stroke();
+    // Blinking light
+    if (frame % 30 < 15) {
+      ctx.fillStyle = '#ff4444';
+      ctx.fillRect(sx + commRoom.w / 2 - 1, sy - commRoom.h - 12, 3, 3);
+    }
+  }
+
+  // Exit door
+  if (exitDoor) {
+    const sx = exitDoor.x - camera.x;
+    const sy = exitDoor.y - camera.y;
+    ctx.fillStyle = bossDefeated ? '#44aa44' : '#663333';
+    ctx.fillRect(sx, sy, exitDoor.w, exitDoor.h);
+    if (bossDefeated) {
+      ctx.fillStyle = '#88ff88';
+      ctx.font = '8px monospace';
+      ctx.textAlign = 'center';
+      ctx.fillText('EXIT', sx + exitDoor.w / 2, sy + exitDoor.h / 2 + 3);
+      // Glow
+      ctx.strokeStyle = '#44ff8844';
+      ctx.lineWidth = 2;
+      ctx.strokeRect(sx - 2, sy - 2, exitDoor.w + 4, exitDoor.h + 4);
+    } else {
+      ctx.fillStyle = '#884444';
+      ctx.fillRect(sx + 8, sy + 15, 8, 10);
+    }
+  }
+}
+
+function drawHUD() {
+  // Health bar
+  const barX = 8, barY = 6, barW = 80, barH = 10;
+  ctx.fillStyle = '#222';
+  ctx.fillRect(barX, barY, barW, barH);
+  ctx.fillStyle = health > 2 ? '#44dd88' : '#ff4444';
+  ctx.fillRect(barX, barY, barW * (health / 6), barH);
+  ctx.strokeStyle = '#666';
+  ctx.lineWidth = 1;
+  ctx.strokeRect(barX, barY, barW, barH);
+
+  // Lives
+  ctx.fillStyle = '#44dd88';
+  ctx.font = '10px monospace';
+  ctx.textAlign = 'left';
+  ctx.fillText('x' + lives, barX + barW + 6, barY + 9);
+
+  // Score
+  ctx.fillStyle = '#ffdd44';
+  ctx.textAlign = 'right';
+  ctx.fillText('SCORE: ' + score, GW - 8, 14);
+
+  // Weapon
+  ctx.textAlign = 'center';
+  ctx.fillStyle = weapon === 'normal' ? '#888' : '#ffaa44';
+  ctx.fillText(weapon.toUpperCase() + (weaponAmmo > 0 ? ' [' + weaponAmmo + ']' : ''), GW / 2, 14);
+
+  // Stage name
+  ctx.fillStyle = '#88ccff44';
+  ctx.font = '8px monospace';
+  ctx.fillText(STAGES[currentStage].name, GW / 2, GH - 4);
+
+  // Grapple indicator
+  if (!grapple) {
+    ctx.fillStyle = '#66cc8888';
+    ctx.font = '8px monospace';
+    ctx.textAlign = 'left';
+    ctx.fillText('GRAPPLE READY', 8, GH - 4);
+  }
+
+  // Damage flash
+  if (damageFlash > 0) {
+    ctx.fillStyle = 'rgba(255,0,0,' + (damageFlash * 0.3) + ')';
+    ctx.fillRect(0, 0, GW, GH);
+    damageFlash -= 0.02;
+  }
+}
+
+// === TITLE SCREEN ===
+function drawTitle() {
+  ctx.fillStyle = '#0a0f0a';
+  ctx.fillRect(0, 0, GW, GH);
+
+  // Background tendrils
+  ctx.strokeStyle = '#22553322';
+  ctx.lineWidth = 2;
+  for (let i = 0; i < 8; i++) {
+    ctx.beginPath();
+    const startX = i * 70;
+    ctx.moveTo(startX, GH);
+    for (let j = 0; j < 6; j++) {
+      ctx.lineTo(startX + Math.sin(frame * 0.02 + i + j) * 30, GH - j * 60);
+    }
+    ctx.stroke();
+  }
+
+  // Title
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#000';
+  ctx.font = 'bold 28px monospace';
+  ctx.fillText('CHAIN REACTION', GW / 2 + 2, GH * 0.25 + 2);
+
+  ctx.fillStyle = '#44dd88';
+  ctx.font = 'bold 28px monospace';
+  ctx.fillText('CHAIN REACTION', GW / 2, GH * 0.25);
+
+  // Subtitle
+  ctx.fillStyle = '#88aacc';
+  ctx.font = '11px monospace';
+  ctx.fillText('A Mycelium Commando Operation', GW / 2, GH * 0.34);
+
+  // Baseling commando silhouette
+  ctx.fillStyle = '#2a4a2a';
+  ctx.fillRect(GW / 2 - 10, GH * 0.45, 20, 36);
+  ctx.fillStyle = '#1a3a1a';
+  ctx.fillRect(GW / 2 - 12, GH * 0.45 - 4, 24, 10);
+  // Grapple tendril
+  ctx.strokeStyle = '#44cc77';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(GW / 2 - 5, GH * 0.48);
+  const endX = GW / 2 - 80 + Math.sin(frame * 0.03) * 20;
+  const endY = GH * 0.3 + Math.cos(frame * 0.04) * 10;
+  ctx.quadraticCurveTo(GW / 2 - 40, GH * 0.35, endX, endY);
+  ctx.stroke();
+  ctx.fillStyle = '#88ffbb';
+  ctx.beginPath();
+  ctx.arc(endX, endY, 4, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Controls
+  ctx.fillStyle = '#888';
+  ctx.font = '9px monospace';
+  ctx.fillText('ARROWS: MOVE/AIM | Z/SPACE: GRAPPLE | X: SHOOT', GW / 2, GH * 0.72);
+  ctx.fillText('NO JUMP - GRAPPLE IS YOUR ONLY WAY UP', GW / 2, GH * 0.78);
+
+  // Start prompt
+  const pulse = Math.sin(frame * 0.05) * 0.3 + 0.7;
+  ctx.globalAlpha = pulse;
+  ctx.fillStyle = '#ffdd44';
+  ctx.font = 'bold 13px monospace';
+  ctx.fillText('PRESS ANY KEY TO START', GW / 2, GH * 0.9);
+  ctx.globalAlpha = 1;
+
+  // High score
+  if (highScore > 0) {
+    ctx.fillStyle = '#666';
+    ctx.font = '9px monospace';
+    ctx.fillText('HIGH SCORE: ' + highScore, GW / 2, GH * 0.96);
+  }
+}
+
+// === STAGE COMPLETE SCREEN ===
+function drawStageComplete() {
+  ctx.fillStyle = 'rgba(0,0,0,0.7)';
+  ctx.fillRect(0, 0, GW, GH);
+
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#44dd88';
+  ctx.font = 'bold 20px monospace';
+  ctx.fillText('STAGE CLEAR!', GW / 2, GH * 0.3);
+
+  ctx.fillStyle = '#ffdd44';
+  ctx.font = '14px monospace';
+  ctx.fillText(STAGES[currentStage].name, GW / 2, GH * 0.42);
+
+  ctx.fillStyle = '#fff';
+  ctx.font = '11px monospace';
+  ctx.fillText('Score: ' + score, GW / 2, GH * 0.55);
+
+  if (intelCollected.includes(currentStage)) {
+    ctx.fillStyle = '#88ccff';
+    ctx.fillText('INTEL RECOVERED!', GW / 2, GH * 0.65);
+  }
+
+  const pulse = Math.sin(frame * 0.05) * 0.3 + 0.7;
+  ctx.globalAlpha = pulse;
+  ctx.fillStyle = '#88ccff';
+  ctx.font = 'bold 11px monospace';
+  ctx.fillText('RETURNING TO MAP...', GW / 2, GH * 0.82);
+  ctx.globalAlpha = 1;
+}
+
+// === MfT SPLASH ===
+let splashTimer = 2;
+let showSplash = true;
+
+function drawSplash() {
+  ctx.fillStyle = '#0a0a0a';
+  ctx.fillRect(0, 0, GW, GH);
+
+  const alpha = splashTimer > 1.5 ? (2 - splashTimer) * 2 : (splashTimer < 0.5 ? splashTimer * 2 : 1);
+  ctx.globalAlpha = alpha;
+
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#44dd88';
+  ctx.font = 'bold 24px monospace';
+  ctx.fillText('MfT', GW / 2, GH / 2 - 10);
+  ctx.fillStyle = '#888';
+  ctx.font = '10px monospace';
+  ctx.fillText('MEME FOR TREES', GW / 2, GH / 2 + 12);
+
+  ctx.globalAlpha = 1;
+}
+
+// === MAIN UPDATE ===
+function update(dt) {
+  frame++;
+  TAS.particles.update(dt);
+  TAS.fx.updateEffects(dt);
+
+  if (showSplash) {
+    splashTimer -= dt;
+    if (splashTimer <= 0) showSplash = false;
+    return;
+  }
+
+  if (state === 'title') {
+    if (Object.values(TAS.input.keys).some(Boolean) || TAS.input.touch.a || TAS.input.touch.b) {
+      state = 'map';
+      TAS.audio.ensureAudio();
+    }
+    return;
+  }
+
+  if (state === 'map') {
+    updateMap(dt);
+    return;
+  }
+
+  if (state === 'gameOver') {
+    if (Object.values(TAS.input.keys).some(Boolean) || TAS.input.touch.a) {
+      state = 'title';
+      score = 0;
+      lives = 3;
+      health = 6;
+      weapon = 'normal';
+      weaponAmmo = -1;
+    }
+    return;
+  }
+
+  if (state === 'stageComplete') {
+    stageCompleteTimer -= dt;
+    if (stageCompleteTimer <= 0) {
+      state = 'map';
+    }
+    return;
+  }
+
+  if (state === 'playing') {
+    updatePlayer(dt);
+    updateGrapple(dt);
+    updateEnemies(dt);
+    updateBoss(dt);
+    updateBullets(dt);
+    updatePickups(dt);
+    updateCamera(dt);
+  }
+}
+
+// === MAIN DRAW ===
+function draw(dt) {
+  ctx.fillStyle = '#111';
+  ctx.fillRect(0, 0, GW, GH);
+
+  if (showSplash) {
+    drawSplash();
+    return;
+  }
+
+  if (state === 'title') {
+    drawTitle();
+    TAS.input.drawTouchControls(GW, GH);
+    return;
+  }
+
+  if (state === 'map') {
+    drawMap();
+    TAS.input.drawTouchControls(GW, GH);
+    return;
+  }
+
+  if (state === 'gameOver') {
+    TAS.ui.drawGameOver(score, highScore, GW, GH, { frame, extra: 'Stage: ' + (currentStage + 1) });
+    TAS.input.drawTouchControls(GW, GH);
+    return;
+  }
+
+  if (state === 'stageComplete') {
+    drawStageComplete();
+    return;
+  }
+
+  if (state === 'playing') {
+    ctx.save();
+    TAS.fx.applyShake();
+
+    drawBackground();
+    drawPlatforms();
+    drawGrapplePoints();
+    drawPickups();
+    drawEnemies();
+    drawBoss();
+    drawGrapple();
+    drawPlayer();
+    drawBullets();
+
+    TAS.particles.draw();
+    ctx.restore();
+
+    TAS.fx.drawFlash(GW, GH);
+    drawHUD();
+    TAS.input.drawTouchControls(GW, GH);
+  }
+}
+
+// === START ===
+TAS.loop.start(update, draw);
+
+})();
+</script>
+</body>
+</html>

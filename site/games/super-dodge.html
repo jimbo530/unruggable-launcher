@@ -1,0 +1,1719 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Super Dodge</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body { width: 100%; height: 100%; overflow: hidden; background: #111; touch-action: none; }
+canvas { display: block; margin: 0 auto; }
+#back-link {
+  position: fixed; bottom: 8px; left: 50%; transform: translateX(-50%);
+  color: #666; font-family: monospace; font-size: 12px; text-decoration: none; z-index: 10;
+}
+#back-link:hover { color: #aaa; }
+</style>
+</head>
+<body>
+<canvas id="gc"></canvas>
+<a id="back-link" href="/games">Back to Arcade</a>
+<script src="nft-loader.js"></script>
+<script>if(window.NftLoader)NftLoader.gate();</script>
+<script src="tasern-engine.js"></script>
+<script>
+(function() {
+"use strict";
+
+// === GAME CONSTANTS ===
+const GW = 480, GH = 320;
+const ctx = TAS.ctx;
+
+TAS.initCanvas(GW, GH);
+TAS.input.initTouch({ buttons: ['a', 'b'], labels: { a: 'THROW', b: 'SWAP' } });
+
+const COURT_LEFT = 20;
+const COURT_RIGHT = 460;
+const COURT_TOP = 100;
+const COURT_BOTTOM = 280;
+const COURT_MID = 240;
+const GROUND_Y = 260;
+const GRAVITY = 1400;
+const BALL_SPEED = 280;
+const SUPER_SPEED = 380;
+const CATCH_WINDOW = 8;
+const CHARGE_TIME = 60;
+const SPRINT_DRAIN = 30;
+const SPRINT_REGEN = 15;
+const MAX_STAMINA = 100;
+const SAVE_KEY = 'sdodge';
+
+// === TEAMS ===
+const TEAMS = [
+  { name: "Dock Vipers", district: "Harbor District", colors: ['#2288aa', '#115577', '#44bbdd'], super: 'thunder', aggro: 0.3, react: 18 },
+  { name: "Market Rats", district: "Merchant Row", colors: ['#aa8822', '#775511', '#ddbb44'], super: 'curve', aggro: 0.4, react: 16 },
+  { name: "Slum Ghosts", district: "The Underbelly", colors: ['#6644aa', '#331177', '#9966dd'], super: 'shadow', aggro: 0.5, react: 14 },
+  { name: "Park Wolves", district: "Green Gardens", colors: ['#22aa44', '#117722', '#44dd66'], super: 'rocket', aggro: 0.5, react: 13 },
+  { name: "Iron Hammers", district: "Forge Ward", colors: ['#aa4422', '#771100', '#dd6644'], super: 'bomb', aggro: 0.6, react: 11 },
+  { name: "Tower Hawks", district: "High Spire", colors: ['#4466cc', '#2233aa', '#6688ee'], super: 'thunder', aggro: 0.65, react: 10 },
+  { name: "Shadow Fangs", district: "Dark Alley", colors: ['#333333', '#111111', '#666666'], super: 'shadow', aggro: 0.7, react: 8 },
+  { name: "Flame Lords", district: "Ember Keep", colors: ['#dd4400', '#aa2200', '#ff8844'], super: 'fire', aggro: 0.8, react: 6 }
+];
+
+const PLAYER_TEAM_IDX = 0;
+
+// === SUPER THROW TYPES ===
+const SUPER_TYPES = ['thunder', 'fire', 'shadow', 'bomb', 'curve', 'rocket'];
+
+// === POWER-UPS (shop between matches) ===
+const POWERUPS = [
+  { name: 'Speed Shoes', cost: 30, stat: 'speed', amount: 15, desc: '+15 Speed' },
+  { name: 'Iron Body', cost: 40, stat: 'defense', amount: 5, desc: '+5 Defense' },
+  { name: 'Quick Charge', cost: 50, stat: 'charge', amount: 8, desc: 'Faster charge' },
+  { name: 'Stamina Drink', cost: 25, stat: 'stamina', amount: 15, desc: '+15 Stamina' },
+  { name: 'Power Arm', cost: 45, stat: 'power', amount: 8, desc: '+8 Throw power' },
+  { name: 'Heal Salve', cost: 20, stat: 'heal', amount: 30, desc: 'Heal 30 HP' }
+];
+
+// === CHARACTER TEMPLATES ===
+const CHAR_TEMPLATES = [
+  { name: 'Striker', super: 'thunder', hp: 80, speed: 130, power: 20, color: 0 },
+  { name: 'Tank', super: 'bomb', hp: 120, speed: 90, power: 25, color: 1 },
+  { name: 'Scout', super: 'rocket', hp: 70, speed: 160, power: 15, color: 2 },
+  { name: 'Trickster', super: 'shadow', hp: 75, speed: 140, power: 18, color: 0 },
+  { name: 'Blaze', super: 'fire', hp: 85, speed: 120, power: 22, color: 1 },
+  { name: 'Bender', super: 'curve', hp: 90, speed: 110, power: 20, color: 2 }
+];
+
+// === GAME STATE ===
+let state = 'title';
+let frame = 0;
+let score = 0;
+let highScore = TAS.score.load(SAVE_KEY + '_hi') || 0;
+let tournamentRound = 0;
+let tokens = 0;
+let playerTeam = [];
+let enemyTeam = [];
+let balls = [];
+let particles = [];
+let controlledIdx = 0;
+let matchResult = '';
+let slowMo = 0;
+let slowMoTimer = 0;
+let screenShake = 0;
+let shakeX = 0, shakeY = 0;
+let flashAlpha = 0;
+let shopOpen = false;
+let shopCursor = 0;
+let matchIntro = 0;
+let matchIntroText = '';
+let playerStats = { speed: 0, defense: 0, charge: 0, stamina: 0, power: 0 };
+let catchFlash = 0;
+let catchText = '';
+let aiThrowCooldown = 0;
+
+// === HELPERS ===
+function lerp(a, b, t) { return a + (b - a) * t; }
+function dist(a, b) { return Math.sqrt((a.x - b.x) ** 2 + (a.y - b.y) ** 2); }
+function rnd(min, max) { return Math.random() * (max - min) + min; }
+function rndInt(min, max) { return Math.floor(rnd(min, max + 1)); }
+function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+
+// === CHARACTER FACTORY ===
+function createChar(template, teamIdx, side, slot) {
+  const team = TEAMS[teamIdx];
+  const baseX = side === 'left' ? COURT_LEFT + 40 + slot * 60 : COURT_MID + 40 + slot * 60;
+  return {
+    x: baseX,
+    y: GROUND_Y,
+    vx: 0, vy: 0,
+    w: 16, h: 28,
+    hp: template.hp,
+    maxHp: template.hp,
+    speed: template.speed,
+    power: template.power,
+    super: template.super,
+    chargeFrames: 0,
+    stamina: MAX_STAMINA + playerStats.stamina,
+    maxStamina: MAX_STAMINA + playerStats.stamina,
+    alive: true,
+    side: side,
+    slot: slot,
+    team: teamIdx,
+    colorIdx: template.color,
+    name: template.name,
+    state: 'idle',
+    stateTimer: 0,
+    hasBall: false,
+    invuln: 0,
+    stunTimer: 0,
+    jumpCooldown: 0,
+    facing: side === 'left' ? 1 : -1,
+    aiTarget: null,
+    aiTimer: 0,
+    sprinting: false,
+    throwDir: { x: 0, y: 0 }
+  };
+}
+
+// === BALL FACTORY ===
+function createBall(x, y) {
+  return {
+    x: x, y: y,
+    vx: 0, vy: 0,
+    radius: 5,
+    active: true,
+    thrown: false,
+    superType: null,
+    thrower: null,
+    damage: 0,
+    trailParticles: [],
+    visible: true,
+    invisTimer: 0,
+    splitDone: false,
+    homingTarget: null,
+    bounced: false,
+    grounded: false,
+    catchable: true
+  };
+}
+
+// === PARTICLE SYSTEM ===
+function spawnParticle(x, y, vx, vy, color, life, size) {
+  if (particles.length > 200) particles.shift();
+  particles.push({ x, y, vx, vy, color, life, maxLife: life, size: size || 3 });
+}
+
+function spawnExplosion(x, y, color, count, speed) {
+  for (let i = 0; i < count; i++) {
+    const angle = (Math.PI * 2 * i) / count + rnd(-0.2, 0.2);
+    const spd = rnd(speed * 0.5, speed * 1.5);
+    spawnParticle(x, y, Math.cos(angle) * spd, Math.sin(angle) * spd, color, rnd(0.3, 0.8), rnd(2, 5));
+  }
+}
+
+function spawnTrail(x, y, color) {
+  spawnParticle(x, y, rnd(-10, 10), rnd(-20, 5), color, rnd(0.2, 0.5), rnd(2, 4));
+}
+
+// === MATCH INITIALIZATION ===
+function initMatch(enemyIdx) {
+  const pTemplates = [CHAR_TEMPLATES[0], CHAR_TEMPLATES[1], CHAR_TEMPLATES[2]];
+  const eBase = enemyIdx % CHAR_TEMPLATES.length;
+  const eTemplates = [
+    CHAR_TEMPLATES[eBase],
+    CHAR_TEMPLATES[(eBase + 1) % CHAR_TEMPLATES.length],
+    CHAR_TEMPLATES[(eBase + 2) % CHAR_TEMPLATES.length]
+  ];
+
+  playerTeam = pTemplates.map((t, i) => {
+    const c = createChar(t, PLAYER_TEAM_IDX, 'left', i);
+    c.speed += playerStats.speed;
+    c.power += playerStats.power;
+    c.hp += playerStats.defense * 2;
+    c.maxHp = c.hp;
+    c.maxStamina += playerStats.stamina;
+    c.stamina = c.maxStamina;
+    return c;
+  });
+
+  enemyTeam = eTemplates.map((t, i) => {
+    const c = createChar(t, enemyIdx, 'right', i);
+    const diff = enemyIdx * 0.12;
+    c.speed *= (1 + diff);
+    c.power *= (1 + diff * 0.5);
+    c.hp = Math.floor(c.hp * (1 + diff * 0.3));
+    c.maxHp = c.hp;
+    return c;
+  });
+
+  balls = [createBall(GW / 2, GROUND_Y - 10)];
+  controlledIdx = 0;
+  matchResult = '';
+  aiThrowCooldown = 0;
+  particles = [];
+  slowMo = 0;
+  screenShake = 0;
+  matchIntro = 120;
+  matchIntroText = 'VS ' + TEAMS[enemyIdx].name.toUpperCase();
+}
+
+// === TOURNAMENT START ===
+function startTournament() {
+  state = 'playing';
+  tournamentRound = 0;
+  score = 0;
+  tokens = 50;
+  playerStats = { speed: 0, defense: 0, charge: 0, stamina: 0, power: 0 };
+  initMatch(1);
+}
+
+// === INPUT HANDLING ===
+function getInput() {
+  const keys = TAS.input.keys;
+  const touch = TAS.input.touch;
+  return {
+    left: keys['ArrowLeft'] || touch.left,
+    right: keys['ArrowRight'] || touch.right,
+    up: keys['ArrowUp'] || touch.up,
+    down: keys['ArrowDown'] || touch.down,
+    fire: keys['KeyZ'] || keys['Space'] || touch.a,
+    swap: keys['KeyX'] || keys['ShiftLeft'] || touch.b,
+    sprint: keys['KeyC'] || keys['ShiftRight']
+  };
+}
+
+let prevFire = false;
+let prevSwap = false;
+let fireHeld = 0;
+
+// === GAME UPDATE ===
+function update(dt) {
+  frame++;
+
+  if (flashAlpha > 0) flashAlpha -= dt * 4;
+  if (screenShake > 0) {
+    screenShake -= dt * 8;
+    shakeX = rnd(-screenShake * 3, screenShake * 3);
+    shakeY = rnd(-screenShake * 2, screenShake * 2);
+  } else { shakeX = 0; shakeY = 0; }
+  if (catchFlash > 0) catchFlash -= dt * 3;
+  if (slowMoTimer > 0) { slowMoTimer -= dt; if (slowMoTimer <= 0) slowMo = 0; }
+
+  const effectiveDt = slowMo > 0 ? dt * 0.25 : dt;
+
+  // Update particles
+  for (let i = particles.length - 1; i >= 0; i--) {
+    const p = particles[i];
+    p.x += p.vx * effectiveDt;
+    p.y += p.vy * effectiveDt;
+    p.vy += 200 * effectiveDt;
+    p.life -= effectiveDt;
+    if (p.life <= 0) particles.splice(i, 1);
+  }
+
+  if (state === 'title') {
+    const inp = getInput();
+    if (inp.fire && !prevFire) {
+      TAS.audio.playTone(440, 0.1, 'square', 0.15);
+      startTournament();
+    }
+    prevFire = inp.fire;
+    return;
+  }
+
+  if (state === 'gameOver') {
+    const inp = getInput();
+    if (inp.fire && !prevFire) { state = 'title'; }
+    prevFire = inp.fire;
+    return;
+  }
+
+  if (state === 'victory') {
+    const inp = getInput();
+    if (inp.fire && !prevFire) { state = 'title'; }
+    prevFire = inp.fire;
+    return;
+  }
+
+  if (state === 'shop') {
+    updateShop();
+    return;
+  }
+
+  if (state === 'matchEnd') {
+    const inp = getInput();
+    if (inp.fire && !prevFire) {
+      if (matchResult === 'win') {
+        tournamentRound++;
+        tokens += 30 + tournamentRound * 10;
+        if (tournamentRound >= 7) {
+          state = 'victory';
+          score += 5000;
+          if (score > highScore) { highScore = score; TAS.score.save(SAVE_KEY + '_hi', highScore); }
+        } else {
+          state = 'shop';
+          shopCursor = 0;
+        }
+      } else {
+        state = 'gameOver';
+        if (score > highScore) { highScore = score; TAS.score.save(SAVE_KEY + '_hi', highScore); }
+      }
+    }
+    prevFire = inp.fire;
+    return;
+  }
+
+  if (state === 'playing') {
+    if (matchIntro > 0) { matchIntro--; return; }
+    updatePlaying(effectiveDt);
+  }
+}
+
+// === SHOP UPDATE ===
+function updateShop() {
+  const inp = getInput();
+
+  if (inp.up && !prevFire) {
+    shopCursor = (shopCursor - 1 + POWERUPS.length + 1) % (POWERUPS.length + 1);
+    TAS.audio.playTone(330, 0.05, 'square', 0.1);
+  }
+  if (inp.down && !prevSwap) {
+    shopCursor = (shopCursor + 1) % (POWERUPS.length + 1);
+    TAS.audio.playTone(330, 0.05, 'square', 0.1);
+  }
+
+  if (inp.fire && !prevFire) {
+    if (shopCursor === POWERUPS.length) {
+      // Continue
+      TAS.audio.playTone(550, 0.15, 'square', 0.15);
+      const nextEnemy = tournamentRound + 1;
+      if (nextEnemy < TEAMS.length) {
+        state = 'playing';
+        initMatch(nextEnemy);
+      }
+    } else {
+      const item = POWERUPS[shopCursor];
+      if (tokens >= item.cost) {
+        tokens -= item.cost;
+        if (item.stat === 'heal') {
+          // Will heal at match start
+        } else {
+          playerStats[item.stat] += item.amount;
+        }
+        TAS.audio.playTone(660, 0.15, 'sine', 0.15);
+        spawnExplosion(GW / 2, GH / 2, '#ffdd44', 8, 80);
+      } else {
+        TAS.audio.playTone(110, 0.2, 'square', 0.1);
+      }
+    }
+  }
+
+  prevFire = inp.fire;
+  prevSwap = inp.down || inp.up;
+}
+
+// === MAIN GAMEPLAY ===
+function updatePlaying(dt) {
+  const inp = getInput();
+  const controlled = playerTeam[controlledIdx];
+
+  // Handle swap
+  if (inp.swap && !prevSwap && controlled) {
+    let nearest = null;
+    let nearDist = Infinity;
+    for (let i = 0; i < playerTeam.length; i++) {
+      if (i !== controlledIdx && playerTeam[i].alive) {
+        const d = dist(controlled, playerTeam[i]);
+        if (d < nearDist) { nearDist = d; nearest = i; }
+      }
+    }
+    if (nearest !== null) {
+      controlledIdx = nearest;
+      TAS.audio.playTone(440, 0.05, 'triangle', 0.1);
+    }
+  }
+  prevSwap = inp.swap;
+
+  // Update controlled player
+  if (controlled && controlled.alive && controlled.stunTimer <= 0) {
+    updateControlledPlayer(controlled, inp, dt);
+  }
+
+  // Fire hold for charging
+  if (inp.fire) {
+    fireHeld++;
+  } else {
+    if (fireHeld > 0 && controlled && controlled.alive && controlled.hasBall) {
+      throwBall(controlled, inp, fireHeld);
+    }
+    fireHeld = 0;
+  }
+  prevFire = inp.fire;
+
+  // Update all characters
+  updateAllChars(dt);
+
+  // AI for player teammates
+  for (let i = 0; i < playerTeam.length; i++) {
+    if (i !== controlledIdx && playerTeam[i].alive) {
+      updateTeammateAI(playerTeam[i], dt);
+    }
+  }
+
+  // AI for enemies
+  aiThrowCooldown -= dt;
+  for (let i = 0; i < enemyTeam.length; i++) {
+    if (enemyTeam[i].alive) {
+      updateEnemyAI(enemyTeam[i], i, dt);
+    }
+  }
+
+  // Update balls
+  updateBalls(dt);
+
+  // Check match end
+  const pAlive = playerTeam.filter(c => c.alive).length;
+  const eAlive = enemyTeam.filter(c => c.alive).length;
+  if (pAlive === 0) {
+    matchResult = 'lose';
+    state = 'matchEnd';
+    TAS.audio.playTone(110, 0.5, 'sawtooth', 0.15);
+  } else if (eAlive === 0) {
+    matchResult = 'win';
+    score += 1000 + tournamentRound * 500;
+    state = 'matchEnd';
+    TAS.audio.playTone(660, 0.3, 'square', 0.15);
+    setTimeout(() => TAS.audio.playTone(880, 0.3, 'square', 0.12), 150);
+  }
+}
+
+// === PLAYER CONTROL ===
+function updateControlledPlayer(p, inp, dt) {
+  let moveX = 0, moveY = 0;
+  if (inp.left) moveX = -1;
+  if (inp.right) moveX = 1;
+  if (inp.up) moveY = -1;
+  if (inp.down) moveY = 1;
+
+  // Sprint
+  p.sprinting = inp.sprint && (moveX !== 0 || moveY !== 0) && p.stamina > 0;
+  const spdMult = p.sprinting ? 1.6 : 1.0;
+  if (p.sprinting) {
+    p.stamina -= SPRINT_DRAIN * dt;
+    if (p.stamina < 0) p.stamina = 0;
+  } else {
+    p.stamina = Math.min(p.maxStamina, p.stamina + SPRINT_REGEN * dt);
+  }
+
+  const spd = (p.speed + playerStats.speed) * spdMult;
+  p.vx = moveX * spd;
+  p.vy = moveY * spd * 0.6;
+
+  // Store throw direction
+  if (moveX !== 0 || moveY !== 0) {
+    p.throwDir = { x: moveX || p.facing, y: moveY * 0.5 };
+    if (moveX !== 0) p.facing = moveX > 0 ? 1 : -1;
+  } else {
+    p.throwDir = { x: p.facing, y: 0 };
+  }
+
+  // Jump/dodge
+  if ((inp.up && p.y <= COURT_TOP + 20) || (inp.fire === false && inp.swap === false && inp.up)) {
+    // Jump is automatic with up near top
+  }
+
+  // Catch attempt (press fire without ball as ball approaches)
+  if (inp.fire && !p.hasBall && p.stunTimer <= 0) {
+    p.state = 'catching';
+    p.stateTimer = CATCH_WINDOW;
+  }
+}
+
+// === THROW BALL ===
+function throwBall(thrower, inp, chargeFrames) {
+  thrower.hasBall = false;
+  const isSuper = chargeFrames >= (CHARGE_TIME - playerStats.charge);
+  const ball = createBall(thrower.x, thrower.y - 5);
+
+  // Direction
+  let dx = thrower.throwDir.x;
+  let dy = thrower.throwDir.y;
+  const len = Math.sqrt(dx * dx + dy * dy) || 1;
+  dx /= len;
+  dy /= len;
+
+  // Pass to teammate check
+  if (thrower.side === 'left') {
+    // Check if aiming toward a teammate
+    const teammates = playerTeam.filter(t => t !== thrower && t.alive);
+    let passTarget = null;
+    for (const t of teammates) {
+      const tdx = t.x - thrower.x;
+      const tdy = t.y - thrower.y;
+      const dot = tdx * dx + tdy * dy;
+      if (dot > 0 && dist(thrower, t) < 80) {
+        passTarget = t;
+        break;
+      }
+    }
+    if (passTarget && !isSuper) {
+      ball.vx = (passTarget.x - thrower.x) * 3;
+      ball.vy = (passTarget.y - thrower.y) * 3;
+      ball.thrown = false;
+      ball.damage = 0;
+      ball.catchable = true;
+      balls.push(ball);
+      TAS.audio.playTone(330, 0.08, 'triangle', 0.1);
+      return;
+    }
+  }
+
+  const speed = isSuper ? SUPER_SPEED : BALL_SPEED;
+  const power = thrower.power + playerStats.power;
+  ball.vx = dx * speed;
+  ball.vy = dy * speed * 0.5 - 50;
+  ball.thrown = true;
+  ball.thrower = thrower;
+  ball.damage = isSuper ? power * 2 : power;
+  ball.catchable = true;
+
+  if (isSuper) {
+    ball.superType = thrower.super;
+    TAS.audio.playTone(880, 0.2, 'sawtooth', 0.2);
+    TAS.audio.playTone(1100, 0.15, 'sine', 0.1);
+    spawnExplosion(thrower.x, thrower.y - 10, TEAMS[thrower.team].colors[2], 12, 100);
+    screenShake = 0.5;
+  } else {
+    TAS.audio.playTone(550, 0.1, 'square', 0.12);
+  }
+
+  balls.push(ball);
+}
+
+// === AI THROW ===
+function aiThrow(thrower) {
+  if (aiThrowCooldown > 0) return;
+  thrower.hasBall = false;
+  const ball = createBall(thrower.x, thrower.y - 5);
+
+  // Pick target
+  const targets = playerTeam.filter(t => t.alive);
+  if (targets.length === 0) return;
+  const target = targets[rndInt(0, targets.length - 1)];
+
+  const dx = target.x - thrower.x;
+  const dy = target.y - thrower.y;
+  const len = Math.sqrt(dx * dx + dy * dy) || 1;
+
+  const team = TEAMS[thrower.team];
+  const isSuper = Math.random() < team.aggro * 0.4;
+  const speed = isSuper ? SUPER_SPEED : BALL_SPEED;
+
+  ball.vx = (dx / len) * speed;
+  ball.vy = (dy / len) * speed * 0.7 - 30;
+  ball.thrown = true;
+  ball.thrower = thrower;
+  ball.damage = isSuper ? thrower.power * 2 : thrower.power;
+  ball.catchable = true;
+
+  if (isSuper) {
+    ball.superType = team.super;
+    TAS.audio.playTone(660, 0.15, 'sawtooth', 0.15);
+    spawnExplosion(thrower.x, thrower.y - 10, team.colors[2], 8, 80);
+    screenShake = 0.3;
+  } else {
+    TAS.audio.playTone(440, 0.08, 'square', 0.1);
+  }
+
+  balls.push(ball);
+  aiThrowCooldown = rnd(0.8, 2.0);
+}
+
+// === UPDATE ALL CHARACTERS ===
+function updateAllChars(dt) {
+  const allChars = [...playerTeam, ...enemyTeam];
+  for (const c of allChars) {
+    if (!c.alive) continue;
+
+    if (c.stunTimer > 0) { c.stunTimer -= dt; c.vx = 0; c.vy = 0; }
+    if (c.invuln > 0) c.invuln -= dt;
+    if (c.stateTimer > 0) c.stateTimer -= dt;
+
+    // Apply velocity
+    c.x += c.vx * dt;
+    c.y += c.vy * dt;
+
+    // Boundary constraints
+    if (c.side === 'left') {
+      c.x = clamp(c.x, COURT_LEFT + c.w / 2, COURT_MID - c.w / 2);
+    } else {
+      c.x = clamp(c.x, COURT_MID + c.w / 2, COURT_RIGHT - c.w / 2);
+    }
+    c.y = clamp(c.y, COURT_TOP + c.h / 2, COURT_BOTTOM - c.h / 2);
+
+    // Auto pick up nearby ball
+    if (!c.hasBall && c.stunTimer <= 0) {
+      for (const ball of balls) {
+        if (!ball.thrown && ball.active && !ball.grounded) {
+          if (dist(c, ball) < 20) {
+            c.hasBall = true;
+            ball.active = false;
+            TAS.audio.playTone(220, 0.05, 'triangle', 0.08);
+            break;
+          }
+        }
+        // Grounded ball pickup
+        if (ball.grounded && ball.active && dist(c, ball) < 18) {
+          c.hasBall = true;
+          ball.active = false;
+          TAS.audio.playTone(220, 0.05, 'triangle', 0.08);
+          break;
+        }
+      }
+    }
+
+    // Friction
+    if (c !== playerTeam[controlledIdx]) {
+      c.vx *= 0.9;
+      c.vy *= 0.9;
+    }
+  }
+}
+
+// === TEAMMATE AI ===
+function updateTeammateAI(p, dt) {
+  p.aiTimer -= dt;
+  if (p.aiTimer > 0) return;
+  p.aiTimer = rnd(0.3, 0.8);
+
+  if (p.hasBall) {
+    // Pass to controlled player or throw at enemies
+    const controlled = playerTeam[controlledIdx];
+    if (controlled && controlled.alive && Math.random() < 0.6) {
+      // Pass
+      p.hasBall = false;
+      const ball = createBall(p.x, p.y - 5);
+      ball.vx = (controlled.x - p.x) * 2.5;
+      ball.vy = (controlled.y - p.y) * 2.5;
+      ball.thrown = false;
+      ball.damage = 0;
+      balls.push(ball);
+      TAS.audio.playTone(330, 0.06, 'triangle', 0.08);
+    } else {
+      // Throw at enemy
+      const targets = enemyTeam.filter(e => e.alive);
+      if (targets.length > 0) {
+        const target = targets[rndInt(0, targets.length - 1)];
+        p.hasBall = false;
+        const ball = createBall(p.x, p.y - 5);
+        const dx = target.x - p.x;
+        const dy = target.y - p.y;
+        const len = Math.sqrt(dx * dx + dy * dy) || 1;
+        ball.vx = (dx / len) * BALL_SPEED * 0.8;
+        ball.vy = (dy / len) * BALL_SPEED * 0.5;
+        ball.thrown = true;
+        ball.thrower = p;
+        ball.damage = p.power;
+        ball.catchable = true;
+        balls.push(ball);
+        TAS.audio.playTone(440, 0.06, 'square', 0.08);
+      }
+    }
+  } else {
+    // Move toward nearest ball or hold position
+    let nearestBall = null;
+    let nearDist = Infinity;
+    for (const ball of balls) {
+      if (ball.active && !ball.thrown && ball.x < COURT_MID) {
+        const d = dist(p, ball);
+        if (d < nearDist) { nearDist = d; nearestBall = ball; }
+      }
+    }
+    if (nearestBall && nearDist > 20) {
+      const dx = nearestBall.x - p.x;
+      const dy = nearestBall.y - p.y;
+      const len = Math.sqrt(dx * dx + dy * dy) || 1;
+      p.vx = (dx / len) * p.speed * 0.6;
+      p.vy = (dy / len) * p.speed * 0.6;
+    } else {
+      // Return to formation
+      const homeX = COURT_LEFT + 50 + p.slot * 60;
+      const homeY = GROUND_Y - 10 + p.slot * 20;
+      p.vx = (homeX - p.x) * 2;
+      p.vy = (homeY - p.y) * 2;
+    }
+  }
+
+  // Dodge incoming balls
+  for (const ball of balls) {
+    if (ball.thrown && ball.active && ball.thrower && ball.thrower.side === 'right') {
+      if (dist(p, ball) < 60 && Math.random() < 0.4) {
+        p.vy = (Math.random() < 0.5 ? -1 : 1) * p.speed;
+      }
+    }
+  }
+}
+
+// === ENEMY AI ===
+function updateEnemyAI(e, idx, dt) {
+  const team = TEAMS[e.team];
+  e.aiTimer -= dt;
+  if (e.aiTimer > 0) return;
+  e.aiTimer = rnd(0.2, 0.6) * (1 - team.aggro * 0.3);
+
+  if (e.hasBall) {
+    // Decide to throw
+    if (Math.random() < team.aggro) {
+      aiThrow(e);
+    } else {
+      // Position for throw
+      const targetY = rnd(COURT_TOP + 40, COURT_BOTTOM - 40);
+      e.vy = (targetY - e.y) * 2;
+    }
+  } else {
+    // Try to get a ball
+    let nearestBall = null;
+    let nearDist = Infinity;
+    for (const ball of balls) {
+      if (ball.active && !ball.thrown && ball.x > COURT_MID - 20) {
+        const d = dist(e, ball);
+        if (d < nearDist) { nearDist = d; nearestBall = ball; }
+      }
+    }
+    if (nearestBall && nearDist > 15) {
+      const dx = nearestBall.x - e.x;
+      const dy = nearestBall.y - e.y;
+      const len = Math.sqrt(dx * dx + dy * dy) || 1;
+      e.vx = (dx / len) * e.speed * 0.8;
+      e.vy = (dy / len) * e.speed * 0.8;
+    } else {
+      // Dodge
+      for (const ball of balls) {
+        if (ball.thrown && ball.active && ball.thrower && ball.thrower.side === 'left') {
+          const d = dist(e, ball);
+          if (d < 50 + team.react * 3) {
+            if (Math.random() < 0.3 + team.aggro * 0.3) {
+              // Try to catch
+              e.state = 'catching';
+              e.stateTimer = CATCH_WINDOW + team.react;
+            } else {
+              e.vy = (Math.random() < 0.5 ? -1 : 1) * e.speed * 1.2;
+            }
+          }
+        }
+      }
+      // Wander
+      const homeX = COURT_MID + 50 + e.slot * 55;
+      const homeY = COURT_TOP + 50 + e.slot * 50;
+      e.vx = (homeX - e.x) * 1.5;
+      e.vy = (homeY - e.y) * 1.5;
+    }
+  }
+}
+
+// === BALL PHYSICS & SUPER EFFECTS ===
+function updateBalls(dt) {
+  for (let i = balls.length - 1; i >= 0; i--) {
+    const ball = balls[i];
+    if (!ball.active) { balls.splice(i, 1); continue; }
+
+    // Super throw behaviors
+    if (ball.superType && ball.thrown) {
+      updateSuperBall(ball, dt);
+    }
+
+    ball.x += ball.vx * dt;
+    ball.y += ball.vy * dt;
+
+    // Add gravity to non-thrown balls
+    if (!ball.thrown) {
+      ball.vy += GRAVITY * 0.3 * dt;
+    } else {
+      ball.vy += GRAVITY * 0.1 * dt;
+    }
+
+    // Trail particles for thrown balls
+    if (ball.thrown && ball.visible) {
+      const color = ball.superType ? getSuperColor(ball.superType) : '#ffffff';
+      if (frame % 2 === 0) spawnTrail(ball.x, ball.y, color);
+    }
+
+    // Ground bounce
+    if (ball.y > COURT_BOTTOM - 5) {
+      ball.y = COURT_BOTTOM - 5;
+      if (ball.thrown && !ball.bounced) {
+        ball.bounced = true;
+        ball.vy = -Math.abs(ball.vy) * 0.3;
+        ball.vx *= 0.6;
+        // Fire ball split
+        if (ball.superType === 'fire' && !ball.splitDone) {
+          ball.splitDone = true;
+          fireBallSplit(ball);
+        }
+      } else {
+        ball.vy = 0;
+        ball.vx *= 0.85;
+        ball.thrown = false;
+        ball.grounded = true;
+        ball.superType = null;
+        if (Math.abs(ball.vx) < 5) ball.vx = 0;
+      }
+    }
+
+    // Wall bounds
+    if (ball.x < COURT_LEFT || ball.x > COURT_RIGHT) {
+      ball.active = false;
+      // Respawn ball at center
+      setTimeout(() => {
+        if (balls.filter(b => b.active).length < 1) {
+          balls.push(createBall(GW / 2, COURT_TOP + 30));
+        }
+      }, 1000);
+      continue;
+    }
+
+    // Top bound
+    if (ball.y < COURT_TOP) {
+      ball.y = COURT_TOP;
+      ball.vy = Math.abs(ball.vy) * 0.5;
+    }
+
+    // Hit detection
+    if (ball.thrown && ball.active) {
+      const targets = ball.thrower && ball.thrower.side === 'left' ? enemyTeam : playerTeam;
+      for (const target of targets) {
+        if (!target.alive || target.invuln > 0) continue;
+        if (dist(ball, target) < 18) {
+          // Check if catching
+          if (target.state === 'catching' && target.stateTimer > 0 && ball.catchable) {
+            // CAUGHT!
+            performCatch(target, ball);
+          } else {
+            // HIT!
+            performHit(target, ball);
+          }
+          break;
+        }
+      }
+    }
+  }
+
+  // Ensure at least one ball exists
+  if (balls.filter(b => b.active).length === 0) {
+    balls.push(createBall(GW / 2, COURT_TOP + 30));
+  }
+}
+
+// === SUPER BALL BEHAVIORS ===
+function updateSuperBall(ball, dt) {
+  switch (ball.superType) {
+    case 'thunder':
+      // Zigzag pattern
+      ball.vy += Math.sin(frame * 0.5) * 800 * dt;
+      if (frame % 3 === 0) spawnParticle(ball.x, ball.y, rnd(-30, 30), rnd(-30, 30), '#ffff44', 0.3, 3);
+      break;
+    case 'shadow':
+      // Goes invisible mid-flight
+      ball.invisTimer += dt;
+      if (ball.invisTimer > 0.15 && ball.invisTimer < 0.45) {
+        ball.visible = false;
+      } else {
+        ball.visible = true;
+      }
+      if (ball.invisTimer > 0.45) {
+        spawnParticle(ball.x, ball.y, 0, 0, '#9944ff', 0.2, 5);
+      }
+      break;
+    case 'curve':
+      // Extreme curve
+      ball.vy += Math.sin(frame * 0.15) * 600 * dt;
+      ball.vx += Math.cos(frame * 0.1) * 100 * dt;
+      break;
+    case 'rocket':
+      // Slight homing
+      if (ball.thrower) {
+        const targets = ball.thrower.side === 'left' ? enemyTeam : playerTeam;
+        const alive = targets.filter(t => t.alive);
+        if (alive.length > 0) {
+          const nearest = alive.reduce((a, b) => dist(ball, a) < dist(ball, b) ? a : b);
+          const dx = nearest.x - ball.x;
+          const dy = nearest.y - ball.y;
+          const len = Math.sqrt(dx * dx + dy * dy) || 1;
+          ball.vx += (dx / len) * 150 * dt;
+          ball.vy += (dy / len) * 80 * dt;
+        }
+      }
+      if (frame % 2 === 0) spawnParticle(ball.x, ball.y, rnd(-20, 20), rnd(10, 40), '#ff6600', 0.3, 4);
+      break;
+    case 'bomb':
+      // Normal flight, explodes on impact (handled in hit)
+      if (frame % 4 === 0) spawnParticle(ball.x, ball.y, rnd(-5, 5), rnd(-5, 5), '#ff4400', 0.4, 3);
+      break;
+    case 'fire':
+      // Normal flight, splits on ground bounce (handled in updateBalls)
+      if (frame % 2 === 0) spawnParticle(ball.x, ball.y, rnd(-15, 15), rnd(-15, 15), '#ff8800', 0.3, 4);
+      break;
+  }
+}
+
+// === FIRE BALL SPLIT ===
+function fireBallSplit(parentBall) {
+  for (let i = -1; i <= 1; i++) {
+    if (i === 0) continue;
+    const child = createBall(parentBall.x, parentBall.y);
+    child.vx = parentBall.vx * 0.7 + i * 120;
+    child.vy = -180;
+    child.thrown = true;
+    child.thrower = parentBall.thrower;
+    child.damage = parentBall.damage * 0.5;
+    child.superType = null;
+    child.catchable = true;
+    balls.push(child);
+  }
+  spawnExplosion(parentBall.x, parentBall.y, '#ff4400', 10, 120);
+  screenShake = 0.4;
+  TAS.audio.playTone(200, 0.2, 'sawtooth', 0.15);
+}
+
+// === CATCH ===
+function performCatch(catcher, ball) {
+  catcher.hasBall = true;
+  ball.active = false;
+  catcher.state = 'idle';
+  catcher.stateTimer = 0;
+
+  // Slow-mo on super catch
+  if (ball.superType) {
+    slowMo = 1;
+    slowMoTimer = 0.6;
+    catchFlash = 1;
+    catchText = 'SUPER CATCH!';
+    score += 500;
+    spawnExplosion(catcher.x, catcher.y, '#ffffff', 20, 150);
+    TAS.audio.playTone(880, 0.2, 'sine', 0.2);
+    TAS.audio.playTone(1100, 0.15, 'sine', 0.15);
+    screenShake = 0.6;
+  } else {
+    catchFlash = 0.6;
+    catchText = 'CATCH!';
+    score += 100;
+    spawnExplosion(catcher.x, catcher.y, '#44ff44', 8, 80);
+    TAS.audio.playTone(660, 0.15, 'sine', 0.15);
+  }
+  flashAlpha = 0.3;
+}
+
+// === HIT ===
+function performHit(target, ball) {
+  const dmg = Math.max(1, ball.damage - (playerStats.defense * (target.side === 'left' ? 1 : 0)));
+  target.hp -= dmg;
+  target.invuln = 0.5;
+  target.stunTimer = 0.4;
+  target.vx = ball.vx * 0.3;
+  target.vy = ball.vy * 0.2;
+
+  // Bomb explosion AoE
+  if (ball.superType === 'bomb') {
+    const aoeTargets = target.side === 'left' ? playerTeam : enemyTeam;
+    for (const t of aoeTargets) {
+      if (t !== target && t.alive && dist(t, ball) < 60) {
+        t.hp -= dmg * 0.5;
+        t.stunTimer = 0.6;
+        t.invuln = 0.3;
+      }
+    }
+    spawnExplosion(ball.x, ball.y, '#ff4400', 25, 180);
+    spawnExplosion(ball.x, ball.y, '#ffaa00', 15, 120);
+    screenShake = 1.0;
+    TAS.audio.playTone(100, 0.4, 'sawtooth', 0.2);
+    TAS.audio.playTone(60, 0.5, 'square', 0.15);
+  } else {
+    spawnExplosion(ball.x, ball.y, '#ff4444', 8, 100);
+    screenShake = 0.4;
+    TAS.audio.playTone(180, 0.15, 'square', 0.15);
+  }
+
+  ball.active = false;
+  ball.thrown = false;
+
+  // Check elimination
+  if (target.hp <= 0) {
+    target.hp = 0;
+    target.alive = false;
+    spawnExplosion(target.x, target.y, '#ff0000', 20, 150);
+    spawnExplosion(target.x, target.y, '#ffff00', 10, 100);
+    screenShake = 0.8;
+    TAS.audio.playTone(100, 0.5, 'sawtooth', 0.2);
+    score += 300;
+
+    // Switch to next alive if controlled was eliminated
+    if (target.side === 'left') {
+      if (!playerTeam[controlledIdx].alive) {
+        for (let i = 0; i < playerTeam.length; i++) {
+          if (playerTeam[i].alive) { controlledIdx = i; break; }
+        }
+      }
+    }
+  }
+
+  flashAlpha = 0.2;
+}
+
+// === SUPER THROW COLORS ===
+function getSuperColor(type) {
+  switch (type) {
+    case 'thunder': return '#ffff00';
+    case 'fire': return '#ff6600';
+    case 'shadow': return '#9944ff';
+    case 'bomb': return '#ff2200';
+    case 'curve': return '#00ffcc';
+    case 'rocket': return '#ff8800';
+    default: return '#ffffff';
+  }
+}
+
+// === DRAW ===
+function draw(dt) {
+  ctx.fillStyle = '#0a0a1a';
+  ctx.fillRect(0, 0, GW, GH);
+
+  if (state === 'title') {
+    drawTitle();
+    return;
+  }
+  if (state === 'gameOver') {
+    drawGameOver();
+    return;
+  }
+  if (state === 'victory') {
+    drawVictory();
+    return;
+  }
+  if (state === 'shop') {
+    drawShop();
+    return;
+  }
+
+  // Apply screen shake
+  ctx.save();
+  ctx.translate(shakeX, shakeY);
+
+  drawCourt();
+  drawCharacters();
+  drawBalls();
+  drawParticles();
+
+  ctx.restore();
+
+  // UI overlays
+  drawHUD();
+  if (matchIntro > 0) drawMatchIntro();
+  if (state === 'matchEnd') drawMatchEnd();
+  if (catchFlash > 0) drawCatchFlash();
+  if (flashAlpha > 0) {
+    ctx.fillStyle = `rgba(255, 255, 255, ${flashAlpha})`;
+    ctx.fillRect(0, 0, GW, GH);
+  }
+  if (slowMo > 0) {
+    ctx.fillStyle = 'rgba(0, 0, 40, 0.15)';
+    ctx.fillRect(0, 0, GW, GH);
+  }
+
+  TAS.input.drawTouchControls(GW, GH);
+}
+
+// === DRAW TITLE ===
+function drawTitle() {
+  // Background
+  ctx.fillStyle = '#0a0a2a';
+  ctx.fillRect(0, 0, GW, GH);
+
+  // Animated court lines
+  const pulse = Math.sin(frame * 0.03) * 0.3 + 0.7;
+  ctx.strokeStyle = `rgba(100, 200, 255, ${pulse * 0.3})`;
+  ctx.lineWidth = 2;
+  ctx.strokeRect(40, 80, 400, 200);
+  ctx.beginPath();
+  ctx.moveTo(240, 80);
+  ctx.lineTo(240, 280);
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.arc(240, 180, 40, 0, Math.PI * 2);
+  ctx.stroke();
+
+  // Title
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.font = 'bold 36px monospace';
+  ctx.fillStyle = '#ffffff';
+  ctx.fillText('SUPER DODGE', GW / 2, 50);
+
+  ctx.font = '12px monospace';
+  ctx.fillStyle = '#88aacc';
+  ctx.fillText('Tasern Dodgeball Tournament', GW / 2, 75);
+
+  // Bouncing ball animation
+  const ballY = 180 + Math.sin(frame * 0.08) * 30;
+  ctx.beginPath();
+  ctx.arc(240, ballY, 8, 0, Math.PI * 2);
+  ctx.fillStyle = '#ff6644';
+  ctx.fill();
+  ctx.strokeStyle = '#ffaa88';
+  ctx.lineWidth = 1;
+  ctx.stroke();
+
+  // Animated players
+  for (let i = 0; i < 3; i++) {
+    const px = 100 + i * 40;
+    const py = 200 + Math.sin(frame * 0.04 + i) * 5;
+    drawMiniPlayer(px, py, TEAMS[0].colors, 1);
+  }
+  for (let i = 0; i < 3; i++) {
+    const px = 320 + i * 40;
+    const py = 200 + Math.sin(frame * 0.04 + i + 2) * 5;
+    drawMiniPlayer(px, py, TEAMS[7].colors, -1);
+  }
+
+  // Instructions
+  ctx.font = '11px monospace';
+  ctx.fillStyle = '#aaaaaa';
+  ctx.fillText('ARROWS: Move | THROW: Hold to charge super', GW / 2, GH - 50);
+  ctx.fillText('SWAP: Switch player | Catch: Press THROW as ball arrives', GW / 2, GH - 35);
+
+  ctx.font = '14px monospace';
+  ctx.fillStyle = '#ffffff';
+  const blink = Math.sin(frame * 0.1) > 0;
+  if (blink) ctx.fillText('Press THROW to Start', GW / 2, GH - 15);
+
+  if (highScore > 0) {
+    ctx.font = '10px monospace';
+    ctx.fillStyle = '#666666';
+    ctx.fillText('High Score: ' + highScore, GW / 2, 95);
+  }
+}
+
+// === DRAW COURT ===
+function drawCourt() {
+  // Floor
+  const gradient = ctx.createLinearGradient(0, COURT_TOP, 0, COURT_BOTTOM);
+  gradient.addColorStop(0, '#1a2a1a');
+  gradient.addColorStop(1, '#0a1a0a');
+  ctx.fillStyle = gradient;
+  ctx.fillRect(COURT_LEFT, COURT_TOP, COURT_RIGHT - COURT_LEFT, COURT_BOTTOM - COURT_TOP);
+
+  // Court lines
+  ctx.strokeStyle = '#335533';
+  ctx.lineWidth = 2;
+  ctx.strokeRect(COURT_LEFT, COURT_TOP, COURT_RIGHT - COURT_LEFT, COURT_BOTTOM - COURT_TOP);
+
+  // Center line
+  ctx.beginPath();
+  ctx.setLineDash([6, 4]);
+  ctx.moveTo(COURT_MID, COURT_TOP);
+  ctx.lineTo(COURT_MID, COURT_BOTTOM);
+  ctx.strokeStyle = '#ffffff44';
+  ctx.stroke();
+  ctx.setLineDash([]);
+
+  // Center circle
+  ctx.beginPath();
+  ctx.arc(COURT_MID, (COURT_TOP + COURT_BOTTOM) / 2, 25, 0, Math.PI * 2);
+  ctx.strokeStyle = '#ffffff22';
+  ctx.stroke();
+
+  // Team zone colors
+  ctx.fillStyle = `rgba(${hexToRgb(TEAMS[PLAYER_TEAM_IDX].colors[0])}, 0.05)`;
+  ctx.fillRect(COURT_LEFT, COURT_TOP, COURT_MID - COURT_LEFT, COURT_BOTTOM - COURT_TOP);
+
+  const enemyIdx = Math.min(tournamentRound + 1, TEAMS.length - 1);
+  ctx.fillStyle = `rgba(${hexToRgb(TEAMS[enemyIdx].colors[0])}, 0.05)`;
+  ctx.fillRect(COURT_MID, COURT_TOP, COURT_RIGHT - COURT_MID, COURT_BOTTOM - COURT_TOP);
+
+  // Crowd (simple dots in background)
+  ctx.fillStyle = '#333344';
+  ctx.fillRect(COURT_LEFT, COURT_TOP - 30, COURT_RIGHT - COURT_LEFT, 30);
+  for (let i = 0; i < 40; i++) {
+    const cx = COURT_LEFT + 10 + i * 11;
+    const cy = COURT_TOP - 15 + Math.sin(i * 2 + frame * 0.02) * 3;
+    ctx.fillStyle = `hsl(${i * 30}, 30%, 40%)`;
+    ctx.beginPath();
+    ctx.arc(cx, cy, 3, 0, Math.PI * 2);
+    ctx.fill();
+  }
+}
+
+// === DRAW CHARACTERS ===
+function drawCharacters() {
+  const allChars = [...playerTeam, ...enemyTeam];
+  // Sort by y for depth
+  allChars.sort((a, b) => a.y - b.y);
+
+  for (const c of allChars) {
+    if (!c.alive) continue;
+
+    const team = TEAMS[c.team];
+    const colors = team.colors;
+    const isControlled = c === playerTeam[controlledIdx];
+
+    // Invulnerability flash
+    if (c.invuln > 0 && Math.floor(c.invuln * 10) % 2 === 0) continue;
+
+    ctx.save();
+    ctx.translate(c.x, c.y);
+
+    // Controlled indicator
+    if (isControlled) {
+      ctx.beginPath();
+      ctx.arc(0, -c.h - 8, 4, 0, Math.PI * 2);
+      ctx.fillStyle = '#ffff00';
+      ctx.fill();
+    }
+
+    // Shadow
+    ctx.fillStyle = 'rgba(0,0,0,0.3)';
+    ctx.beginPath();
+    ctx.ellipse(0, c.h / 2 - 2, 8, 3, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Body
+    const bobY = Math.sin(frame * 0.1 + c.slot) * 1.5;
+
+    // Legs
+    const legSpread = (c.vx !== 0 || c.vy !== 0) ? Math.sin(frame * 0.2 + c.slot) * 4 : 0;
+    ctx.fillStyle = colors[1];
+    ctx.fillRect(-4 + legSpread, 4 + bobY, 4, 12);
+    ctx.fillRect(2 - legSpread, 4 + bobY, 4, 12);
+
+    // Torso
+    ctx.fillStyle = colors[0];
+    ctx.fillRect(-7, -10 + bobY, 14, 16);
+
+    // Stripe
+    ctx.fillStyle = colors[2];
+    ctx.fillRect(-7, -4 + bobY, 14, 3);
+
+    // Head
+    ctx.fillStyle = '#ffcc88';
+    ctx.beginPath();
+    ctx.arc(0, -14 + bobY, 6, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Eyes
+    ctx.fillStyle = '#000000';
+    ctx.fillRect(-3 * c.facing - 1, -15 + bobY, 2, 2);
+    ctx.fillRect(1 * c.facing, -15 + bobY, 2, 2);
+
+    // Arms
+    ctx.fillStyle = colors[0];
+    if (c.hasBall) {
+      // Arm up holding ball
+      ctx.fillRect(c.facing * 6, -12 + bobY, 4 * c.facing, 3);
+      ctx.fillRect(c.facing * 9, -16 + bobY, 3, 5);
+      // Ball in hand
+      ctx.beginPath();
+      ctx.arc(c.facing * 11, -18 + bobY, 5, 0, Math.PI * 2);
+      ctx.fillStyle = '#dd4422';
+      ctx.fill();
+      ctx.strokeStyle = '#ff8866';
+      ctx.lineWidth = 1;
+      ctx.stroke();
+    } else {
+      // Arms at sides
+      ctx.fillRect(-9, -6 + bobY, 3, 8);
+      ctx.fillRect(6, -6 + bobY, 3, 8);
+    }
+
+    // Charge indicator
+    if (isControlled && fireHeld > 0 && c.hasBall) {
+      const chargeRatio = Math.min(1, fireHeld / (CHARGE_TIME - playerStats.charge));
+      ctx.fillStyle = chargeRatio >= 1 ? '#ffff00' : '#ff8800';
+      ctx.fillRect(-10, -c.h - 4, 20 * chargeRatio, 3);
+      if (chargeRatio >= 1 && frame % 4 < 2) {
+        spawnParticle(c.x + rnd(-8, 8), c.y - c.h - 5, rnd(-20, 20), rnd(-40, -10), getSuperColor(c.super), 0.3, 2);
+      }
+    }
+
+    // Stun stars
+    if (c.stunTimer > 0) {
+      for (let s = 0; s < 3; s++) {
+        const angle = frame * 0.15 + s * 2.1;
+        const sx = Math.cos(angle) * 10;
+        const sy = -20 + Math.sin(angle) * 5 + bobY;
+        ctx.fillStyle = '#ffff00';
+        ctx.font = '8px monospace';
+        ctx.textAlign = 'center';
+        ctx.fillText('*', sx, sy);
+      }
+    }
+
+    // HP bar
+    const hpRatio = c.hp / c.maxHp;
+    ctx.fillStyle = '#333333';
+    ctx.fillRect(-10, -c.h - 12, 20, 3);
+    ctx.fillStyle = hpRatio > 0.5 ? '#44cc44' : hpRatio > 0.25 ? '#cccc44' : '#cc4444';
+    ctx.fillRect(-10, -c.h - 12, 20 * hpRatio, 3);
+
+    ctx.restore();
+  }
+}
+
+// === DRAW MINI PLAYER (for title) ===
+function drawMiniPlayer(x, y, colors, facing) {
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.fillStyle = colors[1];
+  ctx.fillRect(-3, 4, 3, 8);
+  ctx.fillRect(1, 4, 3, 8);
+  ctx.fillStyle = colors[0];
+  ctx.fillRect(-5, -6, 10, 12);
+  ctx.fillStyle = colors[2];
+  ctx.fillRect(-5, -2, 10, 2);
+  ctx.fillStyle = '#ffcc88';
+  ctx.beginPath();
+  ctx.arc(0, -10, 5, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+}
+
+// === DRAW BALLS ===
+function drawBalls() {
+  for (const ball of balls) {
+    if (!ball.active) continue;
+    if (!ball.visible) {
+      // Draw faint shadow for invisible balls
+      ctx.globalAlpha = 0.1;
+      ctx.beginPath();
+      ctx.arc(ball.x, ball.y, ball.radius, 0, Math.PI * 2);
+      ctx.fillStyle = '#9944ff';
+      ctx.fill();
+      ctx.globalAlpha = 1;
+      continue;
+    }
+
+    ctx.save();
+
+    // Super glow
+    if (ball.superType && ball.thrown) {
+      const color = getSuperColor(ball.superType);
+      ctx.shadowColor = color;
+      ctx.shadowBlur = 12;
+
+      // Extra ring
+      ctx.beginPath();
+      ctx.arc(ball.x, ball.y, ball.radius + 4, 0, Math.PI * 2);
+      ctx.strokeStyle = color;
+      ctx.globalAlpha = 0.4 + Math.sin(frame * 0.3) * 0.2;
+      ctx.lineWidth = 2;
+      ctx.stroke();
+      ctx.globalAlpha = 1;
+    }
+
+    // Ball body
+    ctx.beginPath();
+    ctx.arc(ball.x, ball.y, ball.radius, 0, Math.PI * 2);
+    ctx.fillStyle = ball.thrown ? '#dd3322' : '#cc6644';
+    ctx.fill();
+    ctx.strokeStyle = ball.thrown ? '#ff8866' : '#aa8866';
+    ctx.lineWidth = 1;
+    ctx.stroke();
+
+    // Ball highlight
+    ctx.beginPath();
+    ctx.arc(ball.x - 1, ball.y - 2, 2, 0, Math.PI * 2);
+    ctx.fillStyle = 'rgba(255,255,255,0.4)';
+    ctx.fill();
+
+    // Speed lines for fast balls
+    if (ball.thrown && Math.abs(ball.vx) > 200) {
+      ctx.strokeStyle = 'rgba(255,255,255,0.3)';
+      ctx.lineWidth = 1;
+      for (let l = 0; l < 3; l++) {
+        const lx = ball.x - ball.vx * 0.01 * (l + 1);
+        const ly = ball.y - ball.vy * 0.01 * (l + 1) + rnd(-3, 3);
+        ctx.beginPath();
+        ctx.moveTo(lx, ly);
+        ctx.lineTo(lx - ball.vx * 0.008, ly);
+        ctx.stroke();
+      }
+    }
+
+    ctx.restore();
+  }
+}
+
+// === DRAW PARTICLES ===
+function drawParticles() {
+  for (const p of particles) {
+    const alpha = p.life / p.maxLife;
+    ctx.globalAlpha = alpha;
+    ctx.fillStyle = p.color;
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, p.size * alpha, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+}
+
+// === DRAW HUD ===
+function drawHUD() {
+  ctx.textAlign = 'left';
+  ctx.font = '10px monospace';
+
+  // Score
+  ctx.fillStyle = '#ffffff';
+  ctx.fillText('Score: ' + score, 10, 14);
+
+  // Tokens
+  ctx.fillStyle = '#ffdd44';
+  ctx.fillText('Tokens: ' + tokens, 10, 26);
+
+  // Round
+  ctx.textAlign = 'right';
+  ctx.fillStyle = '#aaaaaa';
+  ctx.fillText('Round ' + (tournamentRound + 1) + '/7', GW - 10, 14);
+
+  // Team names
+  ctx.textAlign = 'center';
+  ctx.font = '9px monospace';
+  ctx.fillStyle = TEAMS[PLAYER_TEAM_IDX].colors[2];
+  ctx.fillText(TEAMS[PLAYER_TEAM_IDX].name, COURT_LEFT + 60, COURT_TOP - 35);
+  const eIdx = Math.min(tournamentRound + 1, TEAMS.length - 1);
+  ctx.fillStyle = TEAMS[eIdx].colors[2];
+  ctx.fillText(TEAMS[eIdx].name, COURT_RIGHT - 60, COURT_TOP - 35);
+
+  // Player team HP bars
+  ctx.textAlign = 'left';
+  for (let i = 0; i < playerTeam.length; i++) {
+    const p = playerTeam[i];
+    const bx = 10;
+    const by = GH - 55 + i * 16;
+    ctx.fillStyle = p.alive ? '#ffffff' : '#444444';
+    ctx.font = '8px monospace';
+    ctx.fillText(p.name[0], bx, by + 8);
+    ctx.fillStyle = '#222222';
+    ctx.fillRect(bx + 10, by, 50, 8);
+    if (p.alive) {
+      const hpR = p.hp / p.maxHp;
+      ctx.fillStyle = hpR > 0.5 ? '#44aa44' : hpR > 0.25 ? '#aaaa44' : '#aa4444';
+      ctx.fillRect(bx + 10, by, 50 * hpR, 8);
+    }
+    if (i === controlledIdx) {
+      ctx.strokeStyle = '#ffff00';
+      ctx.lineWidth = 1;
+      ctx.strokeRect(bx + 9, by - 1, 52, 10);
+    }
+  }
+
+  // Stamina bar for controlled
+  const controlled = playerTeam[controlledIdx];
+  if (controlled && controlled.alive) {
+    const stR = controlled.stamina / controlled.maxStamina;
+    ctx.fillStyle = '#222222';
+    ctx.fillRect(10, GH - 10, 60, 5);
+    ctx.fillStyle = stR > 0.3 ? '#4488cc' : '#cc8844';
+    ctx.fillRect(10, GH - 10, 60 * stR, 5);
+    ctx.font = '7px monospace';
+    ctx.fillStyle = '#88aacc';
+    ctx.fillText('STA', 72, GH - 5);
+  }
+
+  // Enemy team HP bars
+  ctx.textAlign = 'right';
+  for (let i = 0; i < enemyTeam.length; i++) {
+    const e = enemyTeam[i];
+    const bx = GW - 70;
+    const by = GH - 55 + i * 16;
+    ctx.fillStyle = e.alive ? '#ffffff' : '#444444';
+    ctx.font = '8px monospace';
+    ctx.textAlign = 'right';
+    ctx.fillText(e.name[0], GW - 10, by + 8);
+    ctx.fillStyle = '#222222';
+    ctx.fillRect(bx, by, 50, 8);
+    if (e.alive) {
+      const hpR = e.hp / e.maxHp;
+      ctx.fillStyle = hpR > 0.5 ? '#44aa44' : hpR > 0.25 ? '#aaaa44' : '#aa4444';
+      ctx.fillRect(bx, by, 50 * hpR, 8);
+    }
+  }
+
+  // Super throw hint
+  if (controlled && controlled.alive && controlled.hasBall) {
+    ctx.textAlign = 'center';
+    ctx.font = '8px monospace';
+    ctx.fillStyle = '#888888';
+    ctx.fillText('Hold THROW for ' + controlled.super.toUpperCase() + ' BALL', GW / 2, GH - 5);
+  }
+}
+
+// === DRAW MATCH INTRO ===
+function drawMatchIntro() {
+  const alpha = Math.min(1, matchIntro / 30);
+  ctx.fillStyle = `rgba(0, 0, 0, ${alpha * 0.7})`;
+  ctx.fillRect(0, 0, GW, GH);
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.font = 'bold 28px monospace';
+  ctx.fillStyle = `rgba(255, 255, 255, ${alpha})`;
+  ctx.fillText(matchIntroText, GW / 2, GH / 2 - 10);
+  ctx.font = '12px monospace';
+  ctx.fillStyle = `rgba(200, 200, 200, ${alpha})`;
+  const eIdx = Math.min(tournamentRound + 1, TEAMS.length - 1);
+  ctx.fillText(TEAMS[eIdx].district, GW / 2, GH / 2 + 20);
+}
+
+// === DRAW CATCH FLASH ===
+function drawCatchFlash() {
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.font = 'bold 24px monospace';
+  ctx.fillStyle = `rgba(255, 255, 100, ${catchFlash})`;
+  ctx.fillText(catchText, GW / 2, GH / 2 - 40);
+}
+
+// === DRAW MATCH END ===
+function drawMatchEnd() {
+  ctx.fillStyle = 'rgba(0, 0, 0, 0.6)';
+  ctx.fillRect(0, 0, GW, GH);
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.font = 'bold 32px monospace';
+  if (matchResult === 'win') {
+    ctx.fillStyle = '#44ff44';
+    ctx.fillText('VICTORY!', GW / 2, GH / 2 - 20);
+    ctx.font = '14px monospace';
+    ctx.fillStyle = '#ffdd44';
+    ctx.fillText('+' + (30 + tournamentRound * 10) + ' Tokens', GW / 2, GH / 2 + 15);
+  } else {
+    ctx.fillStyle = '#ff4444';
+    ctx.fillText('DEFEATED', GW / 2, GH / 2 - 20);
+  }
+  ctx.font = '12px monospace';
+  ctx.fillStyle = '#aaaaaa';
+  ctx.fillText('Press THROW to continue', GW / 2, GH / 2 + 45);
+}
+
+// === DRAW SHOP ===
+function drawShop() {
+  ctx.fillStyle = '#0a0a2a';
+  ctx.fillRect(0, 0, GW, GH);
+
+  ctx.textAlign = 'center';
+  ctx.font = 'bold 20px monospace';
+  ctx.fillStyle = '#ffffff';
+  ctx.fillText('POWER-UP SHOP', GW / 2, 30);
+
+  ctx.font = '11px monospace';
+  ctx.fillStyle = '#ffdd44';
+  ctx.fillText('Tokens: ' + tokens, GW / 2, 50);
+
+  ctx.textAlign = 'left';
+  for (let i = 0; i < POWERUPS.length; i++) {
+    const item = POWERUPS[i];
+    const y = 80 + i * 30;
+    const selected = i === shopCursor;
+
+    if (selected) {
+      ctx.fillStyle = '#1a1a3a';
+      ctx.fillRect(60, y - 8, 360, 26);
+      ctx.strokeStyle = '#4466cc';
+      ctx.lineWidth = 1;
+      ctx.strokeRect(60, y - 8, 360, 26);
+    }
+
+    ctx.font = selected ? 'bold 12px monospace' : '12px monospace';
+    ctx.fillStyle = tokens >= item.cost ? '#ffffff' : '#666666';
+    ctx.fillText(item.name, 80, y + 6);
+    ctx.fillStyle = '#ffdd44';
+    ctx.fillText(item.cost + 'T', 240, y + 6);
+    ctx.fillStyle = '#88ccff';
+    ctx.fillText(item.desc, 290, y + 6);
+  }
+
+  // Continue option
+  const contY = 80 + POWERUPS.length * 30;
+  const contSelected = shopCursor === POWERUPS.length;
+  if (contSelected) {
+    ctx.fillStyle = '#1a3a1a';
+    ctx.fillRect(60, contY - 8, 360, 26);
+    ctx.strokeStyle = '#44cc44';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(60, contY - 8, 360, 26);
+  }
+  ctx.font = contSelected ? 'bold 14px monospace' : '14px monospace';
+  ctx.fillStyle = '#44ff44';
+  ctx.fillText('>> NEXT MATCH >>', 80, contY + 6);
+
+  // Stats display
+  ctx.textAlign = 'right';
+  ctx.font = '9px monospace';
+  ctx.fillStyle = '#888888';
+  ctx.fillText('SPD +' + playerStats.speed, GW - 20, GH - 50);
+  ctx.fillText('DEF +' + playerStats.defense, GW - 20, GH - 38);
+  ctx.fillText('POW +' + playerStats.power, GW - 20, GH - 26);
+  ctx.fillText('CHG +' + playerStats.charge, GW - 20, GH - 14);
+
+  ctx.textAlign = 'center';
+  ctx.font = '10px monospace';
+  ctx.fillStyle = '#666666';
+  ctx.fillText('UP/DOWN: Select | THROW: Buy/Continue', GW / 2, GH - 5);
+
+  // Draw particles for shop too
+  drawParticles();
+}
+
+// === DRAW GAME OVER ===
+function drawGameOver() {
+  ctx.fillStyle = '#0a0a0a';
+  ctx.fillRect(0, 0, GW, GH);
+
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.font = 'bold 28px monospace';
+  ctx.fillStyle = '#ff4444';
+  ctx.fillText('TOURNAMENT OVER', GW / 2, GH / 2 - 40);
+
+  ctx.font = '16px monospace';
+  ctx.fillStyle = '#ffffff';
+  ctx.fillText('Score: ' + score, GW / 2, GH / 2);
+
+  ctx.font = '12px monospace';
+  ctx.fillStyle = '#ffdd44';
+  ctx.fillText('Best: ' + highScore, GW / 2, GH / 2 + 25);
+
+  ctx.fillStyle = '#888888';
+  ctx.fillText('Reached Round ' + (tournamentRound + 1), GW / 2, GH / 2 + 50);
+
+  ctx.font = '11px monospace';
+  ctx.fillStyle = '#aaaaaa';
+  const blink = Math.sin(frame * 0.1) > 0;
+  if (blink) ctx.fillText('Press THROW to return', GW / 2, GH / 2 + 80);
+}
+
+// === DRAW VICTORY ===
+function drawVictory() {
+  ctx.fillStyle = '#0a0a2a';
+  ctx.fillRect(0, 0, GW, GH);
+
+  // Celebration particles
+  if (frame % 5 === 0) {
+    spawnParticle(rnd(50, GW - 50), rnd(20, 60), rnd(-50, 50), rnd(50, 150),
+      `hsl(${rnd(0, 360)}, 80%, 60%)`, rnd(1, 2), rnd(3, 6));
+  }
+  drawParticles();
+
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.font = 'bold 32px monospace';
+  ctx.fillStyle = '#ffdd44';
+  ctx.fillText('CHAMPION!', GW / 2, GH / 2 - 50);
+
+  ctx.font = '16px monospace';
+  ctx.fillStyle = '#ffffff';
+  ctx.fillText(TEAMS[PLAYER_TEAM_IDX].name + ' wins the tournament!', GW / 2, GH / 2 - 10);
+
+  ctx.font = '14px monospace';
+  ctx.fillStyle = '#44ff44';
+  ctx.fillText('Final Score: ' + score, GW / 2, GH / 2 + 25);
+
+  ctx.font = '11px monospace';
+  ctx.fillStyle = '#aaaaaa';
+  const blink = Math.sin(frame * 0.1) > 0;
+  if (blink) ctx.fillText('Press THROW to return', GW / 2, GH / 2 + 60);
+}
+
+// === UTILITY: hex to rgb string ===
+function hexToRgb(hex) {
+  const r = parseInt(hex.slice(1, 3), 16);
+  const g = parseInt(hex.slice(3, 5), 16);
+  const b = parseInt(hex.slice(5, 7), 16);
+  return r + ',' + g + ',' + b;
+}
+
+// === START GAME LOOP ===
+TAS.loop.start(update, draw);
+
+})();
+</script>
+</body>
+</html>

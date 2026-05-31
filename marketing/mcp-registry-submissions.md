@@ -12,7 +12,7 @@ URL: https://mcpservers.org/submit
 
 **Fields:**
 - Server Name: `Baselings MCP`
-- Short Description: `40 MCP tools for AI agents to play a yield-generating pet game on Base chain. Earn USDC/ETH/BTC by raising virtual pets. Impact: every action burns tokens and retires carbon credits.`
+- Short Description: `49 MCP tools for AI agents to play a yield-generating pet game on Base chain. Earn USDC/ETH/BTC by raising virtual pets. Impact: every action burns tokens and funds carbon collection credits.`
 - Link: `https://www.npmjs.com/package/baselings-mcp`
 - Category: `Other` (or `Development` if that fits better)
 - Contact Email: `mftstudio@proton.me`
@@ -27,7 +27,7 @@ URL: https://github.com/punkpeye/awesome-mcp-servers
 
 **PR entry to add:**
 ```
-| [Baselings MCP](https://www.npmjs.com/package/baselings-mcp) | 40 tools for AI agents to play Baselings — a Tamagotchi-meets-DeFi pet game on Base chain. Earn yield, burn tokens, retire carbon. | [npm](https://www.npmjs.com/package/baselings-mcp) |
+| [Baselings MCP](https://www.npmjs.com/package/baselings-mcp) | 49 tools for AI agents to play Baselings — a Tamagotchi-meets-DeFi pet game on Base chain. Earn yield, burn tokens, fund carbon collection. | [npm](https://www.npmjs.com/package/baselings-mcp) |
 ```
 
 **Category:** Finance / Gaming / Blockchain (whichever exists)
@@ -54,7 +54,7 @@ Repo: https://github.com/modelcontextprotocol/registry
 ```json
 {
   "name": "io.github.memefortrees/baselings-mcp",
-  "description": "40 MCP tools for AI agents to play Baselings — a yield-generating pet game on Base chain",
+  "description": "49 MCP tools for AI agents to play Baselings — a yield-generating pet game on Base chain",
   "package": {
     "type": "npm",
     "name": "baselings-mcp"
@@ -90,7 +90,7 @@ smithery mcp publish https://www.npmjs.com/package/baselings-mcp -n memefortrees
 ```
 
 **Description for listing:**
-`40 MCP tools for AI agents to play Baselings (Tamagotchi-meets-DeFi on Base), launch tokens via MycoPad, fire reactors, and earn yield. Every action burns tokens + retires carbon.`
+`49 MCP tools for AI agents to play Baselings (Tamagotchi-meets-DeFi on Base), launch tokens via Unrugable, fire reactors, and earn yield. Every action burns tokens + funds carbon collection.`
 
 **Benefits:** Gets discovered by agent developers, Smithery generates OAuth modals if needed, built-in infrastructure.
 
@@ -166,7 +166,7 @@ Registry: MCP server registry with hosted execution.
 ```
 [ ] 1. Go to https://mcpservers.org/submit
      - Name: Baselings MCP
-     - Description: 40 MCP tools for AI agents to play a yield-generating pet game on Base chain. Earn USDC/ETH/BTC by raising virtual pets. Impact: every action burns tokens and retires carbon credits.
+     - Description: 49 MCP tools for AI agents to play a yield-generating pet game on Base chain. Earn USDC/ETH/BTC by raising virtual pets. Impact: every action burns tokens and funds carbon collection credits.
      - Link: https://www.npmjs.com/package/baselings-mcp
      - Category: Other
      - Email: mftstudio@proton.me
@@ -190,6 +190,6 @@ Registry: MCP server registry with hosted execution.
 
 [ ] 6. Fork https://github.com/punkpeye/awesome-mcp-servers
      Add under Finance/Gaming/Blockchain:
-     | [Baselings MCP](https://www.npmjs.com/package/baselings-mcp) | 40 tools for AI agents to play Baselings — a Tamagotchi-meets-DeFi pet game on Base chain. Earn yield, burn tokens, retire carbon. | [npm](https://www.npmjs.com/package/baselings-mcp) |
+     | [Baselings MCP](https://www.npmjs.com/package/baselings-mcp) | 49 tools for AI agents to play Baselings — a Tamagotchi-meets-DeFi pet game on Base chain. Earn yield, burn tokens, fund carbon collection. | [npm](https://www.npmjs.com/package/baselings-mcp) |
      Submit PR.
 ```

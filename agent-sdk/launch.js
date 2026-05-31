@@ -1,11 +1,12 @@
-// MycoPad Agent Launch SDK
-// Standalone module for AI agents to interact with MycoPad V5.2 on Base.
+// Unrugable Agent Launch SDK
+// Standalone module for AI agents to interact with Unrugable (V5.2 Factory + Adoption) on Base.
 //
 // Usage (read-only):
 //   const launch = require('./agent-sdk/launch');
 //   const ctx = launch.createReadContext();
 //   const info = await launch.getFactoryInfo(ctx);
 //   const recent = await launch.getRecentLaunches(ctx);
+//   const adopted = await launch.checkAdoption(ctx, '0x...');
 //
 // NOTE: launchToken() needs updating for V5.2 (USDC seed, two-step flow).
 // Do not call launchToken() until it is rewritten for the new factory.
@@ -25,19 +26,30 @@ const FACTORY_ABI = [
   'event TokenLaunched(address indexed token, address indexed reactor, address indexed charReactor, address launcher, string name, string symbol, uint256 supply, uint256 seed)',
 ];
 
+const ADOPTION_ADDRESS = '0x013a1091108D50eF5F9cC3FDa38f9b2BA4D3F81d';
+
+const ADOPTION_ABI = [
+  'function adoptionCount() view returns (uint256)',
+  'function adopterOf(address token) view returns (address)',
+  'function reactorOf(address token) view returns (address)',
+  'event TokenAdopted(address indexed token, address indexed reactor, address indexed adopter, address upstreamReactor, string name, string symbol)',
+];
+
 const ZERO_ADDR = '0x0000000000000000000000000000000000000000';
 
 function createLaunchContext(privateKey, opts = {}) {
   const provider = new ethers.JsonRpcProvider(opts.rpc || BASE_RPC);
   const wallet = new ethers.Wallet(privateKey, provider);
   const factory = new ethers.Contract(FACTORY_ADDRESS, FACTORY_ABI, wallet);
-  return { wallet, provider, factory };
+  const adoption = new ethers.Contract(ADOPTION_ADDRESS, ADOPTION_ABI, wallet);
+  return { wallet, provider, factory, adoption };
 }
 
 function createReadContext(opts = {}) {
   const provider = new ethers.JsonRpcProvider(opts.rpc || BASE_RPC);
   const factory = new ethers.Contract(FACTORY_ADDRESS, FACTORY_ABI, provider);
-  return { provider, factory };
+  const adoption = new ethers.Contract(ADOPTION_ADDRESS, ADOPTION_ABI, provider);
+  return { provider, factory, adoption };
 }
 
 async function getFactoryInfo(ctx) {
@@ -126,17 +138,43 @@ async function launchToken(ctx, name, symbol, totalSupply, inviteReactor = ZERO_
     launcher: ctx.wallet.address,
     upstream: inviteReactor === ZERO_ADDR ? 'MfT Reactor Prime (default)' : inviteReactor,
     txHash: receipt.hash,
-    inviteLink: `https://mycopad.memefortrees.com?ref=${reactorAddr}`,
+    inviteLink: `https://tasern.quest/launcher/unrugable.html?ref=${reactorAddr}`,
+  };
+}
+
+async function getAdoptionInfo(ctx) {
+  const count = Number(await ctx.adoption.adoptionCount());
+  return {
+    contract: ADOPTION_ADDRESS,
+    adoptionCount: count,
+  };
+}
+
+async function checkAdoption(ctx, tokenAddress) {
+  const [adopter, reactor] = await Promise.all([
+    ctx.adoption.adopterOf(tokenAddress),
+    ctx.adoption.reactorOf(tokenAddress),
+  ]);
+  const isAdopted = adopter !== ZERO_ADDR;
+  return {
+    token: tokenAddress,
+    isAdopted,
+    adopter: isAdopted ? adopter : null,
+    reactor: isAdopted ? reactor : null,
   };
 }
 
 module.exports = {
   FACTORY_ADDRESS,
   FACTORY_ABI,
+  ADOPTION_ADDRESS,
+  ADOPTION_ABI,
   ZERO_ADDR,
   createLaunchContext,
   createReadContext,
   getFactoryInfo,
+  getAdoptionInfo,
+  checkAdoption,
   checkReactor,
   getLaunch,
   getRecentLaunches,
