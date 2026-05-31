@@ -62,7 +62,8 @@ body{background:#0a1a0a;color:#ccc;font-family:'Segoe UI',system-ui,sans-serif;m
 
 <div class="card">
   <div class="tabs">
-    <div class="tab active" onclick="showTab('deposit', event)">Deposit</div>
+    <div class="tab active" onclick="showTab('deposit', event)">New LP</div>
+    <div class="tab" onclick="showTab('existing', event)">Send Existing</div>
     <div class="tab" onclick="showTab('withdraw', event)">Withdraw</div>
     <div class="tab" onclick="showTab('execute', event)">Execute</div>
   </div>
@@ -129,6 +130,16 @@ body{background:#0a1a0a;color:#ccc;font-family:'Segoe UI',system-ui,sans-serif;m
     <button class="action-btn go" id="depositBtn" style="display:none" onclick="createAndDeposit()">Create LP & Deposit</button>
     <div class="status" id="depositStatus"></div>
     <div class="steps" id="depositSteps"></div>
+  </div>
+
+  <!-- SEND EXISTING TAB -->
+  <div id="tab-existing" style="display:none">
+    <p style="font-size:13px;color:#888;margin-bottom:16px">
+      Send an existing Money-paired V3 LP from your wallet into the generator.
+    </p>
+    <button class="action-btn secondary" onclick="scanWalletPositions()">Scan My Wallet</button>
+    <div id="walletPositions" style="margin-top:12px;font-size:13px;color:#666"></div>
+    <div class="status" id="existingStatus"></div>
   </div>
 
   <!-- WITHDRAW TAB -->
@@ -546,6 +557,80 @@ async function withdrawPosition(tokenId, fromContract) {
     loadStats();
   } catch(e) {
     setStatus('withdrawStatus', e.reason || e.shortMessage || e.message || 'Failed', 'err');
+  }
+}
+
+async function scanWalletPositions() {
+  if (!userAddr) { setStatus('existingStatus', 'Connect wallet first', 'err'); return; }
+  const el = document.getElementById('walletPositions');
+  el.innerHTML = '<span style="color:#f0d060">Scanning wallet for Money-paired LPs...</span>';
+  setStatus('existingStatus', '', '');
+
+  try {
+    const p = provider || new ethers.JsonRpcProvider('https://mainnet.base.org', undefined, { batchMaxCount: 1 });
+    const pmC = new ethers.Contract(PM, [
+      'function balanceOf(address) view returns (uint256)',
+      'function tokenOfOwnerByIndex(address,uint256) view returns (uint256)'
+    ], p);
+    const posAbi = ['function positions(uint256) view returns (uint96 nonce, address operator, address token0, address token1, uint24 fee, int24 tickLower, int24 tickUpper, uint128 liquidity, uint256 feeGrowthInside0, uint256 feeGrowthInside1, uint128 tokensOwed0, uint128 tokensOwed1)'];
+    const pmPos = new ethers.Contract(PM, posAbi, p);
+
+    const bal = Number(await pmC.balanceOf(userAddr));
+    if (bal === 0) { el.innerHTML = '<div style="color:#666">No V3 positions in this wallet.</div>'; return; }
+
+    const moneyLower = MONEY.toLowerCase();
+    const found = [];
+
+    // Scan in batches of 5 to avoid rate limits
+    for (let i = 0; i < bal; i++) {
+      const tokenId = await pmC.tokenOfOwnerByIndex(userAddr, i);
+      const pos = await pmPos.positions(tokenId);
+      if (pos.liquidity === 0n) continue;
+      const t0 = pos.token0.toLowerCase();
+      const t1 = pos.token1.toLowerCase();
+      if (t0 === moneyLower || t1 === moneyLower) {
+        const xToken = t0 === moneyLower ? pos.token1 : pos.token0;
+        const name = Object.values(TOKENS).find(t => t.addr.toLowerCase() === xToken.toLowerCase())?.name || xToken.slice(0,10) + '...';
+        found.push({ tokenId: tokenId.toString(), name, fee: pos.fee });
+      }
+      // Status update every 5
+      if (i % 5 === 4) el.innerHTML = '<span style="color:#f0d060">Scanning... (' + (i+1) + '/' + bal + ')</span>';
+    }
+
+    if (found.length === 0) {
+      el.innerHTML = '<div style="color:#666">No Money-paired positions found in wallet.</div>';
+      return;
+    }
+
+    el.innerHTML = found.map(f =>
+      '<div style="display:flex;justify-content:space-between;align-items:center;padding:10px;background:#0a0a0a;border:1px solid #222;border-radius:8px;margin-bottom:8px">' +
+        '<div><div style="color:#fff;font-weight:600">Money/' + f.name + '</div><div style="font-size:11px;color:#666">ID: ' + f.tokenId + ' · Fee: ' + (f.fee/10000) + '%</div></div>' +
+        '<button onclick="depositExisting(\'' + f.tokenId + '\')" class="action-btn go" style="width:auto;margin:0;padding:8px 14px;font-size:12px">Deposit</button></div>'
+    ).join('');
+  } catch(e) {
+    console.error('scanWalletPositions:', e);
+    el.innerHTML = '<span style="color:#ef4444">Scan failed: ' + (e.shortMessage || e.message || 'RPC error') + '</span>';
+  }
+}
+
+async function depositExisting(tokenId) {
+  if (!signer) { setStatus('existingStatus', 'Connect wallet first', 'err'); return; }
+  try {
+    setStatus('existingStatus', 'Transferring LP to generator...', 'wait');
+    const pmC = new ethers.Contract(PM, ['function safeTransferFrom(address,address,uint256)'], signer);
+    const tx1 = await pmC.safeTransferFrom(userAddr, GENERATOR, tokenId);
+    await tx1.wait();
+
+    setStatus('existingStatus', 'Registering position (no lock)...', 'wait');
+    const gen = new ethers.Contract(GENERATOR, GEN_ABI, signer);
+    const tx2 = await gen.depositPosition(tokenId, 0);
+    await tx2.wait();
+
+    setStatus('existingStatus', 'Done! Position deposited and auto-registered for yield.', 'ok');
+    loadMyPositions();
+    loadStats();
+  } catch(e) {
+    setStatus('existingStatus', e.reason || e.shortMessage || e.message || 'Failed', 'err');
   }
 }
 
