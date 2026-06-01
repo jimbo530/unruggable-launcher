@@ -211,10 +211,11 @@ contract ImpactGenerator {
     //  Position Deposit — anyone can deposit Money/X LP positions
     // ═══════════════════════════════════════════════════════════════════════════
 
-    /// @notice Deposit a V3 LP position. Must be a Money/X pair. Caller must send NFT first.
+    /// @notice Deposit a V3 LP position. Called internally by onERC721Received — not directly.
     /// @param tokenId The position NFT token ID (must already be transferred to this contract)
     /// @param lockUntil Timestamp until which the position is locked (0 = no lock, withdraw anytime)
-    function depositPosition(uint256 tokenId, uint256 lockUntil) external nonReentrant {
+    /// @param depositor The address that sent the NFT (set by onERC721Received, not msg.sender)
+    function _depositPosition(uint256 tokenId, uint256 lockUntil, address depositor) internal {
         require(pools.length < MAX_POOLS, "max pools reached");
         require(tokenIdToIndex[tokenId] == 0, "already registered");
         require(pm.ownerOf(tokenId) == address(this), "NFT not received");
@@ -238,14 +239,14 @@ contract ImpactGenerator {
             fee:           fee,
             moneyIsToken0: is0,
             disabled:      false,
-            depositor:     msg.sender,
+            depositor:     depositor,
             lockUntil:     lockUntil
         }));
         tokenIdToIndex[tokenId] = pools.length;  // index + 1
         hasXToken[xToken] = true;
 
         // Track shares based on liquidity amount for proportional yield
-        shares[msg.sender] += uint256(liquidity);
+        shares[depositor] += uint256(liquidity);
         totalShares += uint256(liquidity);
 
         // Auto-register with CharityFund so this position earns yield
@@ -253,7 +254,12 @@ contract ImpactGenerator {
             emit YieldRegistrationFailed(tokenId);
         }
 
-        emit PositionDeposited(tokenId, msg.sender, xToken, lockUntil);
+        emit PositionDeposited(tokenId, depositor, xToken, lockUntil);
+    }
+
+    /// @notice Admin-only recovery: register an NFT already in the contract to its rightful owner.
+    function adminRegisterPosition(uint256 tokenId, uint256 lockUntil, address depositor) external onlyAdmin nonReentrant {
+        _depositPosition(tokenId, lockUntil, depositor);
     }
 
     /// @notice Withdraw your LP position. Only the original depositor can withdraw, and only if unlocked.
@@ -675,7 +681,15 @@ contract ImpactGenerator {
     //  NFT receiver — accepts from anyone (public-facing)
     // ═══════════════════════════════════════════════════════════════════════════
 
-    function onERC721Received(address, address, uint256, bytes calldata) external pure returns (bytes4) {
+    /// @notice Receives V3 LP NFTs and auto-registers them. Atomic — no orphan window.
+    /// @dev `data` can optionally encode a uint256 lockUntil timestamp. Empty data = no lock.
+    function onERC721Received(address, address from, uint256 tokenId, bytes calldata data) external returns (bytes4) {
+        require(msg.sender == address(pm), "only position manager");
+        uint256 lockUntil = 0;
+        if (data.length >= 32) {
+            lockUntil = abi.decode(data, (uint256));
+        }
+        _depositPosition(tokenId, lockUntil, from);
         return this.onERC721Received.selector;
     }
 }

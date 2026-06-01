@@ -11,7 +11,7 @@ const fs = require('fs');
 const path = require('path');
 
 const RPC = process.env.BASE_RPC || 'https://mainnet.base.org';
-const GENERATOR = '0xe0cD43F031A9F8b3C5A2eB89EA0B1fCa06B6C4b1';
+const GENERATOR = '0x7876e05BfA1bCF90110199B68849eaE3eC0F75d3';
 const DEPLOY_BLOCK = 30000000; // approximate deploy block, adjust if needed
 const BATCH_SIZE = 50000;
 
