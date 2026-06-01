@@ -15,7 +15,7 @@ require('dotenv').config({ path: require('path').join(__dirname, '.env') });
 const fs = require('fs');
 const path = require('path');
 
-// -- Config ------------------------------------------------------------------
+// ── Config ──────────────────────────────────────────────────────────────────
 const BURN_DATA_URL = process.env.BURN_DATA_URL || 'https://tasern.quest/mft/data.json';
 const REACTOR_STATS_URL = process.env.REACTOR_STATS_URL || 'https://tasern.quest/reactor/reactor/stats';
 const CHECK_INTERVAL = 30 * 60 * 1000; // 30 min
@@ -26,7 +26,7 @@ let state = { lastBurnUSD: 0, lastPostTime: 0, contentIndex: 0, postCount: 0 };
 try { state = { ...state, ...JSON.parse(fs.readFileSync(STATE_FILE, 'utf8')) }; } catch (e) { console.warn('social-bot: failed to load saved state:', e.message || e); }
 function saveState() { fs.writeFileSync(STATE_FILE, JSON.stringify(state, null, 2)); }
 
-// -- Promotional content rotation --------------------------------------------
+// ── Promotional content rotation ────────────────────────────────────────────
 const CONTENT = [
   // Reactor mechanics
   `A network of reactors firing across hundreds of pools. Every 2 hours they collect fees and burn tokens permanently.\n\nRenounced or add-only keys. No withdrawal capability. Verify it on a block explorer.\n\nhttps://tasern.quest/mft/`,
@@ -37,11 +37,11 @@ const CONTENT = [
   // Unrugable
   `"Unrugable" isn't a brand name. It's a contract property.\n\nNo withdraw function. Renounced ownership. Locked LP.\n\nVerify it yourself.\n\nhttps://tasern.quest/unrugable.html`,
   // Carbon impact (ethics-approved framing 2026-05-08)
-  `Every trade through reactor pools removes carbon credits from markets. The amount compounds with volume.\n\nRight now it's grams. We're building the infrastructure for tonnes.\n\n6% of every launch seed funds a permanent CHAR carbon reactor. All removals on-chain.\n\nhttps://tasern.quest/mft/`,
+  `Every trade through reactor pools retires carbon. The amount compounds with volume.\n\nRight now it's grams. We're building the infrastructure for tonnes.\n\n6% of every launch seed funds a permanent CHAR carbon reactor. All burns on-chain.\n\nhttps://tasern.quest/mft/`,
   // Reactor heartbeat
   `The reactor heartbeat: secondary reactors compress MfT. V1 Prime fires last, buying through accumulated sell walls with fees from the entire network.\n\nCycle resets every 2 hours.\n\nhttps://tasern.quest/mft/`,
   // Unrugable Launcher
-  `Launch a token on Base for $5. Get: 8 permanently locked LP positions, trading routes across hundreds of pools, and a mandatory charity fund wall.\n\nNo VC raise. No dev allocation. Charity is coded in.\n\nhttps://tasern.quest/unrugable.html`,
+  `Launch a token on Base for $5. Get: locked V3 liquidity across multiple pools, an MfT floor pool, mftUSD sell walls, and a CHAR carbon reactor.\n\nNo VC raise. No dev allocation. Charity is coded in.\n\nhttps://tasern.quest/unrugable.html`,
   // Stats
   null, // Placeholder — dynamic stats post generated at runtime
   // Agent play
@@ -56,7 +56,7 @@ const CONTENT = [
   `Your baseling produced poop. That poop became LP. That LP earned fees. Those fees burned tokens.\n\nYour virtual pet just did more DeFi than most traders.\n\nhttps://tasern.quest/baseling/`,
   // Infrastructure token
   `MfT started as sharing memes to fund trees. Then we built tools.\n\nEvery token launched on Unrugable pairs with MfT — mutual trading routes, arb surfaces, and a mandatory charity fund wall.\n\nhttps://tasern.quest/api/unrugable/tokenomics`,
-  // Fuel loading (reactor pools, not direct sends — only works without upstream fuel line)
+  // Fuel loading (reactor pools, not direct sends)
   `Trading through reactor pools generates fees. Those fees get collected every 2 hours and burned permanently.\n\nSmall amounts on thin pools = outsized impact. Higher slippage, but that's what funds the burns.\n\nhttps://tasern.quest/mft/`,
   // Stats placeholder 2
   null, // Second dynamic stats post
@@ -82,15 +82,15 @@ const CONTENT = [
   `Agent infrastructure on Base:\n\n- llms.txt for discovery\n- /signals for live buy data\n- 49 MCP tools via npx\n- Permissionless execute() on every reactor\n\nBuilt for agents that allocate, not agents that summarize.\n\ntasern.quest/llms.txt`,
   // Reactor arb signal
   `Reactors fire every 2 hours. Each fire creates a price dislocation across hundreds of pools.\n\nYour agent can check reactor readiness at /signals, call execute(), and arb the spread.\n\nPredictable. Permissionless. On a clock.\n\ntasern.quest/api/unrugable/signals`,
-  // v1.1.0 thread — Post 1 (Hook)
+  // v1.2.0 — Post 1 (Hook)
   `Your AI agent earns yield on Base chain.\n\n49 tools. No API key. $0.10 safety cap.\n\nNew in v1.2.0:\n- liquidity_depth for pool depth scanning\n- reactor_timing predictions\n- portfolio_value tracking\n- arb_signal cross-pool detection\n\nnpx baselings-mcp`,
-  // v1.1.0 thread — Post 2 (Swap tools)
+  // v1.2.0 — Post 2 (Swap tools)
   `4 swap tools with built-in safety rails:\n\n- swap_token: $0.10 max, 60s cooldown\n- swap_quote: check prices first\n- swap_status: verify on-chain\n- arb_signal: spot price gaps across hundreds of pools\n\n17 allowlisted tokens. No rugs. No oopsies.`,
-  // v1.1.0 thread — Post 3 (Reactor firing)
+  // v1.2.0 — Post 3 (Reactor firing)
   `fire_reactor — one call, massive on-chain effect.\n\nReactors fire permissionlessly every 2hrs. Each one:\n- Collects LP fees\n- Burns tokens permanently\n- Compounds liquidity upstream\n\nYour agent fires them. The network does the rest. $0.01 gas.`,
-  // v1.1.0 thread — Post 4 (Agent discovery)
+  // v1.2.0 — Post 4 (Agent discovery)
   `Built for AI-native discovery:\n\n- llms.txt at tasern.quest/llms.txt\n- .well-known/agents.json (capabilities + limits)\n- .well-known/mcp.json (MCP registry compatible)\n- ElizaOS plugin: drop-in stdio server\n\nAny framework. Any agent. Zero setup friction.`,
-  // v1.1.0 thread — Post 5 (CTA)
+  // v1.2.0 — Post 5 (CTA)
   `npx baselings-mcp\n\n49 tools. Swaps, reactors, pet game, token launches.\n\nAll on Base. All verifiable on-chain. All unrugable.\n\nnpm: npmjs.com/package/baselings-mcp\nDocs: tasern.quest/llms.txt\n\nBuilt for agents. Humans welcome.`,
   // Money for Trees — human-facing
   `Hold dollars. Fund impact. Withdraw anytime.\n\nMoney for Trees is a 1:1 dollar-backed proof of deposit. Your deposit earns Aave yield on Base. Yield splits three ways: 1/3 depositors (additional mftUSD), 1/3 reactor, 1/3 operations.\n\nImmutable contract. No admin keys. Verify it yourself.\n\nhttps://tasern.quest/fund/meadville/`,
@@ -100,9 +100,13 @@ const CONTENT = [
   `No admin keys. No owner function. No upgrade path. The Money for Trees contract is immutable.\n\nDeposit dollars. Get proof of deposit 1:1. Yield splits three ways (hardcoded). Withdraw anytime.\n\nDon't trust us — read the contract.\n\nhttps://tasern.quest/fund/meadville/`,
   // Money for Trees — charity angle
   `Every dollar deposited into Money for Trees earns yield that flows through the reactor network and funds charity — without the depositor spending a dime.\n\nCharity deposits move to non-refundable LP positions. The architecture locks impact in permanently.\n\nhttps://tasern.quest/fund/meadville/`,
+  // Money for Trees — scale angle
+  `$100 deposited earns yield that funds trees and burns memes. $10,000 deposited does it at 100x scale.\n\nMoney for Trees is a proof of deposit — your dollars stay yours. The yield does the work.\n\nhttps://tasern.quest/fund/meadville/`,
+  // Money for Trees — compounding angle
+  `The Money for Trees flywheel:\n\nMore deposits = more yield generated. More yield = more reactor fuel + more charity. More reactor activity = more burns across every token in the network.\n\nYour deposit funds trees. The architecture handles the rest.\n\nhttps://tasern.quest/fund/meadville/`,
 ];
 
-// -- Fetch live data ---------------------------------------------------------
+// ── Fetch live data ─────────────────────────────────────────────────────────
 async function fetchBurnData() {
   try {
     const r = await fetch(BURN_DATA_URL);
@@ -134,7 +138,7 @@ function buildStatsPost(burnData, reactorData) {
     `https://tasern.quest/mft/`;
 }
 
-// -- Post to X ---------------------------------------------------------------
+// ── Post to X ───────────────────────────────────────────────────────────────
 async function postToX(text) {
   if (!process.env.X_APP_KEY) { console.log('[X] No API keys configured, skipping'); return false; }
   try {
@@ -154,7 +158,7 @@ async function postToX(text) {
   }
 }
 
-// -- Post to Farcaster -------------------------------------------------------
+// ── Post to Farcaster ───────────────────────────────────────────────────────
 async function postToFarcaster(text) {
   if (!process.env.NEYNAR_API_KEY) { console.log('[FC] No Neynar API key, skipping'); return false; }
   try {
@@ -182,7 +186,7 @@ async function postToFarcaster(text) {
   }
 }
 
-// -- Post to all platforms ---------------------------------------------------
+// ── Post to all platforms ───────────────────────────────────────────────────
 async function post(text) {
   console.log(`[POST] ${text.substring(0, 80)}...`);
   const results = await Promise.allSettled([postToX(text), postToFarcaster(text)]);
@@ -192,7 +196,7 @@ async function post(text) {
   return results.some(r => r.status === 'fulfilled' && r.value);
 }
 
-// -- Main loop ---------------------------------------------------------------
+// ── Main loop ───────────────────────────────────────────────────────────────
 async function cycle() {
   console.log(`[CYCLE] ${new Date().toISOString()} — post #${state.postCount + 1}`);
 
@@ -225,7 +229,7 @@ async function cycle() {
   await post(text);
 }
 
-// -- Start -------------------------------------------------------------------
+// ── Start ───────────────────────────────────────────────────────────────────
 console.log('[SOCIAL] MfT Social Bot starting');
 console.log(`[SOCIAL] X: ${process.env.X_APP_KEY ? 'configured' : 'NOT configured'}`);
 console.log(`[SOCIAL] Farcaster: ${process.env.NEYNAR_API_KEY ? 'configured' : 'NOT configured'}`);
