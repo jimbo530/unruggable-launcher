@@ -7,7 +7,7 @@
 <style>
 * { margin: 0; padding: 0; box-sizing: border-box; }
 html, body { width: 100%; height: 100%; overflow: hidden; background: #111; touch-action: none; }
-canvas { display: block; margin: 0 auto; }
+canvas { display: block; margin: 0 auto; image-rendering: pixelated; image-rendering: crisp-edges; }
 #back-link { position: fixed; bottom: 8px; left: 50%; transform: translateX(-50%); color: #666; font-family: monospace; font-size: 12px; text-decoration: none; z-index: 10; }
 #back-link:hover { color: #aaa; }
 </style>
@@ -29,16 +29,55 @@ const ctx = TAS.ctx;
 TAS.initCanvas(GW, GH);
 TAS.input.initTouch({ buttons: ['a', 'b'], labels: { a: 'JUMP', b: 'BLOCK' } });
 
-// === TILE TYPES ===
-const T = { EMPTY: 0, STONE: 1, BLOCK: 2, KEY: 3, DOOR: 4, GEM: 5, JAR: 6, HOURGLASS: 7, STAR: 8, LAVA: 9 };
+// === STAT B SYSTEM (PASS 1) ===
+const statB = { STR: 5, DEX: 5, CON: 5, INT: 5, WIS: 5, CHA: 5 };
+function loadStatB() {
+  try {
+    if (window.NftLoader && NftLoader.stats) {
+      const s = NftLoader.stats;
+      if (s.STR !== undefined) statB.STR = Math.floor(Number(s.STR)) || 5;
+      if (s.DEX !== undefined) statB.DEX = Math.floor(Number(s.DEX)) || 5;
+      if (s.CON !== undefined) statB.CON = Math.floor(Number(s.CON)) || 5;
+      if (s.INT !== undefined) statB.INT = Math.floor(Number(s.INT)) || 5;
+      if (s.WIS !== undefined) statB.WIS = Math.floor(Number(s.WIS)) || 5;
+      if (s.CHA !== undefined) statB.CHA = Math.floor(Number(s.CHA)) || 5;
+    }
+  } catch(e) { /* no NFT loaded, use defaults */ }
+}
+loadStatB();
 
-// === COLORS / PALETTES ===
-const WORLD_PALETTES = [
-  { bg: '#1a0a2e', stone: '#4a3b6b', block: '#6b4e9e', accent: '#c8a2ff' },
-  { bg: '#2e0a0a', stone: '#6b3030', block: '#9e4e2e', accent: '#ffa252' },
-  { bg: '#0a1a2e', stone: '#3b5a7b', block: '#4e7e9e', accent: '#a2d4ff' },
-  { bg: '#0a0a1a', stone: '#2b2b4b', block: '#3e3e6b', accent: '#7a7aff' },
-  { bg: '#1a0a1a', stone: '#5b3b5b', block: '#8e4e8e', accent: '#ff82ff' }
+// Derived stats from statB
+function getSpeed() { return 100 + Math.floor(statB.DEX * 6); }
+function getJump() { return -(240 + Math.floor(statB.DEX * 8)); }
+function getMaxLives() { return 2 + Math.floor(statB.CON / 4); }
+function getScoreMult() { return 1 + Math.floor(statB.INT * 0.08 * 100) / 100; }
+function getMagicCooldown() { return Math.max(0.05, 0.25 - Math.floor(statB.WIS * 0.015 * 100) / 100); }
+function getDropBonus() { return Math.floor(statB.CHA * 2); }
+function getBlockPushRange() { return 1 + Math.floor(statB.STR / 8); }
+function getFireballDamage() { return 1 + Math.floor(statB.STR / 10); }
+function getBonusFireballs() { return Math.floor(statB.WIS / 5); }
+function getTimerBonus() { return Math.floor(statB.CON / 3); }
+function getHintCharges() { return Math.floor(statB.INT / 6); }
+
+// === TILE TYPES ===
+const T = {
+  EMPTY: 0, STONE: 1, BLOCK: 2, KEY: 3, DOOR: 4, GEM: 5, JAR: 6,
+  HOURGLASS: 7, STAR: 8, LAVA: 9,
+  REACTOR_BLOCK: 10, SPORE_BLOCK: 11, MYCELIAL_BLOCK: 12
+};
+
+// === WORLD DATA (PASS 3) ===
+const WORLDS = [
+  { name: 'Tower Base', bg: '#1a0a2e', stone: '#4a3b6b', block: '#6b4e9e', accent: '#c8a2ff',
+    floors: ['Entrance Hall', 'Guard Post', 'Storage Wing', 'Inner Sanctum', 'Reactor Core'] },
+  { name: 'Fire Halls', bg: '#2e0a0a', stone: '#6b3030', block: '#9e4e2e', accent: '#ffa252',
+    floors: ['Smoldering Gate', 'Cinder Path', 'Flame Vault', 'Magma Rift', 'Inferno Heart'] },
+  { name: 'Ice Caves', bg: '#0a1a2e', stone: '#3b5a7b', block: '#4e7e9e', accent: '#a2d4ff',
+    floors: ['Frozen Entry', 'Crystal Grotto', 'Frost Labyrinth', 'Glacial Tomb', 'Spore Nexus'] },
+  { name: 'Dark Maze', bg: '#0a0a1a', stone: '#2b2b4b', block: '#3e3e6b', accent: '#7a7aff',
+    floors: ['Shadow Gate', 'Blind Passage', 'Ghost Walk', 'Abyss Edge', 'Mycelial Throne'] },
+  { name: "Solomon's Chamber", bg: '#1a0a1a', stone: '#5b3b5b', block: '#8e4e8e', accent: '#ff82ff',
+    floors: ['Antechamber', 'Mirror Hall', 'Dragon Pit', 'Key Vault', "Solomon's Seal"] }
 ];
 
 // === GAME STATE ===
@@ -57,10 +96,21 @@ let invincTimer = 0;
 let deathAnim = 0;
 let winAnim = 0;
 let savedProgress = 0;
+let hintCharges = 0;
+let hintActive = 0;
+let bossHP = 0;
+let bossMaxHP = 0;
+let bossType = null;
+let bossPhase = 0;
+let bossDead = false;
+let floorTransition = 0;
+let floorTransitionName = '';
 
 // Player
 let px, py, pvx, pvy, pdir, pgrounded, pjumping;
-const PW = 20, PH = 28, PGRAV = 600, PSPEED = 120, PJUMP = -280;
+let pwalkFrame = 0;
+let pcastAnim = 0;
+const PW = 20, PH = 28, PGRAV = 600;
 
 // Entities
 let enemies = [];
@@ -68,24 +118,31 @@ let playerFireballs = [];
 let enemyFireballs = [];
 let grid = [];
 let items = [];
+let sporeTimers = [];
+let mycelialBridges = [];
 
 // Animation timers
 let blockCreateAnims = [];
 let blockDestroyAnims = [];
+let reactorExplosions = [];
+let solveParticles = [];
 
 // Action cooldown
 let actionCooldown = 0;
 let jumpPressed = false;
 let blockPressed = false;
+let hintPressed = false;
+
+// Coyote time + jump buffer (NES feel)
+let coyoteTime = 0;
+let jumpBuffer = 0;
+const COYOTE_FRAMES = 0.08;
+const JUMP_BUFFER_FRAMES = 0.1;
 
 // Load progress
 try { savedProgress = parseInt(localStorage.getItem('solomonkey_progress') || '0', 10); } catch(e) { savedProgress = 0; }
 
 // === LEVEL DATA ===
-// Format: array of strings, 12 chars wide, 10 rows tall
-// S=stone, .=empty, K=key, D=door, G=gem, J=jar, H=hourglass, *=star, L=lava
-// P=player start
-// Enemies placed separately
 function makeLevels() {
   const levels = [];
 
@@ -146,19 +203,20 @@ function makeLevels() {
       'SSSSSSSSSSSS'
     ], enemies: [{type:'spark',x:6,y:4},{type:'demon',x:9,y:7}], time: 75
   });
+  // World 1 Boss: Reactor Guardian
   levels.push({
     map: [
       'SSSSSSSSSSSS',
-      'S..G..G..G.S',
-      'S.SSS.SSS..S',
-      'S..........D',
-      'SSSS....SSSS',
       'S..........S',
-      'S..SS..SS..S',
-      'S.J........S',
-      'S.P......K.S',
+      'S..........S',
+      'S..........S',
+      'S..........S',
+      'S..........S',
+      'S..........S',
+      'S..........D',
+      'S.P..SSSSSSS',
       'SSSSSSSSSSSS'
-    ], enemies: [{type:'spark',x:5,y:1},{type:'demon',x:8,y:5},{type:'spark',x:2,y:5}], time: 90
+    ], enemies: [], time: 120, boss: 'reactor_guardian'
   });
 
   // World 2: Fire Halls (rooms 5-9)
@@ -202,7 +260,7 @@ function makeLevels() {
       'S.P........S',
       'SSS....SSSSS',
       'SSLLLLLLLLSS'
-    ], enemies: [{type:'dragon',x:11,y:4},{type:'demon',x:5,y:4},{type:'spark',x:8,y:7}], time: 90
+    ], enemies: [{type:'reactor_spark',x:11,y:4},{type:'demon',x:5,y:4},{type:'spark',x:8,y:7}], time: 90
   });
   levels.push({
     map: [
@@ -216,21 +274,22 @@ function makeLevels() {
       'S.SS..SSSSS',
       'S.P........S',
       'SLLLLLLLLLLS'
-    ], enemies: [{type:'demon',x:7,y:5},{type:'dragon',x:11,y:1},{type:'demon',x:3,y:3}], time: 90
+    ], enemies: [{type:'demon',x:7,y:5},{type:'dragon',x:11,y:1},{type:'reactor_spark',x:3,y:3}], time: 90
   });
+  // World 2 Boss: Inferno Drake
   levels.push({
     map: [
       'SSSSSSSSSSSS',
-      'S..K.......S',
-      'S.SSS......S',
-      'S........G.S',
-      'S.....SSSSS',
-      'S.J........D',
-      'SSSS..SS.SSS',
       'S..........S',
-      'S.P........S',
+      'S..........S',
+      'S..........S',
+      'S..........S',
+      'S..........S',
+      'S..........S',
+      'S..........D',
+      'S.P..SSSSSSS',
       'SLLLLLLLLLLS'
-    ], enemies: [{type:'dragon',x:11,y:2},{type:'dragon',x:0,y:4},{type:'demon',x:6,y:7}], time: 90
+    ], enemies: [], time: 120, boss: 'inferno_drake'
   });
 
   // World 3: Ice Caves (rooms 10-14)
@@ -246,7 +305,7 @@ function makeLevels() {
       'S..SSSSS...S',
       'S.P........S',
       'SSSSSSSSSSSS'
-    ], enemies: [{type:'spark',x:7,y:1},{type:'spark',x:3,y:5},{type:'spark',x:9,y:5}], time: 60, icy: true
+    ], enemies: [{type:'spark',x:7,y:1},{type:'spore_ghost',x:3,y:5},{type:'spark',x:9,y:5}], time: 60, icy: true
   });
   levels.push({
     map: [
@@ -260,7 +319,7 @@ function makeLevels() {
       'SSSSSSSSS..S',
       'S.P........S',
       'SSSSSSSSSSSS'
-    ], enemies: [{type:'spark',x:8,y:2},{type:'spark',x:5,y:5},{type:'spark',x:2,y:5},{type:'spark',x:10,y:7}], time: 75, icy: true
+    ], enemies: [{type:'spore_ghost',x:8,y:2},{type:'spark',x:5,y:5},{type:'spark',x:2,y:5},{type:'spark',x:10,y:7}], time: 75, icy: true
   });
   levels.push({
     map: [
@@ -274,7 +333,7 @@ function makeLevels() {
       'S.SS.SSSSSSS',
       'S.P........S',
       'SSSSSSSSSSSS'
-    ], enemies: [{type:'spark',x:5,y:1},{type:'spark',x:8,y:4},{type:'mirror',x:9,y:4}], time: 90, icy: true
+    ], enemies: [{type:'spark',x:5,y:1},{type:'spore_ghost',x:8,y:4},{type:'mirror',x:9,y:4}], time: 90, icy: true
   });
   levels.push({
     map: [
@@ -288,21 +347,22 @@ function makeLevels() {
       'S.G..K.....S',
       'S.P..SSSSSSS',
       'SSSSSSSSSSSS'
-    ], enemies: [{type:'spark',x:8,y:1},{type:'spark',x:4,y:3},{type:'spark',x:9,y:5},{type:'mirror',x:6,y:3}], time: 75, icy: true
+    ], enemies: [{type:'spark',x:8,y:1},{type:'spark',x:4,y:3},{type:'spore_ghost',x:9,y:5},{type:'mirror',x:6,y:3}], time: 75, icy: true
   });
+  // World 3 Boss: Spore Mother
   levels.push({
     map: [
       'SSSSSSSSSSSS',
-      'S..K.....G.S',
-      'S.SSS..SSSS',
       'S..........S',
-      'S..*.......S',
-      'SSSSSS.....D',
-      'S......SSSSS',
       'S..........S',
-      'S.P...J....S',
+      'S..........S',
+      'S..........S',
+      'S..........S',
+      'S..........S',
+      'S..........D',
+      'S.P..SSSSSSS',
       'SSSSSSSSSSSS'
-    ], enemies: [{type:'spark',x:7,y:1},{type:'spark',x:3,y:3},{type:'mirror',x:8,y:3},{type:'spark',x:5,y:7}], time: 90, icy: true
+    ], enemies: [], time: 120, boss: 'spore_mother', icy: true
   });
 
   // World 4: Dark Maze (rooms 15-19)
@@ -362,19 +422,20 @@ function makeLevels() {
       'SSSSSSSSSSSS'
     ], enemies: [{type:'ghost',x:6,y:1},{type:'ghost',x:9,y:4},{type:'ghost',x:3,y:5},{type:'demon',x:7,y:7}], time: 90, dark: true
   });
+  // World 4 Boss: Mycelial Overlord
   levels.push({
     map: [
       'SSSSSSSSSSSS',
-      'S........K.S',
-      'S....SSSSSSS',
       'S..........S',
-      'SSSS.......S',
-      'S........G.S',
-      'S.....SSSSS',
-      'S.D..J.....S',
-      'S.P..SS....S',
+      'S..........S',
+      'S..........S',
+      'S..........S',
+      'S..........S',
+      'S..........S',
+      'S..........D',
+      'S.P..SSSSSSS',
       'SSSSSSSSSSSS'
-    ], enemies: [{type:'ghost',x:8,y:1},{type:'ghost',x:3,y:3},{type:'ghost',x:7,y:5},{type:'demon',x:5,y:3}], time: 90, dark: true
+    ], enemies: [], time: 120, boss: 'mycelial_overlord', dark: true
   });
 
   // World 5: Solomon's Chamber (rooms 20-24)
@@ -390,7 +451,7 @@ function makeLevels() {
       'S..........S',
       'S.P........S',
       'SSSSSSSSSSSS'
-    ], enemies: [{type:'mirror',x:7,y:1},{type:'demon',x:9,y:4},{type:'ghost',x:4,y:4}], time: 75
+    ], enemies: [{type:'mirror',x:7,y:1},{type:'reactor_spark',x:9,y:4},{type:'ghost',x:4,y:4}], time: 75
   });
   levels.push({
     map: [
@@ -404,7 +465,7 @@ function makeLevels() {
       'S........K.S',
       'S.P..SSSSSSS',
       'SSSSSSSSSSSS'
-    ], enemies: [{type:'mirror',x:6,y:3},{type:'mirror',x:9,y:6},{type:'demon',x:3,y:6},{type:'dragon',x:11,y:4}], time: 90
+    ], enemies: [{type:'mirror',x:6,y:3},{type:'mirror',x:9,y:6},{type:'spore_ghost',x:3,y:6},{type:'dragon',x:11,y:4}], time: 90
   });
   levels.push({
     map: [
@@ -418,7 +479,7 @@ function makeLevels() {
       'SSS..SSSSSSS',
       'S.P........S',
       'SLLLLLLLLLLS'
-    ], enemies: [{type:'mirror',x:5,y:1},{type:'dragon',x:11,y:3},{type:'demon',x:7,y:4},{type:'ghost',x:3,y:5}], time: 90
+    ], enemies: [{type:'mirror',x:5,y:1},{type:'dragon',x:11,y:3},{type:'reactor_spark',x:7,y:4},{type:'spore_ghost',x:3,y:5}], time: 90
   });
   levels.push({
     map: [
@@ -432,21 +493,22 @@ function makeLevels() {
       'SSSSSSSSS..S',
       'S.P........S',
       'SLLLLLLLLLLS'
-    ], enemies: [{type:'mirror',x:8,y:2},{type:'mirror',x:4,y:5},{type:'dragon',x:0,y:4},{type:'demon',x:7,y:5},{type:'ghost',x:9,y:7}], time: 105
+    ], enemies: [{type:'mirror',x:8,y:2},{type:'mirror',x:4,y:5},{type:'dragon',x:0,y:4},{type:'reactor_spark',x:7,y:5},{type:'ghost',x:9,y:7}], time: 105
   });
+  // World 5 Boss: Solomon's Seal
   levels.push({
     map: [
       'SSSSSSSSSSSS',
-      'S..G..G..G.S',
-      'S.SS.SS.SS.S',
       'S..........S',
       'S..........S',
-      'SSSS..K.SSSS',
       'S..........S',
-      'S.*.J....D.S',
-      'S.P..SS.SSSS',
+      'S..........S',
+      'S..........S',
+      'S..........S',
+      'S..........D',
+      'S.P..SSSSSSS',
       'SLLLLLLLLLLS'
-    ], enemies: [{type:'mirror',x:5,y:1},{type:'mirror',x:8,y:3},{type:'dragon',x:0,y:3},{type:'dragon',x:11,y:6},{type:'demon',x:6,y:6},{type:'ghost',x:3,y:6}], time: 120
+    ], enemies: [], time: 180, boss: 'solomon_seal'
   });
 
   return levels;
@@ -465,12 +527,30 @@ function loadRoom(idx) {
   enemyFireballs = [];
   blockCreateAnims = [];
   blockDestroyAnims = [];
+  reactorExplosions = [];
+  solveParticles = [];
+  sporeTimers = [];
+  mycelialBridges = [];
   hasKey = false;
   freezeTimer = 0;
   invincTimer = 0;
   actionCooldown = 0;
-  timer = lv.time;
-  timerMax = lv.time;
+  pcastAnim = 0;
+  timer = lv.time + getTimerBonus();
+  timerMax = timer;
+  bossHP = 0;
+  bossMaxHP = 0;
+  bossType = lv.boss || null;
+  bossPhase = 0;
+  bossDead = false;
+
+  // Show floor transition
+  const worldIdx = Math.floor(idx / 5);
+  const floorIdx = idx % 5;
+  if (WORLDS[worldIdx]) {
+    floorTransitionName = WORLDS[worldIdx].floors[floorIdx] || ('Floor ' + (floorIdx + 1));
+    floorTransition = 1.5;
+  }
 
   for (let r = 0; r < ROWS; r++) {
     grid[r] = [];
@@ -483,6 +563,7 @@ function loadRoom(idx) {
           grid[r][c] = T.EMPTY;
           px = c * TS + 6; py = r * TS + 4;
           pvx = 0; pvy = 0; pdir = 1; pgrounded = false; pjumping = false;
+          pwalkFrame = 0;
           break;
         case 'K':
           grid[r][c] = T.EMPTY;
@@ -513,14 +594,61 @@ function loadRoom(idx) {
     }
   }
 
+  // CHA drop bonus: chance for extra gems
+  if (Math.random() * 100 < getDropBonus()) {
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const rc = 1 + Math.floor(Math.random() * (COLS - 2));
+      const rr = 1 + Math.floor(Math.random() * (ROWS - 2));
+      if (grid[rr][rc] === T.EMPTY) {
+        const hasItem = items.some(function(it) { return it.x === rc && it.y === rr; });
+        if (!hasItem) {
+          items.push({type:'gem', x:rc, y:rr, collected:false});
+          break;
+        }
+      }
+    }
+  }
+
   // Spawn enemies
   for (const e of lv.enemies) {
     enemies.push(spawnEnemy(e.type, e.x * TS + TS/2, e.y * TS + TS/2));
   }
+
+  // Spawn boss
+  if (bossType) {
+    spawnBoss(bossType);
+    // Boss rooms always have key+door after boss dies
+    hasKey = false;
+  }
+}
+
+function spawnBoss(type) {
+  switch(type) {
+    case 'reactor_guardian':
+      bossHP = 6; bossMaxHP = 6;
+      enemies.push(spawnEnemy('boss_reactor', 6 * TS + TS/2, 3 * TS + TS/2));
+      break;
+    case 'inferno_drake':
+      bossHP = 8; bossMaxHP = 8;
+      enemies.push(spawnEnemy('boss_drake', 6 * TS + TS/2, 3 * TS + TS/2));
+      break;
+    case 'spore_mother':
+      bossHP = 8; bossMaxHP = 8;
+      enemies.push(spawnEnemy('boss_spore', 6 * TS + TS/2, 3 * TS + TS/2));
+      break;
+    case 'mycelial_overlord':
+      bossHP = 10; bossMaxHP = 10;
+      enemies.push(spawnEnemy('boss_mycelial', 6 * TS + TS/2, 3 * TS + TS/2));
+      break;
+    case 'solomon_seal':
+      bossHP = 12; bossMaxHP = 12;
+      enemies.push(spawnEnemy('boss_solomon', 6 * TS + TS/2, 3 * TS + TS/2));
+      break;
+  }
 }
 
 function spawnEnemy(type, x, y) {
-  const base = { type, x, y, vx: 0, vy: 0, dir: 1, alive: true, frame: 0, fireTimer: 0 };
+  const base = { type, x, y, vx: 0, vy: 0, dir: 1, alive: true, frame: 0, fireTimer: 0, hp: 1 };
   switch(type) {
     case 'spark':
       base.vx = 40 * (Math.random() > 0.5 ? 1 : -1);
@@ -544,6 +672,39 @@ function spawnEnemy(type, x, y) {
     case 'mirror':
       base.vx = 30 * (Math.random() > 0.5 ? 1 : -1);
       break;
+    // PASS 2: New Tasern enemies
+    case 'reactor_spark':
+      base.vx = 50 * (Math.random() > 0.5 ? 1 : -1);
+      base.vy = 0;
+      base.explodeTimer = 3 + Math.random() * 4;
+      break;
+    case 'spore_ghost':
+      base.vx = 25 * (Math.random() > 0.5 ? 1 : -1);
+      base.vy = 15 * (Math.random() > 0.5 ? 1 : -1);
+      base.phase = Math.random() * Math.PI * 2;
+      base.sporeTimer = 4 + Math.random() * 3;
+      break;
+    // Bosses
+    case 'boss_reactor':
+      base.hp = 6; base.vx = 30; base.fireTimer = 80;
+      base.phaseTimer = 0; base.attackPattern = 0;
+      break;
+    case 'boss_drake':
+      base.hp = 8; base.vx = 0; base.fireTimer = 40;
+      base.fireDir = -1; base.phaseTimer = 0; base.swoopY = y;
+      break;
+    case 'boss_spore':
+      base.hp = 8; base.vx = 20; base.fireTimer = 60;
+      base.spawnTimer = 5; base.phaseTimer = 0;
+      break;
+    case 'boss_mycelial':
+      base.hp = 10; base.vx = 25; base.fireTimer = 50;
+      base.bridgeTimer = 4; base.phaseTimer = 0;
+      break;
+    case 'boss_solomon':
+      base.hp = 12; base.vx = 35; base.fireTimer = 30;
+      base.phaseTimer = 0; base.teleportTimer = 6; base.attackPattern = 0;
+      break;
   }
   return base;
 }
@@ -551,7 +712,8 @@ function spawnEnemy(type, x, y) {
 // === GRID HELPERS ===
 function isSolid(c, r) {
   if (c < 0 || c >= COLS || r < 0 || r >= ROWS) return true;
-  return grid[r][c] === T.STONE || grid[r][c] === T.BLOCK;
+  const t = grid[r][c];
+  return t === T.STONE || t === T.BLOCK || t === T.REACTOR_BLOCK || t === T.SPORE_BLOCK || t === T.MYCELIAL_BLOCK;
 }
 
 function isLava(c, r) {
@@ -564,15 +726,17 @@ function gridAt(px, py) {
 }
 
 // === BLOCK CREATE/DESTROY ===
-function createBlock(c, r) {
+function createBlock(c, r, blockType) {
   if (c < 0 || c >= COLS || r < 0 || r >= ROWS) return false;
   if (grid[r][c] !== T.EMPTY) return false;
-  // Check no enemy at that spot (squish check done separately)
-  grid[r][c] = T.BLOCK;
-  blockCreateAnims.push({ c, r, t: 0.3 });
+  const type = blockType || T.BLOCK;
+  grid[r][c] = type;
+  blockCreateAnims.push({ c, r, t: 0.3, type: type });
+
+  const colors = { [T.BLOCK]: '#c8a2ff', [T.REACTOR_BLOCK]: '#ff6644', [T.SPORE_BLOCK]: '#44ff88', [T.MYCELIAL_BLOCK]: '#88aaff' };
   TAS.audio.playTone(200, 0.15, 'triangle', 0.08);
   TAS.audio.playTone(400, 0.1, 'square', 0.05);
-  TAS.particles.spawn(c * TS + TS/2, r * TS + TS/2, '#c8a2ff', 6, 1.5, { size: 2, shape: 'rect' });
+  TAS.particles.spawn(c * TS + TS/2, r * TS + TS/2, colors[type] || '#c8a2ff', 6, 1.5, { size: 2, shape: 'rect' });
 
   // Squish enemies
   for (let i = enemies.length - 1; i >= 0; i--) {
@@ -580,22 +744,109 @@ function createBlock(c, r) {
     if (!e.alive) continue;
     const ec = Math.floor(e.x / TS), er = Math.floor(e.y / TS);
     if (ec === c && er === r) {
-      killEnemy(i);
-      score += 200;
+      damageEnemy(i, getFireballDamage());
+      score += Math.floor(200 * getScoreMult());
     }
   }
+
+  // Spore block: spread after delay
+  if (type === T.SPORE_BLOCK) {
+    sporeTimers.push({ c, r, timer: 2.0 });
+  }
+
   return true;
 }
 
 function destroyBlock(c, r) {
   if (c < 0 || c >= COLS || r < 0 || r >= ROWS) return false;
-  if (grid[r][c] !== T.BLOCK) return false;
+  const tile = grid[r][c];
+  if (tile !== T.BLOCK && tile !== T.REACTOR_BLOCK && tile !== T.SPORE_BLOCK && tile !== T.MYCELIAL_BLOCK) return false;
+
   grid[r][c] = T.EMPTY;
   blockDestroyAnims.push({ c, r, t: 0.3 });
   TAS.audio.playNoise(0.12, 0.06, 800);
   TAS.audio.playTone(150, 0.1, 'sawtooth', 0.05);
   TAS.particles.spawn(c * TS + TS/2, r * TS + TS/2, '#8866aa', 8, 2, { size: 3, gravity: 2, shape: 'rect' });
+
+  // Reactor block: explode adjacent
+  if (tile === T.REACTOR_BLOCK) {
+    triggerReactorExplosion(c, r);
+  }
+
   return true;
+}
+
+function triggerReactorExplosion(c, r) {
+  reactorExplosions.push({ x: c * TS + TS/2, y: r * TS + TS/2, t: 0.5 });
+  TAS.fx.shake(12, 0.9);
+  TAS.audio.playTone(80, 0.3, 'sawtooth', 0.1);
+  TAS.audio.playNoise(0.25, 0.08, 500);
+  TAS.particles.spawn(c * TS + TS/2, r * TS + TS/2, '#ff4400', 20, 4, { size: 4, gravity: 1 });
+  TAS.particles.spawn(c * TS + TS/2, r * TS + TS/2, '#ffaa00', 15, 3, { size: 3 });
+
+  // Destroy adjacent blocks and damage enemies in 3x3
+  const dirs = [[-1,-1],[-1,0],[-1,1],[0,-1],[0,1],[1,-1],[1,0],[1,1]];
+  for (const d of dirs) {
+    const nc = c + d[0], nr = r + d[1];
+    if (nc >= 0 && nc < COLS && nr >= 0 && nr < ROWS) {
+      const t = grid[nr][nc];
+      if (t === T.BLOCK || t === T.SPORE_BLOCK || t === T.MYCELIAL_BLOCK) {
+        grid[nr][nc] = T.EMPTY;
+        TAS.particles.spawn(nc * TS + TS/2, nr * TS + TS/2, '#ff8844', 6, 2, { size: 2 });
+      }
+      // Chain react
+      if (t === T.REACTOR_BLOCK) {
+        grid[nr][nc] = T.EMPTY;
+        setTimeout(function() { triggerReactorExplosion(nc, nr); }, 150);
+      }
+    }
+    // Damage enemies in blast
+    for (let i = enemies.length - 1; i >= 0; i--) {
+      const e = enemies[i];
+      if (!e.alive) continue;
+      const ex = Math.floor(e.x / TS), ey = Math.floor(e.y / TS);
+      if (Math.abs(ex - c) <= 1 && Math.abs(ey - r) <= 1) {
+        damageEnemy(i, 2);
+        score += Math.floor(300 * getScoreMult());
+      }
+    }
+  }
+
+  // Damage player if in blast radius
+  const pcx = Math.floor((px + PW/2) / TS);
+  const pcy = Math.floor((py + PH/2) / TS);
+  if (Math.abs(pcx - c) <= 1 && Math.abs(pcy - r) <= 1 && invincTimer <= 0) {
+    playerDie();
+  }
+}
+
+function damageEnemy(idx, dmg) {
+  const e = enemies[idx];
+  e.hp -= dmg;
+  if (e.hp <= 0) {
+    killEnemy(idx);
+    // Boss damage
+    if (e.type.startsWith('boss_')) {
+      bossHP -= dmg;
+      if (bossHP <= 0) {
+        bossHP = 0;
+        bossDead = true;
+        // Spawn key + open door
+        items.push({type:'key', x:5, y:4, collected:false});
+        TAS.fx.shake(16, 0.95);
+        TAS.audio.playMelody([[262,0.1],[330,0.1],[392,0.1],[523,0.2]], 100);
+        score += Math.floor(2000 * getScoreMult());
+        for (let sy = 0; sy < 6; sy++) {
+          solveParticles.push({ x: GW/2 + (Math.random()-0.5)*200, y: GH/2 + (Math.random()-0.5)*150,
+            vx: (Math.random()-0.5)*100, vy: -50-Math.random()*80, life: 2+Math.random(), color: '#ffdd44', size: 3 });
+        }
+      }
+    }
+  } else {
+    // Flash white
+    e.hitFlash = 0.15;
+    TAS.audio.playTone(400, 0.06, 'square', 0.04);
+  }
 }
 
 function killEnemy(idx) {
@@ -604,15 +855,18 @@ function killEnemy(idx) {
   TAS.particles.spawn(e.x, e.y, '#ff6644', 12, 3, { size: 3 });
   TAS.audio.playTone(300, 0.1, 'square', 0.06);
   TAS.audio.playTone(150, 0.15, 'sawtooth', 0.04);
+  TAS.fx.shake(4, 0.7);
 }
 
 // === START GAME ===
 function startGame() {
+  loadStatB();
   state = 'playing';
   score = 0;
-  lives = 3;
+  lives = getMaxLives();
   room = savedProgress;
-  fireballs = 2;
+  fireballs = 2 + getBonusFireballs();
+  hintCharges = getHintCharges();
   deathAnim = 0;
   winAnim = 0;
   TAS.particles.clear();
@@ -624,12 +878,18 @@ function playerDie() {
   if (invincTimer > 0) return;
   lives--;
   deathAnim = 1.0;
-  TAS.fx.shake(8, 0.85);
+  TAS.fx.shake(10, 0.9);
   TAS.fx.flash('#ff0000', 0.4);
   TAS.audio.playTone(400, 0.1, 'square', 0.1);
   TAS.audio.playTone(200, 0.2, 'sawtooth', 0.08, 80);
   TAS.audio.playTone(100, 0.3, 'sawtooth', 0.06, 40);
   TAS.particles.spawn(px + PW/2, py + PH/2, '#ff4444', 20, 4, { size: 3 });
+  // Death particles spiral
+  for (let i = 0; i < 8; i++) {
+    const angle = (i / 8) * Math.PI * 2;
+    solveParticles.push({ x: px+PW/2, y: py+PH/2, vx: Math.cos(angle)*60, vy: Math.sin(angle)*60,
+      life: 0.8, color: '#ff4444', size: 2 });
+  }
   if (lives <= 0) {
     state = 'gameOver';
     if (score > highScore) {
@@ -644,7 +904,14 @@ function playerDie() {
 // === ROOM WIN ===
 function roomWin() {
   winAnim = 1.5;
-  score += Math.floor(timer) * 10;
+  score += Math.floor(Math.floor(timer) * 10 * getScoreMult());
+  // Solve animation burst
+  for (let i = 0; i < 16; i++) {
+    solveParticles.push({ x: px+PW/2, y: py+PH/2,
+      vx: (Math.random()-0.5)*150, vy: -40-Math.random()*100,
+      life: 1.0+Math.random(), color: i%2===0?'#ffdd44':'#c8a2ff', size: 2+Math.random()*2 });
+  }
+  TAS.fx.shake(6, 0.8);
   room++;
   if (room > savedProgress) {
     savedProgress = room;
@@ -668,6 +935,22 @@ function update(dt) {
   TAS.particles.update(dt);
   TAS.fx.updateEffects(dt);
 
+  // Update solve particles
+  for (let i = solveParticles.length - 1; i >= 0; i--) {
+    const p = solveParticles[i];
+    p.x += p.vx * dt;
+    p.y += p.vy * dt;
+    p.vy += 60 * dt;
+    p.life -= dt;
+    if (p.life <= 0) solveParticles.splice(i, 1);
+  }
+
+  // Update reactor explosions
+  for (let i = reactorExplosions.length - 1; i >= 0; i--) {
+    reactorExplosions[i].t -= dt;
+    if (reactorExplosions[i].t <= 0) reactorExplosions.splice(i, 1);
+  }
+
   // Animate block effects
   for (let i = blockCreateAnims.length - 1; i >= 0; i--) {
     blockCreateAnims[i].t -= dt;
@@ -676,6 +959,11 @@ function update(dt) {
   for (let i = blockDestroyAnims.length - 1; i >= 0; i--) {
     blockDestroyAnims[i].t -= dt;
     if (blockDestroyAnims[i].t <= 0) blockDestroyAnims.splice(i, 1);
+  }
+
+  // Floor transition
+  if (floorTransition > 0) {
+    floorTransition -= dt;
   }
 
   if (state === 'title') {
@@ -716,77 +1004,186 @@ function update(dt) {
   if (freezeTimer > 0) freezeTimer -= dt;
   if (invincTimer > 0) invincTimer -= dt;
   if (actionCooldown > 0) actionCooldown -= dt;
+  if (pcastAnim > 0) pcastAnim -= dt;
+  if (hintActive > 0) hintActive -= dt;
+
+  // Coyote time
+  if (pgrounded) coyoteTime = COYOTE_FRAMES;
+  else if (coyoteTime > 0) coyoteTime -= dt;
+
+  // Spore timers
+  for (let i = sporeTimers.length - 1; i >= 0; i--) {
+    sporeTimers[i].timer -= dt;
+    if (sporeTimers[i].timer <= 0) {
+      const sp = sporeTimers[i];
+      sporeTimers.splice(i, 1);
+      // Spread to adjacent empty cells
+      const dirs = [[0,-1],[0,1],[-1,0],[1,0]];
+      for (const d of dirs) {
+        const nc = sp.c + d[0], nr = sp.r + d[1];
+        if (nc > 0 && nc < COLS-1 && nr > 0 && nr < ROWS-1 && grid[nr][nc] === T.EMPTY) {
+          if (Math.random() < 0.4) {
+            createBlock(nc, nr, T.SPORE_BLOCK);
+          }
+        }
+      }
+    }
+  }
+
+  // Mycelial bridge growth
+  for (let i = mycelialBridges.length - 1; i >= 0; i--) {
+    const mb = mycelialBridges[i];
+    mb.timer -= dt;
+    if (mb.timer <= 0) {
+      mycelialBridges.splice(i, 1);
+      // Grow one step in direction
+      const nc = mb.c + mb.dc, nr = mb.r + mb.dr;
+      if (nc > 0 && nc < COLS-1 && nr > 0 && nr < ROWS-1 && grid[nr][nc] === T.EMPTY) {
+        createBlock(nc, nr, T.MYCELIAL_BLOCK);
+        mycelialBridges.push({ c: nc, r: nr, dc: mb.dc, dr: mb.dr, timer: 0.4, steps: mb.steps-1 });
+      }
+    }
+    if (mb.steps <= 0) {
+      mycelialBridges.splice(i, 1);
+    }
+  }
 
   // === INPUT ===
   const kl = TAS.input.keys['ArrowLeft'] || TAS.input.keys['KeyA'] || TAS.input.touch.left;
   const kr = TAS.input.keys['ArrowRight'] || TAS.input.keys['KeyD'] || TAS.input.touch.right;
   const ku = TAS.input.keys['ArrowUp'] || TAS.input.keys['KeyW'] || TAS.input.touch.up;
+  const kd = TAS.input.keys['ArrowDown'] || TAS.input.keys['KeyS'] || TAS.input.touch.down;
   const jumpKey = TAS.input.keys['Space'] || TAS.input.keys['KeyZ'] || TAS.input.touch.a;
   const blockKey = TAS.input.keys['KeyX'] || TAS.input.keys['ShiftLeft'] || TAS.input.touch.b;
+  const hintKey = TAS.input.keys['KeyC'];
 
   const lv = LEVELS[room];
   const icy = lv && lv.icy;
+  const speed = getSpeed();
 
-  // Horizontal movement
-  if (kl) { pvx = icy ? TAS.math.lerp(pvx, -PSPEED, dt * 4) : -PSPEED; pdir = -1; }
-  else if (kr) { pvx = icy ? TAS.math.lerp(pvx, PSPEED, dt * 4) : PSPEED; pdir = 1; }
-  else { pvx = icy ? TAS.math.lerp(pvx, 0, dt * 3) : 0; }
+  // Horizontal movement with NES-style acceleration
+  if (kl) {
+    pvx = icy ? TAS.math.lerp(pvx, -speed, dt * 4) : TAS.math.lerp(pvx, -speed, dt * 15);
+    pdir = -1;
+    pwalkFrame += dt * 8;
+  } else if (kr) {
+    pvx = icy ? TAS.math.lerp(pvx, speed, dt * 4) : TAS.math.lerp(pvx, speed, dt * 15);
+    pdir = 1;
+    pwalkFrame += dt * 8;
+  } else {
+    pvx = icy ? TAS.math.lerp(pvx, 0, dt * 3) : TAS.math.lerp(pvx, 0, dt * 20);
+    pwalkFrame = 0;
+  }
 
-  // Jump
-  if (jumpKey && !jumpPressed && pgrounded) {
-    pvy = PJUMP;
+  // Jump buffer
+  if (jumpKey && !jumpPressed) {
+    jumpBuffer = JUMP_BUFFER_FRAMES;
+  }
+  if (jumpBuffer > 0) jumpBuffer -= dt;
+
+  // Jump with coyote time + jump buffer
+  if (jumpBuffer > 0 && coyoteTime > 0) {
+    pvy = getJump();
     pgrounded = false;
     pjumping = true;
+    coyoteTime = 0;
+    jumpBuffer = 0;
     TAS.audio.playTone(280, 0.08, 'square', 0.05, 400);
   }
+  // Variable jump height (release early = less height)
+  if (!jumpKey && pvy < 0 && pjumping) {
+    pvy *= 0.6;
+    pjumping = false;
+  }
   jumpPressed = jumpKey;
+
+  // Hint system (INT stat)
+  if (hintKey && !hintPressed && hintCharges > 0 && hintActive <= 0) {
+    hintCharges--;
+    hintActive = 4;
+    TAS.audio.playTone(660, 0.15, 'sine', 0.04);
+    TAS.audio.playTone(880, 0.1, 'sine', 0.03);
+  }
+  hintPressed = hintKey;
 
   // Block create/destroy action
   if (blockKey && !blockPressed && actionCooldown <= 0) {
     blockPressed = true;
-    actionCooldown = 0.2;
+    actionCooldown = getMagicCooldown();
+    pcastAnim = 0.25;
     const playerCenterC = Math.floor((px + PW/2) / TS);
     const playerCenterR = Math.floor((py + PH/2) / TS);
-    let targetC, targetR;
 
     if (ku) {
-      // Fireball
+      // Fireball (up+block)
       if (fireballs > 0) {
         fireballs--;
-        playerFireballs.push({ x: px + PW/2, y: py + PH/4, vx: pdir * 200, vy: 0, life: 2 });
+        playerFireballs.push({ x: px + PW/2, y: py + PH/4, vx: pdir * 200, vy: 0, life: 2, dmg: getFireballDamage() });
         TAS.audio.playTone(600, 0.12, 'sawtooth', 0.07, 200);
         TAS.audio.playNoise(0.08, 0.04, 2000);
+        TAS.particles.spawn(px + PW/2, py + PH/4, '#ffaa00', 4, 1, { size: 2 });
+      }
+    } else if (kd) {
+      // Tasern special blocks (down+block)
+      const targetC = playerCenterC + pdir;
+      const targetR = playerCenterR;
+      if (targetC >= 0 && targetC < COLS && targetR >= 0 && targetR < ROWS && grid[targetR][targetC] === T.EMPTY) {
+        // Cycle: reactor -> spore -> mycelial based on STR
+        const pushRange = getBlockPushRange();
+        if (pushRange >= 3) {
+          createBlock(targetC, targetR, T.MYCELIAL_BLOCK);
+          // Start bridge growth
+          mycelialBridges.push({ c: targetC, r: targetR, dc: pdir, dr: 0, timer: 0.5, steps: 3 });
+        } else if (pushRange >= 2) {
+          createBlock(targetC, targetR, T.SPORE_BLOCK);
+        } else {
+          createBlock(targetC, targetR, T.REACTOR_BLOCK);
+        }
+        TAS.audio.playTone(300, 0.1, 'triangle', 0.06);
       }
     } else {
-      // Block create/destroy
-      targetC = playerCenterC + pdir;
-      targetR = playerCenterR;
-      if (targetC >= 0 && targetC < COLS && targetR >= 0 && targetR < ROWS) {
-        if (grid[targetR][targetC] === T.BLOCK) {
-          destroyBlock(targetC, targetR);
-          // Mirror knight reacts
-          for (const e of enemies) {
-            if (e.type === 'mirror' && e.alive) {
-              const ec = Math.floor(e.x / TS);
-              const er = Math.floor(e.y / TS);
-              const mc = ec + (Math.random() > 0.5 ? 1 : -1);
-              if (mc >= 0 && mc < COLS && grid[er][mc] === T.EMPTY) {
-                setTimeout(function() { createBlock(mc, er); }, 300);
+      // Normal block create/destroy
+      const targetC = playerCenterC + pdir;
+      const targetR = playerCenterR;
+      // STR: push range allows creating blocks further away
+      const range = getBlockPushRange();
+      let placed = false;
+      for (let dist = 1; dist <= range; dist++) {
+        const tc = playerCenterC + pdir * dist;
+        if (tc >= 0 && tc < COLS && playerCenterR >= 0 && playerCenterR < ROWS) {
+          const tile = grid[playerCenterR][tc];
+          if (tile === T.BLOCK || tile === T.REACTOR_BLOCK || tile === T.SPORE_BLOCK || tile === T.MYCELIAL_BLOCK) {
+            destroyBlock(tc, playerCenterR);
+            placed = true;
+            // Mirror knight reacts
+            for (const e of enemies) {
+              if (e.type === 'mirror' && e.alive) {
+                const ec = Math.floor(e.x / TS);
+                const er = Math.floor(e.y / TS);
+                const mc = ec + (Math.random() > 0.5 ? 1 : -1);
+                if (mc >= 0 && mc < COLS && grid[er][mc] === T.EMPTY) {
+                  setTimeout(function() { createBlock(mc, er); }, 300);
+                }
               }
             }
-          }
-        } else if (grid[targetR][targetC] === T.EMPTY) {
-          createBlock(targetC, targetR);
-          // Mirror knight reacts
-          for (const e of enemies) {
-            if (e.type === 'mirror' && e.alive) {
-              const ec = Math.floor(e.x / TS);
-              const er = Math.floor(e.y / TS);
-              const mc = ec + (Math.random() > 0.5 ? 1 : -1);
-              if (mc >= 0 && mc < COLS && grid[er][mc] === T.BLOCK) {
-                setTimeout(function() { destroyBlock(mc, er); }, 300);
+            break;
+          } else if (tile === T.EMPTY && !placed) {
+            createBlock(tc, playerCenterR);
+            placed = true;
+            // Mirror knight reacts
+            for (const e of enemies) {
+              if (e.type === 'mirror' && e.alive) {
+                const ec = Math.floor(e.x / TS);
+                const er = Math.floor(e.y / TS);
+                const mc = ec + (Math.random() > 0.5 ? 1 : -1);
+                if (mc >= 0 && mc < COLS && grid[er][mc] === T.BLOCK) {
+                  setTimeout(function() { destroyBlock(mc, er); }, 300);
+                }
               }
             }
+            break;
+          } else if (tile === T.STONE) {
+            break; // Can't go through stone
           }
         }
       }
@@ -801,8 +1198,6 @@ function update(dt) {
   // Move X
   px += pvx * dt;
   // Collide X
-  const pLeft = Math.floor(px / TS);
-  const pRight = Math.floor((px + PW - 1) / TS);
   const pTop = Math.floor(py / TS);
   const pBot = Math.floor((py + PH - 1) / TS);
 
@@ -878,9 +1273,10 @@ function update(dt) {
         case 'key':
           item.collected = true;
           hasKey = true;
-          score += 100;
+          score += Math.floor(100 * getScoreMult());
           TAS.audio.playMelody([[523,0.08],[659,0.08],[784,0.12]], 80);
           TAS.particles.spawn(ix + TS/2, iy + TS/2, '#ffdd44', 10, 2, { size: 2 });
+          TAS.fx.shake(3, 0.5);
           break;
         case 'door':
           if (hasKey) {
@@ -892,28 +1288,45 @@ function update(dt) {
           break;
         case 'gem':
           item.collected = true;
-          score += 500;
+          score += Math.floor(500 * getScoreMult());
           TAS.audio.playTone(880, 0.1, 'sine', 0.06);
           TAS.particles.spawn(ix + TS/2, iy + TS/2, '#44ffaa', 8, 2, { size: 2 });
           break;
         case 'jar':
           item.collected = true;
-          fireballs += 3;
+          fireballs += 3 + Math.floor(statB.CHA / 8);
           TAS.audio.playTone(440, 0.1, 'triangle', 0.06);
           TAS.particles.spawn(ix + TS/2, iy + TS/2, '#ff8844', 6, 1.5);
           break;
         case 'hourglass':
           item.collected = true;
-          freezeTimer = 5;
+          freezeTimer = 5 + Math.floor(statB.WIS / 5);
           TAS.audio.playTone(330, 0.15, 'sine', 0.05);
           TAS.particles.spawn(ix + TS/2, iy + TS/2, '#88ccff', 8, 1.5);
           break;
         case 'star':
           item.collected = true;
-          invincTimer = 6;
-          score += 50;
+          invincTimer = 6 + Math.floor(statB.CON / 4);
+          score += Math.floor(50 * getScoreMult());
           TAS.audio.playMelody([[392,0.06],[494,0.06],[587,0.06],[784,0.1]], 60);
           TAS.particles.spawn(ix + TS/2, iy + TS/2, '#ffff44', 12, 3);
+          break;
+        // Tasern items
+        case 'spore_pod':
+          item.collected = true;
+          fireballs += 2;
+          freezeTimer = 2;
+          score += Math.floor(150 * getScoreMult());
+          TAS.audio.playTone(220, 0.15, 'triangle', 0.05);
+          TAS.particles.spawn(ix + TS/2, iy + TS/2, '#44ff88', 10, 2, { size: 3 });
+          break;
+        case 'reactor_core':
+          item.collected = true;
+          invincTimer = 3;
+          score += Math.floor(300 * getScoreMult());
+          TAS.audio.playTone(150, 0.2, 'sawtooth', 0.06);
+          TAS.particles.spawn(ix + TS/2, iy + TS/2, '#ff6644', 14, 3, { size: 3 });
+          TAS.fx.shake(5, 0.7);
           break;
       }
     }
@@ -924,41 +1337,33 @@ function update(dt) {
     const e = enemies[i];
     if (!e.alive) continue;
     e.frame++;
+    if (e.hitFlash > 0) e.hitFlash -= dt;
 
-    if (freezeTimer > 0 && e.type !== 'ghost') continue;
+    if (freezeTimer > 0 && e.type !== 'ghost' && e.type !== 'spore_ghost') continue;
 
     switch(e.type) {
       case 'spark': {
         e.x += e.vx * dt;
-        // Gravity for spark
         e.vy += PGRAV * 0.7 * dt;
         e.y += e.vy * dt;
-        // Floor collision
         const er = Math.floor((e.y + 12) / TS);
         const ec = Math.floor(e.x / TS);
         if (isSolid(ec, er)) {
           e.y = (er - 1) * TS + TS - 12;
           e.vy = 0;
         }
-        // Wall collision
         const ewc = Math.floor((e.x + (e.vx > 0 ? 10 : -10)) / TS);
         const ewr = Math.floor(e.y / TS);
-        if (isSolid(ewc, ewr)) {
-          e.vx = -e.vx;
-        }
-        // Edge detection - turn at platform edges
+        if (isSolid(ewc, ewr)) e.vx = -e.vx;
         const aheadC = Math.floor((e.x + (e.vx > 0 ? 14 : -14)) / TS);
         const belowR = Math.floor((e.y + 14) / TS);
-        if (!isSolid(aheadC, belowR) && e.vy === 0) {
-          e.vx = -e.vx;
-        }
+        if (!isSolid(aheadC, belowR) && e.vy === 0) e.vx = -e.vx;
         break;
       }
       case 'ghost': {
         e.phase += dt * 2;
         e.x += e.vx * dt;
         e.y += Math.sin(e.phase) * 30 * dt;
-        // Bounce off walls (ghosts pass through blocks but not walls)
         if (e.x < TS || e.x > GW - TS) e.vx = -e.vx;
         if (e.y < TS || e.y > GH - TS) e.vy = -e.vy;
         e.x = TAS.math.clamp(e.x, TS, GW - TS);
@@ -969,26 +1374,15 @@ function update(dt) {
         e.x += e.vx * dt;
         e.vy += PGRAV * 0.7 * dt;
         e.y += e.vy * dt;
-        // Floor
         const dr = Math.floor((e.y + 12) / TS);
         const dc = Math.floor(e.x / TS);
-        if (isSolid(dc, dr)) {
-          e.y = (dr - 1) * TS + TS - 12;
-          e.vy = 0;
-        }
-        // Wall
+        if (isSolid(dc, dr)) { e.y = (dr - 1) * TS + TS - 12; e.vy = 0; }
         const dwc = Math.floor((e.x + (e.vx > 0 ? 12 : -12)) / TS);
         const dwr = Math.floor(e.y / TS);
-        if (isSolid(dwc, dwr)) {
-          e.vx = -e.vx;
-        }
-        // Edge
+        if (isSolid(dwc, dwr)) e.vx = -e.vx;
         const daC = Math.floor((e.x + (e.vx > 0 ? 14 : -14)) / TS);
         const dbR = Math.floor((e.y + 14) / TS);
-        if (!isSolid(daC, dbR) && e.vy === 0) {
-          e.vx = -e.vx;
-        }
-        // Fire
+        if (!isSolid(daC, dbR) && e.vy === 0) e.vx = -e.vx;
         e.fireTimer -= dt * 60;
         if (e.fireTimer <= 0) {
           e.fireTimer = 80 + Math.random() * 40;
@@ -1013,27 +1407,77 @@ function update(dt) {
         e.y += e.vy * dt;
         const mr = Math.floor((e.y + 12) / TS);
         const mc = Math.floor(e.x / TS);
-        if (isSolid(mc, mr)) {
-          e.y = (mr - 1) * TS + TS - 12;
-          e.vy = 0;
-        }
+        if (isSolid(mc, mr)) { e.y = (mr - 1) * TS + TS - 12; e.vy = 0; }
         const mwc = Math.floor((e.x + (e.vx > 0 ? 12 : -12)) / TS);
         const mwr = Math.floor(e.y / TS);
-        if (isSolid(mwc, mwr)) {
-          e.vx = -e.vx;
-        }
+        if (isSolid(mwc, mwr)) e.vx = -e.vx;
         const maC = Math.floor((e.x + (e.vx > 0 ? 14 : -14)) / TS);
         const mbR = Math.floor((e.y + 14) / TS);
-        if (!isSolid(maC, mbR) && e.vy === 0) {
-          e.vx = -e.vx;
+        if (!isSolid(maC, mbR) && e.vy === 0) e.vx = -e.vx;
+        break;
+      }
+      // PASS 2: Reactor Spark - moves fast, explodes periodically
+      case 'reactor_spark': {
+        e.x += e.vx * dt;
+        e.vy += PGRAV * 0.7 * dt;
+        e.y += e.vy * dt;
+        const rr = Math.floor((e.y + 12) / TS);
+        const rc = Math.floor(e.x / TS);
+        if (isSolid(rc, rr)) { e.y = (rr - 1) * TS + TS - 12; e.vy = 0; }
+        const rwc = Math.floor((e.x + (e.vx > 0 ? 10 : -10)) / TS);
+        const rwr = Math.floor(e.y / TS);
+        if (isSolid(rwc, rwr)) e.vx = -e.vx;
+        const raC = Math.floor((e.x + (e.vx > 0 ? 14 : -14)) / TS);
+        const rbR = Math.floor((e.y + 14) / TS);
+        if (!isSolid(raC, rbR) && e.vy === 0) e.vx = -e.vx;
+        e.explodeTimer -= dt;
+        if (e.explodeTimer <= 0) {
+          e.explodeTimer = 3 + Math.random() * 3;
+          // Small explosion around self
+          TAS.particles.spawn(e.x, e.y, '#ff6644', 12, 2.5, { size: 3 });
+          TAS.audio.playTone(100, 0.15, 'sawtooth', 0.05);
+          TAS.fx.shake(4, 0.6);
+          // Damage player if close
+          if (invincTimer <= 0 && TAS.math.dist(px+PW/2, py+PH/2, e.x, e.y) < 48) {
+            playerDie();
+            return;
+          }
         }
         break;
       }
+      // PASS 2: Spore Ghost - floats, drops spore blocks
+      case 'spore_ghost': {
+        e.phase += dt * 1.8;
+        e.x += e.vx * dt;
+        e.y += Math.sin(e.phase) * 25 * dt;
+        if (e.x < TS || e.x > GW - TS) e.vx = -e.vx;
+        if (e.y < TS || e.y > GH - TS) e.vy = -e.vy;
+        e.x = TAS.math.clamp(e.x, TS, GW - TS);
+        e.y = TAS.math.clamp(e.y, TS, GH - TS);
+        e.sporeTimer -= dt;
+        if (e.sporeTimer <= 0) {
+          e.sporeTimer = 3 + Math.random() * 3;
+          // Drop a spore block below
+          const sc = Math.floor(e.x / TS);
+          const sr = Math.floor(e.y / TS) + 1;
+          if (sr < ROWS - 1 && sc > 0 && sc < COLS - 1 && grid[sr][sc] === T.EMPTY) {
+            createBlock(sc, sr, T.SPORE_BLOCK);
+            TAS.audio.playTone(180, 0.1, 'sine', 0.03);
+          }
+        }
+        break;
+      }
+      // Bosses
+      case 'boss_reactor': updateBossReactor(e, dt, i); break;
+      case 'boss_drake': updateBossDrake(e, dt, i); break;
+      case 'boss_spore': updateBossSpore(e, dt, i); break;
+      case 'boss_mycelial': updateBossMycelial(e, dt, i); break;
+      case 'boss_solomon': updateBossSolomon(e, dt, i); break;
     }
 
     // Collision with player
     if (e.alive && invincTimer <= 0) {
-      const eSize = e.type === 'dragon' ? 14 : 10;
+      const eSize = (e.type === 'dragon' || e.type.startsWith('boss_')) ? 14 : 10;
       if (TAS.hit.rectOverlap(px, py, PW, PH, e.x - eSize, e.y - eSize, eSize * 2, eSize * 2)) {
         playerDie();
         return;
@@ -1047,21 +1491,19 @@ function update(dt) {
     f.x += f.vx * dt;
     f.y += f.vy * dt;
     f.life -= dt;
-    // Hit walls
     const fc = Math.floor(f.x / TS), fr = Math.floor(f.y / TS);
     if (isSolid(fc, fr) || f.life <= 0) {
       TAS.particles.spawn(f.x, f.y, '#ff8844', 5, 1.5);
       playerFireballs.splice(i, 1);
       continue;
     }
-    // Hit enemies
     let hit = false;
     for (let j = enemies.length - 1; j >= 0; j--) {
       const e = enemies[j];
       if (!e.alive) continue;
       if (TAS.math.dist(f.x, f.y, e.x, e.y) < 16) {
-        killEnemy(j);
-        score += 300;
+        damageEnemy(j, f.dmg || 1);
+        score += Math.floor(300 * getScoreMult());
         hit = true;
         break;
       }
@@ -1083,7 +1525,6 @@ function update(dt) {
       enemyFireballs.splice(i, 1);
       continue;
     }
-    // Hit player
     if (invincTimer <= 0 && TAS.hit.rectOverlap(px, py, PW, PH, f.x - 4, f.y - 4, 8, 8)) {
       enemyFireballs.splice(i, 1);
       playerDie();
@@ -1092,15 +1533,172 @@ function update(dt) {
   }
 }
 
+// === BOSS UPDATE FUNCTIONS ===
+function updateBossReactor(e, dt, idx) {
+  e.phaseTimer += dt;
+  e.x += e.vx * dt;
+  e.vy += PGRAV * 0.5 * dt;
+  e.y += e.vy * dt;
+  const br = Math.floor((e.y + 14) / TS);
+  const bc = Math.floor(e.x / TS);
+  if (isSolid(bc, br)) { e.y = (br - 1) * TS + TS - 14; e.vy = 0; }
+  if (e.x < TS * 2 || e.x > GW - TS * 2) e.vx = -e.vx;
+  // Periodically drop reactor blocks
+  e.fireTimer -= dt * 60;
+  if (e.fireTimer <= 0) {
+    e.fireTimer = 60 + Math.random() * 30;
+    const rc = Math.floor(e.x / TS);
+    const rr = Math.floor(e.y / TS) + 2;
+    if (rr < ROWS - 1 && rc > 0 && rc < COLS - 1 && grid[rr][rc] === T.EMPTY) {
+      createBlock(rc, rr, T.REACTOR_BLOCK);
+    }
+    // Also shoot fireballs
+    const dirP = px > e.x ? 1 : -1;
+    enemyFireballs.push({ x: e.x, y: e.y, vx: dirP * 130, vy: 0, life: 2.5 });
+    TAS.audio.playTone(150, 0.1, 'sawtooth', 0.04);
+  }
+}
+
+function updateBossDrake(e, dt, idx) {
+  e.phaseTimer += dt;
+  // Swoop pattern
+  e.x += Math.sin(e.phaseTimer * 1.5) * 60 * dt;
+  e.y = e.swoopY + Math.sin(e.phaseTimer * 0.8) * 40;
+  e.x = TAS.math.clamp(e.x, TS * 2, GW - TS * 2);
+  // Fire breath
+  e.fireTimer -= dt * 60;
+  if (e.fireTimer <= 0) {
+    e.fireTimer = 30 + Math.random() * 20;
+    for (let f = -1; f <= 1; f++) {
+      enemyFireballs.push({ x: e.x, y: e.y + 8, vx: (px > e.x ? 1 : -1) * 140, vy: f * 40, life: 2 });
+    }
+    TAS.audio.playTone(80, 0.2, 'sawtooth', 0.06);
+  }
+}
+
+function updateBossSpore(e, dt, idx) {
+  e.phaseTimer += dt;
+  e.x += e.vx * dt;
+  e.vy += PGRAV * 0.4 * dt;
+  e.y += e.vy * dt;
+  const sr = Math.floor((e.y + 14) / TS);
+  const sc = Math.floor(e.x / TS);
+  if (isSolid(sc, sr)) { e.y = (sr - 1) * TS + TS - 14; e.vy = 0; }
+  if (e.x < TS * 2 || e.x > GW - TS * 2) e.vx = -e.vx;
+  // Spawn spore ghosts periodically
+  e.spawnTimer -= dt;
+  if (e.spawnTimer <= 0) {
+    e.spawnTimer = 4 + Math.random() * 2;
+    if (enemies.length < 8) {
+      enemies.push(spawnEnemy('spore_ghost', e.x, e.y - TS));
+      TAS.audio.playTone(200, 0.1, 'sine', 0.04);
+    }
+  }
+  // Drop spore blocks
+  e.fireTimer -= dt * 60;
+  if (e.fireTimer <= 0) {
+    e.fireTimer = 40 + Math.random() * 20;
+    const dc = Math.floor(e.x / TS);
+    const dr = Math.floor(e.y / TS) + 2;
+    if (dr < ROWS-1 && dc > 0 && dc < COLS-1 && grid[dr][dc] === T.EMPTY) {
+      createBlock(dc, dr, T.SPORE_BLOCK);
+    }
+  }
+}
+
+function updateBossMycelial(e, dt, idx) {
+  e.phaseTimer += dt;
+  e.x += e.vx * dt;
+  e.vy += PGRAV * 0.5 * dt;
+  e.y += e.vy * dt;
+  const mr = Math.floor((e.y + 14) / TS);
+  const mc = Math.floor(e.x / TS);
+  if (isSolid(mc, mr)) { e.y = (mr - 1) * TS + TS - 14; e.vy = 0; }
+  if (e.x < TS * 2 || e.x > GW - TS * 2) e.vx = -e.vx;
+  // Mycelial bridge attacks
+  e.bridgeTimer -= dt;
+  if (e.bridgeTimer <= 0) {
+    e.bridgeTimer = 3 + Math.random() * 2;
+    const bc = Math.floor(e.x / TS);
+    const br = Math.floor(e.y / TS);
+    const dirToPlayer = px > e.x ? 1 : -1;
+    if (bc > 1 && bc < COLS-2 && br > 1 && br < ROWS-2) {
+      mycelialBridges.push({ c: bc+dirToPlayer, r: br, dc: dirToPlayer, dr: 0, timer: 0.3, steps: 4 });
+    }
+    TAS.audio.playTone(180, 0.15, 'triangle', 0.04);
+  }
+  // Fire
+  e.fireTimer -= dt * 60;
+  if (e.fireTimer <= 0) {
+    e.fireTimer = 50 + Math.random() * 25;
+    const dp = px > e.x ? 1 : -1;
+    enemyFireballs.push({ x: e.x, y: e.y, vx: dp * 120, vy: -30, life: 3 });
+    TAS.audio.playTone(160, 0.1, 'sawtooth', 0.04);
+  }
+}
+
+function updateBossSolomon(e, dt, idx) {
+  e.phaseTimer += dt;
+  e.x += e.vx * dt;
+  e.vy += PGRAV * 0.5 * dt;
+  e.y += e.vy * dt;
+  const sr = Math.floor((e.y + 14) / TS);
+  const sc = Math.floor(e.x / TS);
+  if (isSolid(sc, sr)) { e.y = (sr - 1) * TS + TS - 14; e.vy = 0; }
+  if (e.x < TS * 2 || e.x > GW - TS * 2) e.vx = -e.vx;
+  // Teleport
+  e.teleportTimer -= dt;
+  if (e.teleportTimer <= 0) {
+    e.teleportTimer = 4 + Math.random() * 3;
+    TAS.particles.spawn(e.x, e.y, '#ff82ff', 12, 2, { size: 3 });
+    e.x = TS * 2 + Math.random() * (GW - TS * 4);
+    e.y = TS * 2 + Math.random() * (GH - TS * 6);
+    TAS.particles.spawn(e.x, e.y, '#ff82ff', 12, 2, { size: 3 });
+    TAS.audio.playTone(500, 0.1, 'sine', 0.04);
+  }
+  // Multi-attack
+  e.fireTimer -= dt * 60;
+  if (e.fireTimer <= 0) {
+    e.attackPattern = (e.attackPattern + 1) % 3;
+    if (e.attackPattern === 0) {
+      // Ring of fireballs
+      for (let a = 0; a < 6; a++) {
+        const angle = (a / 6) * Math.PI * 2;
+        enemyFireballs.push({ x: e.x, y: e.y, vx: Math.cos(angle) * 100, vy: Math.sin(angle) * 100, life: 2.5 });
+      }
+      e.fireTimer = 50;
+    } else if (e.attackPattern === 1) {
+      // Reactor block drop
+      for (let b = 0; b < 3; b++) {
+        const bc = 2 + Math.floor(Math.random() * 8);
+        const br = 2 + Math.floor(Math.random() * 3);
+        if (grid[br][bc] === T.EMPTY) createBlock(bc, br, T.REACTOR_BLOCK);
+      }
+      e.fireTimer = 40;
+    } else {
+      // Aimed triple shot
+      const dp = px > e.x ? 1 : -1;
+      for (let s = -1; s <= 1; s++) {
+        enemyFireballs.push({ x: e.x, y: e.y, vx: dp * 150, vy: s * 50, life: 2 });
+      }
+      e.fireTimer = 35;
+    }
+    TAS.audio.playTone(200, 0.12, 'sawtooth', 0.05);
+  }
+}
+
 // === DRAW ===
 function draw(dt) {
   const worldIdx = Math.floor(room / 5);
-  const pal = WORLD_PALETTES[worldIdx] || WORLD_PALETTES[0];
+  const world = WORLDS[worldIdx] || WORLDS[0];
   const lv = LEVELS[room] || LEVELS[0];
 
   // Background
-  ctx.fillStyle = pal.bg;
+  ctx.fillStyle = world.bg;
   ctx.fillRect(0, 0, GW, GH);
+
+  // Themed background decoration (PASS 3)
+  drawWorldBackground(worldIdx);
 
   if (state === 'title') {
     drawTitleScreen();
@@ -1121,7 +1719,6 @@ function draw(dt) {
   ctx.save();
   TAS.fx.applyShake();
 
-  // Dark mode (limited visibility)
   const isDark = lv && lv.dark;
 
   // Draw grid
@@ -1136,22 +1733,27 @@ function draw(dt) {
       }
 
       if (tile === T.STONE) {
-        drawStone(x, y, pal);
+        drawStone(x, y, world);
       } else if (tile === T.BLOCK) {
-        drawBlock(x, y, pal);
+        drawMagicBlock(x, y, world);
       } else if (tile === T.LAVA) {
         drawLava(x, y);
+      } else if (tile === T.REACTOR_BLOCK) {
+        drawReactorBlock(x, y);
+      } else if (tile === T.SPORE_BLOCK) {
+        drawSporeBlock(x, y);
+      } else if (tile === T.MYCELIAL_BLOCK) {
+        drawMycelialBlock(x, y);
       }
     }
   }
 
   // Block create animations
   for (const a of blockCreateAnims) {
-    const x = a.c * TS, y = a.y * TS;
     const progress = 1 - (a.t / 0.3);
     ctx.globalAlpha = 0.5 * (1 - progress);
     ctx.fillStyle = '#ffffff';
-    const expand = (1 - progress) * 8;
+    const expand = Math.floor((1 - progress) * 8);
     ctx.fillRect(a.c * TS - expand, a.r * TS - expand, TS + expand * 2, TS + expand * 2);
     ctx.globalAlpha = 1;
   }
@@ -1160,10 +1762,55 @@ function draw(dt) {
   for (const a of blockDestroyAnims) {
     const progress = 1 - (a.t / 0.3);
     ctx.globalAlpha = 0.4 * (1 - progress);
-    ctx.fillStyle = pal.block;
-    const shrink = progress * 16;
+    ctx.fillStyle = world.block;
+    const shrink = Math.floor(progress * 16);
     ctx.fillRect(a.c * TS + shrink, a.r * TS + shrink, TS - shrink * 2, TS - shrink * 2);
     ctx.globalAlpha = 1;
+  }
+
+  // Reactor explosions
+  for (const rx of reactorExplosions) {
+    const progress = 1 - (rx.t / 0.5);
+    const radius = Math.floor(20 + progress * 30);
+    ctx.globalAlpha = 0.6 * (1 - progress);
+    ctx.fillStyle = '#ff4400';
+    ctx.beginPath();
+    ctx.arc(rx.x, rx.y, radius, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = '#ffaa00';
+    ctx.beginPath();
+    ctx.arc(rx.x, rx.y, Math.floor(radius * 0.6), 0, Math.PI * 2);
+    ctx.fill();
+    ctx.globalAlpha = 1;
+  }
+
+  // Hint system glow (INT stat)
+  if (hintActive > 0) {
+    for (const item of items) {
+      if (item.collected) continue;
+      if (item.type === 'key' || item.type === 'door') {
+        const hx = item.x * TS + TS/2, hy = item.y * TS + TS/2;
+        const pulse = Math.sin(frame * 0.12) * 0.3 + 0.5;
+        ctx.globalAlpha = pulse;
+        ctx.strokeStyle = item.type === 'key' ? '#ffdd44' : '#88ff88';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.arc(hx, hy, 20 + Math.sin(frame * 0.1) * 4, 0, Math.PI * 2);
+        ctx.stroke();
+        // Arrow pointing to it
+        const dx = hx - (px + PW/2), dy = hy - (py + PH/2);
+        const dist = Math.sqrt(dx*dx + dy*dy);
+        if (dist > 60) {
+          const ax = px + PW/2 + (dx/dist) * 40;
+          const ay = py + PH/2 + (dy/dist) * 40;
+          ctx.fillStyle = item.type === 'key' ? '#ffdd44' : '#88ff88';
+          ctx.beginPath();
+          ctx.arc(ax, ay, 4, 0, Math.PI * 2);
+          ctx.fill();
+        }
+        ctx.globalAlpha = 1;
+      }
+    }
   }
 
   // Items
@@ -1178,26 +1825,24 @@ function draw(dt) {
 
   // Player fireballs
   for (const f of playerFireballs) {
+    const r = 5 + Math.floor(Math.sin(frame * 0.3));
     ctx.fillStyle = '#ffaa00';
-    ctx.beginPath();
-    ctx.arc(f.x, f.y, 5 + Math.sin(frame * 0.3) * 1, 0, Math.PI * 2);
-    ctx.fill();
+    ctx.fillRect(Math.floor(f.x - r), Math.floor(f.y - r), r * 2, r * 2);
     ctx.fillStyle = '#ffdd44';
-    ctx.beginPath();
-    ctx.arc(f.x, f.y, 3, 0, Math.PI * 2);
-    ctx.fill();
+    ctx.fillRect(Math.floor(f.x - 3), Math.floor(f.y - 3), 6, 6);
+    // Trail particles
+    if (frame % 3 === 0) {
+      TAS.particles.spawn(f.x, f.y, '#ff8844', 1, 0.5, { size: 2 });
+    }
   }
 
   // Enemy fireballs
   for (const f of enemyFireballs) {
+    const r = 4 + Math.floor(Math.sin(frame * 0.4));
     ctx.fillStyle = '#ff4400';
-    ctx.beginPath();
-    ctx.arc(f.x, f.y, 4 + Math.sin(frame * 0.4) * 1, 0, Math.PI * 2);
-    ctx.fill();
+    ctx.fillRect(Math.floor(f.x - r), Math.floor(f.y - r), r * 2, r * 2);
     ctx.fillStyle = '#ff8800';
-    ctx.beginPath();
-    ctx.arc(f.x, f.y, 2, 0, Math.PI * 2);
-    ctx.fill();
+    ctx.fillRect(Math.floor(f.x - 2), Math.floor(f.y - 2), 4, 4);
   }
 
   // Enemies
@@ -1220,6 +1865,14 @@ function draw(dt) {
     drawDarkOverlay();
   }
 
+  // Solve particles
+  for (const p of solveParticles) {
+    ctx.globalAlpha = Math.min(1, p.life);
+    ctx.fillStyle = p.color;
+    ctx.fillRect(Math.floor(p.x - p.size/2), Math.floor(p.y - p.size/2), Math.floor(p.size), Math.floor(p.size));
+  }
+  ctx.globalAlpha = 1;
+
   TAS.particles.draw();
   ctx.restore();
 
@@ -1227,7 +1880,92 @@ function draw(dt) {
 
   // HUD
   drawHUD();
+
+  // Floor transition overlay
+  if (floorTransition > 0) {
+    drawFloorTransition();
+  }
+
+  // Boss HP bar
+  if (bossType && bossMaxHP > 0 && !bossDead) {
+    drawBossHPBar();
+  }
+
   TAS.input.drawTouchControls(GW, GH);
+}
+
+// === WORLD BACKGROUNDS (PASS 3) ===
+function drawWorldBackground(worldIdx) {
+  ctx.globalAlpha = 0.15;
+  switch(worldIdx) {
+    case 0: // Tower Base - stone pillars
+      for (let i = 0; i < 4; i++) {
+        ctx.fillStyle = '#4a3b6b';
+        ctx.fillRect(Math.floor(40 + i * 100), Math.floor(60), 12, GH - 60);
+        ctx.fillStyle = '#3a2b5b';
+        ctx.fillRect(Math.floor(44 + i * 100), Math.floor(60), 4, GH - 60);
+      }
+      // Torches
+      if (frame % 8 < 4) {
+        ctx.fillStyle = '#ffa252';
+        for (let i = 0; i < 3; i++) {
+          ctx.fillRect(Math.floor(80 + i * 120), Math.floor(100), 6, 6);
+        }
+      }
+      break;
+    case 1: // Fire Halls - lava glow from below
+      ctx.fillStyle = '#ff4400';
+      const lavaH = Math.floor(20 + Math.sin(frame * 0.04) * 5);
+      ctx.fillRect(0, GH - lavaH, GW, lavaH);
+      // Embers rising
+      for (let i = 0; i < 5; i++) {
+        ctx.fillStyle = '#ff6600';
+        const ex = Math.floor((i * 83 + frame * 0.5) % GW);
+        const ey = Math.floor(GH - 30 - ((frame * 0.8 + i * 50) % (GH - 60)));
+        ctx.fillRect(ex, ey, 2, 2);
+      }
+      break;
+    case 2: // Ice Caves - stalactites
+      ctx.fillStyle = '#4e7e9e';
+      for (let i = 0; i < 6; i++) {
+        const sx = Math.floor(30 + i * 65);
+        const sh = Math.floor(20 + Math.sin(i * 1.5) * 10);
+        ctx.beginPath();
+        ctx.moveTo(sx, 0);
+        ctx.lineTo(sx + 8, 0);
+        ctx.lineTo(sx + 4, sh);
+        ctx.closePath();
+        ctx.fill();
+      }
+      // Sparkles
+      if (frame % 12 < 4) {
+        ctx.fillStyle = '#a2d4ff';
+        for (let i = 0; i < 4; i++) {
+          const sparkX = Math.floor((i * 97 + frame * 0.3) % GW);
+          const sparkY = Math.floor((i * 73 + frame * 0.2) % GH);
+          ctx.fillRect(sparkX, sparkY, 2, 2);
+        }
+      }
+      break;
+    case 3: // Dark Maze - barely visible walls
+      ctx.fillStyle = '#2b2b4b';
+      for (let i = 0; i < 3; i++) {
+        ctx.fillRect(Math.floor(60 + i * 130), 0, 4, GH);
+      }
+      break;
+    case 4: // Solomon's Chamber - magical runes
+      ctx.fillStyle = '#8e4e8e';
+      for (let i = 0; i < 8; i++) {
+        const rx = Math.floor(20 + i * 48);
+        const ry = Math.floor(GH - 20 + Math.sin(frame * 0.02 + i) * 3);
+        // Simple rune shapes
+        ctx.fillRect(rx, ry - 8, 2, 8);
+        ctx.fillRect(rx - 3, ry - 5, 8, 2);
+        ctx.fillRect(rx - 1, ry - 3, 4, 2);
+      }
+      break;
+  }
+  ctx.globalAlpha = 1;
 }
 
 // === DRAW HELPERS ===
@@ -1251,7 +1989,7 @@ function drawStone(x, y, pal) {
   ctx.stroke();
 }
 
-function drawBlock(x, y, pal) {
+function drawMagicBlock(x, y, pal) {
   ctx.fillStyle = pal.block;
   ctx.fillRect(x + 1, y + 1, TS - 2, TS - 2);
   ctx.fillStyle = 'rgba(255,255,255,0.15)';
@@ -1265,8 +2003,63 @@ function drawBlock(x, y, pal) {
   ctx.fillRect(x + TS/2 - 2, y + TS/2 - 2, 4, 4);
 }
 
+function drawReactorBlock(x, y) {
+  ctx.fillStyle = '#662200';
+  ctx.fillRect(x + 1, y + 1, TS - 2, TS - 2);
+  ctx.fillStyle = '#cc4400';
+  ctx.fillRect(x + 3, y + 3, TS - 6, TS - 6);
+  // Pulsing core
+  const pulse = Math.sin(frame * 0.15) * 0.4 + 0.6;
+  ctx.fillStyle = 'rgba(255,100,0,' + pulse + ')';
+  ctx.fillRect(x + TS/2 - 4, y + TS/2 - 4, 8, 8);
+  ctx.fillStyle = 'rgba(255,200,0,' + pulse * 0.7 + ')';
+  ctx.fillRect(x + TS/2 - 2, y + TS/2 - 2, 4, 4);
+  // Warning marks
+  ctx.fillStyle = '#ffaa00';
+  ctx.fillRect(x + 4, y + 4, 2, 2);
+  ctx.fillRect(x + TS - 6, y + 4, 2, 2);
+  ctx.fillRect(x + 4, y + TS - 6, 2, 2);
+  ctx.fillRect(x + TS - 6, y + TS - 6, 2, 2);
+}
+
+function drawSporeBlock(x, y) {
+  ctx.fillStyle = '#224422';
+  ctx.fillRect(x + 1, y + 1, TS - 2, TS - 2);
+  ctx.fillStyle = '#44aa44';
+  ctx.fillRect(x + 3, y + 3, TS - 6, TS - 6);
+  // Spore dots
+  const bobble = Math.sin(frame * 0.1 + x) * 2;
+  ctx.fillStyle = '#88ff88';
+  ctx.fillRect(Math.floor(x + 6), Math.floor(y + 8 + bobble), 3, 3);
+  ctx.fillRect(Math.floor(x + 14), Math.floor(y + 12 - bobble), 3, 3);
+  ctx.fillRect(Math.floor(x + 10), Math.floor(y + 20 + bobble), 3, 3);
+  ctx.fillStyle = '#66dd66';
+  ctx.fillRect(Math.floor(x + TS/2 - 1), Math.floor(y + TS/2 - 1), 3, 3);
+}
+
+function drawMycelialBlock(x, y) {
+  ctx.fillStyle = '#1a2244';
+  ctx.fillRect(x + 1, y + 1, TS - 2, TS - 2);
+  ctx.fillStyle = '#3355aa';
+  ctx.fillRect(x + 3, y + 3, TS - 6, TS - 6);
+  // Network lines
+  ctx.strokeStyle = '#88aaff';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(x + 4, y + TS/2);
+  ctx.lineTo(x + TS/2, y + 4);
+  ctx.lineTo(x + TS - 4, y + TS/2);
+  ctx.lineTo(x + TS/2, y + TS - 4);
+  ctx.closePath();
+  ctx.stroke();
+  // Glow center
+  const glow = Math.sin(frame * 0.1 + y) * 0.3 + 0.5;
+  ctx.fillStyle = 'rgba(136,170,255,' + glow + ')';
+  ctx.fillRect(x + TS/2 - 2, y + TS/2 - 2, 4, 4);
+}
+
 function drawLava(x, y) {
-  const wave = Math.sin(frame * 0.06 + x * 0.1) * 3;
+  const wave = Math.floor(Math.sin(frame * 0.06 + x * 0.1) * 3);
   ctx.fillStyle = '#441100';
   ctx.fillRect(x, y, TS, TS);
   ctx.fillStyle = '#cc3300';
@@ -1276,18 +2069,17 @@ function drawLava(x, y) {
   ctx.fillStyle = '#ffaa00';
   const bubble = Math.sin(frame * 0.1 + x) > 0.8 ? 3 : 0;
   if (bubble) {
-    ctx.beginPath();
-    ctx.arc(x + TS/2 + Math.sin(x) * 8, y + 12 + wave, bubble, 0, Math.PI * 2);
-    ctx.fill();
+    ctx.fillRect(Math.floor(x + TS/2 + Math.sin(x) * 8 - bubble/2), y + 12 + wave - bubble, bubble * 2, bubble * 2);
   }
 }
 
 function drawItem(item) {
   const x = item.x * TS, y = item.y * TS;
-  const bob = Math.sin(frame * 0.06 + item.x + item.y) * 2;
+  const bob = Math.floor(Math.sin(frame * 0.06 + item.x + item.y) * 2);
 
   switch(item.type) {
     case 'key':
+      // NES-style key sprite
       ctx.fillStyle = '#ffdd44';
       ctx.fillRect(x + 10, y + 8 + bob, 12, 6);
       ctx.fillRect(x + 8, y + 6 + bob, 6, 10);
@@ -1295,6 +2087,11 @@ function drawItem(item) {
       ctx.fillRect(x + 18, y + 18 + bob, 6, 3);
       ctx.fillStyle = '#ffff88';
       ctx.fillRect(x + 9, y + 7 + bob, 4, 4);
+      // Sparkle
+      if (frame % 20 < 6) {
+        ctx.fillStyle = '#fff';
+        ctx.fillRect(x + 7, y + 5 + bob, 2, 2);
+      }
       break;
     case 'door':
       ctx.fillStyle = hasKey ? '#886622' : '#443311';
@@ -1302,12 +2099,15 @@ function drawItem(item) {
       ctx.fillStyle = '#aa8844';
       ctx.fillRect(x + 6, y + 4, TS - 12, TS - 8);
       ctx.fillStyle = hasKey ? '#ffdd44' : '#666';
-      ctx.beginPath();
-      ctx.arc(x + TS - 10, y + TS/2, 3, 0, Math.PI * 2);
-      ctx.fill();
+      ctx.fillRect(x + TS - 12, y + TS/2 - 2, 4, 4);
       // Arch
       ctx.fillStyle = '#664422';
       ctx.fillRect(x + 4, y + 2, TS - 8, 4);
+      // Lock flash when key collected
+      if (hasKey && frame % 16 < 8) {
+        ctx.fillStyle = 'rgba(255,221,68,0.3)';
+        ctx.fillRect(x + 2, y, TS - 4, TS);
+      }
       break;
     case 'gem':
       ctx.fillStyle = '#44ffaa';
@@ -1335,9 +2135,8 @@ function drawItem(item) {
       ctx.fillRect(x + 12, y + 12 + bob, 8, 10);
       // Flame icon
       ctx.fillStyle = '#ffaa00';
-      ctx.beginPath();
-      ctx.arc(x + TS/2, y + 16 + bob, 3, 0, Math.PI * 2);
-      ctx.fill();
+      ctx.fillRect(x + TS/2 - 2, y + 14 + bob, 4, 4);
+      ctx.fillRect(x + TS/2 - 1, y + 12 + bob, 2, 3);
       break;
     case 'hourglass':
       ctx.fillStyle = '#88ccff';
@@ -1358,126 +2157,213 @@ function drawItem(item) {
       break;
     case 'star':
       ctx.fillStyle = '#ffff44';
-      drawStar(x + TS/2, y + TS/2 + bob, 5, 10, 5);
+      drawPixelStar(x + TS/2, y + TS/2 + bob, 10);
       ctx.fillStyle = '#ffffff';
-      drawStar(x + TS/2, y + TS/2 + bob, 5, 5, 3);
+      drawPixelStar(x + TS/2, y + TS/2 + bob, 5);
+      break;
+    case 'spore_pod':
+      ctx.fillStyle = '#226622';
+      ctx.fillRect(x + 8, y + 10 + bob, 16, 14);
+      ctx.fillStyle = '#44cc44';
+      ctx.fillRect(x + 10, y + 12 + bob, 12, 10);
+      // Spore dots
+      ctx.fillStyle = '#88ff88';
+      ctx.fillRect(x + 12, y + 14 + bob, 3, 3);
+      ctx.fillRect(x + 18, y + 17 + bob, 3, 3);
+      ctx.fillRect(x + 14, y + 20 + bob, 3, 3);
+      break;
+    case 'reactor_core':
+      ctx.fillStyle = '#662200';
+      ctx.fillRect(x + 8, y + 8 + bob, 16, 16);
+      ctx.fillStyle = '#cc4400';
+      ctx.fillRect(x + 10, y + 10 + bob, 12, 12);
+      const cPulse = Math.sin(frame * 0.15) * 0.4 + 0.6;
+      ctx.fillStyle = 'rgba(255,150,0,' + cPulse + ')';
+      ctx.fillRect(x + 13, y + 13 + bob, 6, 6);
       break;
   }
 }
 
-function drawStar(cx, cy, points, outerR, innerR) {
-  ctx.beginPath();
-  for (let i = 0; i < points * 2; i++) {
-    const r = i % 2 === 0 ? outerR : innerR;
-    const angle = (i * Math.PI / points) - Math.PI / 2;
-    const x = cx + Math.cos(angle) * r;
-    const y = cy + Math.sin(angle) * r;
-    if (i === 0) ctx.moveTo(x, y);
-    else ctx.lineTo(x, y);
-  }
-  ctx.closePath();
-  ctx.fill();
+// NES-style pixel star (no arcs)
+function drawPixelStar(cx, cy, size) {
+  const s = Math.floor(size / 2);
+  ctx.fillRect(Math.floor(cx - 1), Math.floor(cy - s), 2, size);
+  ctx.fillRect(Math.floor(cx - s), Math.floor(cy - 1), size, 2);
+  // Diagonal
+  ctx.fillRect(Math.floor(cx - s + 2), Math.floor(cy - s + 2), 2, 2);
+  ctx.fillRect(Math.floor(cx + s - 4), Math.floor(cy - s + 2), 2, 2);
+  ctx.fillRect(Math.floor(cx - s + 2), Math.floor(cy + s - 4), 2, 2);
+  ctx.fillRect(Math.floor(cx + s - 4), Math.floor(cy + s - 4), 2, 2);
 }
 
 function drawEnemy(e) {
-  const bob = Math.sin(e.frame * 0.1) * 2;
+  const bob = Math.floor(Math.sin(e.frame * 0.1) * 2);
+  const flash = e.hitFlash > 0;
 
   switch(e.type) {
     case 'spark':
       // Electric spark ball
-      ctx.fillStyle = '#ffff00';
-      ctx.beginPath();
-      ctx.arc(e.x, e.y + bob, 8, 0, Math.PI * 2);
-      ctx.fill();
+      ctx.fillStyle = flash ? '#fff' : '#ffff00';
+      ctx.fillRect(Math.floor(e.x - 8), Math.floor(e.y - 8 + bob), 16, 16);
       ctx.fillStyle = '#ffffff';
-      ctx.beginPath();
-      ctx.arc(e.x, e.y + bob, 4, 0, Math.PI * 2);
-      ctx.fill();
-      // Lightning bolts
-      ctx.strokeStyle = '#ffff88';
-      ctx.lineWidth = 1;
-      for (let i = 0; i < 4; i++) {
-        const a = (frame * 0.1 + i * Math.PI / 2);
-        ctx.beginPath();
-        ctx.moveTo(e.x, e.y + bob);
-        ctx.lineTo(e.x + Math.cos(a) * 12, e.y + bob + Math.sin(a) * 12);
-        ctx.stroke();
+      ctx.fillRect(Math.floor(e.x - 4), Math.floor(e.y - 4 + bob), 8, 8);
+      // Lightning bolts (pixel)
+      ctx.fillStyle = '#ffff88';
+      for (let j = 0; j < 4; j++) {
+        const a = (frame * 0.1 + j * Math.PI / 2);
+        const lx = Math.floor(e.x + Math.cos(a) * 10);
+        const ly = Math.floor(e.y + bob + Math.sin(a) * 10);
+        ctx.fillRect(lx, ly, 2, 2);
       }
       break;
     case 'ghost':
-      // Translucent ghost
+      // Translucent ghost (pixel)
       ctx.globalAlpha = 0.6 + Math.sin(e.frame * 0.05) * 0.2;
-      ctx.fillStyle = '#aabbff';
-      ctx.beginPath();
-      ctx.arc(e.x, e.y - 4 + bob, 10, Math.PI, 0);
-      ctx.lineTo(e.x + 10, e.y + 10 + bob);
-      ctx.lineTo(e.x + 6, e.y + 6 + bob);
-      ctx.lineTo(e.x + 2, e.y + 10 + bob);
-      ctx.lineTo(e.x - 2, e.y + 6 + bob);
-      ctx.lineTo(e.x - 6, e.y + 10 + bob);
-      ctx.lineTo(e.x - 10, e.y + 10 + bob);
-      ctx.closePath();
-      ctx.fill();
+      ctx.fillStyle = flash ? '#fff' : '#aabbff';
+      ctx.fillRect(Math.floor(e.x - 10), Math.floor(e.y - 8 + bob), 20, 14);
+      ctx.fillRect(Math.floor(e.x - 8), Math.floor(e.y + 6 + bob), 4, 4);
+      ctx.fillRect(Math.floor(e.x - 2), Math.floor(e.y + 6 + bob), 4, 4);
+      ctx.fillRect(Math.floor(e.x + 4), Math.floor(e.y + 6 + bob), 4, 4);
       // Eyes
       ctx.fillStyle = '#000';
-      ctx.fillRect(e.x - 5, e.y - 4 + bob, 3, 4);
-      ctx.fillRect(e.x + 2, e.y - 4 + bob, 3, 4);
+      ctx.fillRect(Math.floor(e.x - 5), Math.floor(e.y - 4 + bob), 3, 4);
+      ctx.fillRect(Math.floor(e.x + 2), Math.floor(e.y - 4 + bob), 3, 4);
       ctx.globalAlpha = 1;
       break;
     case 'demon':
-      // Red demon
-      ctx.fillStyle = '#cc2222';
-      ctx.fillRect(e.x - 8, e.y - 8 + bob, 16, 18);
+      ctx.fillStyle = flash ? '#fff' : '#cc2222';
+      ctx.fillRect(Math.floor(e.x - 8), Math.floor(e.y - 8 + bob), 16, 18);
       ctx.fillStyle = '#ff4444';
-      ctx.fillRect(e.x - 6, e.y - 6 + bob, 12, 14);
+      ctx.fillRect(Math.floor(e.x - 6), Math.floor(e.y - 6 + bob), 12, 14);
       // Horns
       ctx.fillStyle = '#880000';
-      ctx.fillRect(e.x - 8, e.y - 12 + bob, 4, 6);
-      ctx.fillRect(e.x + 4, e.y - 12 + bob, 4, 6);
+      ctx.fillRect(Math.floor(e.x - 8), Math.floor(e.y - 12 + bob), 4, 6);
+      ctx.fillRect(Math.floor(e.x + 4), Math.floor(e.y - 12 + bob), 4, 6);
       // Eyes
       ctx.fillStyle = '#ffff00';
-      ctx.fillRect(e.x - 4, e.y - 4 + bob, 3, 3);
-      ctx.fillRect(e.x + 2, e.y - 4 + bob, 3, 3);
+      ctx.fillRect(Math.floor(e.x - 4), Math.floor(e.y - 4 + bob), 3, 3);
+      ctx.fillRect(Math.floor(e.x + 2), Math.floor(e.y - 4 + bob), 3, 3);
       break;
     case 'dragon':
-      // Dragon head (fixed)
-      ctx.fillStyle = '#22aa22';
-      ctx.fillRect(e.x - 12, e.y - 10, 24, 20);
+      ctx.fillStyle = flash ? '#fff' : '#22aa22';
+      ctx.fillRect(Math.floor(e.x - 12), Math.floor(e.y - 10), 24, 20);
       ctx.fillStyle = '#44cc44';
-      ctx.fillRect(e.x - 10, e.y - 8, 20, 16);
+      ctx.fillRect(Math.floor(e.x - 10), Math.floor(e.y - 8), 20, 16);
       // Snout
       ctx.fillStyle = '#22aa22';
-      ctx.fillRect(e.x + e.fireDir * 10, e.y - 4, 8 * Math.abs(e.fireDir), 10);
+      const snoutX = Math.floor(e.x + e.fireDir * 10);
+      ctx.fillRect(snoutX, Math.floor(e.y - 4), 8, 10);
       // Eye
       ctx.fillStyle = '#ff0000';
-      ctx.fillRect(e.x + e.fireDir * 2, e.y - 6, 4, 4);
+      ctx.fillRect(Math.floor(e.x + e.fireDir * 2), Math.floor(e.y - 6), 4, 4);
       // Mouth fire hint
       if (e.fireTimer < 20) {
         ctx.fillStyle = '#ff6600';
-        ctx.beginPath();
-        ctx.arc(e.x + e.fireDir * 18, e.y + 2, 4 + Math.sin(frame * 0.3) * 2, 0, Math.PI * 2);
-        ctx.fill();
+        const fireSize = Math.floor(4 + Math.sin(frame * 0.3) * 2);
+        ctx.fillRect(Math.floor(e.x + e.fireDir * 18 - fireSize/2), Math.floor(e.y - fireSize/2), fireSize, fireSize);
       }
       break;
     case 'mirror':
-      // Mirror knight - silvery
-      ctx.fillStyle = '#8888aa';
-      ctx.fillRect(e.x - 8, e.y - 10 + bob, 16, 20);
+      ctx.fillStyle = flash ? '#fff' : '#8888aa';
+      ctx.fillRect(Math.floor(e.x - 8), Math.floor(e.y - 10 + bob), 16, 20);
       ctx.fillStyle = '#aaaacc';
-      ctx.fillRect(e.x - 6, e.y - 8 + bob, 12, 16);
-      // Shield (mirror)
+      ctx.fillRect(Math.floor(e.x - 6), Math.floor(e.y - 8 + bob), 12, 16);
+      // Shield
       ctx.fillStyle = '#ccccff';
-      ctx.fillRect(e.x - 10, e.y - 4 + bob, 4, 12);
+      ctx.fillRect(Math.floor(e.x - 10), Math.floor(e.y - 4 + bob), 4, 12);
       // Helmet
       ctx.fillStyle = '#666688';
-      ctx.fillRect(e.x - 7, e.y - 12 + bob, 14, 5);
-      // Eyes (glowing)
+      ctx.fillRect(Math.floor(e.x - 7), Math.floor(e.y - 12 + bob), 14, 5);
+      // Eyes
       const glow = Math.sin(frame * 0.08) * 0.3 + 0.7;
       ctx.fillStyle = 'rgba(200,200,255,' + glow + ')';
-      ctx.fillRect(e.x - 3, e.y - 6 + bob, 3, 3);
-      ctx.fillRect(e.x + 1, e.y - 6 + bob, 3, 3);
+      ctx.fillRect(Math.floor(e.x - 3), Math.floor(e.y - 6 + bob), 3, 3);
+      ctx.fillRect(Math.floor(e.x + 1), Math.floor(e.y - 6 + bob), 3, 3);
+      break;
+    // PASS 2: Reactor Spark
+    case 'reactor_spark':
+      ctx.fillStyle = flash ? '#fff' : '#ff6622';
+      ctx.fillRect(Math.floor(e.x - 8), Math.floor(e.y - 8 + bob), 16, 16);
+      ctx.fillStyle = '#ffaa44';
+      ctx.fillRect(Math.floor(e.x - 5), Math.floor(e.y - 5 + bob), 10, 10);
+      // Pulsing danger indicator
+      const dangerPulse = Math.sin(frame * 0.2) > 0.5;
+      if (dangerPulse) {
+        ctx.fillStyle = '#ff0000';
+        ctx.fillRect(Math.floor(e.x - 2), Math.floor(e.y - 2 + bob), 4, 4);
+      }
+      // Warning flare when about to explode
+      if (e.explodeTimer < 1) {
+        ctx.globalAlpha = 0.5;
+        ctx.fillStyle = '#ff4400';
+        ctx.fillRect(Math.floor(e.x - 14), Math.floor(e.y - 14 + bob), 28, 28);
+        ctx.globalAlpha = 1;
+      }
+      break;
+    // PASS 2: Spore Ghost
+    case 'spore_ghost':
+      ctx.globalAlpha = 0.65 + Math.sin(e.frame * 0.06) * 0.15;
+      ctx.fillStyle = flash ? '#fff' : '#44cc66';
+      ctx.fillRect(Math.floor(e.x - 10), Math.floor(e.y - 8 + bob), 20, 14);
+      ctx.fillRect(Math.floor(e.x - 8), Math.floor(e.y + 6 + bob), 4, 4);
+      ctx.fillRect(Math.floor(e.x + 4), Math.floor(e.y + 6 + bob), 4, 4);
+      // Spore eyes
+      ctx.fillStyle = '#88ff88';
+      ctx.fillRect(Math.floor(e.x - 5), Math.floor(e.y - 4 + bob), 3, 4);
+      ctx.fillRect(Math.floor(e.x + 2), Math.floor(e.y - 4 + bob), 3, 4);
+      // Trailing spores
+      ctx.fillStyle = '#66ff66';
+      for (let sp = 0; sp < 3; sp++) {
+        const spx = Math.floor(e.x + Math.sin(e.frame * 0.05 + sp * 2) * 14);
+        const spy = Math.floor(e.y + 10 + sp * 4 + bob);
+        ctx.fillRect(spx, spy, 2, 2);
+      }
+      ctx.globalAlpha = 1;
+      break;
+    // Boss sprites
+    case 'boss_reactor':
+      drawBossSprite(e, bob, flash, '#cc4400', '#ff6622', '#ffaa00');
+      break;
+    case 'boss_drake':
+      drawBossSprite(e, bob, flash, '#22aa22', '#44cc44', '#ff4400');
+      break;
+    case 'boss_spore':
+      drawBossSprite(e, bob, flash, '#226622', '#44aa44', '#88ff88');
+      break;
+    case 'boss_mycelial':
+      drawBossSprite(e, bob, flash, '#223366', '#3355aa', '#88aaff');
+      break;
+    case 'boss_solomon':
+      drawBossSprite(e, bob, flash, '#5b3b5b', '#8e4e8e', '#ff82ff');
       break;
   }
+}
+
+function drawBossSprite(e, bob, flash, c1, c2, c3) {
+  // Large boss body (2x size)
+  ctx.fillStyle = flash ? '#fff' : c1;
+  ctx.fillRect(Math.floor(e.x - 16), Math.floor(e.y - 16 + bob), 32, 32);
+  ctx.fillStyle = c2;
+  ctx.fillRect(Math.floor(e.x - 12), Math.floor(e.y - 12 + bob), 24, 24);
+  // Crown/horns
+  ctx.fillStyle = c3;
+  ctx.fillRect(Math.floor(e.x - 14), Math.floor(e.y - 22 + bob), 6, 8);
+  ctx.fillRect(Math.floor(e.x + 8), Math.floor(e.y - 22 + bob), 6, 8);
+  ctx.fillRect(Math.floor(e.x - 3), Math.floor(e.y - 20 + bob), 6, 6);
+  // Eyes
+  ctx.fillStyle = '#ff0000';
+  ctx.fillRect(Math.floor(e.x - 7), Math.floor(e.y - 6 + bob), 5, 5);
+  ctx.fillRect(Math.floor(e.x + 3), Math.floor(e.y - 6 + bob), 5, 5);
+  // Eye glow
+  ctx.fillStyle = '#ffff00';
+  ctx.fillRect(Math.floor(e.x - 6), Math.floor(e.y - 5 + bob), 3, 3);
+  ctx.fillRect(Math.floor(e.x + 4), Math.floor(e.y - 5 + bob), 3, 3);
+  // Core glow
+  const glow = Math.sin(frame * 0.1) * 0.3 + 0.5;
+  ctx.globalAlpha = glow;
+  ctx.fillStyle = c3;
+  ctx.fillRect(Math.floor(e.x - 5), Math.floor(e.y + 2 + bob), 10, 8);
+  ctx.globalAlpha = 1;
 }
 
 function drawPlayer() {
@@ -1485,16 +2371,25 @@ function drawPlayer() {
   const blink = invincTimer > 0 && Math.floor(frame / 4) % 2 === 0;
   if (blink) return;
 
-  const x = px, y = py + bob;
+  const x = Math.floor(px), y = Math.floor(py + bob);
   const facing = pdir;
+  const walking = Math.abs(pvx) > 10;
+  const casting = pcastAnim > 0;
+
+  // Walk bob
+  const walkBob = walking && pgrounded ? Math.floor(Math.sin(pwalkFrame) * 2) : 0;
 
   // Body (robe)
-  ctx.fillStyle = '#6633aa';
-  ctx.fillRect(x + 3, y + 10, PW - 6, PH - 12);
+  ctx.fillStyle = casting ? '#8855cc' : '#6633aa';
+  ctx.fillRect(x + 3, y + 10 + walkBob, PW - 6, PH - 12);
 
   // Robe detail
   ctx.fillStyle = '#7744bb';
-  ctx.fillRect(x + 5, y + 12, PW - 10, PH - 14);
+  ctx.fillRect(x + 5, y + 12 + walkBob, PW - 10, PH - 14);
+
+  // Robe bottom trim
+  ctx.fillStyle = '#5522aa';
+  ctx.fillRect(x + 3, y + PH - 4 + walkBob, PW - 6, 2);
 
   // Head
   ctx.fillStyle = '#dda866';
@@ -1521,33 +2416,46 @@ function drawPlayer() {
   ctx.fillStyle = '#000';
   if (facing > 0) {
     ctx.fillRect(x + 10, y + 7, 2, 3);
+    ctx.fillRect(x + 13, y + 7, 2, 3);
   } else {
-    ctx.fillRect(x + 8, y + 7, 2, 3);
+    ctx.fillRect(x + 6, y + 7, 2, 3);
+    ctx.fillRect(x + 9, y + 7, 2, 3);
   }
 
   // Staff
   ctx.fillStyle = '#8B4513';
   const staffX = facing > 0 ? x + PW - 3 : x;
-  ctx.fillRect(staffX, y + 2, 3, PH - 4);
+  const staffAngle = casting ? -4 : 0;
+  ctx.fillRect(staffX, y + 2 + staffAngle, 3, PH - 4);
   // Staff orb
-  ctx.fillStyle = '#aa44ff';
-  ctx.beginPath();
-  ctx.arc(staffX + 1, y + 2, 4, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.fillStyle = '#cc88ff';
-  ctx.beginPath();
-  ctx.arc(staffX + 1, y + 1, 2, 0, Math.PI * 2);
-  ctx.fill();
+  const orbColor = casting ? '#ffaa44' : '#aa44ff';
+  ctx.fillStyle = orbColor;
+  ctx.fillRect(staffX - 2, y + staffAngle - 2, 7, 7);
+  ctx.fillStyle = casting ? '#ffdd88' : '#cc88ff';
+  ctx.fillRect(staffX, y + staffAngle, 3, 3);
 
-  // Feet
+  // Cast sparkles
+  if (casting) {
+    ctx.fillStyle = '#ffdd44';
+    const sparkOff = Math.floor(pcastAnim * 20);
+    ctx.fillRect(staffX - 1 + facing * sparkOff, y - 4, 2, 2);
+    ctx.fillRect(staffX + 2 + facing * (sparkOff + 4), y - 2, 2, 2);
+  }
+
+  // Feet (walking animation)
   ctx.fillStyle = '#3a1f5e';
-  ctx.fillRect(x + 4, y + PH - 4, 5, 4);
-  ctx.fillRect(x + PW - 9, y + PH - 4, 5, 4);
+  if (walking && pgrounded) {
+    const step = Math.floor(pwalkFrame) % 2;
+    ctx.fillRect(x + 4 + step * 2, y + PH - 4 + walkBob, 5, 4);
+    ctx.fillRect(x + PW - 9 - step * 2, y + PH - 4 + walkBob, 5, 4);
+  } else {
+    ctx.fillRect(x + 4, y + PH - 4, 5, 4);
+    ctx.fillRect(x + PW - 9, y + PH - 4, 5, 4);
+  }
 }
 
 function drawDarkOverlay() {
-  // Radial gradient darkness
-  const cx = px + PW/2, cy = py + PH/2;
+  const cx = Math.floor(px + PW/2), cy = Math.floor(py + PH/2);
   const grad = ctx.createRadialGradient(cx, cy, 40, cx, cy, 100);
   grad.addColorStop(0, 'rgba(0,0,0,0)');
   grad.addColorStop(0.6, 'rgba(0,0,0,0.7)');
@@ -1558,113 +2466,173 @@ function drawDarkOverlay() {
 
 function drawHUD() {
   const barH = 28;
-  ctx.fillStyle = 'rgba(10,5,20,0.8)';
+  ctx.fillStyle = 'rgba(10,5,20,0.85)';
   ctx.fillRect(0, 0, GW, barH);
 
-  ctx.font = 'bold 13px monospace';
+  // Bottom bar for floor name
+  ctx.fillStyle = 'rgba(10,5,20,0.6)';
+  ctx.fillRect(0, GH - 16, GW, 16);
 
-  // Score
+  ctx.font = 'bold 11px monospace';
+
+  // Score with INT multiplier indicator
   ctx.fillStyle = '#ffdd44';
   ctx.textAlign = 'left';
-  ctx.fillText('SCORE: ' + score, 6, 18);
+  ctx.fillText('SCORE:' + score, 4, 17);
 
-  // Room
-  const worldIdx = Math.floor(room / 5) + 1;
+  // Room - world and floor name
+  const worldIdx = Math.floor(room / 5);
   const roomInWorld = (room % 5) + 1;
+  const world = WORLDS[worldIdx] || WORLDS[0];
   ctx.fillStyle = '#88ccff';
   ctx.textAlign = 'center';
-  ctx.fillText('W' + worldIdx + '-' + roomInWorld, GW/2 - 40, 18);
+  ctx.fillText(world.name + ' ' + roomInWorld + '-5', GW/2 - 30, 17);
 
   // Timer
   ctx.fillStyle = timer < 15 ? '#ff4444' : '#44dd88';
-  ctx.fillText(Math.ceil(timer) + 's', GW/2 + 20, 18);
+  ctx.fillText(Math.ceil(timer) + 's', GW/2 + 40, 17);
 
   // Key indicator
   if (hasKey) {
     ctx.fillStyle = '#ffdd44';
-    ctx.fillText('KEY', GW/2 + 60, 18);
+    ctx.fillText('KEY', GW/2 + 70, 17);
   }
 
   // Fireballs
   ctx.fillStyle = '#ff8844';
   ctx.textAlign = 'right';
-  ctx.fillText('FB:' + fireballs, GW - 60, 18);
+  ctx.fillText('FB:' + fireballs, GW - 55, 17);
 
-  // Lives
+  // Lives (NES hearts)
   for (let i = 0; i < lives; i++) {
-    ctx.fillStyle = '#aa44ff';
-    ctx.beginPath();
-    ctx.arc(GW - 12 - i * 18, 14, 7, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.fillStyle = '#cc88ff';
-    ctx.beginPath();
-    ctx.arc(GW - 12 - i * 18, 13, 4, 0, Math.PI * 2);
-    ctx.fill();
+    ctx.fillStyle = '#ff4466';
+    const hx = GW - 12 - i * 14;
+    // Pixel heart
+    ctx.fillRect(hx - 3, hx > 0 ? 8 : 8, 3, 3);
+    ctx.fillRect(hx + 1, 8, 3, 3);
+    ctx.fillRect(hx - 4, 11, 9, 3);
+    ctx.fillRect(hx - 3, 14, 7, 2);
+    ctx.fillRect(hx - 1, 16, 3, 2);
   }
+
+  // Bottom bar: floor name
+  const floorIdx = room % 5;
+  const floorName = world.floors[floorIdx] || ('Floor ' + (floorIdx + 1));
+  ctx.fillStyle = '#666';
+  ctx.font = '9px monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText(floorName, GW/2, GH - 5);
+
+  // Hint charges
+  if (hintCharges > 0) {
+    ctx.fillStyle = hintActive > 0 ? '#ffdd44' : '#8888aa';
+    ctx.textAlign = 'left';
+    ctx.fillText('HINT:' + hintCharges + (hintActive > 0 ? ' [C]' : ''), 4, GH - 5);
+  }
+
+  // Stat indicator (tiny, corner)
+  ctx.fillStyle = '#444';
+  ctx.font = '8px monospace';
+  ctx.textAlign = 'right';
+  ctx.fillText('S' + statB.STR + ' D' + statB.DEX + ' C' + statB.CON, GW - 4, GH - 5);
+}
+
+function drawFloorTransition() {
+  const alpha = Math.min(1, floorTransition);
+  ctx.globalAlpha = alpha * 0.8;
+  ctx.fillStyle = '#000';
+  ctx.fillRect(0, GH/2 - 30, GW, 60);
+  ctx.globalAlpha = alpha;
+  ctx.fillStyle = '#c8a2ff';
+  ctx.font = 'bold 16px monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText(floorTransitionName, GW/2, GH/2 + 6);
+  ctx.globalAlpha = 1;
+}
+
+function drawBossHPBar() {
+  const barW = 120, barH = 8;
+  const bx = GW/2 - barW/2, by = 30;
+  ctx.fillStyle = 'rgba(0,0,0,0.7)';
+  ctx.fillRect(bx - 2, by - 2, barW + 4, barH + 4);
+  ctx.fillStyle = '#440000';
+  ctx.fillRect(bx, by, barW, barH);
+  const fillW = Math.floor((bossHP / bossMaxHP) * barW);
+  ctx.fillStyle = bossHP > bossMaxHP * 0.3 ? '#cc2222' : '#ff4444';
+  ctx.fillRect(bx, by, fillW, barH);
+  ctx.fillStyle = '#fff';
+  ctx.font = 'bold 8px monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText('BOSS', GW/2, by - 4);
 }
 
 function drawTitleScreen() {
-  // Background decoration
-  const pal = WORLD_PALETTES[0];
+  const pal = WORLDS[0];
   ctx.fillStyle = pal.bg;
   ctx.fillRect(0, 0, GW, GH);
 
   // Decorative blocks
   for (let i = 0; i < 12; i++) {
-    const bx = i * TS, by = GH - TS;
-    drawStone(bx, by, pal);
+    drawStone(i * TS, GH - TS, pal);
+    drawStone(i * TS, 0, pal);
   }
-  for (let i = 0; i < 12; i++) {
-    const bx = i * TS, by = 0;
-    drawStone(bx, by, pal);
-  }
-  // Side columns
   for (let i = 1; i < 9; i++) {
     drawStone(0, i * TS, pal);
     drawStone(GW - TS, i * TS, pal);
   }
   // Floating blocks
   for (let i = 0; i < 4; i++) {
-    const bx = 64 + i * 80 + Math.sin(frame * 0.02 + i) * 5;
-    const by = 220 + Math.cos(frame * 0.03 + i) * 3;
-    drawBlock(bx, by, pal);
+    const bx = Math.floor(64 + i * 80 + Math.sin(frame * 0.02 + i) * 5);
+    const by = Math.floor(220 + Math.cos(frame * 0.03 + i) * 3);
+    drawMagicBlock(bx, by, pal);
   }
+
+  // Tasern blocks preview
+  drawReactorBlock(Math.floor(100 + Math.sin(frame * 0.015) * 3), 250);
+  drawSporeBlock(Math.floor(180 + Math.cos(frame * 0.02) * 3), 250);
+  drawMycelialBlock(Math.floor(260 + Math.sin(frame * 0.018) * 3), 250);
 
   ctx.textAlign = 'center';
 
-  // Title
+  // Title shadow + text
   ctx.fillStyle = '#000';
-  ctx.font = 'bold 28px monospace';
-  ctx.fillText("SOLOMON'S KEY", GW/2 + 2, 80 + 2);
+  ctx.font = 'bold 26px monospace';
+  ctx.fillText("SOLOMON'S KEY", GW/2 + 2, 72 + 2);
   ctx.fillStyle = '#c8a2ff';
-  ctx.fillText("SOLOMON'S KEY", GW/2, 80);
+  ctx.fillText("SOLOMON'S KEY", GW/2, 72);
 
   // Subtitle
   ctx.fillStyle = '#8866aa';
-  ctx.font = '12px monospace';
-  ctx.fillText('A Tasern Tale', GW/2, 100);
-
-  // Instructions
-  ctx.fillStyle = '#aaa';
   ctx.font = '11px monospace';
-  ctx.fillText('Arrows/WASD: Move    Space/Z: Jump', GW/2, 140);
-  ctx.fillText('X/Shift: Create/Destroy Block', GW/2, 156);
-  ctx.fillText('Up + Block: Shoot Fireball', GW/2, 172);
-  ctx.fillText('Collect KEY then reach DOOR', GW/2, 192);
+  ctx.fillText('A Tasern Tale', GW/2, 90);
+
+  // Instructions (NES style)
+  ctx.fillStyle = '#aaa';
+  ctx.font = '10px monospace';
+  ctx.fillText('Arrows/WASD: Move    Space/Z: Jump', GW/2, 120);
+  ctx.fillText('X/Shift: Create/Destroy Block', GW/2, 134);
+  ctx.fillText('Up+Block: Fireball   Down+Block: Special', GW/2, 148);
+  ctx.fillText('C: Hint (INT)    Collect KEY then DOOR', GW/2, 162);
+
+  // statB display
+  ctx.fillStyle = '#666';
+  ctx.font = '9px monospace';
+  ctx.fillText('STR:' + statB.STR + ' DEX:' + statB.DEX + ' CON:' + statB.CON +
+               ' INT:' + statB.INT + ' WIS:' + statB.WIS + ' CHA:' + statB.CHA, GW/2, 182);
 
   // Progress
   if (savedProgress > 0) {
     ctx.fillStyle = '#88ccff';
-    ctx.font = '11px monospace';
-    ctx.fillText('Continue from Room ' + (savedProgress + 1), GW/2, 250);
+    ctx.font = '10px monospace';
+    ctx.fillText('Continue from Room ' + (savedProgress + 1), GW/2, 202);
   }
 
   // Start prompt
   const pulse = Math.sin(frame * 0.05) * 0.3 + 0.7;
   ctx.globalAlpha = pulse;
   ctx.fillStyle = '#ffdd44';
-  ctx.font = 'bold 14px monospace';
-  ctx.fillText('PRESS ANY KEY TO START', GW/2, 280);
+  ctx.font = 'bold 13px monospace';
+  ctx.fillText('PRESS ANY KEY TO START', GW/2, 290);
   ctx.globalAlpha = 1;
 }
 
@@ -1672,19 +2640,33 @@ function drawVictoryScreen() {
   ctx.fillStyle = '#1a0a2e';
   ctx.fillRect(0, 0, GW, GH);
 
+  // Victory particles
+  for (let i = 0; i < 6; i++) {
+    const vx = Math.floor((i * 67 + frame * 0.5) % GW);
+    const vy = Math.floor(GH - ((frame * 0.8 + i * 50) % GH));
+    ctx.fillStyle = i % 2 === 0 ? '#ffdd44' : '#c8a2ff';
+    ctx.fillRect(vx, vy, 3, 3);
+  }
+
   ctx.textAlign = 'center';
 
   ctx.fillStyle = '#ffdd44';
-  ctx.font = 'bold 24px monospace';
-  ctx.fillText('VICTORY!', GW/2, 80);
+  ctx.font = 'bold 22px monospace';
+  ctx.fillText('VICTORY!', GW/2, 70);
 
   ctx.fillStyle = '#c8a2ff';
-  ctx.font = '14px monospace';
-  ctx.fillText("Solomon's Tower is conquered!", GW/2, 120);
+  ctx.font = '12px monospace';
+  ctx.fillText("Solomon's Tower is conquered!", GW/2, 100);
 
   ctx.fillStyle = '#44dd88';
-  ctx.font = 'bold 16px monospace';
-  ctx.fillText('Final Score: ' + score, GW/2, 170);
+  ctx.font = 'bold 14px monospace';
+  ctx.fillText('Final Score: ' + score, GW/2, 140);
+
+  // Stat summary
+  ctx.fillStyle = '#888';
+  ctx.font = '10px monospace';
+  ctx.fillText('STR:' + statB.STR + ' DEX:' + statB.DEX + ' CON:' + statB.CON +
+               ' INT:' + statB.INT + ' WIS:' + statB.WIS + ' CHA:' + statB.CHA, GW/2, 170);
 
   if (score >= highScore && score > 0) {
     const pulse = Math.sin(frame * 0.06) * 0.3 + 0.7;

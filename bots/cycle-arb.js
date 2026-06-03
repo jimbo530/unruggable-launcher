@@ -33,7 +33,7 @@ const TOKENS = {
   WETH:    { addr: '0x4200000000000000000000000000000000000006', dec: 18 },
   cbBTC:   { addr: '0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf', dec: 8 },
 
-  // Money for Trees V2 stablecoin
+  // Money for Trees V2 deposit receipt
   MfT:     { addr: '0xe3dd3881477c20C17Df080cEec0C1bD0C065A072', dec: 6 },
 
   // Tree tokens

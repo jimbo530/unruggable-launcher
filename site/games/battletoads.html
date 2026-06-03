@@ -25,6 +25,21 @@ canvas { display: block; margin: 0 auto; }
 (function() {
 "use strict";
 
+// === STAT BLOCK (PASS 1) ===
+var statB = { damage: 1, speed: 1, lives: 0, hpMult: 1, scoreMult: 1, cooldown: 1, luck: 1, str: 10, dex: 10, con: 10, int: 10, wis: 10, cha: 10, level: 0, color: '#44dd88', name: 'Baseling', icon: 'B' };
+try { if (window.NftLoader && NftLoader.getStatBonuses) statB = NftLoader.getStatBonuses(); } catch(e) {}
+
+// Derived stat helpers
+function strDmgMult() { return 1 + (statB.str - 10) * 0.05; }
+function bootSizeMult() { return 1 + Math.max(0, statB.str - 10) * 0.04; }
+function dexSpeedMult() { return 1 + (statB.dex - 10) * 0.03; }
+function dodgeChance() { return Math.min(0.3, Math.max(0, (statB.dex - 10) * 0.015)); }
+function conHpMult() { return 1 + (statB.con - 10) * 0.06; }
+function bonusLives() { return statB.lives + Math.floor(Math.max(0, statB.con - 14) / 4); }
+function intScoreMult() { return statB.scoreMult * (1 + (statB.int - 10) * 0.04); }
+function wisAtkSpeedMult() { return 1 + (statB.wis - 10) * 0.03; }
+function chaDropChance() { return Math.min(0.5, 0.08 + (statB.cha - 10) * 0.02) * statB.luck; }
+
 // === GAME CONSTANTS ===
 const GW = 480, GH = 320;
 const ctx = TAS.ctx;
@@ -34,12 +49,36 @@ const COMBO_WINDOW = 0.4;
 const HIT_STUN = 0.3;
 const IFRAME_DUR = 1.0;
 const SPEEDER_SPEED_BASE = 280;
+
+// Zone names and color palettes (Pass 3)
 const STAGE_NAMES = [
   'Fungal Depths', 'Spore Gauntlet', 'Turbo Tunnel',
   'Volcanic Caverns', 'Lava Fortress', 'The Descent',
   'Serpent Rapids', 'Dark Tower'
 ];
 const STAGE_TYPES = ['brawl','brawl','speeder','brawl','brawl','rappel','snake','boss'];
+
+const ZONE_PALETTES = [
+  { sky1: '#0d1a0d', sky2: '#1a3322', ground: '#1a2a1a', line: '#2a4a2a', accent: '#44dd88' },
+  { sky1: '#1a0d1a', sky2: '#2a1a2a', ground: '#1a1a2a', line: '#3a2a4a', accent: '#aa44cc' },
+  { sky1: '#0d0d1a', sky2: '#1a1a3a', ground: '#111133', line: '#3333aa', accent: '#88ccff' },
+  { sky1: '#1a0d00', sky2: '#2a1a0d', ground: '#2a1a0a', line: '#4a2a0a', accent: '#ff8844' },
+  { sky1: '#1a0808', sky2: '#2a1010', ground: '#2a1a0a', line: '#4a2a0a', accent: '#ff4422' },
+  { sky1: '#0d0d1a', sky2: '#1a1a2a', ground: '#0a0a1a', line: '#2a2a3a', accent: '#6688cc' },
+  { sky1: '#0a1a1a', sky2: '#0d2a2a', ground: '#0a1a2a', line: '#1a3a4a', accent: '#44ddbb' },
+  { sky1: '#0a0a0a', sky2: '#1a0a1a', ground: '#0a0a0a', line: '#2a1a2a', accent: '#cc44ff' }
+];
+
+const ZONE_DESCS = [
+  'The mycelium stirs beneath the roots...',
+  'Spore clouds choke the ancient tunnels.',
+  'Reactor-powered speedway through the deep.',
+  'Magma seeps from cracked reactor cores.',
+  'The fortress burns with volatile fuel.',
+  'A vertical shaft into the unknown.',
+  'Ride the serpent through toxic rapids.',
+  'The final stand against the Dark Overlord.'
+];
 
 // === INIT ===
 TAS.initCanvas(GW, GH);
@@ -55,13 +94,20 @@ let stageTimer = 0;
 let checkpoint = 0;
 let noDamageBonus = true;
 
+// === POWER-UPS (PASS 2) ===
+let powerUps = [];
+let activeShield = 0;     // Spore Shield timer
+let reactorFistTimer = 0; // Reactor Fist timer
+let chargeTimer = 0;      // Charged smash hold timer
+let chargeReady = false;
+
 // === PLAYER ===
 let player = null;
 function createPlayer() {
   return {
     x: 60, y: GROUND_Y, vx: 0, vy: 0,
     w: 24, h: 36, facing: 1,
-    hp: 100, maxHp: 100,
+    hp: Math.floor(100 * conHpMult()), maxHp: Math.floor(100 * conHpMult()),
     grounded: true, jumping: false,
     attacking: false, attackTimer: 0, attackType: 0,
     comboCount: 0, comboTimer: 0,
@@ -69,7 +115,8 @@ function createPlayer() {
     transformAnim: 0, transformType: '',
     walkFrame: 0, state: 'idle',
     rapY: 0, rapVy: 0, rapX: 60,
-    snakeY: 160, snakeVy: 0
+    snakeY: 160, snakeVy: 0,
+    deathTimer: 0
   };
 }
 
@@ -88,6 +135,7 @@ let hazards = [];
 let stageComplete = false;
 let stageTransition = 0;
 let deathAnim = 0;
+let stageClearTimer = 0;
 
 // === SPEEDER STATE ===
 let speederLane = 1;
@@ -109,6 +157,10 @@ let snakeGoal = 2500;
 let snakeObs = [];
 let snakeWave = 0;
 
+// === ENVIRONMENTAL HAZARDS (PASS 2) ===
+let gooPatches = [];
+let sporeRainDrops = [];
+
 // === BACKGROUND ===
 let bgLayers = [];
 function initBg() {
@@ -126,11 +178,16 @@ function initBg() {
 function startGame() {
   state = 'playing';
   score = 0;
-  lives = 3;
+  lives = 3 + bonusLives();
   stage = 0;
   frame = 0;
   checkpoint = 0;
   player = createPlayer();
+  powerUps = [];
+  activeShield = 0;
+  reactorFistTimer = 0;
+  chargeTimer = 0;
+  chargeReady = false;
   TAS.particles.clear();
   initStage();
 }
@@ -140,17 +197,34 @@ function initStage() {
   obstacles = [];
   hazards = [];
   bosses = [];
+  projectiles = [];
+  powerUps = [];
+  gooPatches = [];
+  sporeRainDrops = [];
   bossActive = false;
   scrollX = 0;
   stageComplete = false;
   stageTransition = 0;
+  stageClearTimer = 0;
   enemiesKilled = 0;
   noDamageBonus = true;
   enemySpawnTimer = 0;
   stageTimer = 0;
   initBg();
 
+  // Spawn goo patches for brawl stages
   const st = STAGE_TYPES[stage];
+  if (st === 'brawl' || st === 'boss') {
+    for (let i = 0; i < 3 + stage; i++) {
+      gooPatches.push({
+        x: 60 + Math.random() * (GW - 120),
+        y: GROUND_Y + Math.floor(Math.random() * 15),
+        w: 30 + Math.floor(Math.random() * 30),
+        timer: 999
+      });
+    }
+  }
+
   player.x = 60;
   player.y = GROUND_Y;
   player.hp = player.maxHp;
@@ -160,6 +234,7 @@ function initStage() {
   player.attacking = false;
   player.hitStun = 0;
   player.iframes = 0;
+  player.deathTimer = 0;
 
   if (st === 'brawl') {
     enemiesToKill = 8 + stage * 3;
@@ -217,37 +292,69 @@ function createBoss(name, hp, type) {
     state: 'idle', timer: 1.5,
     attackCooldown: 0, hitStun: 0,
     pattern: 0, active: true,
-    phase: 1
+    phase: 1,
+    sporeTimer: 0,    // Tasern boss attacks
+    gooTimer: 0
   };
 }
 
 // === ENEMY SPAWNING ===
 function spawnEnemy(type) {
   const side = Math.random() > 0.5 ? 1 : -1;
+  const eType = type || getEnemyType();
   const e = {
-    type: type || getEnemyType(),
+    type: eType,
     x: side > 0 ? GW + 20 : -20,
     y: GROUND_Y - Math.random() * 30,
     w: 20, h: 32, vx: 0, vy: 0,
-    hp: getEnemyHp(type),
+    hp: getEnemyHp(eType),
     facing: -side,
     state: 'walk', timer: 0,
     attackCooldown: 1 + Math.random(),
     hitStun: 0, walkFrame: 0,
-    speed: 40 + Math.random() * 30 + stage * 5
+    speed: 40 + Math.random() * 30 + stage * 5,
+    deathTimer: 0
   };
   enemies.push(e);
 }
 
 function getEnemyType() {
-  const types = ['slime', 'spore', 'brute', 'flyer', 'bomber'];
-  const maxType = Math.min(1 + Math.floor(stage / 2), types.length);
+  // Original + Tasern enemies (Pass 2)
+  const types = ['slime', 'spore', 'brute', 'flyer', 'bomber', 'reactor_rat', 'spore_walker', 'mycelial_worm'];
+  const maxType = Math.min(1 + Math.floor(stage / 1.5), types.length);
   return types[Math.floor(Math.random() * maxType)];
 }
 
 function getEnemyHp(type) {
-  const base = { slime: 30, spore: 45, brute: 80, flyer: 25, bomber: 35 };
+  const base = {
+    slime: 30, spore: 45, brute: 80, flyer: 25, bomber: 35,
+    reactor_rat: 35, spore_walker: 55, mycelial_worm: 70
+  };
   return (base[type] || 30) + stage * 5;
+}
+
+// === POWER-UP SPAWNING (PASS 2) ===
+function spawnPowerUp(x, y) {
+  if (Math.random() > chaDropChance()) return;
+  const types = ['spore_shield', 'reactor_fist', 'lp_token'];
+  const type = types[Math.floor(Math.random() * types.length)];
+  powerUps.push({ x: Math.floor(x), y: Math.floor(y - 20), type, timer: 8, bob: 0 });
+}
+
+function collectPowerUp(pu) {
+  if (pu.type === 'spore_shield') {
+    activeShield = 5;
+    TAS.audio.playTone(600, 0.15, 'sine', 0.06, 800);
+  } else if (pu.type === 'reactor_fist') {
+    reactorFistTimer = 6;
+    TAS.audio.playTone(200, 0.2, 'sawtooth', 0.08, 100);
+  } else if (pu.type === 'lp_token') {
+    const pts = Math.floor(200 * intScoreMult());
+    score += pts;
+    player.hp = Math.min(player.hp + 20, player.maxHp);
+    TAS.audio.playTone(880, 0.12, 'sine', 0.05, 1200);
+  }
+  TAS.particles.spawn(Math.floor(pu.x), Math.floor(pu.y), '#ffff44', 8, 3, { size: 2 });
 }
 
 // === SPEEDER OBSTACLES ===
@@ -323,6 +430,41 @@ function update(dt) {
 
   if (state === 'playing') {
     stageTimer += dt;
+
+    // Power-up timers
+    if (activeShield > 0) activeShield -= dt;
+    if (reactorFistTimer > 0) reactorFistTimer -= dt;
+
+    // Update power-ups
+    for (let i = powerUps.length - 1; i >= 0; i--) {
+      const pu = powerUps[i];
+      pu.timer -= dt;
+      pu.bob += dt * 4;
+      if (pu.timer <= 0) { powerUps.splice(i, 1); continue; }
+      // Collection
+      if (player && Math.abs(player.x - pu.x) < 20 && Math.abs(player.y - 16 - pu.y) < 20) {
+        collectPowerUp(pu);
+        powerUps.splice(i, 1);
+      }
+    }
+
+    // Spore rain on later stages (Pass 2 hazard)
+    if (stage >= 1 && (STAGE_TYPES[stage] === 'brawl' || STAGE_TYPES[stage] === 'boss')) {
+      if (Math.random() < 0.02 + stage * 0.005) {
+        sporeRainDrops.push({ x: Math.floor(Math.random() * GW), y: -5, vy: 60 + Math.random() * 40, size: 2 + Math.random() * 2 });
+      }
+      for (let i = sporeRainDrops.length - 1; i >= 0; i--) {
+        const sr = sporeRainDrops[i];
+        sr.y += sr.vy * dt;
+        if (sr.y > GH) { sporeRainDrops.splice(i, 1); continue; }
+        if (player && player.iframes <= 0 && activeShield <= 0 &&
+            Math.abs(player.x - sr.x) < 10 && Math.abs(player.y - 18 - sr.y) < 10) {
+          playerHit(3);
+          sporeRainDrops.splice(i, 1);
+        }
+      }
+    }
+
     const st = STAGE_TYPES[stage];
 
     if (st === 'brawl' || st === 'boss') updateBrawl(dt);
@@ -331,12 +473,12 @@ function update(dt) {
     else if (st === 'snake') updateSnake(dt);
 
     // Check stage complete
-    if (stageComplete && stageTransition <= 0) {
-      stageTransition = 2.0;
+    if (stageComplete && stageClearTimer <= 0) {
+      stageClearTimer = 2.5;
     }
-    if (stageComplete && stageTransition > 0) {
-      stageTransition -= dt;
-      if (stageTransition <= 0) {
+    if (stageComplete && stageClearTimer > 0) {
+      stageClearTimer -= dt;
+      if (stageClearTimer <= 0) {
         advanceStage();
       }
     }
@@ -345,14 +487,13 @@ function update(dt) {
 
 function advanceStage() {
   if (noDamageBonus) {
-    score += 500;
+    score += Math.floor(500 * intScoreMult());
     TAS.audio.playTone(880, 0.3, 'sine', 0.1);
   }
   stage++;
   checkpoint = stage;
   if (stage >= 8) {
-    // Victory!
-    score += 5000;
+    score += Math.floor(5000 * intScoreMult());
     if (score > highScore) {
       highScore = score;
       TAS.score.save('battletoads_hi', highScore);
@@ -362,7 +503,7 @@ function advanceStage() {
     return;
   }
   state = 'stageIntro';
-  stageTransition = 2.0;
+  stageTransition = 2.5;
   initStage();
 }
 
@@ -372,6 +513,12 @@ function updateBrawl(dt) {
   const keys = TAS.input.keys;
   const touch = TAS.input.touch;
 
+  // Death animation
+  if (p.deathTimer > 0) {
+    p.deathTimer -= dt;
+    return;
+  }
+
   // Iframes
   if (p.iframes > 0) p.iframes -= dt;
   if (p.hitStun > 0) {
@@ -379,18 +526,27 @@ function updateBrawl(dt) {
     return;
   }
 
-  // Movement
+  // Movement (DEX scales speed)
   let mx = 0, my = 0;
   if (keys['ArrowLeft'] || keys['KeyA'] || touch.left) { mx = -1; p.facing = -1; }
   if (keys['ArrowRight'] || keys['KeyD'] || touch.right) { mx = 1; p.facing = 1; }
   if (keys['ArrowUp'] || keys['KeyW'] || touch.up) my = -1;
   if (keys['ArrowDown'] || keys['KeyS'] || touch.down) my = 1;
 
+  const moveSpeed = 130 * dexSpeedMult();
+
   if (!p.attacking) {
-    p.x += mx * 130 * dt;
+    p.x += mx * moveSpeed * dt;
     p.y += my * 80 * dt;
     p.x = TAS.math.clamp(p.x, 16, GW - 16);
     p.y = TAS.math.clamp(p.y, GROUND_Y - 60, GROUND_Y + 20);
+
+    // Goo slow (Pass 2 hazard)
+    for (const goo of gooPatches) {
+      if (Math.abs(p.x - goo.x) < goo.w / 2 && Math.abs(p.y - goo.y) < 12) {
+        p.x -= mx * moveSpeed * 0.4 * dt; // 40% slow
+      }
+    }
 
     if (mx !== 0 || my !== 0) {
       p.walkFrame += dt * 8;
@@ -420,13 +576,60 @@ function updateBrawl(dt) {
     }
   }
 
-  // Attack input
+  // Attack input (WIS scales attack speed)
   const punchKey = keys['KeyZ'] || keys['KeyJ'] || touch.a;
   const kickKey = keys['KeyX'] || keys['KeyK'] || touch.b;
+  const atkDuration = 0.25 / wisAtkSpeedMult();
 
-  if ((punchKey || kickKey) && !p.attacking && p.hitStun <= 0) {
+  // Charged smash (Pass 2) — hold punch with STR >= 10
+  if (punchKey && !p.attacking && p.hitStun <= 0 && statB.str >= 10) {
+    chargeTimer += dt;
+    if (chargeTimer >= 0.6) {
+      chargeReady = true;
+    }
+  }
+  if (!punchKey && chargeReady && chargeTimer > 0) {
+    // Release charged smash
+    chargeReady = false;
+    chargeTimer = 0;
     p.attacking = true;
-    p.attackTimer = 0.25;
+    p.attackTimer = 0.35;
+    p.attackType = 20; // charged smash type
+    p.transformAnim = 0.5;
+    p.transformType = 'fist';
+    TAS.audio.playTone(100, 0.4, 'sawtooth', 0.15, 50);
+    TAS.fx.shake(12, 0.8);
+
+    // Charged smash hit — big AOE
+    const atkRange = 70;
+    const atkDmg = Math.floor((50 + stage * 5) * strDmgMult() * (reactorFistTimer > 0 ? 1.5 : 1));
+    const atkX = p.x + p.facing * 25;
+    const atkY = p.y - 16;
+
+    for (let i = enemies.length - 1; i >= 0; i--) {
+      const e = enemies[i];
+      if (TAS.hit.rectOverlap(atkX - atkRange/2, atkY - 25, atkRange, 50, e.x - e.w/2, e.y - e.h, e.w, e.h)) {
+        damageEnemy(e, i, atkDmg);
+      }
+    }
+    for (const b of bosses) {
+      if (!b.active) continue;
+      if (TAS.hit.rectOverlap(atkX - atkRange/2, atkY - 25, atkRange, 50, b.x - b.w/2, b.y - b.h, b.w, b.h)) {
+        damageBoss(b, atkDmg);
+      }
+    }
+    // Ground crack particles
+    for (let i = 0; i < 12; i++) {
+      TAS.particles.spawn(Math.floor(atkX + (Math.random() - 0.5) * atkRange), Math.floor(p.y), '#ffaa00', 1, 2, { size: 3, gravity: 4 });
+    }
+  } else if (!punchKey && !chargeReady) {
+    chargeTimer = 0;
+  }
+
+  // Normal attacks
+  if ((punchKey || kickKey) && !p.attacking && p.hitStun <= 0 && !chargeReady) {
+    p.attacking = true;
+    p.attackTimer = atkDuration;
     p.comboTimer = COMBO_WINDOW;
 
     if (punchKey) {
@@ -448,9 +651,11 @@ function updateBrawl(dt) {
       TAS.audio.playTone(200 + p.attackType * 50, 0.08, 'square', 0.06);
     }
 
-    // Hit detection
-    const atkRange = p.transformAnim > 0 ? 50 : 32;
-    const atkDmg = p.transformAnim > 0 ? 35 + stage * 3 : 12 + stage * 2;
+    // Hit detection (STR scales damage, boot size)
+    const isTransform = p.transformAnim > 0;
+    const atkRange = isTransform ? Math.floor(50 * bootSizeMult()) : 32;
+    const baseDmg = isTransform ? 35 + stage * 3 : 12 + stage * 2;
+    const atkDmg = Math.floor(baseDmg * strDmgMult() * statB.damage * (reactorFistTimer > 0 ? 1.5 : 1));
     const atkX = p.x + p.facing * 20;
     const atkY = p.y - 16;
 
@@ -511,7 +716,7 @@ function updateBrawl(dt) {
   }
   if (bossActive && bosses.every(b => !b.active)) {
     stageComplete = true;
-    score += 1000;
+    score += Math.floor(1000 * intScoreMult());
     TAS.audio.playMelody([[440,0.15],[660,0.15],[880,0.3]], 150);
   }
 }
@@ -521,16 +726,32 @@ function damageEnemy(e, idx, dmg) {
   e.hitStun = HIT_STUN;
   e.vx = player.facing * 100;
 
-  TAS.particles.spawn(e.x, e.y - e.h/2, '#ffaa00', 5, 3, { size: 2 });
+  // Hit particles (Pass 3)
+  TAS.particles.spawn(Math.floor(e.x), Math.floor(e.y - e.h/2), '#ffaa00', 6, 3, { size: 2 });
+  TAS.particles.spawn(Math.floor(e.x + player.facing * 5), Math.floor(e.y - e.h/2), '#ffffff', 3, 2, { size: 1 });
   TAS.audio.playTone(100 + Math.random() * 100, 0.1, 'sawtooth', 0.05);
 
   if (e.hp <= 0) {
-    enemies.splice(idx, 1);
+    // Death animation delay (Pass 3)
+    e.deathTimer = 0.3;
+    e.state = 'dying';
     enemiesKilled++;
-    score += 50 + stage * 10;
-    TAS.particles.spawn(e.x, e.y - e.h/2, '#ff4400', 12, 4, { size: 3, gravity: 2 });
-    TAS.fx.shake(3, 0.9);
+    score += Math.floor((50 + stage * 10) * intScoreMult());
+
+    // Death burst particles
+    TAS.particles.spawn(Math.floor(e.x), Math.floor(e.y - e.h/2), '#ff4400', 14, 5, { size: 3, gravity: 3 });
+    TAS.particles.spawn(Math.floor(e.x), Math.floor(e.y - e.h/2), '#ffdd44', 6, 3, { size: 2, gravity: 2 });
+    TAS.fx.shake(4, 0.88);
     TAS.audio.playTone(80, 0.2, 'sawtooth', 0.08, 40);
+
+    // CHA-based power-up drop
+    spawnPowerUp(e.x, e.y);
+
+    // Remove after short delay
+    setTimeout(function() {
+      const idx2 = enemies.indexOf(e);
+      if (idx2 >= 0) enemies.splice(idx2, 1);
+    }, 300);
   }
 }
 
@@ -538,24 +759,32 @@ function damageBoss(b, dmg) {
   if (b.hitStun > 0) return;
   b.hp -= dmg;
   b.hitStun = 0.2;
-  TAS.particles.spawn(b.x, b.y - b.h/2, '#ff8800', 8, 3, { size: 3 });
-  TAS.fx.shake(4, 0.88);
+  TAS.particles.spawn(Math.floor(b.x), Math.floor(b.y - b.h/2), '#ff8800', 10, 4, { size: 3 });
+  TAS.particles.spawn(Math.floor(b.x), Math.floor(b.y - b.h/2), '#ffffff', 4, 2, { size: 2 });
+  TAS.fx.shake(6, 0.85);
   TAS.audio.playTone(120, 0.15, 'sawtooth', 0.08);
 
   if (b.hp <= 0) {
     b.active = false;
-    score += 500;
-    TAS.particles.spawn(b.x, b.y - b.h/2, '#ff0000', 20, 5, { size: 4, gravity: 3 });
-    TAS.fx.shake(12, 0.82);
-    TAS.fx.flash('#ff4400', 0.4);
+    score += Math.floor(500 * intScoreMult());
+    TAS.particles.spawn(Math.floor(b.x), Math.floor(b.y - b.h/2), '#ff0000', 25, 6, { size: 4, gravity: 3 });
+    TAS.particles.spawn(Math.floor(b.x), Math.floor(b.y - b.h/2), '#ffdd44', 12, 4, { size: 3, gravity: 2 });
+    TAS.fx.shake(14, 0.78);
+    TAS.fx.flash('#ff4400', 0.5);
     TAS.audio.playNoise(0.4, 0.1, 200);
-    // Activate next boss if any
+    spawnPowerUp(b.x, b.y);
     const nextBoss = bosses.find(bb => bb.active && bb !== b);
     if (nextBoss) nextBoss.timer = 1.5;
   }
 }
 
 function updateEnemy(e, dt, idx) {
+  // Death animation (Pass 3)
+  if (e.state === 'dying') {
+    e.deathTimer -= dt;
+    return;
+  }
+
   if (e.hitStun > 0) {
     e.hitStun -= dt;
     e.x += e.vx * dt;
@@ -578,11 +807,23 @@ function updateEnemy(e, dt, idx) {
     e.walkFrame += dt * 6;
     e.state = 'walk';
   } else if (e.attackCooldown <= 0) {
-    // Attack player
     e.state = 'attack';
     e.attackCooldown = 1.5 + Math.random();
+
+    // Tasern enemy special attacks (Pass 2)
+    let dmg = 8 + stage * 2;
+    if (e.type === 'reactor_rat') dmg = 10 + stage * 2;
+    else if (e.type === 'spore_walker') dmg = 12 + stage * 2;
+    else if (e.type === 'mycelial_worm') dmg = 15 + stage * 3;
+
     if (p.iframes <= 0) {
-      playerHit(8 + stage * 2);
+      // DEX dodge chance
+      if (Math.random() < dodgeChance()) {
+        TAS.particles.spawn(Math.floor(p.x), Math.floor(p.y - 18), '#88ffaa', 4, 2, { size: 1 });
+        TAS.audio.playTone(500, 0.06, 'sine', 0.03);
+      } else {
+        playerHit(dmg);
+      }
     }
   }
 
@@ -591,6 +832,13 @@ function updateEnemy(e, dt, idx) {
   // Flyer behavior
   if (e.type === 'flyer') {
     e.y = GROUND_Y - 40 - Math.sin(frame * 0.05 + idx) * 20;
+  }
+
+  // Mycelial worm burrow (Pass 2)
+  if (e.type === 'mycelial_worm' && dist > 100 && Math.random() < 0.005) {
+    e.x = p.x + (Math.random() > 0.5 ? 50 : -50);
+    e.y = GROUND_Y;
+    TAS.particles.spawn(Math.floor(e.x), Math.floor(e.y), '#886644', 6, 3, { size: 2, gravity: 3 });
   }
 }
 
@@ -606,28 +854,58 @@ function updateBoss(b, dt) {
   if (b.hp < b.maxHp * 0.5 && b.phase === 1) {
     b.phase = 2;
     TAS.fx.flash('#ff0000', 0.3);
+    TAS.fx.shake(8, 0.85);
+  }
+
+  // Tasern boss abilities (Pass 2)
+  b.sporeTimer -= dt;
+  b.gooTimer -= dt;
+
+  // Spore burst attack (all bosses, phase 2)
+  if (b.phase === 2 && b.sporeTimer <= 0) {
+    b.sporeTimer = 3 + Math.random() * 2;
+    for (let i = 0; i < 5; i++) {
+      const angle = (i / 5) * Math.PI * 2;
+      projectiles.push({
+        x: b.x, y: b.y - 30,
+        vx: Math.cos(angle) * 120, vy: Math.sin(angle) * 120,
+        w: 8, h: 8, life: 2.5, type: 'spore'
+      });
+    }
+    TAS.audio.playTone(200, 0.2, 'square', 0.06, 100);
+  }
+
+  // Goo puddle attack (boss types 2+)
+  if (b.type >= 2 && b.gooTimer <= 0) {
+    b.gooTimer = 5 + Math.random() * 3;
+    gooPatches.push({
+      x: Math.floor(p.x + (Math.random() - 0.5) * 60),
+      y: GROUND_Y + Math.floor(Math.random() * 10),
+      w: 40,
+      timer: 8
+    });
   }
 
   if (b.timer <= 0) {
-    // Boss attack patterns
     b.pattern = (b.pattern + 1) % 4;
     const speed = b.phase === 2 ? 1.5 : 1.0;
 
     if (b.pattern === 0) {
-      // Charge
       b.state = 'charge';
       b.timer = 0.8 / speed;
       b.vx = b.facing * 200 * speed;
     } else if (b.pattern === 1) {
-      // Slam
       b.state = 'slam';
       b.timer = 0.6;
       if (Math.abs(dx) < 60 && p.iframes <= 0) {
-        playerHit(15 + b.type * 3);
-        TAS.fx.shake(6, 0.85);
+        if (Math.random() < dodgeChance()) {
+          TAS.particles.spawn(Math.floor(p.x), Math.floor(p.y - 18), '#88ffaa', 4, 2, { size: 1 });
+        } else {
+          playerHit(15 + b.type * 3);
+          TAS.fx.shake(8, 0.82);
+        }
       }
     } else if (b.pattern === 2) {
-      // Projectile
       b.state = 'shoot';
       b.timer = 1.0 / speed;
       spawnProjectile(b.x, b.y - 20, b.facing);
@@ -641,32 +919,46 @@ function updateBoss(b, dt) {
   if (b.state === 'charge') {
     b.x += (b.vx || 0) * dt;
     b.x = TAS.math.clamp(b.x, 40, GW - 40);
-    // Collision with player during charge
     if (TAS.hit.rectOverlap(b.x - b.w/2, b.y - b.h, b.w, b.h, p.x - 12, p.y - 36, 24, 36)) {
-      if (p.iframes <= 0) playerHit(12 + b.type * 2);
+      if (p.iframes <= 0) {
+        if (Math.random() >= dodgeChance()) {
+          playerHit(12 + b.type * 2);
+        }
+      }
     }
+  }
+
+  // Expire goo patches
+  for (let i = gooPatches.length - 1; i >= 0; i--) {
+    gooPatches[i].timer -= dt;
+    if (gooPatches[i].timer <= 0) gooPatches.splice(i, 1);
   }
 }
 
 let projectiles = [];
 function spawnProjectile(x, y, dir) {
-  projectiles.push({ x, y, vx: dir * 180, w: 10, h: 8, life: 3 });
+  projectiles.push({ x, y, vx: dir * 180, vy: 0, w: 10, h: 8, life: 3, type: 'normal' });
 }
 
 function updateHazards(dt) {
   // Falling rocks on stage 3-4
   if (Math.random() < 0.01 + stage * 0.005) {
-    hazards.push({ x: Math.random() * GW, y: -20, vy: 100 + Math.random() * 80, size: 8 + Math.random() * 12 });
+    hazards.push({ x: Math.floor(Math.random() * GW), y: -20, vy: 100 + Math.random() * 80, size: 8 + Math.random() * 12 });
   }
   for (let i = hazards.length - 1; i >= 0; i--) {
     const h = hazards[i];
     h.y += h.vy * dt;
     if (h.y > GH + 20) { hazards.splice(i, 1); continue; }
-    // Hit player
     if (TAS.hit.circleOverlap(h.x, h.y, h.size/2, player.x, player.y - 18, 12)) {
       if (player.iframes <= 0) {
-        playerHit(10);
-        hazards.splice(i, 1);
+        if (activeShield > 0) {
+          activeShield = 0;
+          TAS.particles.spawn(Math.floor(player.x), Math.floor(player.y - 18), '#44ffaa', 8, 3, { size: 2 });
+          hazards.splice(i, 1);
+        } else if (Math.random() >= dodgeChance()) {
+          playerHit(10);
+          hazards.splice(i, 1);
+        }
       }
     }
   }
@@ -675,11 +967,17 @@ function updateHazards(dt) {
   for (let i = projectiles.length - 1; i >= 0; i--) {
     const pr = projectiles[i];
     pr.x += pr.vx * dt;
+    pr.y += (pr.vy || 0) * dt;
     pr.life -= dt;
-    if (pr.life <= 0 || pr.x < -20 || pr.x > GW + 20) { projectiles.splice(i, 1); continue; }
+    if (pr.life <= 0 || pr.x < -20 || pr.x > GW + 20 || pr.y > GH + 20) { projectiles.splice(i, 1); continue; }
     if (TAS.hit.rectOverlap(pr.x - pr.w/2, pr.y - pr.h/2, pr.w, pr.h, player.x - 12, player.y - 36, 24, 36)) {
       if (player.iframes <= 0) {
-        playerHit(8);
+        if (activeShield > 0) {
+          activeShield = 0;
+          TAS.particles.spawn(Math.floor(player.x), Math.floor(player.y - 18), '#44ffaa', 6, 3, { size: 2 });
+        } else if (Math.random() >= dodgeChance()) {
+          playerHit(8);
+        }
         projectiles.splice(i, 1);
       }
     }
@@ -691,20 +989,17 @@ function updateSpeeder(dt) {
   const keys = TAS.input.keys;
   const touch = TAS.input.touch;
 
-  speederSpeed += dt * 15;
+  speederSpeed += dt * 15 * dexSpeedMult();
   speederDist += speederSpeed * dt;
 
-  // Lane switching
   if (keys['ArrowLeft'] || keys['KeyA'] || touch.left) {
     if (speederLane > 0) { speederLane--; keys['ArrowLeft'] = false; TAS.audio.playTone(400, 0.05, 'square', 0.04); }
   }
   if (keys['ArrowRight'] || keys['KeyD'] || touch.right) {
     if (speederLane < 2) { speederLane++; keys['ArrowRight'] = false; TAS.audio.playTone(400, 0.05, 'square', 0.04); }
   }
-  // Jump (duck under overhead)
   const jumping = keys['ArrowUp'] || keys['Space'] || touch.up || touch.a;
 
-  // Check wall collisions
   for (const w of speederWalls) {
     if (w.hit) continue;
     const relDist = w.dist - speederDist;
@@ -719,21 +1014,19 @@ function updateSpeeder(dt) {
     }
   }
 
-  // Ramp bonus
   for (const r of speederRamps) {
     const relDist = r.dist - speederDist;
     if (relDist < 10 && relDist > -10 && r.lane === speederLane) {
-      score += 25;
+      score += Math.floor(25 * intScoreMult());
       r.dist = -9999;
       TAS.audio.playTone(600, 0.1, 'sine', 0.05, 900);
-      TAS.particles.spawn(GW/2, GROUND_Y - 20, '#44ff88', 6, 3);
+      TAS.particles.spawn(Math.floor(GW/2), Math.floor(GROUND_Y - 20), '#44ff88', 6, 3);
     }
   }
 
-  // Completion
   if (speederDist >= speederGoal) {
     stageComplete = true;
-    score += 300;
+    score += Math.floor(300 * intScoreMult());
   }
 }
 
@@ -743,17 +1036,14 @@ function updateRappel(dt) {
   const touch = TAS.input.touch;
   const p = player;
 
-  // Descend
   const descSpeed = 60;
   rapDepth += descSpeed * dt;
   p.rapVy = 0;
 
-  // Swing left/right
-  if (keys['ArrowLeft'] || keys['KeyA'] || touch.left) p.rapX -= 150 * dt;
-  if (keys['ArrowRight'] || keys['KeyD'] || touch.right) p.rapX += 150 * dt;
+  if (keys['ArrowLeft'] || keys['KeyA'] || touch.left) p.rapX -= 150 * dexSpeedMult() * dt;
+  if (keys['ArrowRight'] || keys['KeyD'] || touch.right) p.rapX += 150 * dexSpeedMult() * dt;
   p.rapX = TAS.math.clamp(p.rapX, 30, GW - 30);
 
-  // Kick attack
   const kickKey = keys['KeyZ'] || keys['KeyX'] || touch.a || touch.b;
   if (kickKey) {
     for (let i = rapEnemies.length - 1; i >= 0; i--) {
@@ -762,27 +1052,27 @@ function updateRappel(dt) {
       const relDepth = re.depth - rapDepth;
       if (Math.abs(relDepth) < 30 && Math.abs(re.x - p.rapX) < 40) {
         re.active = false;
-        score += 75;
-        TAS.particles.spawn(re.x, GH/2, '#ffaa00', 8, 4);
+        score += Math.floor(75 * intScoreMult());
+        TAS.particles.spawn(Math.floor(re.x), Math.floor(GH/2), '#ffaa00', 8, 4);
         TAS.fx.shake(3, 0.9);
         TAS.audio.playTone(180, 0.12, 'sawtooth', 0.06);
       }
     }
   }
 
-  // Enemy collision
   for (const re of rapEnemies) {
     if (!re.active) continue;
     const relDepth = re.depth - rapDepth;
     if (Math.abs(relDepth) < 20 && Math.abs(re.x - p.rapX) < 20) {
       if (p.iframes <= 0) {
-        playerHit(12);
+        if (Math.random() >= dodgeChance()) {
+          playerHit(12);
+        }
         re.active = false;
       }
     }
   }
 
-  // Platform collision (bonk)
   for (const plat of rapPlatforms) {
     const relDepth = plat.depth - rapDepth;
     if (Math.abs(relDepth) < 15) {
@@ -796,7 +1086,7 @@ function updateRappel(dt) {
 
   if (rapDepth >= rapGoal) {
     stageComplete = true;
-    score += 300;
+    score += Math.floor(300 * intScoreMult());
   }
 }
 
@@ -809,20 +1099,20 @@ function updateSnake(dt) {
   snakeDist += 160 * dt;
   snakeWave += dt * 3;
 
-  // Move up/down
-  if (keys['ArrowUp'] || keys['KeyW'] || touch.up) p.snakeVy -= 400 * dt;
-  if (keys['ArrowDown'] || keys['KeyS'] || touch.down) p.snakeVy += 400 * dt;
+  if (keys['ArrowUp'] || keys['KeyW'] || touch.up) p.snakeVy -= 400 * dexSpeedMult() * dt;
+  if (keys['ArrowDown'] || keys['KeyS'] || touch.down) p.snakeVy += 400 * dexSpeedMult() * dt;
   p.snakeVy *= 0.92;
   p.snakeY += p.snakeVy * dt;
   p.snakeY = TAS.math.clamp(p.snakeY, 50, GH - 60);
 
-  // Obstacle collision
   for (const ob of snakeObs) {
     const relDist = ob.dist - snakeDist;
     if (relDist < 60 && relDist > -10) {
-      if (TAS.hit.rectOverlap(55, p.snakeY - 10, 30, 20, relDist + 60, ob.y - ob.h/2, ob.w, ob.h)) {
+      if (TAS.hit.rectOverlap(55, Math.floor(p.snakeY) - 10, 30, 20, Math.floor(relDist) + 60, Math.floor(ob.y) - ob.h/2, ob.w, ob.h)) {
         if (p.iframes <= 0) {
-          playerHit(15);
+          if (Math.random() >= dodgeChance()) {
+            playerHit(15);
+          }
           ob.dist = -9999;
           TAS.fx.shake(4, 0.9);
         }
@@ -830,7 +1120,6 @@ function updateSnake(dt) {
     }
   }
 
-  // Jump over obstacles with A button
   if ((keys['Space'] || touch.a) && p.snakeVy >= -50) {
     p.snakeVy = -200;
     TAS.audio.playTone(350, 0.08, 'square', 0.04, 500);
@@ -838,20 +1127,28 @@ function updateSnake(dt) {
 
   if (snakeDist >= snakeGoal) {
     stageComplete = true;
-    score += 300;
+    score += Math.floor(300 * intScoreMult());
   }
 }
 
 // === PLAYER DAMAGE ===
 function playerHit(dmg) {
+  // Spore Shield absorbs hit
+  if (activeShield > 0) {
+    activeShield = 0;
+    TAS.particles.spawn(Math.floor(player.x), Math.floor(player.y - 18), '#44ffaa', 10, 4, { size: 2 });
+    TAS.audio.playTone(400, 0.1, 'sine', 0.05);
+    return;
+  }
+
   player.hp -= dmg;
   player.hitStun = HIT_STUN;
   player.iframes = IFRAME_DUR;
   noDamageBonus = false;
-  TAS.fx.shake(5, 0.88);
-  TAS.fx.flash('#ff0000', 0.2);
+  TAS.fx.shake(6, 0.85);
+  TAS.fx.flash('#ff0000', 0.25);
   TAS.audio.playTone(80, 0.15, 'sawtooth', 0.08, 40);
-  TAS.particles.spawn(player.x, player.y - 18, '#ff2222', 6, 3);
+  TAS.particles.spawn(Math.floor(player.x), Math.floor(player.y - 18), '#ff2222', 8, 3, { size: 2 });
 
   if (player.hp <= 0) {
     playerDeath();
@@ -860,10 +1157,23 @@ function playerHit(dmg) {
 
 function playerDeath() {
   lives--;
-  TAS.fx.shake(12, 0.8);
-  TAS.fx.flash('#ff0000', 0.5);
+  player.deathTimer = 1.0;
+
+  // Death animation particles (Pass 3)
+  TAS.fx.shake(14, 0.78);
+  TAS.fx.flash('#ff0000', 0.6);
   TAS.audio.playNoise(0.5, 0.12, 200);
-  TAS.particles.spawn(player.x, player.y - 18, '#ff4400', 20, 5, { size: 3, gravity: 3 });
+  // Explosion ring
+  for (let i = 0; i < 24; i++) {
+    const angle = (i / 24) * Math.PI * 2;
+    const dist = 10 + Math.random() * 15;
+    TAS.particles.spawn(
+      Math.floor(player.x + Math.cos(angle) * dist),
+      Math.floor(player.y - 18 + Math.sin(angle) * dist),
+      i % 3 === 0 ? '#ff4400' : i % 3 === 1 ? '#ffaa00' : '#ffdd44',
+      1, 4, { size: 2 + Math.random() * 2, gravity: 2 }
+    );
+  }
 
   if (lives <= 0) {
     state = 'gameOver';
@@ -872,13 +1182,17 @@ function playerDeath() {
       TAS.score.save('battletoads_hi', highScore);
     }
   } else {
-    // Respawn at checkpoint
-    player.hp = player.maxHp;
-    player.x = 60;
-    player.y = GROUND_Y;
-    player.iframes = 2.0;
-    player.hitStun = 0;
-    player.attacking = false;
+    setTimeout(function() {
+      if (player) {
+        player.hp = player.maxHp;
+        player.x = 60;
+        player.y = GROUND_Y;
+        player.iframes = 2.0;
+        player.hitStun = 0;
+        player.attacking = false;
+        player.deathTimer = 0;
+      }
+    }, 800);
   }
 }
 
@@ -924,61 +1238,125 @@ function draw(dt) {
   drawHUD();
   TAS.input.drawTouchControls(GW, GH);
 
-  // Stage complete overlay
-  if (stageComplete && stageTransition > 0) {
-    ctx.globalAlpha = 0.7;
-    ctx.fillStyle = '#000';
-    ctx.fillRect(0, 0, GW, GH);
-    ctx.globalAlpha = 1;
-    ctx.fillStyle = '#44ff88';
-    ctx.font = 'bold 22px monospace';
-    ctx.textAlign = 'center';
-    ctx.fillText('STAGE CLEAR!', GW/2, GH/2 - 10);
-    if (noDamageBonus) {
-      ctx.fillStyle = '#ffdd44';
-      ctx.font = '14px monospace';
-      ctx.fillText('NO DAMAGE BONUS +500', GW/2, GH/2 + 20);
-    }
+  // Stage clear overlay (Pass 3)
+  if (stageComplete && stageClearTimer > 0) {
+    drawStageClear();
   }
+}
+
+// === STAGE CLEAR SCREEN (Pass 3) ===
+function drawStageClear() {
+  const t = 2.5 - stageClearTimer;
+  ctx.globalAlpha = Math.min(0.8, t * 2);
+  ctx.fillStyle = '#000';
+  ctx.fillRect(0, 0, GW, GH);
+  ctx.globalAlpha = 1;
+
+  ctx.textAlign = 'center';
+
+  // Zone cleared banner
+  const pal = ZONE_PALETTES[stage];
+  ctx.fillStyle = pal ? pal.accent : '#44ff88';
+  ctx.font = 'bold 24px monospace';
+  ctx.fillText('STAGE CLEAR', GW/2, GH/2 - 30);
+
+  ctx.fillStyle = '#ffffff';
+  ctx.font = 'bold 14px monospace';
+  ctx.fillText(STAGE_NAMES[stage], GW/2, GH/2);
+
+  // Kill count
+  if (STAGE_TYPES[stage] === 'brawl' || STAGE_TYPES[stage] === 'boss') {
+    ctx.fillStyle = '#aaa';
+    ctx.font = '11px monospace';
+    ctx.fillText('Enemies Defeated: ' + enemiesKilled, GW/2, GH/2 + 22);
+  }
+
+  // No damage bonus
+  if (noDamageBonus) {
+    ctx.fillStyle = '#ffdd44';
+    ctx.font = 'bold 12px monospace';
+    ctx.fillText('FLAWLESS! +' + Math.floor(500 * intScoreMult()), GW/2, GH/2 + 44);
+  }
+
+  // Score tally
+  ctx.fillStyle = '#88ccff';
+  ctx.font = '10px monospace';
+  ctx.fillText('Score: ' + score, GW/2, GH/2 + 62);
 }
 
 // === DRAW BRAWL ===
 function drawBrawlScene() {
-  // Background
   drawBrawlBg();
 
+  // Goo patches (Pass 2 hazard)
+  for (const goo of gooPatches) {
+    ctx.fillStyle = 'rgba(80,180,40,0.35)';
+    ctx.beginPath();
+    ctx.ellipse(Math.floor(goo.x), Math.floor(goo.y) + 18, Math.floor(goo.w / 2), 5, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = 'rgba(100,220,60,0.25)';
+    ctx.beginPath();
+    ctx.ellipse(Math.floor(goo.x), Math.floor(goo.y) + 18, Math.floor(goo.w / 3), 3, 0, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
   // Ground
-  ctx.fillStyle = '#1a2a1a';
+  const pal = ZONE_PALETTES[stage];
+  ctx.fillStyle = pal.ground;
   ctx.fillRect(0, GROUND_Y + 18, GW, GH - GROUND_Y - 18);
-  ctx.strokeStyle = '#2a4a2a';
+  ctx.strokeStyle = pal.line;
   ctx.lineWidth = 2;
   ctx.beginPath();
   ctx.moveTo(0, GROUND_Y + 18);
   ctx.lineTo(GW, GROUND_Y + 18);
   ctx.stroke();
 
+  // Spore rain drops (Pass 2 hazard)
+  for (const sr of sporeRainDrops) {
+    ctx.fillStyle = 'rgba(170,100,220,0.6)';
+    ctx.beginPath();
+    ctx.arc(Math.floor(sr.x), Math.floor(sr.y), Math.floor(sr.size), 0, Math.PI * 2);
+    ctx.fill();
+  }
+
   // Hazards
   for (const h of hazards) {
     ctx.fillStyle = '#664422';
     ctx.beginPath();
-    ctx.arc(h.x, h.y, h.size/2, 0, Math.PI * 2);
+    ctx.arc(Math.floor(h.x), Math.floor(h.y), Math.floor(h.size/2), 0, Math.PI * 2);
     ctx.fill();
     ctx.fillStyle = '#553311';
     ctx.beginPath();
-    ctx.arc(h.x - 2, h.y - 2, h.size/4, 0, Math.PI * 2);
+    ctx.arc(Math.floor(h.x) - 2, Math.floor(h.y) - 2, Math.floor(h.size/4), 0, Math.PI * 2);
     ctx.fill();
   }
 
   // Projectiles
   for (const pr of projectiles) {
-    ctx.fillStyle = '#ff4488';
-    ctx.beginPath();
-    ctx.arc(pr.x, pr.y, 5, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.fillStyle = '#ff88aa';
-    ctx.beginPath();
-    ctx.arc(pr.x, pr.y, 3, 0, Math.PI * 2);
-    ctx.fill();
+    if (pr.type === 'spore') {
+      ctx.fillStyle = '#aa66dd';
+      ctx.beginPath();
+      ctx.arc(Math.floor(pr.x), Math.floor(pr.y), 5, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = '#cc88ff';
+      ctx.beginPath();
+      ctx.arc(Math.floor(pr.x), Math.floor(pr.y), 3, 0, Math.PI * 2);
+      ctx.fill();
+    } else {
+      ctx.fillStyle = '#ff4488';
+      ctx.beginPath();
+      ctx.arc(Math.floor(pr.x), Math.floor(pr.y), 5, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = '#ff88aa';
+      ctx.beginPath();
+      ctx.arc(Math.floor(pr.x), Math.floor(pr.y), 3, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+
+  // Power-ups
+  for (const pu of powerUps) {
+    drawPowerUp(pu);
   }
 
   // Enemies
@@ -993,60 +1371,198 @@ function drawBrawlScene() {
   drawPlayer();
 }
 
+function drawPowerUp(pu) {
+  const by = Math.floor(pu.y + Math.sin(pu.bob) * 4);
+  const blink = pu.timer < 2 && Math.floor(frame / 4) % 2 === 0;
+  if (blink) return;
+
+  ctx.save();
+  ctx.translate(Math.floor(pu.x), by);
+
+  if (pu.type === 'spore_shield') {
+    // Green shield icon
+    ctx.fillStyle = '#44ddaa';
+    ctx.beginPath();
+    ctx.moveTo(0, -10);
+    ctx.lineTo(-7, -4);
+    ctx.lineTo(-7, 4);
+    ctx.lineTo(0, 10);
+    ctx.lineTo(7, 4);
+    ctx.lineTo(7, -4);
+    ctx.closePath();
+    ctx.fill();
+    ctx.fillStyle = '#88ffcc';
+    ctx.beginPath();
+    ctx.arc(0, 0, 3, 0, Math.PI * 2);
+    ctx.fill();
+  } else if (pu.type === 'reactor_fist') {
+    // Orange fist icon
+    ctx.fillStyle = '#ff8844';
+    ctx.beginPath();
+    ctx.arc(0, 0, 7, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = '#ffaa66';
+    ctx.font = 'bold 10px monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText('!', 0, 4);
+  } else if (pu.type === 'lp_token') {
+    // Gold coin icon
+    ctx.fillStyle = '#ffdd44';
+    ctx.beginPath();
+    ctx.arc(0, 0, 7, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = '#ffaa00';
+    ctx.beginPath();
+    ctx.arc(0, 0, 5, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = '#fff';
+    ctx.font = 'bold 8px monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText('M', 0, 3);
+  }
+
+  ctx.restore();
+}
+
 function drawBrawlBg() {
-  // Parallax bg elements
-  const stageColors = [
-    ['#0d1a0d','#1a2a1a'], ['#1a0d1a','#2a1a2a'],
-    ['#0d0d1a','#1a1a2a'], ['#1a0d0d','#2a1a0d'],
-    ['#1a0a0a','#2a1a0a'], ['#0d0d1a','#1a1a2a'],
-    ['#0a1a1a','#0d2a2a'], ['#0a0a0a','#1a0a1a']
-  ];
-  const colors = stageColors[stage] || stageColors[0];
+  const pal = ZONE_PALETTES[stage];
 
   // Gradient sky
   const grad = ctx.createLinearGradient(0, 0, 0, GROUND_Y);
-  grad.addColorStop(0, colors[0]);
-  grad.addColorStop(1, colors[1]);
+  grad.addColorStop(0, pal.sky1);
+  grad.addColorStop(1, pal.sky2);
   ctx.fillStyle = grad;
   ctx.fillRect(0, 0, GW, GROUND_Y + 18);
 
   // BG elements
   for (const b of bgLayers) {
     ctx.fillStyle = b.color;
-    ctx.fillRect(b.x, b.y, b.size, b.size * 2);
+    ctx.fillRect(Math.floor(b.x), Math.floor(b.y), Math.floor(b.size), Math.floor(b.size * 2));
   }
 
-  // Mushroom silhouettes
-  for (let i = 0; i < 5; i++) {
-    const mx = 50 + i * 100 + Math.sin(frame * 0.01 + i) * 5;
+  // Mushroom silhouettes (improved Pass 3)
+  for (let i = 0; i < 6; i++) {
+    const mx = Math.floor(40 + i * 85 + Math.sin(frame * 0.008 + i) * 4);
     const my = GROUND_Y - 10;
-    ctx.fillStyle = '#1a3322';
-    ctx.fillRect(mx - 2, my - 20, 4, 20);
+    const mh = 18 + Math.floor(Math.sin(i * 1.7) * 6);
+    ctx.fillStyle = pal.sky2;
+    ctx.fillRect(mx - 2, my - mh, 4, mh);
     ctx.beginPath();
-    ctx.arc(mx, my - 22, 12, Math.PI, 0);
+    ctx.arc(mx, my - mh - 2, 10 + Math.floor(Math.sin(i * 2.3) * 4), Math.PI, 0);
     ctx.fill();
+    // Glowing spots
+    if (stage >= 2) {
+      ctx.fillStyle = pal.accent;
+      ctx.globalAlpha = 0.3 + Math.sin(frame * 0.03 + i) * 0.15;
+      ctx.beginPath();
+      ctx.arc(mx - 3, my - mh - 4, 2, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.globalAlpha = 1;
+    }
   }
+
+  // Zone name watermark (Pass 3)
+  ctx.globalAlpha = 0.08;
+  ctx.fillStyle = pal.accent;
+  ctx.font = 'bold 36px monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText(STAGE_NAMES[stage], GW/2, GROUND_Y - 30);
+  ctx.globalAlpha = 1;
 }
 
 function drawPlayer() {
   const p = player;
+
+  // Death animation (Pass 3)
+  if (p.deathTimer > 0) {
+    const t = p.deathTimer;
+    ctx.save();
+    ctx.translate(Math.floor(p.x), Math.floor(p.y));
+    ctx.globalAlpha = t;
+    ctx.fillStyle = '#ff4400';
+    const s = (1 - t) * 30;
+    ctx.beginPath();
+    ctx.arc(0, -18, s, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = '#ffaa00';
+    ctx.beginPath();
+    ctx.arc(0, -18, s * 0.6, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+    return;
+  }
+
   if (p.iframes > 0 && Math.floor(frame / 3) % 2 === 0) return;
 
   ctx.save();
-  ctx.translate(p.x, p.y);
+  ctx.translate(Math.floor(p.x), Math.floor(p.y));
 
-  // Body
+  // Spore Shield glow (Pass 2)
+  if (activeShield > 0) {
+    ctx.strokeStyle = '#44ffaa';
+    ctx.lineWidth = 2;
+    ctx.globalAlpha = 0.4 + Math.sin(frame * 0.1) * 0.2;
+    ctx.beginPath();
+    ctx.arc(0, -18, 22, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.globalAlpha = 1;
+  }
+
+  // Reactor Fist glow (Pass 2)
+  if (reactorFistTimer > 0) {
+    ctx.fillStyle = 'rgba(255,136,0,0.15)';
+    ctx.beginPath();
+    ctx.arc(p.facing * 15, -22, 14, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  // Charge indicator (Pass 2)
+  if (chargeTimer > 0.1 && !chargeReady) {
+    ctx.strokeStyle = '#ffaa00';
+    ctx.lineWidth = 2;
+    const pct = Math.min(chargeTimer / 0.6, 1);
+    ctx.beginPath();
+    ctx.arc(0, -42, 8, -Math.PI/2, -Math.PI/2 + pct * Math.PI * 2);
+    ctx.stroke();
+  }
+  if (chargeReady) {
+    ctx.fillStyle = '#ffdd44';
+    ctx.globalAlpha = 0.5 + Math.sin(frame * 0.2) * 0.3;
+    ctx.beginPath();
+    ctx.arc(0, -42, 6, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.globalAlpha = 1;
+  }
+
+  // Body (improved sprite Pass 3)
   const bob = p.state === 'walk' ? Math.sin(p.walkFrame) * 2 : 0;
-  ctx.fillStyle = '#33aa55';
+
+  // Shadow
+  ctx.fillStyle = 'rgba(0,0,0,0.3)';
+  ctx.beginPath();
+  ctx.ellipse(0, 2, 12, 4, 0, 0, Math.PI * 2);
+  ctx.fill();
 
   // Torso
+  ctx.fillStyle = statB.color || '#33aa55';
   ctx.fillRect(-8 * p.facing, -32 + bob, 16, 20);
 
+  // Belt detail
+  ctx.fillStyle = '#225533';
+  ctx.fillRect(-8, -14 + bob, 16, 3);
+
   // Head
-  ctx.fillStyle = '#44cc66';
+  const headColor = statB.color || '#44cc66';
+  ctx.fillStyle = headColor;
   ctx.beginPath();
   ctx.arc(0, -36 + bob, 10, 0, Math.PI * 2);
   ctx.fill();
+
+  // Headband (Pass 3)
+  ctx.fillStyle = '#dd4444';
+  ctx.fillRect(-10, -38 + bob, 20, 3);
+  // Headband tail
+  ctx.fillRect(-10, -38 + bob, 2, 6 + Math.floor(Math.sin(p.walkFrame * 0.5) * 2));
 
   // Eyes
   ctx.fillStyle = '#fff';
@@ -1054,18 +1570,25 @@ function drawPlayer() {
   ctx.fillStyle = '#111';
   ctx.fillRect(p.facing * 4, -37 + bob, 2, 2);
 
-  // Legs
-  const legOff = p.state === 'walk' ? Math.sin(p.walkFrame) * 4 : 0;
+  // Mouth (determined expression)
+  ctx.fillStyle = '#225533';
+  ctx.fillRect(p.facing * 2, -32 + bob, 4, 1);
+
+  // Legs (improved)
+  const legOff = p.state === 'walk' ? Math.sin(p.walkFrame) * 5 : 0;
   ctx.fillStyle = '#228844';
   ctx.fillRect(-6, -12 + bob, 5, 14);
-  ctx.fillRect(1, -12 + bob + legOff, 5, 14);
+  ctx.fillRect(1, -12 + bob + Math.floor(legOff), 5, 14);
+  // Boots (Pass 3)
+  ctx.fillStyle = '#115533';
+  ctx.fillRect(-7, 0 + bob, 7, 4);
+  ctx.fillRect(0, 0 + bob + Math.floor(legOff), 7, 4);
 
   // Arms / Attack
   if (p.attacking) {
     drawAttack(bob);
   } else {
-    // Idle arms
-    ctx.fillStyle = '#33aa55';
+    ctx.fillStyle = statB.color || '#33aa55';
     ctx.fillRect(p.facing * 8, -28 + bob, 5 * p.facing, 12);
   }
 
@@ -1079,79 +1602,118 @@ function drawPlayer() {
 
 function drawAttack(bob) {
   const p = player;
-  const progress = 1 - (p.attackTimer / 0.25);
+  const progress = 1 - (p.attackTimer / (0.25 / wisAtkSpeedMult()));
 
-  if (p.attackType < 10) {
-    // Punch combo
-    const extend = Math.sin(progress * Math.PI) * 20;
-    ctx.fillStyle = '#44dd77';
-    ctx.fillRect(p.facing * 10, -26 + bob, p.facing * (extend + 5), 8);
-    // Fist
-    ctx.fillStyle = '#55ee88';
+  if (p.attackType === 20) {
+    // Charged smash (Pass 2)
+    const extend = Math.sin(progress * Math.PI) * 30;
+    ctx.fillStyle = '#ff8844';
+    ctx.fillRect(p.facing * 10, -26 + bob, Math.floor(p.facing * (extend + 8)), 10);
+    ctx.fillStyle = '#ffaa00';
     ctx.beginPath();
-    ctx.arc(p.facing * (15 + extend), -22 + bob, 6, 0, Math.PI * 2);
+    ctx.arc(Math.floor(p.facing * (18 + extend)), -22 + bob, 10, 0, Math.PI * 2);
     ctx.fill();
+    // Impact sparks
+    if (progress > 0.4) {
+      ctx.fillStyle = '#ffff88';
+      for (let i = 0; i < 3; i++) {
+        ctx.beginPath();
+        ctx.arc(
+          Math.floor(p.facing * (20 + extend) + (Math.random()-0.5)*10),
+          Math.floor(-22 + bob + (Math.random()-0.5)*10),
+          2, 0, Math.PI * 2
+        );
+        ctx.fill();
+      }
+    }
+  } else if (p.attackType < 10) {
+    // Punch combo (improved Pass 3)
+    const extend = Math.sin(progress * Math.PI) * 20;
+    ctx.fillStyle = reactorFistTimer > 0 ? '#ff8844' : '#44dd77';
+    ctx.fillRect(p.facing * 10, -26 + bob, Math.floor(p.facing * (extend + 5)), 8);
+    // Fist
+    ctx.fillStyle = reactorFistTimer > 0 ? '#ffaa44' : '#55ee88';
+    ctx.beginPath();
+    ctx.arc(Math.floor(p.facing * (15 + extend)), -22 + bob, 6, 0, Math.PI * 2);
+    ctx.fill();
+    // Motion line (Pass 3)
+    if (extend > 10) {
+      ctx.strokeStyle = 'rgba(255,255,255,0.3)';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(Math.floor(p.facing * 12), -22 + bob);
+      ctx.lineTo(Math.floor(p.facing * (10 + extend * 0.5)), -22 + bob);
+      ctx.stroke();
+    }
   } else {
-    // Kick
+    // Kick (improved Pass 3)
     const extend = Math.sin(progress * Math.PI) * 22;
     ctx.fillStyle = '#228844';
     ctx.save();
     ctx.translate(0, -8 + bob);
     ctx.rotate(p.facing * progress * 0.5);
-    ctx.fillRect(p.facing * 5, 0, p.facing * (extend + 8), 7);
-    // Boot
+    ctx.fillRect(p.facing * 5, 0, Math.floor(p.facing * (extend + 8)), 7);
+    // Boot (STR scales size)
+    const bSize = Math.floor(8 * bootSizeMult());
     ctx.fillStyle = '#115533';
-    ctx.fillRect(p.facing * (13 + extend), -2, p.facing * 8, 10);
+    ctx.fillRect(Math.floor(p.facing * (13 + extend)), -2, p.facing * bSize, 10);
     ctx.restore();
   }
 }
 
 function drawTransform(bob) {
   const p = player;
-  const scale = p.transformAnim / 0.4;
+  const scale = p.transformAnim / (p.attackType === 20 ? 0.5 : 0.4);
   const size = 18 + (1 - scale) * 20;
 
   ctx.globalAlpha = scale;
   if (p.transformType === 'fist') {
     // Giant fist
-    ctx.fillStyle = '#ffdd44';
+    ctx.fillStyle = reactorFistTimer > 0 ? '#ff6600' : '#ffdd44';
     ctx.beginPath();
-    ctx.arc(p.facing * 40, -22 + bob, size, 0, Math.PI * 2);
+    ctx.arc(Math.floor(p.facing * 40), -22 + bob, Math.floor(size), 0, Math.PI * 2);
     ctx.fill();
-    ctx.fillStyle = '#ffaa00';
+    ctx.fillStyle = reactorFistTimer > 0 ? '#ff4400' : '#ffaa00';
     ctx.beginPath();
-    ctx.arc(p.facing * 40 - 3, -24 + bob, size * 0.6, 0, Math.PI * 2);
+    ctx.arc(Math.floor(p.facing * 40 - 3), -24 + bob, Math.floor(size * 0.6), 0, Math.PI * 2);
     ctx.fill();
-    // Impact lines
-    for (let i = 0; i < 4; i++) {
-      const angle = (i / 4) * Math.PI - Math.PI/4;
+    // Impact lines (Pass 3)
+    for (let i = 0; i < 6; i++) {
+      const angle = (i / 6) * Math.PI - Math.PI/4;
       ctx.strokeStyle = '#ffff88';
       ctx.lineWidth = 2;
       ctx.beginPath();
-      ctx.moveTo(p.facing * 40 + Math.cos(angle) * size, -22 + bob + Math.sin(angle) * size);
-      ctx.lineTo(p.facing * 40 + Math.cos(angle) * (size + 10), -22 + bob + Math.sin(angle) * (size + 10));
+      ctx.moveTo(Math.floor(p.facing * 40 + Math.cos(angle) * size), Math.floor(-22 + bob + Math.sin(angle) * size));
+      ctx.lineTo(Math.floor(p.facing * 40 + Math.cos(angle) * (size + 14)), Math.floor(-22 + bob + Math.sin(angle) * (size + 14)));
       ctx.stroke();
     }
   } else if (p.transformType === 'boot') {
-    // Giant boot
+    // Giant boot (STR scales)
+    const bMult = bootSizeMult();
     ctx.fillStyle = '#ffdd44';
-    ctx.fillRect(p.facing * 25, -12 + bob, p.facing * size * 1.5, size * 0.8);
+    ctx.fillRect(Math.floor(p.facing * 25), -12 + bob, Math.floor(p.facing * size * 1.5 * bMult), Math.floor(size * 0.8));
     ctx.fillStyle = '#ffaa00';
-    ctx.fillRect(p.facing * 30, -8 + bob, p.facing * size, size * 0.5);
+    ctx.fillRect(Math.floor(p.facing * 30), -8 + bob, Math.floor(p.facing * size * bMult), Math.floor(size * 0.5));
+    // Stomp wave
+    ctx.strokeStyle = '#ffff44';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.arc(Math.floor(p.facing * (25 + size)), bob, Math.floor((1-scale) * 20), 0, Math.PI);
+    ctx.stroke();
   } else {
     // Horn ram
     ctx.fillStyle = '#ffdd44';
     ctx.beginPath();
-    ctx.moveTo(p.facing * 15, -40 + bob);
-    ctx.lineTo(p.facing * (15 + size * 2), -36 + bob);
-    ctx.lineTo(p.facing * 15, -30 + bob);
+    ctx.moveTo(Math.floor(p.facing * 15), -40 + bob);
+    ctx.lineTo(Math.floor(p.facing * (15 + size * 2)), -36 + bob);
+    ctx.lineTo(Math.floor(p.facing * 15), -30 + bob);
     ctx.closePath();
     ctx.fill();
     ctx.fillStyle = '#ffaa00';
     ctx.beginPath();
-    ctx.moveTo(p.facing * 18, -38 + bob);
-    ctx.lineTo(p.facing * (18 + size * 1.2), -36 + bob);
-    ctx.lineTo(p.facing * 18, -33 + bob);
+    ctx.moveTo(Math.floor(p.facing * 18), -38 + bob);
+    ctx.lineTo(Math.floor(p.facing * (18 + size * 1.2)), -36 + bob);
+    ctx.lineTo(Math.floor(p.facing * 18), -33 + bob);
     ctx.closePath();
     ctx.fill();
   }
@@ -1159,38 +1721,56 @@ function drawTransform(bob) {
 }
 
 function drawEnemy(e) {
+  // Death flash (Pass 3)
+  if (e.state === 'dying') {
+    ctx.save();
+    ctx.translate(Math.floor(e.x), Math.floor(e.y));
+    ctx.globalAlpha = e.deathTimer / 0.3;
+    ctx.fillStyle = '#fff';
+    ctx.beginPath();
+    ctx.arc(0, -16, 14, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+    return;
+  }
+
   ctx.save();
-  ctx.translate(e.x, e.y);
+  ctx.translate(Math.floor(e.x), Math.floor(e.y));
+
+  // Shadow
+  ctx.fillStyle = 'rgba(0,0,0,0.25)';
+  ctx.beginPath();
+  ctx.ellipse(0, 2, 10, 3, 0, 0, Math.PI * 2);
+  ctx.fill();
 
   if (e.hitStun > 0) {
     ctx.fillStyle = '#fff';
   } else {
-    const colors = { slime: '#88aa22', spore: '#aa44aa', brute: '#886633', flyer: '#4488cc', bomber: '#cc4444' };
+    const colors = {
+      slime: '#88aa22', spore: '#aa44aa', brute: '#886633', flyer: '#4488cc', bomber: '#cc4444',
+      reactor_rat: '#cc8844', spore_walker: '#8855bb', mycelial_worm: '#667744'
+    };
     ctx.fillStyle = colors[e.type] || '#888';
   }
 
   const bob = Math.sin(e.walkFrame) * 2;
 
-  // Body varies by type
   if (e.type === 'slime') {
     ctx.beginPath();
     ctx.arc(0, -14 + bob, 12, 0, Math.PI * 2);
     ctx.fill();
-    ctx.fillStyle = '#aacc33';
+    ctx.fillStyle = e.hitStun > 0 ? '#fff' : '#aacc33';
     ctx.beginPath();
     ctx.arc(-3 * e.facing, -18 + bob, 4, 0, Math.PI * 2);
     ctx.fill();
-    // Eyes
     ctx.fillStyle = '#ff0';
     ctx.fillRect(e.facing * 3, -17 + bob, 3, 3);
   } else if (e.type === 'spore') {
-    // Mushroom warrior
     ctx.fillRect(-7, -28 + bob, 14, 18);
-    ctx.fillStyle = '#cc66cc';
+    ctx.fillStyle = e.hitStun > 0 ? '#fff' : '#cc66cc';
     ctx.beginPath();
     ctx.arc(0, -30 + bob, 11, Math.PI, 0);
     ctx.fill();
-    // Spots
     ctx.fillStyle = '#fff';
     ctx.beginPath();
     ctx.arc(-4, -33 + bob, 3, 0, Math.PI * 2);
@@ -1199,37 +1779,32 @@ function drawEnemy(e) {
     ctx.arc(4, -30 + bob, 2, 0, Math.PI * 2);
     ctx.fill();
   } else if (e.type === 'brute') {
-    // Big chunky enemy
     ctx.fillRect(-12, -34 + bob, 24, 28);
-    ctx.fillStyle = '#997744';
+    ctx.fillStyle = e.hitStun > 0 ? '#fff' : '#997744';
     ctx.beginPath();
     ctx.arc(0, -38 + bob, 10, 0, Math.PI * 2);
     ctx.fill();
-    // Angry eyes
     ctx.fillStyle = '#f00';
     ctx.fillRect(e.facing * 2 - 3, -40 + bob, 3, 3);
     ctx.fillRect(e.facing * 2 + 2, -40 + bob, 3, 3);
   } else if (e.type === 'flyer') {
-    // Wings
-    ctx.fillStyle = '#3377aa';
+    ctx.fillStyle = e.hitStun > 0 ? '#fff' : '#3377aa';
     const wingFlap = Math.sin(frame * 0.2) * 8;
     ctx.beginPath();
     ctx.moveTo(-5, -14);
-    ctx.lineTo(-20, -20 + wingFlap);
+    ctx.lineTo(-20, -20 + Math.floor(wingFlap));
     ctx.lineTo(-5, -20);
     ctx.fill();
     ctx.beginPath();
     ctx.moveTo(5, -14);
-    ctx.lineTo(20, -20 + wingFlap);
+    ctx.lineTo(20, -20 + Math.floor(wingFlap));
     ctx.lineTo(5, -20);
     ctx.fill();
-    // Body
-    ctx.fillStyle = '#4488cc';
+    ctx.fillStyle = e.hitStun > 0 ? '#fff' : '#4488cc';
     ctx.beginPath();
     ctx.arc(0, -14, 8, 0, Math.PI * 2);
     ctx.fill();
-  } else {
-    // Bomber - round with fuse
+  } else if (e.type === 'bomber') {
     ctx.beginPath();
     ctx.arc(0, -16 + bob, 10, 0, Math.PI * 2);
     ctx.fill();
@@ -1239,13 +1814,100 @@ function drawEnemy(e) {
     ctx.moveTo(0, -26 + bob);
     ctx.lineTo(3, -32 + bob);
     ctx.stroke();
-    // Spark
     if (frame % 6 < 3) {
       ctx.fillStyle = '#ff0';
       ctx.beginPath();
       ctx.arc(3, -33 + bob, 3, 0, Math.PI * 2);
       ctx.fill();
     }
+  } else if (e.type === 'reactor_rat') {
+    // Tasern: Reactor Rat (Pass 2) — small, quick, glowing eyes
+    ctx.beginPath();
+    ctx.arc(0, -10 + bob, 8, 0, Math.PI * 2);
+    ctx.fill();
+    // Ears
+    ctx.fillRect(-8, -18 + bob, 4, 6);
+    ctx.fillRect(4, -18 + bob, 4, 6);
+    // Tail
+    ctx.strokeStyle = e.hitStun > 0 ? '#fff' : '#aa6633';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(-8, -8 + bob);
+    ctx.quadraticCurveTo(-16, -14 + bob, -20, -6 + bob);
+    ctx.stroke();
+    // Glowing eyes
+    ctx.fillStyle = '#ff8800';
+    ctx.fillRect(e.facing * 2, -12 + bob, 3, 2);
+    ctx.fillRect(e.facing * 2 + 4, -12 + bob, 3, 2);
+    // Sparks
+    if (frame % 10 < 3) {
+      ctx.fillStyle = '#ffaa00';
+      ctx.beginPath();
+      ctx.arc(Math.floor((Math.random()-0.5) * 12), Math.floor(-14 + bob + (Math.random()-0.5) * 8), 1, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  } else if (e.type === 'spore_walker') {
+    // Tasern: Spore Walker (Pass 2) — tall mushroom with legs
+    ctx.fillRect(-5, -24 + bob, 10, 16);
+    // Mushroom cap with spore trail
+    ctx.fillStyle = e.hitStun > 0 ? '#fff' : '#9944cc';
+    ctx.beginPath();
+    ctx.arc(0, -28 + bob, 13, Math.PI, 0);
+    ctx.fill();
+    // Toxic spots
+    ctx.fillStyle = '#ddaaff';
+    ctx.beginPath();
+    ctx.arc(-5, -32 + bob, 3, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.beginPath();
+    ctx.arc(5, -29 + bob, 2, 0, Math.PI * 2);
+    ctx.fill();
+    // Walking legs
+    const lOff = Math.sin(e.walkFrame * 1.5) * 3;
+    ctx.fillStyle = e.hitStun > 0 ? '#fff' : '#6633aa';
+    ctx.fillRect(-5, -8 + bob, 4, 10 + Math.floor(lOff));
+    ctx.fillRect(2, -8 + bob, 4, 10 - Math.floor(lOff));
+    // Spore trail particles
+    if (frame % 12 === 0 && e.hitStun <= 0) {
+      TAS.particles.spawn(Math.floor(e.x), Math.floor(e.y - 30), '#aa66dd', 1, 1, { size: 1 });
+    }
+  } else if (e.type === 'mycelial_worm') {
+    // Tasern: Mycelial Worm (Pass 2) — segmented, can burrow
+    for (let i = 0; i < 4; i++) {
+      const sx = Math.floor(Math.sin(frame * 0.04 + i * 0.6) * 3);
+      const segY = -8 - i * 8 + bob;
+      ctx.beginPath();
+      ctx.arc(sx, segY, 7 - i * 0.5, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    // Head with mandibles
+    ctx.fillStyle = e.hitStun > 0 ? '#fff' : '#889955';
+    ctx.beginPath();
+    ctx.arc(0, -36 + bob, 6, 0, Math.PI * 2);
+    ctx.fill();
+    // Mandibles
+    ctx.strokeStyle = e.hitStun > 0 ? '#fff' : '#aabb66';
+    ctx.lineWidth = 2;
+    const mOpen = Math.sin(frame * 0.1) * 3;
+    ctx.beginPath();
+    ctx.moveTo(-3, -38 + bob);
+    ctx.lineTo(-5 - Math.floor(mOpen), -44 + bob);
+    ctx.moveTo(3, -38 + bob);
+    ctx.lineTo(5 + Math.floor(mOpen), -44 + bob);
+    ctx.stroke();
+    // Underground particles when walking
+    if (e.state === 'walk' && frame % 8 === 0) {
+      TAS.particles.spawn(Math.floor(e.x), Math.floor(e.y), '#886644', 1, 1, { size: 1, gravity: 2 });
+    }
+  }
+
+  // HP bar for tougher enemies
+  if (e.hp > 0 && getEnemyHp(e.type) > 40) {
+    const hpW = 20;
+    ctx.fillStyle = '#300';
+    ctx.fillRect(-hpW/2, -e.h - 8, hpW, 3);
+    ctx.fillStyle = '#ff4444';
+    ctx.fillRect(-hpW/2, -e.h - 8, Math.floor(hpW * (e.hp / getEnemyHp(e.type))), 3);
   }
 
   ctx.restore();
@@ -1253,53 +1915,68 @@ function drawEnemy(e) {
 
 function drawBoss(b) {
   ctx.save();
-  ctx.translate(b.x, b.y);
+  ctx.translate(Math.floor(b.x), Math.floor(b.y));
 
   const flash = b.hitStun > 0 && Math.floor(frame / 2) % 2 === 0;
   const pulse = Math.sin(frame * 0.05) * 2;
 
+  // Shadow
+  ctx.fillStyle = 'rgba(0,0,0,0.3)';
+  ctx.beginPath();
+  ctx.ellipse(0, 2, 20, 6, 0, 0, Math.PI * 2);
+  ctx.fill();
+
   if (b.type === 1) {
-    // Spore King - large mushroom
+    // Spore King
     ctx.fillStyle = flash ? '#fff' : '#663388';
-    ctx.fillRect(-18, -44 + pulse, 36, 30);
+    ctx.fillRect(-18, -44 + Math.floor(pulse), 36, 30);
     ctx.fillStyle = flash ? '#fff' : '#8844aa';
     ctx.beginPath();
-    ctx.arc(0, -48 + pulse, 22, Math.PI, 0);
+    ctx.arc(0, -48 + Math.floor(pulse), 22, Math.PI, 0);
     ctx.fill();
-    // Crown spots
     ctx.fillStyle = '#ffdd44';
-    ctx.beginPath(); ctx.arc(-8, -55 + pulse, 4, 0, Math.PI * 2); ctx.fill();
-    ctx.beginPath(); ctx.arc(8, -52 + pulse, 3, 0, Math.PI * 2); ctx.fill();
-    ctx.beginPath(); ctx.arc(0, -60 + pulse, 3, 0, Math.PI * 2); ctx.fill();
-    // Eyes
+    ctx.beginPath(); ctx.arc(-8, -55 + Math.floor(pulse), 4, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.arc(8, -52 + Math.floor(pulse), 3, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.arc(0, -60 + Math.floor(pulse), 3, 0, Math.PI * 2); ctx.fill();
     ctx.fillStyle = '#ff0000';
-    ctx.fillRect(b.facing * 4 - 4, -40 + pulse, 5, 5);
-    ctx.fillRect(b.facing * 4 + 4, -40 + pulse, 5, 5);
+    ctx.fillRect(b.facing * 4 - 4, -40 + Math.floor(pulse), 5, 5);
+    ctx.fillRect(b.facing * 4 + 4, -40 + Math.floor(pulse), 5, 5);
+    // Spore aura (Pass 2 enhancement)
+    if (b.phase === 2) {
+      ctx.globalAlpha = 0.2 + Math.sin(frame * 0.08) * 0.1;
+      ctx.fillStyle = '#aa44ff';
+      ctx.beginPath();
+      ctx.arc(0, -40 + Math.floor(pulse), 30, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.globalAlpha = 1;
+    }
   } else if (b.type === 2) {
     // Magma Golem
     ctx.fillStyle = flash ? '#fff' : '#553300';
-    ctx.fillRect(-20, -50 + pulse, 40, 40);
+    ctx.fillRect(-20, -50 + Math.floor(pulse), 40, 40);
     ctx.fillStyle = flash ? '#fff' : '#774411';
     ctx.beginPath();
-    ctx.arc(0, -54 + pulse, 18, 0, Math.PI * 2);
+    ctx.arc(0, -54 + Math.floor(pulse), 18, 0, Math.PI * 2);
     ctx.fill();
-    // Lava cracks
     ctx.strokeStyle = '#ff4400';
     ctx.lineWidth = 2;
     ctx.beginPath();
-    ctx.moveTo(-10, -40 + pulse); ctx.lineTo(-5, -25 + pulse);
-    ctx.moveTo(5, -45 + pulse); ctx.lineTo(10, -30 + pulse);
-    ctx.moveTo(-3, -30 + pulse); ctx.lineTo(3, -18 + pulse);
+    ctx.moveTo(-10, -40 + Math.floor(pulse)); ctx.lineTo(-5, -25 + Math.floor(pulse));
+    ctx.moveTo(5, -45 + Math.floor(pulse)); ctx.lineTo(10, -30 + Math.floor(pulse));
+    ctx.moveTo(-3, -30 + Math.floor(pulse)); ctx.lineTo(3, -18 + Math.floor(pulse));
     ctx.stroke();
-    // Glowing eyes
     ctx.fillStyle = '#ff8800';
-    ctx.fillRect(-8, -52 + pulse, 6, 4);
-    ctx.fillRect(4, -52 + pulse, 6, 4);
+    ctx.fillRect(-8, -52 + Math.floor(pulse), 6, 4);
+    ctx.fillRect(4, -52 + Math.floor(pulse), 6, 4);
+    // Lava drip particles (Pass 2)
+    if (frame % 15 === 0) {
+      TAS.particles.spawn(Math.floor(b.x + (Math.random()-0.5)*20), Math.floor(b.y - 20), '#ff4400', 1, 2, { size: 2, gravity: 3 });
+    }
   } else if (b.type === 3) {
     // Shadow Wurm
     ctx.fillStyle = flash ? '#fff' : '#2a1a3a';
     for (let i = 0; i < 5; i++) {
-      const sx = Math.sin(frame * 0.03 + i * 0.5) * 5;
+      const sx = Math.floor(Math.sin(frame * 0.03 + i * 0.5) * 5);
       ctx.beginPath();
       ctx.arc(sx, -10 - i * 10, 10 - i, 0, Math.PI * 2);
       ctx.fill();
@@ -1310,68 +1987,81 @@ function drawBoss(b) {
   } else if (b.type === 4) {
     // Void Knight
     ctx.fillStyle = flash ? '#fff' : '#1a1a4a';
-    ctx.fillRect(-16, -48 + pulse, 32, 38);
-    // Helmet
+    ctx.fillRect(-16, -48 + Math.floor(pulse), 32, 38);
     ctx.fillStyle = flash ? '#fff' : '#3a3a6a';
     ctx.beginPath();
-    ctx.arc(0, -52 + pulse, 14, 0, Math.PI * 2);
+    ctx.arc(0, -52 + Math.floor(pulse), 14, 0, Math.PI * 2);
     ctx.fill();
-    // Visor
     ctx.fillStyle = '#ff0044';
-    ctx.fillRect(-8, -54 + pulse, 16, 4);
-    // Sword
+    ctx.fillRect(-8, -54 + Math.floor(pulse), 16, 4);
     ctx.fillStyle = '#8888ff';
-    ctx.fillRect(b.facing * 18, -55 + pulse, 4, 40);
+    ctx.fillRect(b.facing * 18, -55 + Math.floor(pulse), 4, 40);
     ctx.fillStyle = '#aaaaff';
-    ctx.fillRect(b.facing * 17, -58 + pulse, 6, 4);
+    ctx.fillRect(b.facing * 17, -58 + Math.floor(pulse), 6, 4);
   } else {
     // Dark Overlord
     ctx.fillStyle = flash ? '#fff' : '#0a0a0a';
-    ctx.fillRect(-22, -55 + pulse, 44, 45);
-    // Cape
+    ctx.fillRect(-22, -55 + Math.floor(pulse), 44, 45);
     ctx.fillStyle = '#330044';
     ctx.beginPath();
-    ctx.moveTo(-22, -55 + pulse);
-    ctx.lineTo(-30, -10 + pulse);
-    ctx.lineTo(-22, -10 + pulse);
+    ctx.moveTo(-22, -55 + Math.floor(pulse));
+    ctx.lineTo(-30, -10 + Math.floor(pulse));
+    ctx.lineTo(-22, -10 + Math.floor(pulse));
     ctx.fill();
     ctx.beginPath();
-    ctx.moveTo(22, -55 + pulse);
-    ctx.lineTo(30, -10 + pulse);
-    ctx.lineTo(22, -10 + pulse);
+    ctx.moveTo(22, -55 + Math.floor(pulse));
+    ctx.lineTo(30, -10 + Math.floor(pulse));
+    ctx.lineTo(22, -10 + Math.floor(pulse));
     ctx.fill();
-    // Crown
     ctx.fillStyle = '#ffdd00';
-    ctx.fillRect(-10, -62 + pulse, 20, 5);
-    ctx.fillRect(-8, -68 + pulse, 3, 8);
-    ctx.fillRect(5, -68 + pulse, 3, 8);
-    ctx.fillRect(-2, -70 + pulse, 4, 10);
-    // Eyes
+    ctx.fillRect(-10, -62 + Math.floor(pulse), 20, 5);
+    ctx.fillRect(-8, -68 + Math.floor(pulse), 3, 8);
+    ctx.fillRect(5, -68 + Math.floor(pulse), 3, 8);
+    ctx.fillRect(-2, -70 + Math.floor(pulse), 4, 10);
     ctx.fillStyle = '#ff0000';
-    ctx.beginPath(); ctx.arc(-6, -50 + pulse, 4, 0, Math.PI * 2); ctx.fill();
-    ctx.beginPath(); ctx.arc(6, -50 + pulse, 4, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.arc(-6, -50 + Math.floor(pulse), 4, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.arc(6, -50 + Math.floor(pulse), 4, 0, Math.PI * 2); ctx.fill();
+    // Dark aura (Pass 2 enhancement)
+    if (b.phase === 2) {
+      ctx.globalAlpha = 0.15;
+      ctx.fillStyle = '#440066';
+      ctx.beginPath();
+      ctx.arc(0, -30, 40 + Math.sin(frame * 0.06) * 5, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.globalAlpha = 1;
+    }
   }
 
   // HP bar
   ctx.fillStyle = '#300';
   ctx.fillRect(-25, -b.h - 20, 50, 6);
   ctx.fillStyle = b.hp < b.maxHp * 0.3 ? '#ff2200' : '#ff8800';
-  ctx.fillRect(-25, -b.h - 20, 50 * (b.hp / b.maxHp), 6);
+  ctx.fillRect(-25, -b.h - 20, Math.floor(50 * (b.hp / b.maxHp)), 6);
+  ctx.strokeStyle = '#555';
+  ctx.lineWidth = 1;
+  ctx.strokeRect(-25, -b.h - 20, 50, 6);
   ctx.fillStyle = '#fff';
   ctx.font = '8px monospace';
   ctx.textAlign = 'center';
   ctx.fillText(b.name, 0, -b.h - 24);
+
+  // Phase indicator
+  if (b.phase === 2) {
+    ctx.fillStyle = '#ff4444';
+    ctx.font = 'bold 7px monospace';
+    ctx.fillText('ENRAGED', 0, -b.h - 32);
+  }
 
   ctx.restore();
 }
 
 // === DRAW SPEEDER ===
 function drawSpeederScene() {
-  // Road perspective
+  const pal = ZONE_PALETTES[stage] || ZONE_PALETTES[2];
   const grad = ctx.createLinearGradient(0, 0, 0, GH);
-  grad.addColorStop(0, '#0a0a2a');
-  grad.addColorStop(0.4, '#1a1a3a');
-  grad.addColorStop(1, '#2a2a4a');
+  grad.addColorStop(0, pal.sky1);
+  grad.addColorStop(0.4, pal.sky2);
+  grad.addColorStop(1, pal.ground);
   ctx.fillStyle = grad;
   ctx.fillRect(0, 0, GW, GH);
 
@@ -1379,12 +2069,12 @@ function drawSpeederScene() {
   const speedIntensity = speederSpeed / SPEEDER_SPEED_BASE;
   for (let i = 0; i < 12; i++) {
     const ly = 60 + i * 22;
-    const lx = (speederDist * (0.5 + i * 0.1) + i * 73) % GW;
-    ctx.strokeStyle = `rgba(100,200,255,${0.1 * speedIntensity})`;
+    const lx = Math.floor((speederDist * (0.5 + i * 0.1) + i * 73) % GW);
+    ctx.strokeStyle = 'rgba(100,200,255,' + (0.1 * speedIntensity).toFixed(2) + ')';
     ctx.lineWidth = 1;
     ctx.beginPath();
     ctx.moveTo(lx, ly);
-    ctx.lineTo(lx - 20 * speedIntensity, ly);
+    ctx.lineTo(Math.floor(lx - 20 * speedIntensity), ly);
     ctx.stroke();
   }
 
@@ -1406,7 +2096,7 @@ function drawSpeederScene() {
   ctx.moveTo(40, GROUND_Y + 40); ctx.lineTo(GW - 40, GROUND_Y + 40);
   ctx.stroke();
 
-  // Obstacles approaching
+  // Obstacles
   for (const w of speederWalls) {
     if (w.hit) continue;
     const relDist = w.dist - speederDist;
@@ -1414,14 +2104,13 @@ function drawSpeederScene() {
     const scale = 1 - relDist / 400;
     const wx = getLaneX(w.lane);
     const wy = GROUND_Y;
-    const sz = 15 + scale * 25;
+    const sz = Math.floor(15 + scale * 25);
     ctx.fillStyle = '#ff2222';
-    ctx.fillRect(wx - sz/2, wy - sz, sz, sz);
+    ctx.fillRect(wx - Math.floor(sz/2), wy - sz, sz, sz);
     ctx.fillStyle = '#aa0000';
-    ctx.fillRect(wx - sz/3, wy - sz * 0.8, sz * 0.6, sz * 0.6);
-    // Warning stripe
+    ctx.fillRect(wx - Math.floor(sz/3), wy - Math.floor(sz * 0.8), Math.floor(sz * 0.6), Math.floor(sz * 0.6));
     ctx.fillStyle = '#ffff00';
-    ctx.fillRect(wx - sz/2, wy - sz - 4, sz, 4);
+    ctx.fillRect(wx - Math.floor(sz/2), wy - sz - 4, sz, 4);
   }
 
   for (const r of speederRamps) {
@@ -1430,7 +2119,7 @@ function drawSpeederScene() {
     const scale = 1 - relDist / 400;
     const rx = getLaneX(r.lane);
     ctx.fillStyle = '#44ff88';
-    const sz = 10 + scale * 15;
+    const sz = Math.floor(10 + scale * 15);
     ctx.beginPath();
     ctx.moveTo(rx - sz, GROUND_Y);
     ctx.lineTo(rx, GROUND_Y - sz);
@@ -1442,13 +2131,12 @@ function drawSpeederScene() {
   // Player bike
   const bikeX = getLaneX(speederLane);
   const bikeY = GROUND_Y;
-  ctx.fillStyle = '#33aa55';
+  ctx.fillStyle = statB.color || '#33aa55';
   ctx.fillRect(bikeX - 12, bikeY - 20, 24, 16);
   ctx.fillStyle = '#44cc66';
   ctx.beginPath();
   ctx.arc(bikeX, bikeY - 24, 8, 0, Math.PI * 2);
   ctx.fill();
-  // Wheels
   ctx.fillStyle = '#666';
   ctx.beginPath();
   ctx.arc(bikeX - 8, bikeY, 6, 0, Math.PI * 2);
@@ -1456,7 +2144,6 @@ function drawSpeederScene() {
   ctx.beginPath();
   ctx.arc(bikeX + 8, bikeY, 6, 0, Math.PI * 2);
   ctx.fill();
-  // Exhaust
   if (frame % 4 < 2) {
     ctx.fillStyle = '#ff8800';
     ctx.beginPath();
@@ -1464,13 +2151,11 @@ function drawSpeederScene() {
     ctx.fill();
   }
 
-  // Speed indicator
   ctx.fillStyle = '#88ccff';
   ctx.font = 'bold 10px monospace';
   ctx.textAlign = 'right';
   ctx.fillText('SPEED: ' + Math.floor(speederSpeed), GW - 10, GH - 10);
 
-  // Progress bar
   drawProgressBar(speederDist / speederGoal);
 }
 
@@ -1480,7 +2165,6 @@ function getLaneX(lane) {
 
 // === DRAW RAPPEL ===
 function drawRappelScene() {
-  // Cavern walls
   const grad = ctx.createLinearGradient(0, 0, GW, 0);
   grad.addColorStop(0, '#2a1a0d');
   grad.addColorStop(0.1, '#0a0a0a');
@@ -1489,35 +2173,33 @@ function drawRappelScene() {
   ctx.fillStyle = grad;
   ctx.fillRect(0, 0, GW, GH);
 
-  // Wall texture
   ctx.fillStyle = '#1a1008';
   for (let i = 0; i < 10; i++) {
-    const wy = ((rapDepth * 0.5 + i * 40) % GH);
-    ctx.fillRect(0, wy, 25 + Math.sin(i) * 10, 8);
-    ctx.fillRect(GW - 25 - Math.cos(i) * 10, wy, 25 + Math.cos(i) * 10, 8);
+    const wy = Math.floor((rapDepth * 0.5 + i * 40) % GH);
+    ctx.fillRect(0, wy, Math.floor(25 + Math.sin(i) * 10), 8);
+    ctx.fillRect(GW - Math.floor(25 + Math.cos(i) * 10), wy, Math.floor(25 + Math.cos(i) * 10), 8);
   }
 
   // Rope
   ctx.strokeStyle = '#886633';
   ctx.lineWidth = 3;
   ctx.beginPath();
-  ctx.moveTo(player.rapX, 0);
-  ctx.lineTo(player.rapX, GH/2 - 15);
+  ctx.moveTo(Math.floor(player.rapX), 0);
+  ctx.lineTo(Math.floor(player.rapX), GH/2 - 15);
   ctx.stroke();
 
-  // Player hanging on rope
+  // Player on rope
   const p = player;
   ctx.save();
-  ctx.translate(p.rapX, GH/2);
+  ctx.translate(Math.floor(p.rapX), Math.floor(GH/2));
 
-  ctx.fillStyle = '#33aa55';
+  ctx.fillStyle = statB.color || '#33aa55';
   ctx.fillRect(-8, -15, 16, 20);
   ctx.fillStyle = '#44cc66';
   ctx.beginPath();
   ctx.arc(0, -20, 8, 0, Math.PI * 2);
   ctx.fill();
-  // Arms on rope
-  ctx.strokeStyle = '#33aa55';
+  ctx.strokeStyle = statB.color || '#33aa55';
   ctx.lineWidth = 3;
   ctx.beginPath();
   ctx.moveTo(-5, -12);
@@ -1531,7 +2213,7 @@ function drawRappelScene() {
   // Platforms
   for (const plat of rapPlatforms) {
     const relDepth = plat.depth - rapDepth;
-    const py = GH/2 + relDepth * 0.5;
+    const py = Math.floor(GH/2 + relDepth * 0.5);
     if (py < -20 || py > GH + 20) continue;
     const px = plat.side === 'left' ? 10 : GW - 10 - plat.w;
     ctx.fillStyle = '#553322';
@@ -1544,36 +2226,33 @@ function drawRappelScene() {
   for (const re of rapEnemies) {
     if (!re.active) continue;
     const relDepth = re.depth - rapDepth;
-    const ry = GH/2 + relDepth * 0.5;
+    const ry = Math.floor(GH/2 + relDepth * 0.5);
     if (ry < -20 || ry > GH + 20) continue;
     ctx.fillStyle = '#aa2222';
     ctx.beginPath();
-    ctx.arc(re.x, ry, 10, 0, Math.PI * 2);
+    ctx.arc(Math.floor(re.x), ry, 10, 0, Math.PI * 2);
     ctx.fill();
     ctx.fillStyle = '#ff4444';
-    ctx.fillRect(re.x - 3, ry - 3, 6, 3);
+    ctx.fillRect(Math.floor(re.x) - 3, ry - 3, 6, 3);
   }
 
-  // Progress
   drawProgressBar(rapDepth / rapGoal);
 }
 
 // === DRAW SNAKE ===
 function drawSnakeScene() {
-  // Water bg
   const grad = ctx.createLinearGradient(0, 0, 0, GH);
   grad.addColorStop(0, '#0a2a3a');
   grad.addColorStop(1, '#0a1a2a');
   ctx.fillStyle = grad;
   ctx.fillRect(0, 0, GW, GH);
 
-  // Water waves
   ctx.strokeStyle = 'rgba(100,200,255,0.2)';
   ctx.lineWidth = 1;
   for (let i = 0; i < 8; i++) {
     ctx.beginPath();
     for (let x = 0; x < GW; x += 10) {
-      const y = 40 + i * 35 + Math.sin((x + snakeDist + i * 30) * 0.02 + snakeWave) * 8;
+      const y = Math.floor(40 + i * 35 + Math.sin((x + snakeDist + i * 30) * 0.02 + snakeWave) * 8);
       if (x === 0) ctx.moveTo(x, y);
       else ctx.lineTo(x, y);
     }
@@ -1583,57 +2262,53 @@ function drawSnakeScene() {
   // Obstacles
   for (const ob of snakeObs) {
     const relDist = ob.dist - snakeDist;
-    const ox = relDist + 60;
+    const ox = Math.floor(relDist + 60);
     if (ox < -40 || ox > GW + 40) continue;
     if (ob.type === 'rock') {
       ctx.fillStyle = '#445566';
       ctx.beginPath();
-      ctx.arc(ox, ob.y, ob.w/2, 0, Math.PI * 2);
+      ctx.arc(ox, Math.floor(ob.y), Math.floor(ob.w/2), 0, Math.PI * 2);
       ctx.fill();
       ctx.fillStyle = '#334455';
       ctx.beginPath();
-      ctx.arc(ox - 3, ob.y - 3, ob.w/4, 0, Math.PI * 2);
+      ctx.arc(ox - 3, Math.floor(ob.y) - 3, Math.floor(ob.w/4), 0, Math.PI * 2);
       ctx.fill();
     } else {
       ctx.fillStyle = '#553311';
-      ctx.fillRect(ox - ob.w/2, ob.y - ob.h/2, ob.w, ob.h);
+      ctx.fillRect(ox - Math.floor(ob.w/2), Math.floor(ob.y) - Math.floor(ob.h/2), ob.w, ob.h);
       ctx.fillStyle = '#442200';
-      ctx.fillRect(ox - ob.w/2 + 3, ob.y - ob.h/2 + 3, ob.w - 6, ob.h - 6);
+      ctx.fillRect(ox - Math.floor(ob.w/2) + 3, Math.floor(ob.y) - Math.floor(ob.h/2) + 3, ob.w - 6, ob.h - 6);
     }
   }
 
   // Snake mount
   const p = player;
-  const snakeBaseY = p.snakeY;
+  const snakeBaseY = Math.floor(p.snakeY);
   ctx.fillStyle = '#44aa33';
   ctx.beginPath();
   for (let i = 0; i < 8; i++) {
     const sx = 60 - i * 12;
-    const sy = snakeBaseY + Math.sin(snakeWave + i * 0.5) * 5;
+    const sy = snakeBaseY + Math.floor(Math.sin(snakeWave + i * 0.5) * 5);
     ctx.arc(sx, sy, 8 - i * 0.5, 0, Math.PI * 2);
   }
   ctx.fill();
 
-  // Snake head
   ctx.fillStyle = '#55cc44';
   ctx.beginPath();
-  ctx.arc(70, snakeBaseY + Math.sin(snakeWave) * 3, 10, 0, Math.PI * 2);
+  ctx.arc(70, snakeBaseY + Math.floor(Math.sin(snakeWave) * 3), 10, 0, Math.PI * 2);
   ctx.fill();
-  // Snake eye
   ctx.fillStyle = '#ff0';
   ctx.beginPath();
-  ctx.arc(75, snakeBaseY + Math.sin(snakeWave) * 3 - 3, 3, 0, Math.PI * 2);
+  ctx.arc(75, snakeBaseY + Math.floor(Math.sin(snakeWave) * 3) - 3, 3, 0, Math.PI * 2);
   ctx.fill();
 
-  // Player riding
-  ctx.fillStyle = '#33aa55';
+  ctx.fillStyle = statB.color || '#33aa55';
   ctx.fillRect(52, snakeBaseY - 25, 16, 18);
   ctx.fillStyle = '#44cc66';
   ctx.beginPath();
   ctx.arc(60, snakeBaseY - 30, 8, 0, Math.PI * 2);
   ctx.fill();
 
-  // Splash effects
   if (frame % 8 === 0) {
     TAS.particles.spawn(30, snakeBaseY + 5, '#88ddff', 2, 1, { size: 1, gravity: 1 });
   }
@@ -1648,7 +2323,7 @@ function drawProgressBar(pct) {
   ctx.fillStyle = '#222';
   ctx.fillRect(bx, by, barW, barH);
   ctx.fillStyle = '#44ff88';
-  ctx.fillRect(bx, by, barW * TAS.math.clamp(pct, 0, 1), barH);
+  ctx.fillRect(bx, by, Math.floor(barW * TAS.math.clamp(pct, 0, 1)), barH);
   ctx.strokeStyle = '#666';
   ctx.lineWidth = 1;
   ctx.strokeRect(bx, by, barW, barH);
@@ -1656,42 +2331,68 @@ function drawProgressBar(pct) {
 
 // === HUD ===
 function drawHUD() {
-  // Top bar
-  ctx.fillStyle = 'rgba(10,5,20,0.75)';
-  ctx.fillRect(0, 0, GW, 30);
+  ctx.fillStyle = 'rgba(10,5,20,0.8)';
+  ctx.fillRect(0, 0, GW, 34);
 
-  // Score
+  // Score (INT multiplied)
   ctx.fillStyle = '#ffdd44';
-  ctx.font = 'bold 12px monospace';
+  ctx.font = 'bold 11px monospace';
   ctx.textAlign = 'left';
-  ctx.fillText('SCORE: ' + score, 6, 18);
+  ctx.fillText('SCORE ' + score, 6, 13);
 
-  // Stage
-  ctx.fillStyle = '#88ccff';
+  // Zone indicator
+  ctx.fillStyle = ZONE_PALETTES[stage].accent;
+  ctx.font = 'bold 10px monospace';
   ctx.textAlign = 'center';
-  ctx.fillText('S' + (stage + 1), GW/2, 18);
+  ctx.fillText(STAGE_NAMES[stage], GW/2, 13);
+
+  // Stage number
+  ctx.fillStyle = '#888';
+  ctx.font = '8px monospace';
+  ctx.fillText('STAGE ' + (stage + 1), GW/2, 23);
 
   // Lives
   ctx.textAlign = 'right';
   for (let i = 0; i < lives; i++) {
-    ctx.fillStyle = '#44dd88';
+    ctx.fillStyle = statB.color || '#44dd88';
     ctx.beginPath();
-    ctx.arc(GW - 12 - i * 18, 15, 6, 0, Math.PI * 2);
+    ctx.arc(GW - 12 - i * 16, 12, 5, 0, Math.PI * 2);
     ctx.fill();
   }
 
   // Health bar
-  const hpW = 80, hpH = 8;
-  const hpX = 6, hpY = 24;
+  const hpW = 80, hpH = 7;
+  const hpX = 6, hpY = 20;
   if (player) {
     ctx.fillStyle = '#300';
     ctx.fillRect(hpX, hpY, hpW, hpH);
     const hpPct = player.hp / player.maxHp;
     ctx.fillStyle = hpPct > 0.5 ? '#44dd88' : hpPct > 0.25 ? '#ddaa44' : '#dd4444';
-    ctx.fillRect(hpX, hpY, hpW * hpPct, hpH);
-    ctx.strokeStyle = '#666';
+    ctx.fillRect(hpX, hpY, Math.floor(hpW * hpPct), hpH);
+    ctx.strokeStyle = '#555';
     ctx.lineWidth = 1;
     ctx.strokeRect(hpX, hpY, hpW, hpH);
+    // HP text
+    ctx.fillStyle = '#fff';
+    ctx.font = '7px monospace';
+    ctx.textAlign = 'left';
+    ctx.fillText(player.hp + '/' + player.maxHp, hpX + hpW + 4, hpY + 6);
+  }
+
+  // Active power-up indicators
+  ctx.textAlign = 'left';
+  let puY = 40;
+  if (activeShield > 0) {
+    ctx.fillStyle = '#44ddaa';
+    ctx.font = '8px monospace';
+    ctx.fillText('SHIELD ' + Math.ceil(activeShield) + 's', 6, puY);
+    puY += 10;
+  }
+  if (reactorFistTimer > 0) {
+    ctx.fillStyle = '#ff8844';
+    ctx.font = '8px monospace';
+    ctx.fillText('REACTOR FIST ' + Math.ceil(reactorFistTimer) + 's', 6, puY);
+    puY += 10;
   }
 
   // Combo counter
@@ -1699,23 +2400,30 @@ function drawHUD() {
     ctx.fillStyle = '#ffaa00';
     ctx.font = 'bold 14px monospace';
     ctx.textAlign = 'center';
-    ctx.fillText(player.comboCount + 'x COMBO', GW/2, 50);
+    ctx.fillText(player.comboCount + 'x COMBO', GW/2, 52);
+  }
+
+  // Charge indicator
+  if (chargeReady) {
+    ctx.fillStyle = '#ffdd44';
+    ctx.font = 'bold 10px monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText('SMASH READY!', GW/2, 64);
   }
 }
 
-// === TITLE SCREEN ===
+// === TITLE SCREEN (Pass 3 — NES controls with dotted leaders) ===
 function drawTitleScreen() {
-  // Dark bg with spore particles
   ctx.fillStyle = '#0a0a12';
   ctx.fillRect(0, 0, GW, GH);
 
   // Floating spores
   for (let i = 0; i < 20; i++) {
-    const x = (frame * 0.3 + i * 30) % GW;
-    const y = (Math.sin(frame * 0.01 + i) * 40) + GH/2 + i * 8;
-    ctx.fillStyle = `rgba(68,220,100,${0.2 + Math.sin(frame*0.02+i)*0.1})`;
+    const x = Math.floor((frame * 0.3 + i * 30) % GW);
+    const y = Math.floor((Math.sin(frame * 0.01 + i) * 40) + GH/2 + i * 8) % GH;
+    ctx.fillStyle = 'rgba(68,220,100,' + (0.2 + Math.sin(frame*0.02+i)*0.1).toFixed(2) + ')';
     ctx.beginPath();
-    ctx.arc(x, y % GH, 2 + Math.sin(i) * 1, 0, Math.PI * 2);
+    ctx.arc(x, y, 2 + Math.floor(Math.sin(i)), 0, Math.PI * 2);
     ctx.fill();
   }
 
@@ -1723,99 +2431,190 @@ function drawTitleScreen() {
   ctx.textAlign = 'center';
   ctx.fillStyle = '#000';
   ctx.font = 'bold 28px monospace';
-  ctx.fillText('BATTLETOADS', GW/2 + 2, 82);
-  ctx.fillStyle = '#44dd88';
-  ctx.fillText('BATTLETOADS', GW/2, 80);
+  ctx.fillText('BATTLETOADS', GW/2 + 2, 62);
+  ctx.fillStyle = statB.color || '#44dd88';
+  ctx.fillText('BATTLETOADS', GW/2, 60);
 
   ctx.fillStyle = '#000';
   ctx.font = 'bold 14px monospace';
-  ctx.fillText('OF TASERN', GW/2 + 1, 101);
+  ctx.fillText('OF TASERN', GW/2 + 1, 81);
   ctx.fillStyle = '#88ffaa';
-  ctx.fillText('OF TASERN', GW/2, 100);
+  ctx.fillText('OF TASERN', GW/2, 80);
 
   // Baseling warrior preview
   ctx.save();
-  ctx.translate(GW/2, 170);
-  ctx.fillStyle = '#33aa55';
+  ctx.translate(Math.floor(GW/2), 140);
+  ctx.fillStyle = statB.color || '#33aa55';
   ctx.fillRect(-10, -30, 20, 24);
   ctx.fillStyle = '#44cc66';
   ctx.beginPath();
   ctx.arc(0, -36, 12, 0, Math.PI * 2);
   ctx.fill();
+  // Headband
+  ctx.fillStyle = '#dd4444';
+  ctx.fillRect(-12, -38, 24, 3);
   ctx.fillStyle = '#fff';
   ctx.fillRect(4, -38, 5, 5);
   ctx.fillStyle = '#111';
   ctx.fillRect(5, -37, 3, 3);
-  // Flex arms
   const armPump = Math.sin(frame * 0.04) * 3;
-  ctx.fillStyle = '#33aa55';
-  ctx.fillRect(-18, -28 + armPump, 8, 14);
-  ctx.fillRect(10, -28 - armPump, 8, 14);
-  // Giant fist
+  ctx.fillStyle = statB.color || '#33aa55';
+  ctx.fillRect(-18, -28 + Math.floor(armPump), 8, 14);
+  ctx.fillRect(10, -28 - Math.floor(armPump), 8, 14);
   ctx.fillStyle = '#ffdd44';
   ctx.beginPath();
-  ctx.arc(22, -26 - armPump, 10 + Math.sin(frame*0.06)*2, 0, Math.PI * 2);
+  ctx.arc(22, -26 - Math.floor(armPump), Math.floor(10 + Math.sin(frame*0.06)*2), 0, Math.PI * 2);
   ctx.fill();
   ctx.restore();
 
-  // Controls
-  ctx.fillStyle = '#888';
-  ctx.font = '10px monospace';
-  ctx.fillText('ARROWS: Move | Z: Punch | X: Kick | SPACE: Jump', GW/2, 230);
-  ctx.fillText('Combo finishers transform into GIANT attacks!', GW/2, 245);
+  // Stat bar (Pass 1)
+  drawStatBar(190);
+
+  // NES-style controls with dotted leaders (Pass 3)
+  const ctrlY = 228;
+  ctx.font = '9px monospace';
+  const controls = [
+    ['ARROWS', 'Move'],
+    ['Z / J', 'Punch'],
+    ['X / K', 'Kick'],
+    ['SPACE', 'Jump'],
+    ['HOLD Z', 'Charged Smash']
+  ];
+  const colW = 200;
+  const startX = Math.floor(GW/2 - colW/2);
+  for (let i = 0; i < controls.length; i++) {
+    const cy = ctrlY + i * 12;
+    const label = controls[i][0];
+    const action = controls[i][1];
+    ctx.fillStyle = '#aaa';
+    ctx.textAlign = 'left';
+    ctx.fillText(label, startX, cy);
+    ctx.textAlign = 'right';
+    ctx.fillText(action, startX + colW, cy);
+    // Dotted leader
+    const labelW = ctx.measureText(label).width;
+    const actionW = ctx.measureText(action).width;
+    const dotStart = startX + labelW + 4;
+    const dotEnd = startX + colW - actionW - 4;
+    ctx.fillStyle = '#444';
+    for (let dx = dotStart; dx < dotEnd; dx += 6) {
+      ctx.fillRect(Math.floor(dx), cy - 2, 2, 1);
+    }
+  }
+
+  ctx.fillStyle = '#555';
+  ctx.font = '8px monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText('Combo 3 hits for GIANT transform attacks!', GW/2, ctrlY + controls.length * 12 + 8);
 
   // High score
   if (highScore > 0) {
     ctx.fillStyle = '#666';
     ctx.font = '10px monospace';
-    ctx.fillText('HIGH SCORE: ' + highScore, GW/2, 270);
+    ctx.fillText('HIGH SCORE: ' + highScore, GW/2, GH - 48);
   }
 
   // Start prompt
-  const pulse = Math.sin(frame * 0.05) * 0.3 + 0.7;
-  ctx.globalAlpha = pulse;
+  const pulseA = Math.sin(frame * 0.05) * 0.3 + 0.7;
+  ctx.globalAlpha = pulseA;
   ctx.fillStyle = '#ffdd44';
-  ctx.font = 'bold 14px monospace';
-  ctx.fillText('PRESS ANY KEY TO START', GW/2, GH - 30);
+  ctx.font = 'bold 12px monospace';
+  ctx.fillText('PRESS ANY KEY TO START', GW/2, GH - 28);
   ctx.globalAlpha = 1;
 }
 
-// === STAGE INTRO ===
+// Stat bar on title (Pass 1)
+function drawStatBar(y) {
+  const stats = [
+    { label: 'STR', val: statB.str, color: '#ff4444' },
+    { label: 'DEX', val: statB.dex, color: '#44ff44' },
+    { label: 'CON', val: statB.con, color: '#ffaa44' },
+    { label: 'INT', val: statB.int, color: '#4488ff' },
+    { label: 'WIS', val: statB.wis, color: '#aa44ff' },
+    { label: 'CHA', val: statB.cha, color: '#ff44aa' }
+  ];
+
+  const barW = 30, barH = 5, gap = 6;
+  const totalW = stats.length * (barW + 22 + gap);
+  const sx = Math.floor(GW/2 - totalW/2);
+
+  ctx.font = '7px monospace';
+  for (let i = 0; i < stats.length; i++) {
+    const s = stats[i];
+    const bx = sx + i * (barW + 22 + gap);
+
+    ctx.fillStyle = '#888';
+    ctx.textAlign = 'left';
+    ctx.fillText(s.label, bx, y + 4);
+
+    ctx.fillStyle = '#222';
+    ctx.fillRect(bx + 22, y - 2, barW, barH);
+    const fill = Math.min(1, s.val / 20);
+    ctx.fillStyle = s.color;
+    ctx.fillRect(bx + 22, y - 2, Math.floor(barW * fill), barH);
+  }
+
+  // Baseling name + level
+  ctx.fillStyle = statB.color || '#44dd88';
+  ctx.font = '8px monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText(statB.name + (statB.level > 0 ? ' Lv.' + statB.level : ''), GW/2, y + 16);
+}
+
+// === STAGE INTRO (Pass 3) ===
 function drawStageIntro() {
+  const pal = ZONE_PALETTES[stage];
   ctx.fillStyle = '#0a0a12';
   ctx.fillRect(0, 0, GW, GH);
 
+  // Decorative lines
+  ctx.strokeStyle = pal.accent;
+  ctx.globalAlpha = 0.3;
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(GW/2 - 120, GH/2 - 50);
+  ctx.lineTo(GW/2 + 120, GH/2 - 50);
+  ctx.moveTo(GW/2 - 120, GH/2 + 50);
+  ctx.lineTo(GW/2 + 120, GH/2 + 50);
+  ctx.stroke();
+  ctx.globalAlpha = 1;
+
   ctx.textAlign = 'center';
-  ctx.fillStyle = '#44dd88';
-  ctx.font = 'bold 12px monospace';
-  ctx.fillText('STAGE ' + (stage + 1), GW/2, GH/2 - 30);
+  ctx.fillStyle = pal.accent;
+  ctx.font = 'bold 11px monospace';
+  ctx.fillText('STAGE ' + (stage + 1), GW/2, GH/2 - 35);
 
   ctx.fillStyle = '#ffffff';
-  ctx.font = 'bold 18px monospace';
-  ctx.fillText(STAGE_NAMES[stage], GW/2, GH/2);
+  ctx.font = 'bold 20px monospace';
+  ctx.fillText(STAGE_NAMES[stage], GW/2, GH/2 - 5);
 
   const typeLabel = {
     brawl: 'BEAT EM UP', speeder: 'TURBO TUNNEL',
     rappel: 'VERTICAL DESCENT', snake: 'SERPENT RAPIDS', boss: 'BOSS GAUNTLET'
   };
   ctx.fillStyle = '#ff8844';
-  ctx.font = '11px monospace';
-  ctx.fillText(typeLabel[STAGE_TYPES[stage]], GW/2, GH/2 + 25);
+  ctx.font = 'bold 11px monospace';
+  ctx.fillText(typeLabel[STAGE_TYPES[stage]], GW/2, GH/2 + 20);
+
+  // Zone description (Pass 3)
+  ctx.fillStyle = '#777';
+  ctx.font = '9px monospace';
+  ctx.fillText(ZONE_DESCS[stage], GW/2, GH/2 + 40);
 
   // Tips
   const tips = [
     'Combo 3 hits for transform attacks!',
-    'Defeat the Spore King!',
+    'Defeat the Spore King! Watch for spore rain.',
     'Dodge walls! Hit ramps for bonus!',
-    'Watch for falling rocks!',
-    'Lava pits ahead!',
+    'Watch for falling rocks and goo puddles!',
+    'Lava pits and reactor rats ahead!',
     'Kick enemies off the walls!',
     'Ride the serpent, avoid rocks!',
-    'Three bosses await...'
+    'Three bosses await... collect power-ups!'
   ];
-  ctx.fillStyle = '#888';
-  ctx.font = '9px monospace';
-  ctx.fillText(tips[stage], GW/2, GH/2 + 50);
+  ctx.fillStyle = '#555';
+  ctx.font = '8px monospace';
+  ctx.fillText(tips[stage], GW/2, GH/2 + 58);
 }
 
 // === VICTORY ===
@@ -1823,10 +2622,9 @@ function drawVictory() {
   ctx.fillStyle = '#0a0a12';
   ctx.fillRect(0, 0, GW, GH);
 
-  // Celebration particles
   if (frame % 10 === 0) {
     const colors = ['#ff4444','#44ff44','#4444ff','#ffff44','#ff44ff'];
-    TAS.particles.spawn(Math.random() * GW, Math.random() * GH/2, colors[Math.floor(Math.random()*5)], 3, 2, { gravity: 1 });
+    TAS.particles.spawn(Math.floor(Math.random() * GW), Math.floor(Math.random() * GH/2), colors[Math.floor(Math.random()*5)], 3, 2, { gravity: 1 });
   }
 
   ctx.save();
@@ -1834,8 +2632,8 @@ function drawVictory() {
   ctx.restore();
 
   ctx.textAlign = 'center';
-  const pulse = Math.sin(frame * 0.04) * 0.2 + 0.8;
-  ctx.globalAlpha = pulse;
+  const pulseV = Math.sin(frame * 0.04) * 0.2 + 0.8;
+  ctx.globalAlpha = pulseV;
   ctx.fillStyle = '#ffdd44';
   ctx.font = 'bold 24px monospace';
   ctx.fillText('VICTORY!', GW/2, 80);

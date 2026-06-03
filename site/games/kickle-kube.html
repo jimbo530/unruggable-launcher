@@ -30,8 +30,47 @@ var ctx = TAS.ctx;
 TAS.initCanvas(GW, GH);
 TAS.input.initTouch({ buttons: ['a', 'b'], labels: { a: 'FREEZE', b: 'PILLAR' } });
 
+// === STAT BONUSES (PASS 1) ===
+var statB = { STR: 5, DEX: 5, CON: 5, INT: 5, WIS: 5, CHA: 5 };
+
+(function loadStats() {
+  if (window.NftLoader && NftLoader.stats) {
+    var s = NftLoader.stats;
+    if (s.STR !== undefined) statB.STR = Math.floor(Number(s.STR)) || 5;
+    if (s.DEX !== undefined) statB.DEX = Math.floor(Number(s.DEX)) || 5;
+    if (s.CON !== undefined) statB.CON = Math.floor(Number(s.CON)) || 5;
+    if (s.INT !== undefined) statB.INT = Math.floor(Number(s.INT)) || 5;
+    if (s.WIS !== undefined) statB.WIS = Math.floor(Number(s.WIS)) || 5;
+    if (s.CHA !== undefined) statB.CHA = Math.floor(Number(s.CHA)) || 5;
+  }
+})();
+
+// === STAT-DERIVED FUNCTIONS ===
+// STR: freeze power (freeze duration, ice block push range)
+function getFreezeDuration() { return 6 + Math.floor(statB.STR * 0.4); } // statB ref 1
+function getFreezePower() { return 1 + Math.floor(statB.STR / 10); } // statB ref 2 - can freeze through 1+ enemies
+// DEX: movement speed, input cooldown reduction
+function getMoveSpeed() { return Math.max(0.06, 0.13 - statB.DEX * 0.003); } // statB ref 3
+function getBlockSlideSpeed() { return 8 + Math.floor(statB.DEX * 0.3); } // statB ref 4
+// CON: HP/lives, damage resistance
+function getMaxLives() { return 3 + Math.floor(statB.CON / 6); } // statB ref 5
+function getDeathResistChance() { return Math.min(0.25, statB.CON * 0.01); } // statB ref 6
+// INT: score multiplier, puzzle hints
+function getScoreMult() { return 1 + Math.floor(statB.INT * 0.08 * 100) / 100; } // statB ref 7
+function getHintCharges() { return Math.floor(statB.INT / 6); } // statB ref 8
+function getBonusGemScore() { return Math.floor(statB.INT * 5); } // statB ref 9
+// WIS: breath cooldown, pillar duration
+function getFreezeCooldown() { return Math.max(0.1, 0.4 - statB.WIS * 0.012); } // statB ref 10
+function getPillarCooldown() { return Math.max(0.3, 1.0 - statB.WIS * 0.025); } // statB ref 11
+function getPillarDuration() { return 5 + Math.floor(statB.WIS * 0.3); } // statB ref 12
+// CHA: item drops, bonus pickups, gem magnetism range
+function getDropChance() { return Math.min(0.3, 0.05 + statB.CHA * 0.01); } // statB ref 13
+function getGemMagnetRange() { return 1 + Math.floor(statB.CHA / 8); } // statB ref 14
+function getBonusTimeOnClear() { return Math.floor(statB.CHA * 0.5); } // statB ref 15
+function getItemDuration() { return 5 + Math.floor(statB.CHA * 0.2); } // statB ref 16
+
 // Tile types
-var T = { GROUND: 0, WATER: 1, WALL: 2, GEM: 3, SPRING_U: 4, SPRING_D: 5, SPRING_L: 6, SPRING_R: 7, CONV_U: 8, CONV_D: 9, CONV_L: 10, CONV_R: 11, ICE: 12, PILLAR: 13, FILLED: 14 };
+var T = { GROUND: 0, WATER: 1, WALL: 2, GEM: 3, SPRING_U: 4, SPRING_D: 5, SPRING_L: 6, SPRING_R: 7, CONV_U: 8, CONV_D: 9, CONV_L: 10, CONV_R: 11, ICE: 12, PILLAR: 13, FILLED: 14, REACTOR_ICE: 15, SPORE_PATCH: 16, MYCELIAL_PILLAR: 17 };
 
 // Directions
 var DIR = { UP: 0, DOWN: 1, LEFT: 2, RIGHT: 3 };
@@ -64,12 +103,27 @@ var pillarCooldown = 0;
 var worldSelectCursor = 0;
 var levelSelectCursor = 0;
 var selectState = 'world'; // 'world' or 'level'
+var hintChargesLeft = 0;
+var items = []; // dropped items on ground
+var activeItems = []; // active power-ups on player
+var shakeTimer = 0;
+var shakeIntensity = 0;
+var isBossLevel = false;
+var bossState = null;
 
-// World definitions
-var WORLD_NAMES = ['Garden Land', 'Cake Land', 'Toy Land', 'Star Land'];
-var WORLD_COLORS = ['#44cc66', '#ff88cc', '#88aaff', '#ffdd44'];
-var WORLD_BG = ['#1a3320', '#2a1525', '#151a2e', '#2a2510'];
+// World definitions (PASS 3 - Tasern world names)
+var WORLD_NAMES = ['Mycelial Meadows', 'Reactor Ridge', 'Spore Caverns', 'Fungal Apex'];
+var WORLD_COLORS = ['#44cc66', '#ff6644', '#88aaff', '#ffdd44'];
+var WORLD_BG = ['#0a1a10', '#1a0a08', '#0a0f1e', '#1a1808'];
 var WORLD_LEVELS = [6, 6, 6, 7]; // levels per world
+
+// Item types (PASS 2 - Tasern items)
+var ITEM_TYPES = [
+  { name: 'Spore Shield', color: '#44cc88', effect: 'shield', duration: 8 },
+  { name: 'Reactor Charge', color: '#ff6644', effect: 'speedboost', duration: 6 },
+  { name: 'Mycelial Sight', color: '#aa88ff', effect: 'reveal', duration: 10 },
+  { name: 'Fungal Armor', color: '#88cc44', effect: 'armor', duration: 7 }
+];
 
 // Progress
 var progress = loadProgress();
@@ -85,10 +139,11 @@ function saveProgress() {
 
 // === LEVEL DATA ===
 // Legend: 0=ground, 1=water, 2=wall, 3=gem, 4-7=spring(U/D/L/R), 8-11=conv(U/D/L/R)
-// Enemies: S=slime, P=spinner, C=chaser, G=ghost (separate array)
+// 15=reactor ice, 16=spore patch, 17=mycelial pillar
+// Enemies: slime, spinner, chaser, ghost, reactor_fireball, spore_slime
 // Player start: px, py
 var LEVELS = [
-  // === WORLD 1: Garden Land (levels 0-5) ===
+  // === WORLD 1: Mycelial Meadows (levels 0-5) ===
   // Level 1: Simple intro - one gem, one water gap
   { grid: [
     [2,2,2,2,2,2,2,2,2,2,2,2],
@@ -102,7 +157,7 @@ var LEVELS = [
     [2,0,0,0,0,0,0,0,0,0,0,2],
     [2,0,0,0,0,0,0,0,0,0,0,2],
     [2,2,2,2,2,2,2,2,2,2,2,2]
-  ], px: 1, py: 1, enemies: [{type:'slime',x:8,y:3}], par: 30 },
+  ], px: 1, py: 1, enemies: [{type:'spore_slime',x:8,y:3}], par: 30 },
   // Level 2: Two gems, longer bridge needed
   { grid: [
     [2,2,2,2,2,2,2,2,2,2,2,2],
@@ -116,7 +171,7 @@ var LEVELS = [
     [2,0,0,0,0,0,0,0,0,0,0,2],
     [2,0,0,0,0,0,0,0,0,0,0,2],
     [2,2,2,2,2,2,2,2,2,2,2,2]
-  ], px: 1, py: 9, enemies: [{type:'slime',x:6,y:6},{type:'slime',x:3,y:2}], par: 45 },
+  ], px: 1, py: 9, enemies: [{type:'spore_slime',x:6,y:6},{type:'slime',x:3,y:2}], par: 45 },
   // Level 3: L-shaped water, need to build bridge from corner
   { grid: [
     [2,2,2,2,2,2,2,2,2,2,2,2],
@@ -130,40 +185,40 @@ var LEVELS = [
     [2,0,0,0,0,0,0,0,0,0,0,2],
     [2,0,0,0,0,0,0,0,0,0,0,2],
     [2,2,2,2,2,2,2,2,2,2,2,2]
-  ], px: 1, py: 5, enemies: [{type:'slime',x:7,y:2},{type:'slime',x:9,y:8},{type:'slime',x:5,y:5}], par: 50 },
-  // Level 4: Island gem, must bridge to it
+  ], px: 1, py: 5, enemies: [{type:'slime',x:7,y:2},{type:'spore_slime',x:9,y:8},{type:'slime',x:5,y:5}], par: 50 },
+  // Level 4: Island gem with spore patches
   { grid: [
     [2,2,2,2,2,2,2,2,2,2,2,2],
     [2,0,0,0,0,0,0,0,0,0,0,2],
-    [2,0,0,0,0,0,0,0,0,0,0,2],
+    [2,0,0,0,0,16,0,0,0,0,0,2],
     [2,0,0,0,1,1,1,1,0,0,0,2],
     [2,0,0,0,1,0,3,1,0,0,0,2],
     [2,0,0,0,1,1,1,1,0,0,0,2],
-    [2,0,0,0,0,0,0,0,0,0,0,2],
+    [2,0,0,16,0,0,0,0,16,0,0,2],
     [2,0,3,0,0,0,0,0,0,0,0,2],
     [2,0,0,0,0,0,0,0,0,0,0,2],
     [2,0,0,0,0,0,0,0,0,0,0,2],
     [2,2,2,2,2,2,2,2,2,2,2,2]
-  ], px: 1, py: 9, enemies: [{type:'slime',x:9,y:2},{type:'slime',x:2,y:4},{type:'spinner',x:9,y:7}], par: 60 },
+  ], px: 1, py: 9, enemies: [{type:'slime',x:9,y:2},{type:'spore_slime',x:2,y:4},{type:'spinner',x:9,y:7}], par: 60 },
   // Level 5: Multiple water patches and spinners
   { grid: [
     [2,2,2,2,2,2,2,2,2,2,2,2],
     [2,0,0,0,0,0,0,0,0,0,0,2],
     [2,0,3,0,0,1,1,0,0,0,0,2],
-    [2,0,0,0,0,1,1,0,0,0,0,2],
+    [2,0,0,0,0,1,1,0,0,16,0,2],
     [2,0,0,0,0,0,0,0,0,0,0,2],
-    [2,0,0,0,0,0,0,0,0,0,0,2],
+    [2,0,0,16,0,0,0,0,0,0,0,2],
     [2,0,0,0,0,0,0,1,1,0,0,2],
     [2,0,0,0,0,0,0,1,1,0,3,2],
     [2,0,0,0,0,0,0,0,0,0,0,2],
     [2,0,0,0,0,0,0,0,0,0,0,2],
     [2,2,2,2,2,2,2,2,2,2,2,2]
-  ], px: 5, py: 9, enemies: [{type:'spinner',x:3,y:5},{type:'spinner',x:9,y:4},{type:'slime',x:4,y:8}], par: 55 },
-  // Level 6: Gauntlet with wall maze
+  ], px: 5, py: 9, enemies: [{type:'spinner',x:3,y:5},{type:'spinner',x:9,y:4},{type:'spore_slime',x:4,y:8}], par: 55 },
+  // Level 6: Gauntlet with wall maze + reactor ice
   { grid: [
     [2,2,2,2,2,2,2,2,2,2,2,2],
     [2,0,0,0,2,0,0,0,0,0,0,2],
-    [2,0,0,0,2,0,0,0,0,3,0,2],
+    [2,0,0,0,2,0,15,0,0,3,0,2],
     [2,0,0,0,2,0,0,0,0,0,0,2],
     [2,0,0,0,0,0,2,2,2,0,0,2],
     [2,0,0,0,0,0,0,0,0,0,0,2],
@@ -172,14 +227,14 @@ var LEVELS = [
     [2,0,0,0,0,0,0,3,0,0,0,2],
     [2,0,0,0,0,0,0,0,0,0,0,2],
     [2,2,2,2,2,2,2,2,2,2,2,2]
-  ], px: 1, py: 9, enemies: [{type:'spinner',x:8,y:1},{type:'slime',x:6,y:8},{type:'chaser',x:1,y:1}], par: 65 },
+  ], px: 1, py: 9, enemies: [{type:'spinner',x:8,y:1},{type:'spore_slime',x:6,y:8},{type:'chaser',x:1,y:1}], par: 65 },
 
-  // === WORLD 2: Cake Land (levels 6-11) ===
-  // Level 7: Springs introduced
+  // === WORLD 2: Reactor Ridge (levels 6-11) ===
+  // Level 7: Springs + reactor fireballs introduced
   { grid: [
     [2,2,2,2,2,2,2,2,2,2,2,2],
     [2,0,0,0,0,0,0,0,0,0,0,2],
-    [2,0,0,0,0,0,0,0,0,0,0,2],
+    [2,0,0,0,0,0,15,0,0,0,0,2],
     [2,0,0,0,0,0,0,0,0,0,0,2],
     [2,0,0,1,1,1,4,0,0,0,0,2],
     [2,0,0,0,0,0,0,0,0,3,0,2],
@@ -188,7 +243,7 @@ var LEVELS = [
     [2,0,0,0,3,0,0,0,0,0,0,2],
     [2,0,0,0,0,0,0,0,0,0,0,2],
     [2,2,2,2,2,2,2,2,2,2,2,2]
-  ], px: 1, py: 9, enemies: [{type:'slime',x:8,y:2},{type:'spinner',x:2,y:3}], par: 50 },
+  ], px: 1, py: 9, enemies: [{type:'reactor_fireball',x:8,y:2},{type:'spinner',x:2,y:3}], par: 50 },
   // Level 8: Spring redirect puzzle
   { grid: [
     [2,2,2,2,2,2,2,2,2,2,2,2],
@@ -202,13 +257,13 @@ var LEVELS = [
     [2,0,0,0,0,0,0,0,0,0,0,2],
     [2,0,0,0,0,0,0,0,0,3,0,2],
     [2,2,2,2,2,2,2,2,2,2,2,2]
-  ], px: 1, py: 9, enemies: [{type:'slime',x:9,y:2},{type:'spinner',x:3,y:7},{type:'slime',x:7,y:9}], par: 60 },
-  // Level 9: Double spring bounce
+  ], px: 1, py: 9, enemies: [{type:'reactor_fireball',x:9,y:2},{type:'spinner',x:3,y:7},{type:'slime',x:7,y:9}], par: 60 },
+  // Level 9: Double spring bounce + reactor ice
   { grid: [
     [2,2,2,2,2,2,2,2,2,2,2,2],
     [2,0,0,0,0,0,0,0,0,0,0,2],
     [2,0,0,0,0,0,0,0,0,3,0,2],
-    [2,0,0,1,1,1,0,0,0,0,0,2],
+    [2,0,0,1,1,1,0,0,15,0,0,2],
     [2,0,0,1,1,1,5,0,0,0,0,2],
     [2,0,0,0,0,0,0,0,0,0,0,2],
     [2,0,0,0,0,7,0,0,0,0,0,2],
@@ -216,7 +271,7 @@ var LEVELS = [
     [2,0,3,0,0,0,0,0,0,0,0,2],
     [2,0,0,0,0,0,0,0,0,0,0,2],
     [2,2,2,2,2,2,2,2,2,2,2,2]
-  ], px: 1, py: 9, enemies: [{type:'spinner',x:8,y:5},{type:'chaser',x:9,y:8},{type:'slime',x:2,y:2}], par: 55 },
+  ], px: 1, py: 9, enemies: [{type:'spinner',x:8,y:5},{type:'chaser',x:9,y:8},{type:'reactor_fireball',x:2,y:2}], par: 55 },
   // Level 10: Wide water crossing
   { grid: [
     [2,2,2,2,2,2,2,2,2,2,2,2],
@@ -230,7 +285,7 @@ var LEVELS = [
     [2,0,0,0,0,3,0,0,0,0,0,2],
     [2,0,0,0,0,0,0,0,0,0,0,2],
     [2,2,2,2,2,2,2,2,2,2,2,2]
-  ], px: 1, py: 9, enemies: [{type:'slime',x:3,y:5},{type:'slime',x:6,y:6},{type:'slime',x:9,y:7},{type:'spinner',x:5,y:5}], par: 70 },
+  ], px: 1, py: 9, enemies: [{type:'slime',x:3,y:5},{type:'reactor_fireball',x:6,y:6},{type:'slime',x:9,y:7},{type:'spinner',x:5,y:5}], par: 70 },
   // Level 11: Maze with springs
   { grid: [
     [2,2,2,2,2,2,2,2,2,2,2,2],
@@ -244,12 +299,12 @@ var LEVELS = [
     [2,0,3,0,0,0,0,0,2,0,0,2],
     [2,0,0,0,0,0,0,0,2,0,0,2],
     [2,2,2,2,2,2,2,2,2,2,2,2]
-  ], px: 1, py: 9, enemies: [{type:'chaser',x:10,y:1},{type:'spinner',x:5,y:8},{type:'slime',x:8,y:5}], par: 65 },
-  // Level 12: Spring chain
+  ], px: 1, py: 9, enemies: [{type:'chaser',x:10,y:1},{type:'spinner',x:5,y:8},{type:'reactor_fireball',x:8,y:5}], par: 65 },
+  // Level 12: Spring chain + boss room preview
   { grid: [
     [2,2,2,2,2,2,2,2,2,2,2,2],
     [2,0,0,0,0,0,0,0,0,0,3,2],
-    [2,0,0,0,0,0,0,0,0,0,0,2],
+    [2,0,0,0,0,15,0,0,0,0,0,2],
     [2,0,0,1,1,0,0,1,1,0,0,2],
     [2,0,0,1,5,0,0,7,1,0,0,2],
     [2,0,0,0,0,0,0,0,0,0,0,2],
@@ -258,14 +313,14 @@ var LEVELS = [
     [2,3,0,0,0,0,0,0,0,0,0,2],
     [2,0,0,0,0,0,0,0,0,0,0,2],
     [2,2,2,2,2,2,2,2,2,2,2,2]
-  ], px: 5, py: 9, enemies: [{type:'spinner',x:2,y:2},{type:'chaser',x:9,y:8},{type:'slime',x:6,y:6},{type:'slime',x:3,y:7}], par: 70 },
+  ], px: 5, py: 9, enemies: [{type:'spinner',x:2,y:2},{type:'chaser',x:9,y:8},{type:'reactor_fireball',x:6,y:6},{type:'slime',x:3,y:7}], par: 70, boss: true },
 
-  // === WORLD 3: Toy Land (levels 12-17) ===
-  // Level 13: Conveyors introduced
+  // === WORLD 3: Spore Caverns (levels 12-17) ===
+  // Level 13: Conveyors + spore patches
   { grid: [
     [2,2,2,2,2,2,2,2,2,2,2,2],
     [2,0,0,0,0,0,0,0,0,0,0,2],
-    [2,0,0,0,0,0,0,0,0,0,0,2],
+    [2,0,0,0,16,0,0,0,16,0,0,2],
     [2,0,0,0,11,11,11,0,0,0,0,2],
     [2,0,0,0,0,0,0,0,0,0,0,2],
     [2,0,0,1,1,1,0,0,0,3,0,2],
@@ -274,27 +329,27 @@ var LEVELS = [
     [2,0,3,0,0,0,0,0,0,0,0,2],
     [2,0,0,0,0,0,0,0,0,0,0,2],
     [2,2,2,2,2,2,2,2,2,2,2,2]
-  ], px: 1, py: 9, enemies: [{type:'slime',x:8,y:2},{type:'spinner',x:7,y:7}], par: 55 },
-  // Level 14: Conveyor + spring combo
+  ], px: 1, py: 9, enemies: [{type:'spore_slime',x:8,y:2},{type:'spinner',x:7,y:7}], par: 55 },
+  // Level 14: Conveyor + spring combo + mycelial pillars
   { grid: [
     [2,2,2,2,2,2,2,2,2,2,2,2],
     [2,0,0,0,0,0,0,0,0,0,0,2],
     [2,0,0,0,0,10,10,10,0,0,0,2],
-    [2,0,0,0,0,0,0,0,0,0,0,2],
+    [2,0,17,0,0,0,0,0,0,0,0,2],
     [2,0,0,1,1,0,0,0,0,0,3,2],
     [2,0,0,1,1,0,0,0,0,0,0,2],
     [2,0,0,0,0,4,0,0,0,0,0,2],
-    [2,0,0,0,0,0,0,0,0,0,0,2],
+    [2,0,0,0,0,0,0,17,0,0,0,2],
     [2,0,0,0,0,0,0,0,3,0,0,2],
     [2,0,0,0,0,0,0,0,0,0,0,2],
     [2,2,2,2,2,2,2,2,2,2,2,2]
-  ], px: 1, py: 9, enemies: [{type:'spinner',x:9,y:7},{type:'chaser',x:8,y:1},{type:'slime',x:3,y:8}], par: 60 },
+  ], px: 1, py: 9, enemies: [{type:'spinner',x:9,y:7},{type:'chaser',x:8,y:1},{type:'spore_slime',x:3,y:8}], par: 60 },
   // Level 15: Ghost appears!
   { grid: [
     [2,2,2,2,2,2,2,2,2,2,2,2],
     [2,0,0,0,0,0,0,0,0,0,0,2],
     [2,0,3,0,0,0,2,0,0,0,0,2],
-    [2,0,0,0,0,0,2,0,0,0,0,2],
+    [2,0,0,0,16,0,2,0,0,0,0,2],
     [2,0,0,0,1,1,2,0,0,0,0,2],
     [2,0,0,0,1,1,0,0,0,0,0,2],
     [2,0,0,0,0,0,0,0,0,3,0,2],
@@ -302,12 +357,12 @@ var LEVELS = [
     [2,0,0,0,0,0,0,0,0,0,0,2],
     [2,0,0,0,0,0,0,0,0,0,0,2],
     [2,2,2,2,2,2,2,2,2,2,2,2]
-  ], px: 1, py: 9, enemies: [{type:'ghost',x:9,y:3},{type:'slime',x:7,y:7},{type:'spinner',x:3,y:6}], par: 55 },
-  // Level 16: Conveyor maze
+  ], px: 1, py: 9, enemies: [{type:'ghost',x:9,y:3},{type:'spore_slime',x:7,y:7},{type:'spinner',x:3,y:6}], par: 55 },
+  // Level 16: Conveyor maze + reactor ice
   { grid: [
     [2,2,2,2,2,2,2,2,2,2,2,2],
     [2,0,0,0,0,0,0,0,0,0,0,2],
-    [2,0,0,9,0,0,0,0,8,0,0,2],
+    [2,0,0,9,0,15,0,0,8,0,0,2],
     [2,0,0,0,0,0,0,0,0,0,0,2],
     [2,0,11,0,1,1,1,0,10,0,0,2],
     [2,0,0,0,1,3,1,0,0,0,0,2],
@@ -316,7 +371,7 @@ var LEVELS = [
     [2,0,0,0,0,0,0,0,0,3,0,2],
     [2,0,0,0,0,0,0,0,0,0,0,2],
     [2,2,2,2,2,2,2,2,2,2,2,2]
-  ], px: 1, py: 9, enemies: [{type:'ghost',x:5,y:1},{type:'chaser',x:9,y:9},{type:'slime',x:2,y:5}], par: 70 },
+  ], px: 1, py: 9, enemies: [{type:'ghost',x:5,y:1},{type:'chaser',x:9,y:9},{type:'spore_slime',x:2,y:5}], par: 70 },
   // Level 17: Ghost + conveyor danger
   { grid: [
     [2,2,2,2,2,2,2,2,2,2,2,2],
@@ -326,47 +381,47 @@ var LEVELS = [
     [2,0,0,0,0,0,0,0,0,0,0,2],
     [2,0,1,1,1,0,0,1,1,0,0,2],
     [2,0,1,1,0,0,0,1,1,0,0,2],
-    [2,0,0,0,0,0,0,0,0,0,0,2],
+    [2,0,0,0,0,16,0,0,0,0,0,2],
     [2,0,0,0,0,3,0,0,0,0,0,2],
     [2,0,0,0,0,0,0,0,0,0,0,2],
     [2,2,2,2,2,2,2,2,2,2,2,2]
-  ], px: 1, py: 9, enemies: [{type:'ghost',x:5,y:2},{type:'ghost',x:8,y:7},{type:'spinner',x:9,y:4},{type:'slime',x:3,y:8}], par: 75 },
-  // Level 18: Big puzzle
+  ], px: 1, py: 9, enemies: [{type:'ghost',x:5,y:2},{type:'ghost',x:8,y:7},{type:'reactor_fireball',x:9,y:4},{type:'spore_slime',x:3,y:8}], par: 75 },
+  // Level 18: Big puzzle boss
   { grid: [
     [2,2,2,2,2,2,2,2,2,2,2,2],
     [2,0,0,0,0,2,0,0,0,0,0,2],
-    [2,0,3,0,0,2,0,0,0,0,0,2],
+    [2,0,3,0,0,2,0,15,0,0,0,2],
     [2,0,0,0,0,0,0,0,1,1,0,2],
     [2,0,0,0,0,0,0,0,1,3,0,2],
     [2,2,2,0,0,0,0,0,0,0,0,2],
-    [2,0,0,0,0,0,0,0,0,0,0,2],
+    [2,0,0,0,0,0,16,0,0,0,0,2],
     [2,0,0,0,0,4,0,0,0,0,0,2],
     [2,0,0,0,0,0,0,0,0,0,0,2],
     [2,0,0,0,0,0,0,0,0,3,0,2],
     [2,2,2,2,2,2,2,2,2,2,2,2]
-  ], px: 1, py: 9, enemies: [{type:'chaser',x:10,y:1},{type:'ghost',x:4,y:4},{type:'spinner',x:7,y:6},{type:'slime',x:3,y:7}], par: 80 },
+  ], px: 1, py: 9, enemies: [{type:'chaser',x:10,y:1},{type:'ghost',x:4,y:4},{type:'reactor_fireball',x:7,y:6},{type:'spore_slime',x:3,y:7}], par: 80, boss: true },
 
-  // === WORLD 4: Star Land (levels 18-24) ===
+  // === WORLD 4: Fungal Apex (levels 18-24) ===
   // Level 19: All mechanics - tight solution
   { grid: [
     [2,2,2,2,2,2,2,2,2,2,2,2],
     [2,0,0,0,0,0,0,0,0,0,0,2],
-    [2,0,3,0,0,0,0,0,0,0,0,2],
+    [2,0,3,0,0,15,0,0,0,0,0,2],
     [2,0,0,0,1,1,7,0,0,0,0,2],
     [2,0,0,0,1,1,0,0,0,0,0,2],
     [2,0,0,0,0,0,0,0,11,11,0,2],
     [2,0,0,0,0,0,0,0,0,0,0,2],
-    [2,0,0,0,0,0,0,0,0,3,0,2],
+    [2,0,0,0,0,16,0,0,0,3,0,2],
     [2,0,0,0,0,0,0,0,0,0,0,2],
     [2,0,0,0,0,0,0,0,0,0,0,2],
     [2,2,2,2,2,2,2,2,2,2,2,2]
-  ], px: 1, py: 9, enemies: [{type:'chaser',x:9,y:2},{type:'ghost',x:5,y:7},{type:'spinner',x:3,y:5}], par: 65 },
-  // Level 20: Narrow corridors
+  ], px: 1, py: 9, enemies: [{type:'chaser',x:9,y:2},{type:'ghost',x:5,y:7},{type:'reactor_fireball',x:3,y:5}], par: 65 },
+  // Level 20: Narrow corridors + mycelial pillars
   { grid: [
     [2,2,2,2,2,2,2,2,2,2,2,2],
     [2,0,0,2,0,0,0,2,0,0,0,2],
     [2,0,0,2,0,3,0,2,0,3,0,2],
-    [2,0,0,2,0,0,0,2,0,0,0,2],
+    [2,0,17,2,0,0,0,2,17,0,0,2],
     [2,0,0,0,0,0,0,0,0,0,0,2],
     [2,0,0,0,0,1,1,0,0,0,0,2],
     [2,0,0,0,0,1,1,0,0,0,0,2],
@@ -374,12 +429,12 @@ var LEVELS = [
     [2,0,0,0,0,0,0,0,0,0,0,2],
     [2,0,0,0,0,0,0,0,0,0,0,2],
     [2,2,2,2,2,2,2,2,2,2,2,2]
-  ], px: 5, py: 9, enemies: [{type:'chaser',x:1,y:1},{type:'chaser',x:10,y:1},{type:'ghost',x:5,y:4},{type:'spinner',x:8,y:7}], par: 70 },
-  // Level 21: Conveyor hell
+  ], px: 5, py: 9, enemies: [{type:'chaser',x:1,y:1},{type:'chaser',x:10,y:1},{type:'ghost',x:5,y:4},{type:'reactor_fireball',x:8,y:7}], par: 70 },
+  // Level 21: Conveyor hell + spore patches
   { grid: [
     [2,2,2,2,2,2,2,2,2,2,2,2],
     [2,0,0,0,0,11,11,11,11,0,0,2],
-    [2,0,0,0,0,0,0,0,0,0,0,2],
+    [2,0,16,0,0,0,0,0,0,16,0,2],
     [2,0,0,1,1,0,0,0,1,1,0,2],
     [2,0,0,1,3,0,0,0,3,1,0,2],
     [2,0,0,0,0,0,0,0,0,0,0,2],
@@ -388,7 +443,7 @@ var LEVELS = [
     [2,0,0,0,0,0,0,0,0,0,0,2],
     [2,0,0,0,0,0,0,0,0,0,0,2],
     [2,2,2,2,2,2,2,2,2,2,2,2]
-  ], px: 5, py: 9, enemies: [{type:'spinner',x:5,y:2},{type:'spinner',x:7,y:7},{type:'ghost',x:1,y:5},{type:'chaser',x:10,y:9}], par: 75 },
+  ], px: 5, py: 9, enemies: [{type:'spinner',x:5,y:2},{type:'reactor_fireball',x:7,y:7},{type:'ghost',x:1,y:5},{type:'chaser',x:10,y:9}], par: 75 },
   // Level 22: Island chain
   { grid: [
     [2,2,2,2,2,2,2,2,2,2,2,2],
@@ -402,7 +457,7 @@ var LEVELS = [
     [2,0,0,0,0,0,0,0,0,0,0,2],
     [2,0,0,0,0,0,0,0,0,0,0,2],
     [2,2,2,2,2,2,2,2,2,2,2,2]
-  ], px: 1, py: 9, enemies: [{type:'slime',x:2,y:5},{type:'slime',x:8,y:5},{type:'slime',x:5,y:7},{type:'spinner',x:9,y:3},{type:'chaser',x:1,y:1}], par: 80 },
+  ], px: 1, py: 9, enemies: [{type:'spore_slime',x:2,y:5},{type:'spore_slime',x:8,y:5},{type:'slime',x:5,y:7},{type:'reactor_fireball',x:9,y:3},{type:'chaser',x:1,y:1}], par: 80 },
   // Level 23: Spring pinball
   { grid: [
     [2,2,2,2,2,2,2,2,2,2,2,2],
@@ -416,35 +471,35 @@ var LEVELS = [
     [2,0,0,0,0,0,0,0,0,3,0,2],
     [2,0,0,0,0,0,0,0,0,0,0,2],
     [2,2,2,2,2,2,2,2,2,2,2,2]
-  ], px: 1, py: 9, enemies: [{type:'ghost',x:9,y:2},{type:'chaser',x:8,y:8},{type:'spinner',x:2,y:6},{type:'spinner',x:7,y:5}], par: 70 },
+  ], px: 1, py: 9, enemies: [{type:'ghost',x:9,y:2},{type:'chaser',x:8,y:8},{type:'reactor_fireball',x:2,y:6},{type:'spinner',x:7,y:5}], par: 70 },
   // Level 24: The gauntlet
   { grid: [
     [2,2,2,2,2,2,2,2,2,2,2,2],
     [2,0,0,0,0,0,0,0,0,0,3,2],
-    [2,0,0,0,0,0,0,0,0,0,0,2],
+    [2,0,15,0,0,0,0,0,15,0,0,2],
     [2,1,1,0,0,2,2,0,0,1,1,2],
     [2,1,3,0,0,0,0,0,0,1,1,2],
     [2,0,0,0,0,0,0,0,0,0,0,2],
-    [2,0,0,0,0,0,0,0,0,0,0,2],
+    [2,0,0,0,0,16,0,0,0,0,0,2],
     [2,0,0,0,11,11,11,0,0,0,0,2],
     [2,0,0,0,0,0,0,0,0,0,0,2],
     [2,0,0,0,0,0,0,0,0,0,0,2],
     [2,2,2,2,2,2,2,2,2,2,2,2]
-  ], px: 5, py: 9, enemies: [{type:'ghost',x:3,y:5},{type:'ghost',x:8,y:5},{type:'chaser',x:1,y:1},{type:'chaser',x:10,y:9},{type:'spinner',x:5,y:5}], par: 85 },
-  // Level 25: Final challenge
+  ], px: 5, py: 9, enemies: [{type:'ghost',x:3,y:5},{type:'ghost',x:8,y:5},{type:'chaser',x:1,y:1},{type:'chaser',x:10,y:9},{type:'reactor_fireball',x:5,y:5}], par: 85 },
+  // Level 25: Final challenge - BOSS
   { grid: [
     [2,2,2,2,2,2,2,2,2,2,2,2],
     [2,0,0,0,0,0,0,0,0,0,0,2],
     [2,0,3,0,0,1,1,0,0,3,0,2],
     [2,0,0,0,0,1,1,0,0,0,0,2],
-    [2,0,0,2,0,0,0,0,2,0,0,2],
-    [2,0,0,2,0,0,0,0,2,0,0,2],
+    [2,0,17,2,0,0,0,0,2,17,0,2],
+    [2,0,0,2,0,15,0,0,2,0,0,2],
     [2,0,0,0,0,1,1,0,0,0,0,2],
     [2,0,0,0,0,1,3,0,0,0,0,2],
     [2,0,0,0,0,0,0,0,0,0,0,2],
     [2,0,0,0,0,0,0,0,0,0,0,2],
     [2,2,2,2,2,2,2,2,2,2,2,2]
-  ], px: 5, py: 9, enemies: [{type:'ghost',x:5,y:5},{type:'ghost',x:3,y:3},{type:'chaser',x:9,y:1},{type:'chaser',x:1,y:8},{type:'spinner',x:7,y:8},{type:'spinner',x:2,y:5}], par: 90 }
+  ], px: 5, py: 9, enemies: [{type:'ghost',x:5,y:5},{type:'ghost',x:3,y:3},{type:'chaser',x:9,y:1},{type:'chaser',x:1,y:8},{type:'reactor_fireball',x:7,y:8},{type:'spinner',x:2,y:5}], par: 90, boss: true }
 ];
 
 // === AUDIO ===
@@ -480,6 +535,13 @@ function sfxPillar() {
 function sfxSpring() {
   TAS.audio.playTone(300, 0.08, 'sine', 0.07, 900);
 }
+function sfxItem() {
+  TAS.audio.playMelody([[660,0.06,'sine',0.06],[880,0.08,'sine',0.08]], 80);
+}
+function sfxBossHit() {
+  TAS.audio.playNoise(0.12, 0.1, 300);
+  TAS.audio.playTone(100, 0.15, 'sawtooth', 0.1, 50);
+}
 
 // === LEVEL MANAGEMENT ===
 function initLevel(idx) {
@@ -491,6 +553,8 @@ function initLevel(idx) {
   pillars = [];
   slidingBlocks = [];
   freezeProjectiles = [];
+  items = [];
+  activeItems = [];
   levelComplete = false;
   levelCompleteTimer = 0;
   levelTimer = 0;
@@ -498,6 +562,9 @@ function initLevel(idx) {
   inputCooldown = 0;
   freezeCooldown = 0;
   pillarCooldown = 0;
+  hintChargesLeft = getHintCharges();
+  isBossLevel = !!ld.boss;
+  bossState = isBossLevel ? { hp: 3 + Math.floor(world * 1.5), maxHp: 3 + Math.floor(world * 1.5), phase: 0, timer: 0, stunned: false, stunTimer: 0 } : null;
 
   // Copy grid
   for (var r = 0; r < ROWS; r++) {
@@ -521,6 +588,11 @@ function initLevel(idx) {
   player.dead = false;
   player.deathTimer = 0;
   player.moveTimer = 0;
+
+  // Lives: reset to stat-derived max on first level or game start
+  if (level === 0 || lives <= 0) {
+    lives = getMaxLives();
+  }
 
   // Enemies
   for (var i = 0; i < ld.enemies.length; i++) {
@@ -561,13 +633,13 @@ function getWorldLevel(idx) {
 function isSolid(x, y) {
   if (x < 0 || x >= COLS || y < 0 || y >= ROWS) return true;
   var t = grid[y][x];
-  return t === T.WALL || t === T.ICE || t === T.PILLAR;
+  return t === T.WALL || t === T.ICE || t === T.PILLAR || t === T.MYCELIAL_PILLAR;
 }
 
 function isWalkable(x, y) {
   if (x < 0 || x >= COLS || y < 0 || y >= ROWS) return false;
   var t = grid[y][x];
-  return t === T.GROUND || t === T.FILLED || t === T.GEM ||
+  return t === T.GROUND || t === T.FILLED || t === T.GEM || t === T.SPORE_PATCH || t === T.REACTOR_ICE ||
          (t >= T.SPRING_U && t <= T.CONV_R);
 }
 
@@ -590,7 +662,7 @@ function isConveyor(x, y) {
 
 function getSpringDir(x, y) {
   var t = grid[y][x];
-  return t - T.SPRING_U; // 0=up, 1=down, 2=left, 3=right
+  return t - T.SPRING_U;
 }
 
 function getConveyorDir(x, y) {
@@ -606,7 +678,29 @@ function hasEnemyAt(x, y) {
 }
 
 function hasIceBlockAt(x, y) {
-  return grid[y] && grid[y][x] === T.ICE;
+  return grid[y] && (grid[y][x] === T.ICE || grid[y][x] === T.REACTOR_ICE);
+}
+
+// === ITEM SYSTEM (PASS 2) ===
+function tryDropItem(x, y) {
+  if (Math.random() < getDropChance()) {
+    var type = ITEM_TYPES[TAS.math.randInt(0, ITEM_TYPES.length - 1)];
+    items.push({ x: x, y: y, type: type, life: 10, sparkle: 0 });
+    sfxItem();
+  }
+}
+
+function collectItem(item) {
+  activeItems.push({ effect: item.type.effect, timer: item.type.duration + getItemDuration() - 5, name: item.type.name });
+  sfxItem();
+  TAS.particles.spawn(item.x * TS + TS / 2, item.y * TS + TS / 2, item.type.color, 10, 2, { size: 2 });
+}
+
+function hasActiveEffect(effect) {
+  for (var i = 0; i < activeItems.length; i++) {
+    if (activeItems[i].effect === effect) return true;
+  }
+  return false;
 }
 
 // === PLAYER LOGIC ===
@@ -625,47 +719,75 @@ function movePlayer(dir) {
   if (isWalkable(nx, ny) && !hasEnemyAt(nx, ny)) {
     player.x = nx;
     player.y = ny;
-    player.moveTimer = 0.12;
+    player.moveTimer = getMoveSpeed();
 
-    // Check gem collection
+    // Spore patch effect: slow player
+    if (grid[ny][nx] === T.SPORE_PATCH) {
+      player.moveTimer += 0.08;
+      TAS.particles.spawn(nx * TS + TS / 2, ny * TS + TS / 2, '#66aa44', 4, 1, { size: 1 });
+    }
+
+    // Check gem collection (with magnet range from CHA)
+    var magnetRange = getGemMagnetRange();
     for (var i = 0; i < gems.length; i++) {
-      if (!gems[i].collected && gems[i].x === nx && gems[i].y === ny) {
-        gems[i].collected = true;
-        gemsCollected++;
-        score += 100;
-        sfxGem();
-        TAS.particles.spawn(nx * TS + TS / 2, ny * TS + TS / 2, '#ffdd44', 12, 3, { size: 2, gravity: 0.1 });
-        if (gemsCollected >= totalGems) {
-          levelComplete = true;
-          levelCompleteTimer = 2.5;
-          sfxLevelClear();
-          var timeBonus = Math.max(0, Math.floor((parTime - levelTimer) * 10));
-          score += timeBonus + 500;
-          if (score > highScore) {
-            highScore = score;
-            TAS.score.save('kicklekube_hi', highScore);
-          }
-          // Unlock next level
-          if (level + 1 < LEVELS.length) {
-            if (level + 1 >= progress.unlocked) {
-              progress.unlocked = level + 2;
+      if (!gems[i].collected) {
+        var gdx = Math.abs(gems[i].x - nx);
+        var gdy = Math.abs(gems[i].y - ny);
+        if (gdx <= magnetRange && gdy <= magnetRange && gdx + gdy <= magnetRange) {
+          gems[i].collected = true;
+          gemsCollected++;
+          var gemScore = Math.floor((100 + getBonusGemScore()) * getScoreMult());
+          score += gemScore;
+          sfxGem();
+          TAS.particles.spawn(gems[i].x * TS + TS / 2, gems[i].y * TS + TS / 2, '#ffdd44', 12, 3, { size: 2, gravity: 0.1 });
+          if (gemsCollected >= totalGems) {
+            levelComplete = true;
+            levelCompleteTimer = 2.5;
+            sfxLevelClear();
+            var timeBonus = Math.max(0, Math.floor((parTime - levelTimer) * 10));
+            var clearBonus = Math.floor((500 + getBonusTimeOnClear() * 10) * getScoreMult());
+            score += timeBonus + clearBonus;
+            if (score > highScore) {
+              highScore = score;
+              TAS.score.save('kicklekube_hi', highScore);
             }
+            if (level + 1 < LEVELS.length) {
+              if (level + 1 >= progress.unlocked) {
+                progress.unlocked = level + 2;
+              }
+            }
+            if (progress.cleared.indexOf(level) === -1) {
+              progress.cleared.push(level);
+            }
+            saveProgress();
+            // Screen shake on level clear
+            shakeTimer = 0.3;
+            shakeIntensity = 4;
           }
-          if (progress.cleared.indexOf(level) === -1) {
-            progress.cleared.push(level);
-          }
-          saveProgress();
         }
+      }
+    }
+
+    // Check item collection
+    for (var j = items.length - 1; j >= 0; j--) {
+      if (items[j].x === nx && items[j].y === ny) {
+        collectItem(items[j]);
+        items.splice(j, 1);
       }
     }
   }
 }
 
 function kickBlock(bx, by, dir) {
-  // Remove ice from grid, start sliding
+  var isReactorIce = grid[by][bx] === T.REACTOR_ICE;
   grid[by][bx] = T.GROUND;
-  slidingBlocks.push({ x: bx, y: by, dir: dir, px: bx * TS, py: by * TS, speed: 8 });
+  slidingBlocks.push({ x: bx, y: by, dir: dir, px: bx * TS, py: by * TS, speed: getBlockSlideSpeed(), reactor: isReactorIce });
   sfxKick();
+  // STR shake on kick
+  if (statB.STR > 10) {
+    shakeTimer = 0.1;
+    shakeIntensity = 2;
+  }
 }
 
 function updateSlidingBlocks(dt) {
@@ -678,13 +800,11 @@ function updateSlidingBlocks(dt) {
     var dist = Math.sqrt(dx * dx + dy * dy);
 
     if (dist < b.speed) {
-      // Arrived at next tile
       b.x += DX[b.dir];
       b.y += DY[b.dir];
       b.px = b.x * TS;
       b.py = b.y * TS;
 
-      // Check what is at this tile
       var nextX = b.x + DX[b.dir];
       var nextY = b.y + DY[b.dir];
 
@@ -693,6 +813,10 @@ function updateSlidingBlocks(dt) {
         grid[b.y][b.x] = T.FILLED;
         sfxSplash();
         TAS.particles.spawn(b.x * TS + TS / 2, b.y * TS + TS / 2, '#4488ff', 15, 2, { size: 3, gravity: 0.2 });
+        // Reactor ice creates a stronger bridge with particles
+        if (b.reactor) {
+          TAS.particles.spawn(b.x * TS + TS / 2, b.y * TS + TS / 2, '#ff6644', 8, 3, { size: 2 });
+        }
         slidingBlocks.splice(i, 1);
         continue;
       }
@@ -713,16 +837,29 @@ function updateSlidingBlocks(dt) {
 
       // Check if next tile blocks movement
       if (isSolid(nextX, nextY) || !canBlockEnter(nextX, nextY)) {
-        // Block stops here
-        grid[b.y][b.x] = T.ICE;
+        grid[b.y][b.x] = b.reactor ? T.REACTOR_ICE : T.ICE;
         slidingBlocks.splice(i, 1);
+        shakeTimer = 0.08;
+        shakeIntensity = 2;
         // Check if it crushed an enemy
         for (var e = enemies.length - 1; e >= 0; e--) {
           if (enemies[e].x === b.x && enemies[e].y === b.y) {
+            var crushScore = Math.floor(50 * getScoreMult());
+            score += crushScore;
             enemies.splice(e, 1);
-            score += 50;
             TAS.particles.spawn(b.x * TS + TS / 2, b.y * TS + TS / 2, '#88ccff', 10, 2);
+            tryDropItem(b.x, b.y);
           }
+        }
+        // Boss hit check
+        if (bossState && !bossState.stunned) {
+          bossState.hp--;
+          bossState.stunned = true;
+          bossState.stunTimer = 2;
+          sfxBossHit();
+          shakeTimer = 0.4;
+          shakeIntensity = 8;
+          TAS.fx.flash('#ff4444', 0.2);
         }
         continue;
       }
@@ -730,9 +867,10 @@ function updateSlidingBlocks(dt) {
       // Check if next tile has an enemy (crush it)
       for (var e2 = enemies.length - 1; e2 >= 0; e2--) {
         if (enemies[e2].x === nextX && enemies[e2].y === nextY && enemies[e2].type !== 'ghost') {
+          score += Math.floor(50 * getScoreMult());
           enemies.splice(e2, 1);
-          score += 50;
           TAS.particles.spawn(nextX * TS + TS / 2, nextY * TS + TS / 2, '#88ccff', 10, 2);
+          tryDropItem(nextX, nextY);
         }
       }
     } else {
@@ -745,26 +883,30 @@ function updateSlidingBlocks(dt) {
 function canBlockEnter(x, y) {
   if (x < 0 || x >= COLS || y < 0 || y >= ROWS) return false;
   var t = grid[y][x];
-  return t === T.GROUND || t === T.WATER || t === T.FILLED ||
+  return t === T.GROUND || t === T.WATER || t === T.FILLED || t === T.SPORE_PATCH ||
          (t >= T.SPRING_U && t <= T.CONV_R);
 }
 
 // === FREEZE BREATH ===
 function shootFreeze() {
   if (freezeCooldown > 0 || player.dead || levelComplete) return;
-  freezeCooldown = 0.4;
+  freezeCooldown = getFreezeCooldown();
   sfxFreeze();
   freezeProjectiles.push({
     x: player.x * TS + TS / 2,
     y: player.y * TS + TS / 2,
     dir: player.dir,
-    life: 0.5
+    life: 0.5 + statB.STR * 0.01, // STR extends range slightly
+    pierceLeft: getFreezePower() - 1 // STR allows piercing through enemies
   });
-  TAS.particles.spawn(
-    player.x * TS + TS / 2 + DX[player.dir] * 16,
-    player.y * TS + TS / 2 + DY[player.dir] * 16,
-    '#aaddff', 6, 2, { size: 2 }
-  );
+  // Ice particles on shoot
+  for (var p = 0; p < 3; p++) {
+    TAS.particles.spawn(
+      player.x * TS + TS / 2 + DX[player.dir] * (12 + p * 6),
+      player.y * TS + TS / 2 + DY[player.dir] * (12 + p * 6),
+      p === 0 ? '#cceeff' : '#aaddff', 3, 1.5, { size: 1.5 }
+    );
+  }
 }
 
 function updateFreezeProjectiles(dt) {
@@ -774,7 +916,6 @@ function updateFreezeProjectiles(dt) {
     p.y += DY[p.dir] * 200 * dt;
     p.life -= dt;
 
-    // Check grid position
     var gx = Math.floor(p.x / TS);
     var gy = Math.floor(p.y / TS);
 
@@ -789,11 +930,16 @@ function updateFreezeProjectiles(dt) {
     for (var e = 0; e < enemies.length; e++) {
       if (enemies[e].x === gx && enemies[e].y === gy && !enemies[e].frozen && enemies[e].type !== 'ghost') {
         enemies[e].frozen = true;
-        enemies[e].frozenTimer = 8;
+        enemies[e].frozenTimer = getFreezeDuration();
         hit = true;
-        score += 25;
+        score += Math.floor(25 * getScoreMult());
         TAS.particles.spawn(gx * TS + TS / 2, gy * TS + TS / 2, '#88ddff', 10, 2, { size: 2 });
         TAS.fx.flash('#88ddff', 0.1);
+        // STR pierce: continue through if pierce left
+        if (p.pierceLeft > 0) {
+          p.pierceLeft--;
+          hit = false; // don't remove projectile
+        }
         break;
       }
     }
@@ -809,18 +955,19 @@ function createPillar() {
   var px = player.x + DX[player.dir];
   var py = player.y + DY[player.dir];
   if (px < 0 || px >= COLS || py < 0 || py >= ROWS) return;
-  if (grid[py][px] !== T.GROUND && grid[py][px] !== T.FILLED) return;
-  // Dont place on enemies or gems
+  if (grid[py][px] !== T.GROUND && grid[py][px] !== T.FILLED && grid[py][px] !== T.SPORE_PATCH) return;
   if (hasEnemyAt(px, py)) return;
   for (var i = 0; i < gems.length; i++) {
     if (!gems[i].collected && gems[i].x === px && gems[i].y === py) return;
   }
 
   grid[py][px] = T.PILLAR;
-  pillars.push({ x: px, y: py, timer: 5 });
-  pillarCooldown = 1.0;
+  pillars.push({ x: px, y: py, timer: getPillarDuration() });
+  pillarCooldown = getPillarCooldown();
   sfxPillar();
-  TAS.particles.spawn(px * TS + TS / 2, py * TS + TS / 2, '#aaccff', 6, 1.5, { size: 2 });
+  // Mycelial pillar particles
+  TAS.particles.spawn(px * TS + TS / 2, py * TS + TS / 2, '#88aaff', 6, 1.5, { size: 2 });
+  TAS.particles.spawn(px * TS + TS / 2, py * TS + TS / 2 - 8, '#aaccff', 3, 1, { size: 1.5 });
 }
 
 function updatePillars(dt) {
@@ -842,11 +989,9 @@ function updateEnemies(dt) {
   for (var i = 0; i < enemies.length; i++) {
     var e = enemies[i];
 
-    // Frozen enemies become ice blocks when timer runs out
     if (e.frozen) {
       e.frozenTimer -= dt;
       if (e.frozenTimer <= 0) {
-        // Turn into ice block
         grid[e.y][e.x] = T.ICE;
         enemies.splice(i, 1);
         i--;
@@ -863,12 +1008,28 @@ function updateEnemies(dt) {
       case 'slime':
         speed = 0.55;
         e.moveTimer = speed;
-        // Random walk, change direction sometimes
         if (Math.random() < 0.3) e.dir = TAS.math.randInt(0, 3);
         var nx = e.x + DX[e.dir];
         var ny = e.y + DY[e.dir];
         if (isWalkable(nx, ny) && !(nx === player.x && ny === player.y)) {
           e.x = nx; e.y = ny;
+        } else {
+          e.dir = TAS.math.randInt(0, 3);
+        }
+        break;
+
+      case 'spore_slime': // PASS 2: slower but leaves spore trail
+        speed = 0.65;
+        e.moveTimer = speed;
+        if (Math.random() < 0.25) e.dir = TAS.math.randInt(0, 3);
+        var snx = e.x + DX[e.dir];
+        var sny = e.y + DY[e.dir];
+        if (isWalkable(snx, sny) && !(snx === player.x && sny === player.y)) {
+          // Leave spore patch behind sometimes
+          if (Math.random() < 0.15 && grid[e.y][e.x] === T.GROUND) {
+            grid[e.y][e.x] = T.SPORE_PATCH;
+          }
+          e.x = snx; e.y = sny;
         } else {
           e.dir = TAS.math.randInt(0, 3);
         }
@@ -882,15 +1043,35 @@ function updateEnemies(dt) {
         if (isWalkable(nx2, ny2)) {
           e.x = nx2; e.y = ny2;
         } else {
-          // Bounce: reverse direction
           e.dir = (e.dir < 2) ? (1 - e.dir) : (5 - e.dir);
         }
+        break;
+
+      case 'reactor_fireball': // PASS 2: fast, melts ice blocks it touches
+        speed = 0.3;
+        e.moveTimer = speed;
+        var fnx = e.x + DX[e.dir];
+        var fny = e.y + DY[e.dir];
+        // Melt ice blocks
+        if (fnx >= 0 && fnx < COLS && fny >= 0 && fny < ROWS) {
+          if (grid[fny][fnx] === T.ICE) {
+            grid[fny][fnx] = T.GROUND;
+            TAS.particles.spawn(fnx * TS + TS / 2, fny * TS + TS / 2, '#ff6644', 8, 2, { size: 2 });
+          }
+        }
+        if (isWalkable(fnx, fny)) {
+          e.x = fnx; e.y = fny;
+        } else {
+          e.dir = (e.dir < 2) ? (1 - e.dir) : (5 - e.dir);
+          if (Math.random() < 0.3) e.dir = TAS.math.randInt(0, 3);
+        }
+        // Fire trail particles
+        TAS.particles.spawn(e.x * TS + TS / 2, e.y * TS + TS / 2, '#ff4422', 2, 0.5, { size: 1.5 });
         break;
 
       case 'chaser':
         speed = 0.6;
         e.moveTimer = speed;
-        // Move toward player if in line of sight
         var chaseDir = -1;
         if (e.x === player.x) {
           chaseDir = (player.y < e.y) ? DIR.UP : DIR.DOWN;
@@ -905,7 +1086,6 @@ function updateEnemies(dt) {
             e.dir = chaseDir;
           }
         } else {
-          // Wander
           if (Math.random() < 0.4) e.dir = TAS.math.randInt(0, 3);
           var wnx = e.x + DX[e.dir];
           var wny = e.y + DY[e.dir];
@@ -917,7 +1097,6 @@ function updateEnemies(dt) {
       case 'ghost':
         speed = 0.7;
         e.moveTimer = speed;
-        // Moves toward player, passes through walls
         var gdx = player.x - e.x;
         var gdy = player.y - e.y;
         if (Math.abs(gdx) > Math.abs(gdy)) {
@@ -927,7 +1106,6 @@ function updateEnemies(dt) {
         }
         e.x += DX[e.dir];
         e.y += DY[e.dir];
-        // Keep in bounds
         e.x = TAS.math.clamp(e.x, 0, COLS - 1);
         e.y = TAS.math.clamp(e.y, 0, ROWS - 1);
         break;
@@ -935,19 +1113,71 @@ function updateEnemies(dt) {
 
     // Check collision with player
     if (e.x === player.x && e.y === player.y && !e.frozen) {
-      killPlayer();
+      if (hasActiveEffect('shield') || hasActiveEffect('armor')) {
+        // Shield/armor absorbs hit, stun enemy briefly
+        e.moveTimer = 2;
+        TAS.particles.spawn(e.x * TS + TS / 2, e.y * TS + TS / 2, '#44cc88', 8, 2);
+        // Remove the active item that protected
+        for (var ai = activeItems.length - 1; ai >= 0; ai--) {
+          if (activeItems[ai].effect === 'shield' || activeItems[ai].effect === 'armor') {
+            activeItems.splice(ai, 1);
+            break;
+          }
+        }
+      } else {
+        killPlayer();
+      }
     }
+  }
+}
+
+// === BOSS UPDATE (PASS 2) ===
+function updateBoss(dt) {
+  if (!bossState) return;
+  bossState.timer += dt;
+  if (bossState.stunned) {
+    bossState.stunTimer -= dt;
+    if (bossState.stunTimer <= 0) {
+      bossState.stunned = false;
+    }
+  }
+  // Boss spawns extra enemies periodically
+  if (!bossState.stunned && bossState.timer > 8 && enemies.length < 6) {
+    bossState.timer = 0;
+    var spawnType = bossState.hp <= bossState.maxHp / 2 ? 'reactor_fireball' : 'spore_slime';
+    var sx = TAS.math.randInt(2, COLS - 3);
+    var sy = TAS.math.randInt(2, ROWS - 3);
+    if (isWalkable(sx, sy) && !(sx === player.x && sy === player.y)) {
+      enemies.push({ type: spawnType, x: sx, y: sy, dir: TAS.math.randInt(0, 3), moveTimer: 1, frozen: false, frozenTimer: 0, animFrame: 0 });
+      TAS.particles.spawn(sx * TS + TS / 2, sy * TS + TS / 2, '#ff6644', 12, 3, { size: 3 });
+    }
+  }
+  if (bossState.hp <= 0) {
+    // Boss defeated bonus
+    score += Math.floor(1000 * getScoreMult());
+    bossState = null;
+    isBossLevel = false;
+    TAS.fx.flash('#ffdd44', 0.5);
+    shakeTimer = 0.6;
+    shakeIntensity = 10;
   }
 }
 
 // === PLAYER DEATH ===
 function killPlayer() {
   if (player.dead) return;
+  // CON death resist chance
+  if (Math.random() < getDeathResistChance()) {
+    TAS.particles.spawn(player.x * TS + TS / 2, player.y * TS + TS / 2, '#44ff88', 10, 2, { size: 2 });
+    TAS.fx.flash('#44ff88', 0.15);
+    return; // survived!
+  }
   player.dead = true;
   player.deathTimer = 1.5;
   lives--;
   sfxHurt();
-  TAS.fx.shake(6, 0.85);
+  shakeTimer = 0.4;
+  shakeIntensity = 6;
   TAS.fx.flash('#ff4444', 0.3);
   TAS.particles.spawn(player.x * TS + TS / 2, player.y * TS + TS / 2, '#ff6666', 15, 3, { size: 3, gravity: 0.2 });
 }
@@ -956,11 +1186,19 @@ function checkPlayerEnemyCollision() {
   if (player.dead || levelComplete) return;
   for (var i = 0; i < enemies.length; i++) {
     if (!enemies[i].frozen && enemies[i].x === player.x && enemies[i].y === player.y) {
-      killPlayer();
+      if (hasActiveEffect('shield') || hasActiveEffect('armor')) {
+        enemies[i].moveTimer = 2;
+        for (var ai = activeItems.length - 1; ai >= 0; ai--) {
+          if (activeItems[ai].effect === 'shield' || activeItems[ai].effect === 'armor') {
+            activeItems.splice(ai, 1); break;
+          }
+        }
+      } else {
+        killPlayer();
+      }
       return;
     }
   }
-  // Check water
   if (isWater(player.x, player.y)) {
     killPlayer();
   }
@@ -971,6 +1209,7 @@ function update(dt) {
   frame++;
   TAS.particles.update(dt);
   TAS.fx.updateEffects(dt);
+  if (shakeTimer > 0) shakeTimer -= dt;
 
   if (state === 'title') {
     if (Object.values(TAS.input.keys).some(Boolean) || TAS.input.touch.a || TAS.input.touch.b) {
@@ -999,7 +1238,7 @@ function update(dt) {
     if (Object.values(TAS.input.keys).some(Boolean) || TAS.input.touch.a) {
       state = 'title';
       score = 0;
-      lives = 3;
+      lives = getMaxLives();
       inputCooldown = 0.3;
     }
     return;
@@ -1070,7 +1309,6 @@ function updateSelect(dt) {
 function updatePlaying(dt) {
   levelTimer += dt;
 
-  // Level complete animation
   if (levelComplete) {
     levelCompleteTimer -= dt;
     if (levelCompleteTimer <= 0) {
@@ -1085,7 +1323,6 @@ function updatePlaying(dt) {
     return;
   }
 
-  // Player death
   if (player.dead) {
     player.deathTimer -= dt;
     if (player.deathTimer <= 0) {
@@ -1105,30 +1342,65 @@ function updatePlaying(dt) {
   if (pillarCooldown > 0) pillarCooldown -= dt;
   if (player.moveTimer > 0) player.moveTimer -= dt;
 
+  // Active items timer
+  for (var ai = activeItems.length - 1; ai >= 0; ai--) {
+    activeItems[ai].timer -= dt;
+    if (activeItems[ai].timer <= 0) activeItems.splice(ai, 1);
+  }
+
+  // Item lifetime
+  for (var ii = items.length - 1; ii >= 0; ii--) {
+    items[ii].life -= dt;
+    items[ii].sparkle += dt * 3;
+    if (items[ii].life <= 0) items.splice(ii, 1);
+  }
+
+  // Speed boost effect
+  var speedMod = hasActiveEffect('speedboost') ? 0.6 : 1;
+
   // Input
   if (inputCooldown <= 0 && player.moveTimer <= 0) {
     var keys = TAS.input.keys;
     var tc = TAS.input.touch;
+    var moveCd = getMoveSpeed() * speedMod;
 
-    if (keys['ArrowUp'] || keys['KeyW'] || tc.up) { movePlayer(DIR.UP); inputCooldown = 0.13; }
-    else if (keys['ArrowDown'] || keys['KeyS'] || tc.down) { movePlayer(DIR.DOWN); inputCooldown = 0.13; }
-    else if (keys['ArrowLeft'] || keys['KeyA'] || tc.left) { movePlayer(DIR.LEFT); inputCooldown = 0.13; }
-    else if (keys['ArrowRight'] || keys['KeyD'] || tc.right) { movePlayer(DIR.RIGHT); inputCooldown = 0.13; }
+    if (keys['ArrowUp'] || keys['KeyW'] || tc.up) { movePlayer(DIR.UP); inputCooldown = moveCd; }
+    else if (keys['ArrowDown'] || keys['KeyS'] || tc.down) { movePlayer(DIR.DOWN); inputCooldown = moveCd; }
+    else if (keys['ArrowLeft'] || keys['KeyA'] || tc.left) { movePlayer(DIR.LEFT); inputCooldown = moveCd; }
+    else if (keys['ArrowRight'] || keys['KeyD'] || tc.right) { movePlayer(DIR.RIGHT); inputCooldown = moveCd; }
   }
 
-  // Freeze button
+  // Freeze button (Z/Space/A)
   if ((TAS.input.keys['KeyZ'] || TAS.input.keys['Space'] || TAS.input.touch.a) && freezeCooldown <= 0) {
     shootFreeze();
   }
-  // Pillar button
+  // Pillar button (X/Shift/B)
   if ((TAS.input.keys['KeyX'] || TAS.input.keys['ShiftLeft'] || TAS.input.keys['ShiftRight'] || TAS.input.touch.b) && pillarCooldown <= 0) {
     createPillar();
   }
 
-  // Restart level
+  // Restart level (R)
   if (TAS.input.keys['KeyR']) {
     initLevel(level);
     TAS.input.keys['KeyR'] = false;
+  }
+
+  // Hint key (H) - INT charges
+  if (TAS.input.keys['KeyH'] && hintChargesLeft > 0) {
+    TAS.input.keys['KeyH'] = false;
+    hintChargesLeft--;
+    // Reveal nearest uncollected gem direction
+    var nearestGem = null;
+    var nearestDist = 9999;
+    for (var gi = 0; gi < gems.length; gi++) {
+      if (!gems[gi].collected) {
+        var gd = Math.abs(gems[gi].x - player.x) + Math.abs(gems[gi].y - player.y);
+        if (gd < nearestDist) { nearestDist = gd; nearestGem = gems[gi]; }
+      }
+    }
+    if (nearestGem) {
+      TAS.particles.spawn(nearestGem.x * TS + TS / 2, nearestGem.y * TS + TS / 2, '#ffdd44', 20, 4, { size: 3, gravity: -0.1 });
+    }
   }
 
   // Update systems
@@ -1136,6 +1408,7 @@ function updatePlaying(dt) {
   updateSlidingBlocks(dt);
   updatePillars(dt);
   updateEnemies(dt);
+  updateBoss(dt);
   checkPlayerEnemyCollision();
 
   // Gem sparkle
@@ -1167,8 +1440,15 @@ function draw(dt) {
   // === GAME RENDERING ===
   ctx.save();
   TAS.fx.applyShake();
+  // Additional custom shake
+  if (shakeTimer > 0) {
+    var sx = (Math.random() - 0.5) * shakeIntensity * (shakeTimer / 0.5);
+    var sy = (Math.random() - 0.5) * shakeIntensity * (shakeTimer / 0.5);
+    ctx.translate(sx, sy);
+  }
 
   drawGrid();
+  drawItems();
   drawGems();
   drawSlidingBlocks();
   drawEnemies();
@@ -1183,6 +1463,11 @@ function draw(dt) {
   // HUD
   drawHUD();
 
+  // Boss HP bar
+  if (bossState) {
+    drawBossHP();
+  }
+
   // Level complete overlay
   if (levelComplete) {
     drawLevelComplete();
@@ -1192,51 +1477,82 @@ function draw(dt) {
 }
 
 function drawTitle() {
-  // Background
-  ctx.fillStyle = '#0a1520';
+  // Background - dark fungal cavern
+  ctx.fillStyle = '#060d0a';
   ctx.fillRect(0, 0, GW, GH);
 
-  // Decorative ice crystals
-  for (var i = 0; i < 20; i++) {
-    var cx = (i * 47 + frame * 0.3) % GW;
-    var cy = (i * 31 + Math.sin(frame * 0.02 + i) * 20) % GH;
-    ctx.globalAlpha = 0.15 + Math.sin(frame * 0.03 + i) * 0.1;
-    ctx.fillStyle = '#88ddff';
+  // Floating spore particles
+  for (var i = 0; i < 25; i++) {
+    var cx = (i * 47 + frame * 0.2) % GW;
+    var cy = (i * 31 + Math.sin(frame * 0.015 + i) * 25) % GH;
+    ctx.globalAlpha = 0.12 + Math.sin(frame * 0.025 + i) * 0.08;
+    var sporeColor = i % 3 === 0 ? '#88ddff' : (i % 3 === 1 ? '#44cc66' : '#ff6644');
+    ctx.fillStyle = sporeColor;
     ctx.beginPath();
-    ctx.moveTo(cx, cy - 6);
-    ctx.lineTo(cx + 4, cy);
-    ctx.lineTo(cx, cy + 6);
-    ctx.lineTo(cx - 4, cy);
+    if (i % 2 === 0) {
+      // Ice crystal shape
+      ctx.moveTo(cx, cy - 6);
+      ctx.lineTo(cx + 4, cy);
+      ctx.lineTo(cx, cy + 6);
+      ctx.lineTo(cx - 4, cy);
+    } else {
+      // Spore circle
+      ctx.arc(cx, cy, 3, 0, Math.PI * 2);
+    }
     ctx.closePath();
     ctx.fill();
   }
   ctx.globalAlpha = 1;
 
-  // Title
+  // Mycelial network lines in background
+  ctx.strokeStyle = 'rgba(68,204,102,0.08)';
+  ctx.lineWidth = 1;
+  for (var m = 0; m < 8; m++) {
+    ctx.beginPath();
+    ctx.moveTo(m * 50, GH);
+    ctx.quadraticCurveTo(m * 50 + Math.sin(frame * 0.01 + m) * 20, GH / 2, GW / 2, 100 + m * 10);
+    ctx.stroke();
+  }
+
+  // Title with shadow
   ctx.textAlign = 'center';
   ctx.fillStyle = '#000';
   ctx.font = 'bold 28px monospace';
-  ctx.fillText('KICKLE KUBE', GW / 2 + 2, 82);
+  ctx.fillText('KICKLE KUBE', GW / 2 + 2, 72);
   ctx.fillStyle = '#66ccff';
-  ctx.fillText('KICKLE KUBE', GW / 2, 80);
+  ctx.fillText('KICKLE KUBE', GW / 2, 70);
 
   // Subtitle
-  ctx.fillStyle = '#88aacc';
+  ctx.fillStyle = '#44aa66';
   ctx.font = '12px monospace';
-  ctx.fillText('A Tasern Puzzle', GW / 2, 105);
+  ctx.fillText('Tales of Tasern', GW / 2, 92);
+
+  // Tagline
+  ctx.fillStyle = '#668877';
+  ctx.font = '10px monospace';
+  ctx.fillText('Freeze. Slide. Solve.', GW / 2, 112);
 
   // Instructions
-  ctx.fillStyle = '#aaa';
+  ctx.fillStyle = '#99aabb';
   ctx.font = '11px monospace';
-  ctx.fillText('Freeze enemies into ice blocks', GW / 2, 155);
-  ctx.fillText('Kick blocks to fill water gaps', GW / 2, 172);
-  ctx.fillText('Collect all gems to clear each level', GW / 2, 189);
-  ctx.fillText('Create pillars to block paths', GW / 2, 206);
+  ctx.fillText('Freeze enemies into ice blocks', GW / 2, 148);
+  ctx.fillText('Kick blocks to fill water gaps', GW / 2, 164);
+  ctx.fillText('Collect all gems to clear each level', GW / 2, 180);
+  ctx.fillText('Create mycelial pillars to block paths', GW / 2, 196);
 
-  ctx.fillStyle = '#779';
+  // Controls
+  ctx.fillStyle = '#556677';
   ctx.font = '10px monospace';
-  ctx.fillText('ARROWS/WASD = Move   Z/SPACE = Freeze   X/SHIFT = Pillar', GW / 2, 240);
-  ctx.fillText('R = Restart Level', GW / 2, 256);
+  ctx.fillText('ARROWS/WASD = Move', GW / 2, 226);
+  ctx.fillText('Z/SPACE = Freeze Breath   X/SHIFT = Pillar', GW / 2, 240);
+  ctx.fillText('H = Hint   R = Restart Level', GW / 2, 254);
+
+  // Stat info
+  if (statB.STR !== 5 || statB.DEX !== 5) {
+    ctx.fillStyle = '#446655';
+    ctx.font = '9px monospace';
+    ctx.fillText('STR:' + statB.STR + ' DEX:' + statB.DEX + ' CON:' + statB.CON + ' INT:' + statB.INT + ' WIS:' + statB.WIS + ' CHA:' + statB.CHA, GW / 2, 275);
+  }
 
   // Start prompt
   var pulse = Math.sin(frame * 0.05) * 0.3 + 0.7;
@@ -1248,14 +1564,14 @@ function drawTitle() {
 
   // High score
   if (highScore > 0) {
-    ctx.fillStyle = '#666';
+    ctx.fillStyle = '#555';
     ctx.font = '10px monospace';
     ctx.fillText('HIGH SCORE: ' + highScore, GW / 2, 340);
   }
 }
 
 function drawSelect() {
-  ctx.fillStyle = '#0a0f18';
+  ctx.fillStyle = '#060a10';
   ctx.fillRect(0, 0, GW, GH);
 
   ctx.textAlign = 'center';
@@ -1271,29 +1587,27 @@ function drawSelect() {
       ctx.font = (selected ? 'bold ' : '') + '14px monospace';
       ctx.fillText('World ' + (w + 1) + ': ' + WORLD_NAMES[w], GW / 2, y);
 
-      // Show clear count
       var wStart = 0;
       for (var j = 0; j < w; j++) wStart += WORLD_LEVELS[j];
       var cleared = 0;
       for (var k = 0; k < WORLD_LEVELS[w]; k++) {
         if (progress.cleared.indexOf(wStart + k) !== -1) cleared++;
       }
-      ctx.fillStyle = '#666';
+      ctx.fillStyle = '#555';
       ctx.font = '10px monospace';
       ctx.fillText(cleared + '/' + WORLD_LEVELS[w] + ' cleared', GW / 2, y + 18);
 
       if (selected) {
         ctx.fillStyle = WORLD_COLORS[w];
-        ctx.fillText('>', GW / 2 - 120, y);
-        ctx.fillText('<', GW / 2 + 120, y);
+        ctx.fillText('>', GW / 2 - 130, y);
+        ctx.fillText('<', GW / 2 + 130, y);
       }
     }
 
-    ctx.fillStyle = '#888';
+    ctx.fillStyle = '#666';
     ctx.font = '10px monospace';
-    ctx.fillText('UP/DOWN = Select   ENTER/Z = Choose   ESC/X = Back', GW / 2, 330);
+    ctx.fillText('UP/DOWN = Select   Z/ENTER = Choose   X/ESC = Back', GW / 2, 330);
   } else {
-    // Level select within world
     var worldStart = 0;
     for (var w2 = 0; w2 < worldSelectCursor; w2++) worldStart += WORLD_LEVELS[w2];
     var worldCount = WORLD_LEVELS[worldSelectCursor];
@@ -1309,17 +1623,17 @@ function drawSelect() {
       var unlocked = globalIdx < progress.unlocked;
       var cleared2 = progress.cleared.indexOf(globalIdx) !== -1;
       var selected2 = l === levelSelectCursor;
+      var isLevelBoss = LEVELS[globalIdx] && LEVELS[globalIdx].boss;
 
-      // Box
-      ctx.fillStyle = selected2 ? '#335' : '#1a1a2a';
-      ctx.strokeStyle = selected2 ? WORLD_COLORS[worldSelectCursor] : (unlocked ? '#445' : '#222');
+      ctx.fillStyle = selected2 ? '#1a2030' : '#0d0d18';
+      ctx.strokeStyle = selected2 ? WORLD_COLORS[worldSelectCursor] : (unlocked ? '#333' : '#1a1a1a');
       ctx.lineWidth = selected2 ? 2 : 1;
       ctx.fillRect(lx - 30, ly - 20, 60, 45);
       ctx.strokeRect(lx - 30, ly - 20, 60, 45);
 
       ctx.textAlign = 'center';
       if (unlocked) {
-        ctx.fillStyle = cleared2 ? '#44ff88' : '#ccc';
+        ctx.fillStyle = cleared2 ? '#44ff88' : '#bbb';
         ctx.font = 'bold 16px monospace';
         ctx.fillText(String(l + 1), lx, ly + 6);
         if (cleared2) {
@@ -1327,16 +1641,21 @@ function drawSelect() {
           ctx.font = '10px monospace';
           ctx.fillText('CLEAR', lx, ly + 20);
         }
+        if (isLevelBoss) {
+          ctx.fillStyle = '#ff6644';
+          ctx.font = '8px monospace';
+          ctx.fillText('BOSS', lx, ly - 10);
+        }
       } else {
-        ctx.fillStyle = '#444';
+        ctx.fillStyle = '#333';
         ctx.font = 'bold 16px monospace';
         ctx.fillText('?', lx, ly + 6);
       }
     }
 
-    ctx.fillStyle = '#888';
+    ctx.fillStyle = '#666';
     ctx.font = '10px monospace';
-    ctx.fillText('ARROWS = Select   ENTER/Z = Play   ESC/X = Back', GW / 2, 330);
+    ctx.fillText('ARROWS = Select   Z/ENTER = Play   X/ESC = Back', GW / 2, 330);
   }
 }
 
@@ -1346,6 +1665,9 @@ function drawGrid() {
   ctx.fillStyle = bgColor;
   ctx.fillRect(0, 0, GW, GH);
 
+  // Background detail per world
+  drawWorldBackground();
+
   for (var r = 0; r < ROWS; r++) {
     for (var c = 0; c < COLS; c++) {
       var x = c * TS, y = r * TS;
@@ -1354,47 +1676,72 @@ function drawGrid() {
       switch (t) {
         case T.GROUND:
         case T.FILLED:
-          ctx.fillStyle = t === T.FILLED ? '#556688' : '#334455';
+          ctx.fillStyle = t === T.FILLED ? '#445566' : '#2a3344';
           ctx.fillRect(x, y, TS, TS);
-          ctx.strokeStyle = '#2a3a4a';
+          ctx.strokeStyle = '#222a33';
           ctx.strokeRect(x + 0.5, y + 0.5, TS - 1, TS - 1);
           if (t === T.FILLED) {
-            ctx.fillStyle = '#445577';
+            ctx.fillStyle = '#3a4a5a';
             ctx.fillRect(x + 2, y + 2, TS - 4, TS - 4);
           }
           break;
         case T.WATER:
-          ctx.fillStyle = '#1a2a44';
+          ctx.fillStyle = '#0d1a33';
           ctx.fillRect(x, y, TS, TS);
-          // Animated waves
-          ctx.fillStyle = '#2244aa';
+          ctx.fillStyle = '#1a3388';
           var waveOff = Math.sin(frame * 0.04 + c * 0.5 + r * 0.3) * 3;
           ctx.fillRect(x + 4, y + 14 + waveOff, TS - 8, 4);
-          ctx.fillStyle = '#3355bb';
+          ctx.fillStyle = '#2244aa';
           ctx.fillRect(x + 8, y + 22 + waveOff * 0.7, TS - 16, 3);
           break;
         case T.WALL:
-          ctx.fillStyle = '#556677';
+          ctx.fillStyle = '#445566';
           ctx.fillRect(x, y, TS, TS);
-          ctx.fillStyle = '#667788';
+          ctx.fillStyle = '#556677';
           ctx.fillRect(x + 2, y + 2, TS - 4, TS - 4);
-          ctx.fillStyle = '#778899';
+          ctx.fillStyle = '#667788';
           ctx.fillRect(x + 4, y + 4, TS - 12, TS - 12);
+          // Subtle moss on walls based on world
+          if (world === 0 || world === 2) {
+            ctx.fillStyle = 'rgba(68,170,68,0.15)';
+            ctx.fillRect(x + 2, y + TS - 6, TS - 4, 4);
+          }
           break;
         case T.ICE:
-          ctx.fillStyle = '#334455';
+          ctx.fillStyle = '#2a3344';
           ctx.fillRect(x, y, TS, TS);
-          ctx.fillStyle = '#88ccee';
+          ctx.fillStyle = '#77bbdd';
           ctx.fillRect(x + 2, y + 2, TS - 4, TS - 4);
-          ctx.fillStyle = '#aaddff';
+          ctx.fillStyle = '#99ccee';
           ctx.fillRect(x + 6, y + 6, 8, 8);
-          ctx.fillStyle = '#cceeff';
+          ctx.fillStyle = '#bbddff';
           ctx.fillRect(x + 8, y + 8, 4, 4);
+          // Ice crystal shimmer
+          if (Math.sin(frame * 0.06 + c + r) > 0.7) {
+            ctx.fillStyle = '#fff';
+            ctx.globalAlpha = 0.3;
+            ctx.fillRect(x + 4, y + 4, 2, 2);
+            ctx.globalAlpha = 1;
+          }
+          break;
+        case T.REACTOR_ICE: // PASS 2: glowing reactor-infused ice
+          ctx.fillStyle = '#2a3344';
+          ctx.fillRect(x, y, TS, TS);
+          ctx.fillStyle = '#cc7744';
+          ctx.fillRect(x + 2, y + 2, TS - 4, TS - 4);
+          ctx.fillStyle = '#ddaa66';
+          ctx.fillRect(x + 6, y + 6, 8, 8);
+          ctx.fillStyle = '#eebb88';
+          ctx.fillRect(x + 8, y + 8, 4, 4);
+          // Reactor glow pulse
+          ctx.globalAlpha = 0.2 + Math.sin(frame * 0.08) * 0.1;
+          ctx.fillStyle = '#ff6644';
+          ctx.fillRect(x, y, TS, TS);
+          ctx.globalAlpha = 1;
           break;
         case T.PILLAR:
-          ctx.fillStyle = '#334455';
+          ctx.fillStyle = '#2a3344';
           ctx.fillRect(x, y, TS, TS);
-          // Find pillar timer for blink
           var blink = 1;
           for (var pi = 0; pi < pillars.length; pi++) {
             if (pillars[pi].x === c && pillars[pi].y === r) {
@@ -1403,22 +1750,55 @@ function drawGrid() {
             }
           }
           ctx.globalAlpha = blink;
-          ctx.fillStyle = '#6699cc';
+          // Mycelial pillar look
+          ctx.fillStyle = '#557799';
           ctx.fillRect(x + 6, y + 2, TS - 12, TS - 4);
-          ctx.fillStyle = '#88bbee';
+          ctx.fillStyle = '#6699bb';
           ctx.fillRect(x + 8, y + 4, TS - 16, TS - 8);
+          // Glowing veins
+          ctx.fillStyle = '#88ccff';
+          ctx.fillRect(x + 10, y + 6, 2, TS - 12);
+          ctx.fillRect(x + TS - 14, y + 8, 2, TS - 16);
           ctx.globalAlpha = 1;
           break;
-        case T.SPRING_U: case T.SPRING_D: case T.SPRING_L: case T.SPRING_R:
-          ctx.fillStyle = '#334455';
+        case T.MYCELIAL_PILLAR: // Permanent mycelial pillar (PASS 2)
+          ctx.fillStyle = '#2a3344';
           ctx.fillRect(x, y, TS, TS);
-          ctx.strokeStyle = '#2a3a4a';
-          ctx.strokeRect(x + 0.5, y + 0.5, TS - 1, TS - 1);
-          // Spring pad
+          ctx.fillStyle = '#446688';
+          ctx.fillRect(x + 4, y + 1, TS - 8, TS - 2);
+          ctx.fillStyle = '#557799';
+          ctx.fillRect(x + 6, y + 3, TS - 12, TS - 6);
+          // Glowing network veins
           ctx.fillStyle = '#44cc88';
+          ctx.globalAlpha = 0.4 + Math.sin(frame * 0.03 + c * 2) * 0.2;
+          ctx.fillRect(x + 8, y + 4, 2, TS - 8);
+          ctx.fillRect(x + TS - 12, y + 6, 2, TS - 12);
+          ctx.fillRect(x + 10, y + TS / 2 - 1, TS - 22, 2);
+          ctx.globalAlpha = 1;
+          break;
+        case T.SPORE_PATCH: // PASS 2: slowing terrain
+          ctx.fillStyle = '#2a3322';
+          ctx.fillRect(x, y, TS, TS);
+          ctx.strokeStyle = '#1a2a1a';
+          ctx.strokeRect(x + 0.5, y + 0.5, TS - 1, TS - 1);
+          // Spore dots
+          ctx.fillStyle = '#66aa44';
+          for (var sp = 0; sp < 4; sp++) {
+            var spx = x + 6 + (sp % 2) * 16;
+            var spy = y + 8 + Math.floor(sp / 2) * 14 + Math.sin(frame * 0.03 + sp) * 2;
+            ctx.beginPath();
+            ctx.arc(spx, spy, 2.5, 0, Math.PI * 2);
+            ctx.fill();
+          }
+          break;
+        case T.SPRING_U: case T.SPRING_D: case T.SPRING_L: case T.SPRING_R:
+          ctx.fillStyle = '#2a3344';
+          ctx.fillRect(x, y, TS, TS);
+          ctx.strokeStyle = '#222a33';
+          ctx.strokeRect(x + 0.5, y + 0.5, TS - 1, TS - 1);
+          ctx.fillStyle = '#339966';
           ctx.fillRect(x + 4, y + 4, TS - 8, TS - 8);
-          // Arrow
-          ctx.fillStyle = '#88ffbb';
+          ctx.fillStyle = '#55cc88';
           var sd = t - T.SPRING_U;
           var acx = x + TS / 2, acy = y + TS / 2;
           ctx.beginPath();
@@ -1430,16 +1810,14 @@ function drawGrid() {
           ctx.fill();
           break;
         case T.CONV_U: case T.CONV_D: case T.CONV_L: case T.CONV_R:
-          ctx.fillStyle = '#334455';
+          ctx.fillStyle = '#2a3344';
           ctx.fillRect(x, y, TS, TS);
-          ctx.strokeStyle = '#2a3a4a';
+          ctx.strokeStyle = '#222a33';
           ctx.strokeRect(x + 0.5, y + 0.5, TS - 1, TS - 1);
-          // Conveyor belt
-          ctx.fillStyle = '#665533';
+          ctx.fillStyle = '#554422';
           ctx.fillRect(x + 2, y + 2, TS - 4, TS - 4);
-          // Animated arrows
           var cd = t - T.CONV_U;
-          ctx.fillStyle = '#ccaa44';
+          ctx.fillStyle = '#bb8833';
           var anim = (frame * 0.1) % 16;
           for (var a = 0; a < 3; a++) {
             var ao = (a * 10 + anim) % 28 - 4;
@@ -1460,6 +1838,50 @@ function drawGrid() {
   }
 }
 
+// PASS 3: Themed world backgrounds
+function drawWorldBackground() {
+  ctx.globalAlpha = 0.06;
+  switch (world) {
+    case 0: // Mycelial Meadows - subtle mycelium network
+      ctx.strokeStyle = '#44cc66';
+      ctx.lineWidth = 0.5;
+      for (var i = 0; i < 6; i++) {
+        ctx.beginPath();
+        ctx.moveTo(i * 70, GH);
+        ctx.quadraticCurveTo(i * 70 + Math.sin(frame * 0.008 + i) * 30, GH / 2, GW / 2, i * 40);
+        ctx.stroke();
+      }
+      break;
+    case 1: // Reactor Ridge - heat shimmer
+      ctx.fillStyle = '#ff4422';
+      for (var j = 0; j < 10; j++) {
+        var rx = (j * 43 + frame * 0.5) % GW;
+        var ry = GH - 20 + Math.sin(frame * 0.03 + j) * 10;
+        ctx.fillRect(rx, ry, 3, 8);
+      }
+      break;
+    case 2: // Spore Caverns - floating spores
+      ctx.fillStyle = '#88aaff';
+      for (var k = 0; k < 12; k++) {
+        var sx = (k * 37 + frame * 0.15) % GW;
+        var sy = (k * 29 + Math.sin(frame * 0.012 + k) * 30) % GH;
+        ctx.beginPath();
+        ctx.arc(sx, sy, 2, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      break;
+    case 3: // Fungal Apex - golden dust
+      ctx.fillStyle = '#ffdd44';
+      for (var m = 0; m < 15; m++) {
+        var gx = (m * 29 + frame * 0.3) % GW;
+        var gy = (m * 23 + Math.sin(frame * 0.02 + m) * 20) % GH;
+        ctx.fillRect(gx, gy, 2, 2);
+      }
+      break;
+  }
+  ctx.globalAlpha = 1;
+}
+
 function drawGems() {
   for (var i = 0; i < gems.length; i++) {
     var g = gems[i];
@@ -1467,6 +1889,16 @@ function drawGems() {
     var x = g.x * TS + TS / 2;
     var y = g.y * TS + TS / 2;
     var bob = Math.sin(g.sparkle) * 2;
+
+    // Reveal effect (INT item)
+    if (hasActiveEffect('reveal')) {
+      ctx.globalAlpha = 0.15;
+      ctx.fillStyle = '#ffdd44';
+      ctx.beginPath();
+      ctx.arc(x, y, 16, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.globalAlpha = 1;
+    }
 
     // Glow
     ctx.globalAlpha = 0.3 + Math.sin(g.sparkle * 2) * 0.15;
@@ -1477,7 +1909,7 @@ function drawGems() {
 
     // Gem body
     ctx.globalAlpha = 1;
-    ctx.fillStyle = '#ff2222';
+    ctx.fillStyle = '#dd2222';
     ctx.beginPath();
     ctx.moveTo(x, y + bob - 8);
     ctx.lineTo(x + 7, y + bob - 2);
@@ -1488,7 +1920,7 @@ function drawGems() {
     ctx.fill();
 
     // Highlight
-    ctx.fillStyle = '#ff8888';
+    ctx.fillStyle = '#ff7777';
     ctx.beginPath();
     ctx.moveTo(x - 2, y + bob - 6);
     ctx.lineTo(x + 3, y + bob - 3);
@@ -1505,6 +1937,33 @@ function drawGems() {
   }
 }
 
+function drawItems() {
+  for (var i = 0; i < items.length; i++) {
+    var it = items[i];
+    var x = it.x * TS + TS / 2;
+    var y = it.y * TS + TS / 2;
+    var bob = Math.sin(it.sparkle * 2) * 3;
+
+    // Blink when about to expire
+    if (it.life < 3 && Math.sin(it.life * 10) < 0) continue;
+
+    ctx.globalAlpha = 0.3;
+    ctx.fillStyle = it.type.color;
+    ctx.beginPath();
+    ctx.arc(x, y + bob, 8, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.globalAlpha = 1;
+    ctx.fillStyle = it.type.color;
+    ctx.beginPath();
+    ctx.arc(x, y + bob, 5, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.fillStyle = '#fff';
+    ctx.fillRect(x - 1, y + bob - 1, 2, 2);
+  }
+}
+
 function drawPlayer() {
   if (player.dead) {
     ctx.globalAlpha = Math.max(0, player.deathTimer / 1.5);
@@ -1513,14 +1972,34 @@ function drawPlayer() {
   var y = player.y * TS + TS / 2;
   var bob = Math.sin(frame * 0.1) * 1;
 
+  // Shield/armor glow
+  if (hasActiveEffect('shield') || hasActiveEffect('armor')) {
+    ctx.globalAlpha = 0.2 + Math.sin(frame * 0.08) * 0.1;
+    ctx.fillStyle = hasActiveEffect('shield') ? '#44cc88' : '#88cc44';
+    ctx.beginPath();
+    ctx.arc(x, y + bob, 16, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.globalAlpha = player.dead ? Math.max(0, player.deathTimer / 1.5) : 1;
+  }
+
+  // Speed boost trail
+  if (hasActiveEffect('speedboost')) {
+    ctx.globalAlpha = 0.2;
+    ctx.fillStyle = '#ff6644';
+    ctx.beginPath();
+    ctx.arc(x - DX[player.dir] * 8, y - DY[player.dir] * 8 + bob, 8, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.globalAlpha = player.dead ? Math.max(0, player.deathTimer / 1.5) : 1;
+  }
+
   // Body (frost baseling - round blue creature)
-  ctx.fillStyle = '#4488cc';
+  ctx.fillStyle = '#3377bb';
   ctx.beginPath();
   ctx.arc(x, y + bob, 12, 0, Math.PI * 2);
   ctx.fill();
 
   // Face highlight
-  ctx.fillStyle = '#66aaee';
+  ctx.fillStyle = '#5599dd';
   ctx.beginPath();
   ctx.arc(x - 2, y + bob - 2, 7, 0, Math.PI * 2);
   ctx.fill();
@@ -1538,19 +2017,24 @@ function drawPlayer() {
   ctx.fill();
 
   // Frost crown
-  ctx.fillStyle = '#aaddff';
+  ctx.fillStyle = '#88ccff';
   ctx.beginPath();
   ctx.moveTo(x - 6, y + bob - 10);
-  ctx.lineTo(x - 3, y + bob - 14);
+  ctx.lineTo(x - 3, y + bob - 15);
   ctx.lineTo(x, y + bob - 11);
-  ctx.lineTo(x + 3, y + bob - 14);
+  ctx.lineTo(x + 3, y + bob - 15);
   ctx.lineTo(x + 6, y + bob - 10);
   ctx.closePath();
   ctx.fill();
+  // Crown sparkle
+  if (frame % 30 < 5) {
+    ctx.fillStyle = '#cceeff';
+    ctx.fillRect(x - 2, y + bob - 14, 2, 2);
+  }
 
-  // Direction indicator (small triangle)
+  // Direction indicator
   ctx.fillStyle = '#88ddff';
-  ctx.globalAlpha = 0.5;
+  ctx.globalAlpha = 0.4;
   var ix = x + DX[player.dir] * 14;
   var iy = y + DY[player.dir] * 14 + bob;
   ctx.beginPath();
@@ -1567,31 +2051,28 @@ function drawEnemies() {
     var bob = Math.sin(e.animFrame + i) * 1.5;
 
     if (e.frozen) {
-      // Frozen enemy (ice cube appearance)
-      ctx.fillStyle = '#88ccee';
+      // Frozen enemy (Spore Freeze look)
+      ctx.fillStyle = '#77bbdd';
       ctx.fillRect(x - 10, y - 10, 20, 20);
-      ctx.fillStyle = '#aaddff';
+      ctx.fillStyle = '#99ccee';
       ctx.fillRect(x - 6, y - 6, 6, 6);
-      ctx.fillStyle = '#cceeff';
+      ctx.fillStyle = '#bbddff';
       ctx.fillRect(x - 4, y - 4, 3, 3);
-      // Timer indicator
-      ctx.fillStyle = '#446688';
-      ctx.fillRect(x - 8, y + 11, 16 * (e.frozenTimer / 8), 2);
+      ctx.fillStyle = '#335566';
+      ctx.fillRect(x - 8, y + 11, 16 * (e.frozenTimer / getFreezeDuration()), 2);
       continue;
     }
 
     switch (e.type) {
       case 'slime':
-        // Green blob
-        ctx.fillStyle = '#44aa44';
+        ctx.fillStyle = '#338833';
         ctx.beginPath();
         ctx.ellipse(x, y + 2 + bob, 10, 8, 0, 0, Math.PI * 2);
         ctx.fill();
-        ctx.fillStyle = '#66cc66';
+        ctx.fillStyle = '#55aa55';
         ctx.beginPath();
         ctx.ellipse(x - 2, y + bob, 6, 5, 0, 0, Math.PI * 2);
         ctx.fill();
-        // Eyes
         ctx.fillStyle = '#fff';
         ctx.beginPath();
         ctx.arc(x - 3, y + bob - 1, 3, 0, Math.PI * 2);
@@ -1604,19 +2085,48 @@ function drawEnemies() {
         ctx.fill();
         break;
 
+      case 'spore_slime': // PASS 2: green-purple mushroom slime
+        ctx.fillStyle = '#446633';
+        ctx.beginPath();
+        ctx.ellipse(x, y + 3 + bob, 10, 7, 0, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = '#668844';
+        ctx.beginPath();
+        ctx.ellipse(x - 1, y + bob + 1, 6, 5, 0, 0, Math.PI * 2);
+        ctx.fill();
+        // Mushroom cap
+        ctx.fillStyle = '#886644';
+        ctx.beginPath();
+        ctx.arc(x, y + bob - 5, 6, Math.PI, 0);
+        ctx.fill();
+        // Spore dots on cap
+        ctx.fillStyle = '#aacc66';
+        ctx.fillRect(x - 3, y + bob - 8, 2, 2);
+        ctx.fillRect(x + 2, y + bob - 7, 2, 2);
+        // Eyes
+        ctx.fillStyle = '#fff';
+        ctx.beginPath();
+        ctx.arc(x - 3, y + bob, 2.5, 0, Math.PI * 2);
+        ctx.arc(x + 3, y + bob, 2.5, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = '#111';
+        ctx.beginPath();
+        ctx.arc(x - 3, y + bob + 0.5, 1.2, 0, Math.PI * 2);
+        ctx.arc(x + 3, y + bob + 0.5, 1.2, 0, Math.PI * 2);
+        ctx.fill();
+        break;
+
       case 'spinner':
-        // Orange spinning enemy
         var spinAngle = e.animFrame * 2;
-        ctx.fillStyle = '#dd8833';
+        ctx.fillStyle = '#cc7722';
         ctx.beginPath();
         ctx.arc(x, y + bob, 10, 0, Math.PI * 2);
         ctx.fill();
-        ctx.fillStyle = '#ffaa44';
+        ctx.fillStyle = '#ee9933';
         ctx.beginPath();
         ctx.arc(x, y + bob, 7, 0, Math.PI * 2);
         ctx.fill();
-        // Spikes
-        ctx.fillStyle = '#dd6622';
+        ctx.fillStyle = '#cc5511';
         for (var s = 0; s < 4; s++) {
           var sa = spinAngle + s * Math.PI / 2;
           ctx.beginPath();
@@ -1626,7 +2136,6 @@ function drawEnemies() {
           ctx.closePath();
           ctx.fill();
         }
-        // Eye
         ctx.fillStyle = '#fff';
         ctx.beginPath();
         ctx.arc(x, y + bob - 1, 3, 0, Math.PI * 2);
@@ -1637,18 +2146,57 @@ function drawEnemies() {
         ctx.fill();
         break;
 
+      case 'reactor_fireball': // PASS 2: reactor-powered fire enemy
+        // Fire glow
+        ctx.globalAlpha = 0.25;
+        ctx.fillStyle = '#ff4422';
+        ctx.beginPath();
+        ctx.arc(x, y + bob, 14, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.globalAlpha = 1;
+        // Core
+        ctx.fillStyle = '#dd4411';
+        ctx.beginPath();
+        ctx.arc(x, y + bob, 9, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = '#ff6633';
+        ctx.beginPath();
+        ctx.arc(x, y + bob, 6, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = '#ffaa44';
+        ctx.beginPath();
+        ctx.arc(x, y + bob - 1, 3, 0, Math.PI * 2);
+        ctx.fill();
+        // Flame licks
+        var fAngle = e.animFrame * 3;
+        ctx.fillStyle = '#ff8833';
+        for (var f = 0; f < 3; f++) {
+          var fa = fAngle + f * Math.PI * 2 / 3;
+          ctx.beginPath();
+          ctx.arc(x + Math.cos(fa) * 7, y + bob + Math.sin(fa) * 7 - 2, 3, 0, Math.PI * 2);
+          ctx.fill();
+        }
+        // Eye
+        ctx.fillStyle = '#fff';
+        ctx.beginPath();
+        ctx.arc(x, y + bob - 2, 2.5, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = '#220000';
+        ctx.beginPath();
+        ctx.arc(x, y + bob - 2, 1.2, 0, Math.PI * 2);
+        ctx.fill();
+        break;
+
       case 'chaser':
-        // Purple angry blob
-        ctx.fillStyle = '#8844aa';
+        ctx.fillStyle = '#773399';
         ctx.beginPath();
         ctx.arc(x, y + bob, 11, 0, Math.PI * 2);
         ctx.fill();
-        ctx.fillStyle = '#aa66cc';
+        ctx.fillStyle = '#9955bb';
         ctx.beginPath();
         ctx.arc(x - 2, y + bob - 2, 6, 0, Math.PI * 2);
         ctx.fill();
-        // Angry eyes
-        ctx.fillStyle = '#ff4444';
+        ctx.fillStyle = '#ff3333';
         ctx.beginPath();
         ctx.arc(x - 4, y + bob - 2, 3, 0, Math.PI * 2);
         ctx.arc(x + 4, y + bob - 2, 3, 0, Math.PI * 2);
@@ -1658,8 +2206,7 @@ function drawEnemies() {
         ctx.arc(x - 4, y + bob - 2, 1.5, 0, Math.PI * 2);
         ctx.arc(x + 4, y + bob - 2, 1.5, 0, Math.PI * 2);
         ctx.fill();
-        // Eyebrows
-        ctx.strokeStyle = '#440022';
+        ctx.strokeStyle = '#330011';
         ctx.lineWidth = 2;
         ctx.beginPath();
         ctx.moveTo(x - 7, y + bob - 6);
@@ -1671,19 +2218,16 @@ function drawEnemies() {
         break;
 
       case 'ghost':
-        // Translucent white ghost
-        ctx.globalAlpha = 0.5 + Math.sin(e.animFrame) * 0.2;
-        ctx.fillStyle = '#ddeeff';
+        ctx.globalAlpha = 0.45 + Math.sin(e.animFrame) * 0.2;
+        ctx.fillStyle = '#ccddee';
         ctx.beginPath();
         ctx.arc(x, y + bob - 2, 10, Math.PI, 0);
         ctx.lineTo(x + 10, y + bob + 8);
-        // Wavy bottom
         ctx.quadraticCurveTo(x + 7, y + bob + 4, x + 4, y + bob + 8);
         ctx.quadraticCurveTo(x, y + bob + 4, x - 4, y + bob + 8);
         ctx.quadraticCurveTo(x - 7, y + bob + 4, x - 10, y + bob + 8);
         ctx.closePath();
         ctx.fill();
-        // Eyes
         ctx.fillStyle = '#112';
         ctx.beginPath();
         ctx.arc(x - 4, y + bob - 2, 2.5, 0, Math.PI * 2);
@@ -1698,26 +2242,47 @@ function drawEnemies() {
 function drawSlidingBlocks() {
   for (var i = 0; i < slidingBlocks.length; i++) {
     var b = slidingBlocks[i];
-    ctx.fillStyle = '#88ccee';
-    ctx.fillRect(b.px + 2, b.py + 2, TS - 4, TS - 4);
-    ctx.fillStyle = '#aaddff';
-    ctx.fillRect(b.px + 6, b.py + 6, 8, 8);
-    ctx.fillStyle = '#cceeff';
-    ctx.fillRect(b.px + 8, b.py + 8, 4, 4);
+    if (b.reactor) {
+      ctx.fillStyle = '#cc7744';
+      ctx.fillRect(b.px + 2, b.py + 2, TS - 4, TS - 4);
+      ctx.fillStyle = '#ddaa66';
+      ctx.fillRect(b.px + 6, b.py + 6, 8, 8);
+      ctx.fillStyle = '#eebb88';
+      ctx.fillRect(b.px + 8, b.py + 8, 4, 4);
+    } else {
+      ctx.fillStyle = '#77bbdd';
+      ctx.fillRect(b.px + 2, b.py + 2, TS - 4, TS - 4);
+      ctx.fillStyle = '#99ccee';
+      ctx.fillRect(b.px + 6, b.py + 6, 8, 8);
+      ctx.fillStyle = '#bbddff';
+      ctx.fillRect(b.px + 8, b.py + 8, 4, 4);
+    }
+    // Motion trail
+    ctx.globalAlpha = 0.2;
+    ctx.fillStyle = b.reactor ? '#ff6644' : '#88ddff';
+    ctx.fillRect(b.px - DX[b.dir] * 4 + 4, b.py - DY[b.dir] * 4 + 4, TS - 8, TS - 8);
+    ctx.globalAlpha = 1;
   }
 }
 
 function drawFreezeProjectiles() {
   for (var i = 0; i < freezeProjectiles.length; i++) {
     var p = freezeProjectiles[i];
-    ctx.globalAlpha = p.life * 2;
-    ctx.fillStyle = '#88ddff';
+    ctx.globalAlpha = Math.min(1, p.life * 2);
+    // Outer glow
+    ctx.fillStyle = '#66bbee';
     ctx.beginPath();
-    ctx.arc(p.x, p.y, 5, 0, Math.PI * 2);
+    ctx.arc(p.x, p.y, 6, 0, Math.PI * 2);
     ctx.fill();
-    ctx.fillStyle = '#cceeff';
+    // Core
+    ctx.fillStyle = '#aaddff';
     ctx.beginPath();
-    ctx.arc(p.x, p.y, 3, 0, Math.PI * 2);
+    ctx.arc(p.x, p.y, 4, 0, Math.PI * 2);
+    ctx.fill();
+    // Center bright
+    ctx.fillStyle = '#ddeeff';
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, 2, 0, Math.PI * 2);
     ctx.fill();
     ctx.globalAlpha = 1;
   }
@@ -1725,9 +2290,9 @@ function drawFreezeProjectiles() {
 
 function drawHUD() {
   var barH = 28;
-  ctx.fillStyle = 'rgba(10,5,20,0.8)';
+  ctx.fillStyle = 'rgba(5,5,12,0.85)';
   ctx.fillRect(0, GH - barH, GW, barH);
-  ctx.font = 'bold 12px monospace';
+  ctx.font = 'bold 11px monospace';
 
   // Score
   ctx.fillStyle = '#ffdd44';
@@ -1745,35 +2310,73 @@ function drawHUD() {
   ctx.textAlign = 'right';
   ctx.fillText('GEMS: ' + gemsCollected + '/' + totalGems, GW - 80, GH - 10);
 
-  // Lives
+  // Lives (small circles)
   ctx.fillStyle = '#44dd88';
   for (var i = 0; i < lives; i++) {
     ctx.beginPath();
-    ctx.arc(GW - 12 - i * 18, GH - 14, 6, 0, Math.PI * 2);
+    ctx.arc(GW - 12 - i * 16, GH - 14, 5, 0, Math.PI * 2);
     ctx.fill();
   }
 
-  // Timer (top)
-  ctx.fillStyle = 'rgba(10,5,20,0.6)';
+  // Timer (top right)
+  ctx.fillStyle = 'rgba(5,5,12,0.7)';
   ctx.fillRect(GW - 80, 0, 80, 20);
-  ctx.fillStyle = levelTimer > parTime ? '#ff6644' : '#88ccff';
+  ctx.fillStyle = levelTimer > parTime ? '#ff5533' : '#77bbee';
   ctx.textAlign = 'right';
   ctx.font = '11px monospace';
   ctx.fillText(Math.floor(levelTimer) + 's / ' + parTime + 's', GW - 6, 14);
 
-  // Cooldown indicators
+  // Hint charges (top left)
+  if (hintChargesLeft > 0) {
+    ctx.fillStyle = 'rgba(5,5,12,0.7)';
+    ctx.fillRect(0, 0, 70, 20);
+    ctx.fillStyle = '#aabb66';
+    ctx.textAlign = 'left';
+    ctx.font = '10px monospace';
+    ctx.fillText('H:' + hintChargesLeft + ' hints', 4, 14);
+  }
+
+  // Active items (top center)
+  for (var j = 0; j < activeItems.length; j++) {
+    ctx.fillStyle = 'rgba(5,5,12,0.7)';
+    var aiX = GW / 2 - 50 + j * 55;
+    ctx.fillRect(aiX, 0, 50, 16);
+    ctx.fillStyle = '#88ccaa';
+    ctx.textAlign = 'center';
+    ctx.font = '8px monospace';
+    ctx.fillText(activeItems[j].name.substring(0, 8) + ' ' + Math.ceil(activeItems[j].timer) + 's', aiX + 25, 11);
+  }
+
+  // Cooldown bars
   if (freezeCooldown > 0) {
-    ctx.fillStyle = 'rgba(136,221,255,0.3)';
-    ctx.fillRect(0, GH - barH - 4, GW * (freezeCooldown / 0.4), 3);
+    ctx.fillStyle = 'rgba(100,180,220,0.3)';
+    ctx.fillRect(0, GH - barH - 4, GW * (freezeCooldown / getFreezeCooldown()), 3);
   }
   if (pillarCooldown > 0) {
-    ctx.fillStyle = 'rgba(102,153,204,0.3)';
-    ctx.fillRect(0, GH - barH - 8, GW * (pillarCooldown / 1.0), 3);
+    ctx.fillStyle = 'rgba(80,130,180,0.3)';
+    ctx.fillRect(0, GH - barH - 8, GW * (pillarCooldown / getPillarCooldown()), 3);
   }
 }
 
+function drawBossHP() {
+  if (!bossState) return;
+  var barW = 120;
+  var barX = GW / 2 - barW / 2;
+  var barY = 22;
+  ctx.fillStyle = 'rgba(5,5,12,0.8)';
+  ctx.fillRect(barX - 4, barY - 4, barW + 8, 16);
+  ctx.fillStyle = '#331111';
+  ctx.fillRect(barX, barY, barW, 8);
+  ctx.fillStyle = bossState.stunned ? '#ffdd44' : '#ff4444';
+  ctx.fillRect(barX, barY, barW * (bossState.hp / bossState.maxHp), 8);
+  ctx.fillStyle = '#fff';
+  ctx.textAlign = 'center';
+  ctx.font = '8px monospace';
+  ctx.fillText('BOSS', GW / 2, barY + 7);
+}
+
 function drawLevelComplete() {
-  ctx.fillStyle = 'rgba(0,10,20,0.6)';
+  ctx.fillStyle = 'rgba(0,8,16,0.65)';
   ctx.fillRect(0, 0, GW, GH);
 
   ctx.textAlign = 'center';
@@ -1790,9 +2393,15 @@ function drawLevelComplete() {
   if (levelTimer < parTime) {
     ctx.fillText('Time Bonus: +' + timeBonus, GW / 2, GH / 2 + 15);
   }
-  ctx.fillStyle = '#88ccff';
+  ctx.fillStyle = '#77bbee';
   ctx.font = '12px monospace';
   ctx.fillText('Score: ' + score, GW / 2, GH / 2 + 40);
+
+  if (isBossLevel && !bossState) {
+    ctx.fillStyle = '#ff6644';
+    ctx.font = 'bold 12px monospace';
+    ctx.fillText('BOSS DEFEATED!', GW / 2, GH / 2 + 60);
+  }
 }
 
 // === START ===

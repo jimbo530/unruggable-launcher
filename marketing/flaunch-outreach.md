@@ -14,7 +14,7 @@ Use these when replying to Flaunch token creators posting about their launch, mi
 
 ### Template A: The Simple Offer
 
-> Your token can now get its own Unrugable reactor. $5, one tx. No withdraw function -- LP locked permanently. Automated buy-back fires every 2 hours from pool fees.
+> Your token can now get its own Unrugable reactor. free (just gas), one tx. No withdraw function -- LP locked permanently. Automated buy-back fires every 2 hours from pool fees.
 >
 > tasern.quest/launcher/adopt.html
 
@@ -23,7 +23,7 @@ Use these when replying to Flaunch token creators posting about their launch, mi
 
 ### Template B: The Complement Angle
 
-> Flaunch handles the birth. We handle the armor. $5 gets your token a reactor that collects V3 fees and buys your token every 2 hours. Permanent -- no admin can withdraw the LP. Ever.
+> Flaunch handles the birth. We handle the armor. One tx gets your token a reactor that collects V3 fees and buys your token every 2 hours. Permanent -- no admin can withdraw the LP. Ever.
 >
 > tasern.quest/launcher/adopt.html
 
@@ -32,7 +32,7 @@ Use these when replying to Flaunch token creators posting about their launch, mi
 
 ### Template C: The Proof Point
 
-> BURGERS was launched on Flaunch. Now it has 9 reactor pools firing buy-backs every 2 hours. No withdraw function. Permanent by code. $5 to adopt any token.
+> BURGERS was launched on Flaunch. Now it has 9 reactor pools firing buy-backs every 2 hours. No withdraw function. Permanent by code. Free to adopt any token.
 >
 > Reactor: basescan.org/address/0xc858026Ec5D30280137032BC6EA86F46ea23C2CA
 >
@@ -42,7 +42,7 @@ Use these when replying to Flaunch token creators posting about their launch, mi
 
 **Alt C (under 280):**
 
-> BURGERS went from Flaunch launch to 9 permanent reactor pools. Buy-backs every 2hr. No withdraw function. $5 to adopt any token into the network.
+> BURGERS went from Flaunch launch to 9 permanent reactor pools. Buy-backs every 2hr. No withdraw function. Free to adopt any token into the network.
 >
 > tasern.quest/launcher/adopt.html
 
@@ -51,7 +51,7 @@ Use these when replying to Flaunch token creators posting about their launch, mi
 
 ### Template D: The Charity Angle
 
-> Your Flaunch token can fund carbon collection credits on every reactor cycle. $5 adoption. No keys, no withdraw. Just permanent buy-backs every 2 hours and CHAR burns on each firing.
+> Your Flaunch token can fund carbon collection credits on every reactor cycle. Free adoption (just gas). No keys, no withdraw. Just permanent buy-backs every 2 hours and CHAR burns on each firing.
 >
 > tasern.quest/launcher/adopt.html
 
@@ -60,7 +60,7 @@ Use these when replying to Flaunch token creators posting about their launch, mi
 
 ### Template E: The Network Effect
 
-> Every token adopted into the reactor network makes every other token stronger. Fees cascade across the reactor network, hundreds of pools. $5 to join. No withdraw function. Permanent.
+> Every token adopted into the reactor network makes every other token stronger. Fees cascade across the reactor network. Free to join (just gas). No withdraw function. Permanent.
 >
 > tasern.quest/launcher/adopt.html
 
@@ -95,7 +95,7 @@ Position: Flaunch and Unrugable are complementary layers. Flaunch does the launc
 
 **Flaunch alone:** Token trades in a single V4 pool (TOKEN/flETH). All volume, all fees, one pool. Clean and simple.
 
-**Flaunch + Unrugable:** Adoption connects the token to a the reactor, 180+ pool network. The token can have V3 pools against WETH, cbBTC, USDC, MfT, and any other adopted token. Price dislocations between the V4 Flaunch pool and the V3 reactor pools create natural arbitrage surfaces. Arb bots generate additional volume, which generates fees, which fuel more reactor buy-backs.
+**Flaunch + Unrugable:** Adoption connects the token to a the reactor network. The token can have V3 pools against WETH, cbBTC, USDC, MfT, and any other adopted token. Price dislocations between the V4 Flaunch pool and the V3 reactor pools create natural arbitrage surfaces. Arb bots generate additional volume, which generates fees, which fuel more reactor buy-backs.
 
 **Marketing language:** "One pool is a token. A network of pools is an ecosystem. Adoption connects your Flaunch token to both."
 
@@ -114,7 +114,7 @@ Send via X DM. Respectful, not salesy. Lead with proof.
 
 Hey -- saw your token launched on Flaunch. Nice work.
 
-We built something that might interest you. Unrugable Adoption lets any token get its own reactor on Base. It costs $5 and takes one transaction.
+We built something that might interest you. Unrugable Adoption lets any token get its own reactor on Base. It's free (just gas) and takes one transaction.
 
 What a reactor does:
 - Collects fees from V3 liquidity pools every 2 hours
@@ -125,7 +125,7 @@ What a reactor does:
 This already works. BURGERS was launched on Flaunch and now has its own Unrugable reactor (0xc858) with 9 pools firing buy-backs every 2 hours. You can verify every claim on-chain.
 
 What happens when you adopt:
-1. You pay $5 USDC at tasern.quest/launcher/adopt.html
+1. You connect your wallet at tasern.quest/launcher/adopt.html (free, just gas)
 2. A SporeReactorV4 clone is deployed for your token
 3. You (or we) create V3 LP positions and lock them in the reactor
 4. The keeper auto-discovers your reactor and adds it to the 2-hour cycle
@@ -175,7 +175,7 @@ Prioritized by: community activity, volume, creator engagement, charitable/impac
 - **Why:** On-chain game on Base (competitive dungeon crawler, USDC tournaments). Gaming token with real utility. Aligns with our gaming ecosystem (Baselings, Tales of Tasern). Cross-game partnership potential.
 - **Website:** dungeonclaw.com
 - **X handle:** Search for @dungeonclaw or check their website
-- **Angle:** "Game tokens need permanent infrastructure. Reactor fee cycling every 2 hours. No admin keys. Your tournament token gets trading routes across hundreds of pools."
+- **Angle:** "Game tokens need permanent infrastructure. Reactor fee cycling every 2 hours. No admin keys. Your tournament token gets trading routes across the reactor network."
 - **Risk:** Game-first project may not prioritize DeFi mechanics. Keep pitch game-focused.
 
 ### Target 5: Osobot ($OSO)
@@ -224,12 +224,12 @@ Prioritized by: community activity, volume, creator engagement, charitable/impac
 - [x] No price predictions or return promises
 - [x] All claims on-chain verifiable (reactor addresses, no withdraw function, firing cycle)
 - [x] Flaunch mentioned respectfully as complementary platform
-- [x] Cost stated accurately: "$5 to adopt"
+- [x] Cost stated accurately: "free to adopt (just gas)"
 - [x] No "pump" language anywhere
 - [x] No use of "MycoPad" (internal code name only)
 - [x] BURGERS reactor address verified: 0xc858026Ec5D30280137032BC6EA86F46ea23C2CA
 - [x] Adoption contract verified: 0x013a1091108D50eF5F9cC3FDa38f9b2BA4D3F81d
-- [x] Pool/reactor counts from CANONICAL-NUMBERS.md (the reactor network, hundreds of pools)
+- [x] Pool/reactor counts from CANONICAL-NUMBERS.md (the reactor network)
 - [x] "Up to 20 pools per reactor" not claimed (contract supports addPool indefinitely)
 
 ---

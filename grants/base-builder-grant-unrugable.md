@@ -17,20 +17,20 @@ A permissionless token launcher on Base where 100% of supply is locked in perman
 
 Unrugable Launcher is a token factory on Base that makes it impossible for launchers to rug. When someone launches a token:
 
-1. **100% of supply goes to LP** — split across 3 floor pools (AZUSD, BB, EB) + 3 MfT sell walls
+1. **100% of supply goes to LP** — 2 locked pools: TOKEN/Money (70%) + TOKEN/Meme (30%)
 2. **All LP positions are locked forever** — transferred to a reactor contract with no withdraw function
-3. **A SporeReactor is deployed** — an autonomous contract that collects trading fees, burns the token, deepens liquidity, and sends fuel upstream every 2 hours
-4. **6% of the seed retires carbon** — routed through a CHAR reactor that burns carbon credits permanently
+3. **A SporeReactor is deployed** — an autonomous contract that collects trading fees, burns 50% of the token, and sends 50% to the launcher's wallet
+4. **Every trade retires carbon** — network fees cascade through the reactor chain to CHAR carbon retirement
 
-The result: every token launched has permanent liquidity that only grows over time, automatic deflationary pressure, and built-in environmental impact.
+The result: every token launched has permanent liquidity that only grows over time, automatic deflationary pressure, and built-in environmental impact. Free to launch — just gas.
 
 ## What's Live on Base Right Now
 
-### Token Launch Factory (V4.3)
-- One-click token deployment with 3 floor pools + 3 MfT walls
-- Two-step launch for safety (cancel if step 2 isn't completed)
+### Token Launch Factory (V7)
+- Free one-click token deployment — no seed required
+- 2 locked pools + 1 reactor per launch
 - EIP-1167 minimal proxy clones for gas-efficient reactor deployment
-- 0.1% to MfT treasury, 1% to launcher, 98.9% to permanent LP
+- 50% fee burn + 50% to launcher wallet
 
 ### Reactor Network (17+ active reactors)
 - **Reactor Prime** (V1): Top of chain, 12 pools, fires with all accumulated network fees

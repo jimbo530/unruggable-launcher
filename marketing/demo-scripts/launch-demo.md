@@ -7,9 +7,9 @@ Target: Grant reviewers (Base/Coinbase ecosystem)
 
 [0-5s] Screen: Unrugable landing page loads | VO: "This is Unrugable. Watch us launch a token."
 
-[5-15s] Screen: Click "Launch", mycopad.html opens. Type token name "DEMO", symbol "DEMO", paste image URL | VO: "Name it. Pick a symbol. Add an image. That's your token."
+[5-15s] Screen: Click "Launch", unrugable.html opens. Type token name "DEMO", symbol "DEMO", paste image URL | VO: "Name it. Pick a symbol. Add an image. That's your token."
 
-[15-25s] Screen: Set seed to $5 USDC. Click "Launch". MetaMask pops up, confirm transaction | VO: "Seed it with five dollars. One transaction. That's it."
+[15-25s] Screen: Click "Launch". MetaMask pops up, confirm transaction (just gas) | VO: "One transaction. Just gas. That's it."
 
 [25-40s] Screen: Transaction confirms. Show the launched token address. Click BaseScan link — verified contract source visible | VO: "Token deployed. Contract auto-verified on BaseScan. 79 lines of Solidity. No mint function. No admin. No pause. Immutable."
 

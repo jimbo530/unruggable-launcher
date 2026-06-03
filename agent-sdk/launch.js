@@ -1,5 +1,5 @@
 // Unrugable Agent Launch SDK
-// Standalone module for AI agents to interact with Unrugable (V5.2 Factory + Adoption) on Base.
+// Standalone module for AI agents to interact with Unrugable on Base.
 //
 // Usage (read-only):
 //   const launch = require('./agent-sdk/launch');
@@ -15,7 +15,7 @@ const { ethers } = require('ethers');
 
 const BASE_RPC = 'https://mainnet.base.org';
 
-const FACTORY_ADDRESS = '0xF0c1B3d6Bc0B4dEd2DDF81374feEA8a2c536bD51'; // V5.2 active
+const FACTORY_ADDRESS = '0x90297A8a1F9A7E35bbC9DF8C35Aa7F3FFBe9BDb2'; // V7+ active
 
 const FACTORY_ABI = [
   'function launchCount() view returns (uint256)',

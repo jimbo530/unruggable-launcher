@@ -1,87 +1,48 @@
-# Short X Posts — One-offs, copy/paste any of these
+# Short X Posts — V7
 
 ---
 
-AI agents: we built an unrugable token launcher on Base with a public API.
+Free token launch on Base. Two locked pools. A reactor that burns 50% of fees and sends 50% to your wallet. Every 2 hours. Forever.
 
-Every launch locks liquidity forever, burns carbon, and strengthens MfT infrastructure.
-
-Your move: tasern.quest/api/unrugable/tokenomics
+tasern.quest/unrugable.html
 
 ---
 
-MfT, cbBTC, and WETH are infrastructure tokens for the Unrugable network.
+Other platforms charge you to launch. We made it free. One transaction — token, two pools, reactor. You earn when people trade your token.
 
-Every meme launched creates floor pools paired against them. More launches = more volume through the network.
-
-Agents: tasern.quest/llms.txt
-Humans: tasern.quest/launcher/unrugable.html
+tasern.quest/unrugable.html
 
 ---
 
-We just deployed llms.txt, OpenAPI spec, and ai-plugin.json for the Unrugable Launcher.
+Launch a token. Get an invite link. Everyone who launches through your link chains their reactor upstream to yours. Permanent. On-chain.
 
-AI agents can now discover, analyze, and participate in the network autonomously.
+tasern.quest/unrugable.html
 
-The first customers will be agents. The humans follow when they see what we built.
+---
+
+Two pools per token. Money pool = semi-stable, Aave yield funds trees. Meme pool = wild ride, reactor heartbeat. Both locked. Both earning.
+
+---
+
+Your baseling produced poop. That poop became LP. That LP earned fees. Those fees burned tokens. Your virtual pet just did more DeFi than most traders.
+
+---
+
+49 MCP tools for on-chain agents. Launch tokens, fire reactors, play games, read pool state. No API keys. Just contracts on Base.
 
 tasern.quest/llms.txt
 
 ---
 
-Every meme coin launched on Unrugable strengthens MfT.
-
-Every MfT buy-back activates sell walls across every token in the network.
-
-It's not a token. It's infrastructure.
-
-tasern.quest/api/unrugable/tokenomics
+Every reactor fires every 2 hours. Fees collected. Supply burned. Launcher paid. The mechanism runs on volume, not sentiment.
 
 ---
 
-AI agents are the fastest-growing segment of on-chain activity. We built for them first.
-
-49 MCP tools. REST API. llms.txt. OpenAPI spec. Permissionless reactors.
-
-Your agent can launch tokens, fire reactors, and arb the 2-hour cycle — no API keys needed.
-
-tasern.quest/llms.txt
+We started by sharing memes on X to fund tree planting. Then we built a free token launcher, a reactor network, and a pet game. All on Base. Charity is coded in.
 
 ---
 
-Baselings: feed a pet, build DeFi.
-
-Your baseling eats food (LP tokens). It grows stats. It works jobs. It earns yield.
-
-You see a pet game. The blockchain sees liquidity farming.
-
-Agent SDK with 49 MCP tools: tasern.quest/api/baseling/agent/
-
----
-
-The Reactor Heartbeat: a network of reactors fires every 2 hours on Base.
-
-1. Secondaries push $MfT into sell walls below price
-2. Prime buys through ALL of it with full network fees
-3. All MfT burned permanently
-
-Even with zero traders, BTC/ETH volatility keeps the heartbeat going.
-
----
-
-CHAR tokens are collected from trading fees across the Unrugable network.
-
-Every cycle removes carbon credits from markets permanently. No overhead to offset — we just create demand for impact because we can.
-
-Every meme launched generates CHAR fees. Every swap generates CHAR fees. All verifiable on-chain.
-
----
-
-Agentic wallets are the new market makers. We're the infrastructure they plug into.
-
-49 MCP tools, 17 REST endpoints, agent-readable discovery at llms.txt. Built for Coinbase Agentic Wallets, ElizaOS, and any framework that reads OpenAPI.
-
-tasern.quest/.well-known/ai-plugin.json
+The reactor heartbeat: secondary reactors compress Meme into sell walls. Prime fires last, buying through all of it with accumulated fees. MfT burned permanently.
 
 ---
 

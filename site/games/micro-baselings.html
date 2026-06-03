@@ -22,6 +22,29 @@ canvas { display: block; margin: 0 auto; }
 (function(){
 "use strict";
 
+// === BASELING STAT INTEGRATION (Pass 1) ===
+var statB = { damage: 1, speed: 1, lives: 0, hpMult: 1, scoreMult: 1, cooldown: 1, luck: 1, str: 10, dex: 10, con: 10, int: 10, wis: 10, cha: 10, level: 0, color: '#44dd88', name: 'Baseling', icon: 'B' };
+try { if (window.NftLoader && NftLoader.getStatBonuses) statB = NftLoader.getStatBonuses(); } catch(e) {}
+
+// Derived stats from baseling attributes
+var STR_DAMAGE = 1 + (statB.str - 10) * 0.08;        // STR -> collision/missile damage
+var DEX_SPEED = 1 + (statB.dex - 10) * 0.06;          // DEX -> max speed & turn rate
+var CON_HP = 1 + (statB.con - 10) * 0.05;              // CON -> hp multiplier & extra lives
+var INT_SCORE = 1 + (statB.int - 10) * 0.07;           // INT -> score multiplier
+var WIS_COOLDOWN = 1 - (statB.wis - 10) * 0.03;        // WIS -> cooldown reduction (lower = better)
+var CHA_DROPS = 1 + (statB.cha - 10) * 0.06;           // CHA -> powerup drop rate boost
+var STAT_LEVEL = statB.level || 0;
+var EXTRA_LIVES = statB.con >= 15 ? (statB.con >= 20 ? 2 : 1) : 0; // CON 15+ = +1 life, 20+ = +2
+
+// Clamp derived stats
+if (STR_DAMAGE < 0.3) STR_DAMAGE = 0.3;
+if (DEX_SPEED < 0.5) DEX_SPEED = 0.5;
+if (CON_HP < 0.5) CON_HP = 0.5;
+if (INT_SCORE < 0.5) INT_SCORE = 0.5;
+if (WIS_COOLDOWN < 0.3) WIS_COOLDOWN = 0.3;
+if (WIS_COOLDOWN > 1.5) WIS_COOLDOWN = 1.5;
+if (CHA_DROPS < 0.5) CHA_DROPS = 0.5;
+
 // === CONSTANTS ===
 var GW = 480, GH = 480;
 var ctx = TAS.ctx;
@@ -36,6 +59,11 @@ var floor = Math.floor, min = Math.min, max = Math.max, random = Math.random;
 var state = 'title'; // title, trackSelect, racing, lapComplete, raceEnd, standings, champion
 var frame = 0;
 var highScore = TAS.score.load('microbaselings_hi');
+var showTutorial = !highScore; // Show tutorial on first play
+var tutorialTimer = 0;
+
+// Score popup system
+var scorePopups = [];
 
 // Championship
 var championship = false;
@@ -52,17 +80,28 @@ var raceFinished = false;
 var finishOrder = [];
 var countdown = 0;
 var countdownTimer = 0;
+var raceScore = 0;
+
+// Boss state
+var boss = null;
+var bossActive = false;
 
 // Racers
 var player = null;
 var aiRacers = [];
 var allRacers = [];
+var playerLives = 1 + EXTRA_LIVES; // CON grants extra lives
+var playerMaxHP = floor(3 * CON_HP); // CON scales HP
+var playerHP = playerMaxHP;
 
 // Track data
 var track = null;
 var trackWidth = 60;
 var powerups = [];
 var hazards = [];
+
+// Roaming enemies
+var enemies = [];
 
 // Camera
 var camX = 0, camY = 0;
@@ -71,6 +110,10 @@ var camX = 0, camY = 0;
 // Engine sound state
 var engineTimer = 0;
 
+// Zone weather/ambient
+var zoneParticles = [];
+var zonePulse = 0;
+
 // === RACER CLASS ===
 function createRacer(id, color, bodyColor, isPlayer) {
   return {
@@ -78,13 +121,13 @@ function createRacer(id, color, bodyColor, isPlayer) {
     x: 0, y: 0,
     angle: 0,
     speed: 0,
-    maxSpeed: 180,
-    accel: 220,
+    maxSpeed: isPlayer ? 180 * DEX_SPEED : 180,  // DEX boosts player speed
+    accel: isPlayer ? 220 * DEX_SPEED : 220,
     brake: 300,
-    turnSpeed: 3.2,
+    turnSpeed: isPlayer ? 3.2 * (0.7 + DEX_SPEED * 0.3) : 3.2, // DEX boosts turn
     friction: 0.97,
     driftFriction: 0.92,
-    color: color,
+    color: isPlayer ? statB.color : color,  // Use baseling color for player
     bodyColor: bodyColor,
     isPlayer: isPlayer,
     lap: 0,
@@ -101,12 +144,84 @@ function createRacer(id, color, bodyColor, isPlayer) {
     hasOil: false,
     hasShield: false,
     hasBoost: false,
+    hasMagnet: false,  // New item
+    magnetTimer: 0,
     // AI
     targetCP: 1,
     steerNoise: 0,
-    rubberBand: 1.0
+    rubberBand: 1.0,
+    // Hit flash
+    hitFlash: 0,
+    invincible: 0
   };
 }
+
+// === ENEMY DEFINITIONS (Pass 2 - Tasern Content) ===
+var ENEMY_TYPES = {
+  slime: { color: '#44aa44', size: 14, speed: 40, hp: 1, score: 50, name: 'Slime' },
+  bat: { color: '#886688', size: 10, speed: 80, hp: 1, score: 75, name: 'Cave Bat' },
+  goblin: { color: '#88aa44', size: 12, speed: 55, hp: 2, score: 100, name: 'Goblin' },
+  skeleton: { color: '#ccccaa', size: 13, speed: 45, hp: 3, score: 150, name: 'Skeleton' },
+  spider: { color: '#553333', size: 16, speed: 65, hp: 2, score: 125, name: 'Giant Spider' },
+  mushroom: { color: '#cc6644', size: 11, speed: 30, hp: 1, score: 60, name: 'Shrieker' },
+  wisp: { color: '#aaddff', size: 8, speed: 90, hp: 1, score: 80, name: 'Will-o-Wisp' },
+  mimic: { color: '#ddaa44', size: 14, speed: 0, hp: 4, score: 200, name: 'Mimic' }
+};
+
+// Boss definitions
+var BOSS_TYPES = [
+  { name: 'TRACK WYRM', color: '#ff4444', size: 30, hp: 12, speed: 60, score: 500, pattern: 'chase' },
+  { name: 'SLIME KING', color: '#22cc44', size: 40, hp: 18, speed: 35, score: 750, pattern: 'split' },
+  { name: 'PHANTOM RACER', color: '#8844ff', size: 20, hp: 15, speed: 100, score: 1000, pattern: 'mirror' },
+  { name: 'REACTOR GOLEM', color: '#ff8800', size: 45, hp: 25, speed: 25, score: 1500, pattern: 'stomp' }
+];
+
+function createEnemy(type, x, y) {
+  var def = ENEMY_TYPES[type];
+  return {
+    type: type,
+    x: x, y: y,
+    angle: random() * PI2,
+    speed: def.speed * (0.8 + random() * 0.4),
+    size: def.size,
+    color: def.color,
+    hp: def.hp,
+    maxHp: def.hp,
+    score: def.score,
+    alive: true,
+    hitFlash: 0,
+    moveTimer: 0,
+    aggroRange: 200,
+    patrolAngle: random() * PI2
+  };
+}
+
+function createBoss(trackIdx) {
+  var def = BOSS_TYPES[trackIdx % BOSS_TYPES.length];
+  return {
+    name: def.name,
+    x: 1200, y: 1200,
+    angle: 0,
+    speed: def.speed,
+    size: def.size,
+    color: def.color,
+    hp: def.hp,
+    maxHp: def.hp,
+    score: def.score,
+    pattern: def.pattern,
+    alive: true,
+    hitFlash: 0,
+    phase: 0,
+    phaseTimer: 0,
+    attackTimer: 0,
+    projectiles: [],
+    // Split boss spawns
+    children: []
+  };
+}
+
+// === NEW ITEM TYPES (Pass 2) ===
+var POWERUP_TYPES = ['boost', 'oil', 'shield', 'missile', 'magnet', 'star', 'bomb', 'wrench'];
 
 // === TRACK DEFINITIONS ===
 // Each track: name, bgColor, trackColor, borderColor, checkpoints (array of {x,y}), obstacles, theme
@@ -114,14 +229,14 @@ var TRACKS = [];
 
 function generateTrack(idx) {
   var defs = [
-    { name: 'Kitchen Table', bg: '#2a1f14', track: '#8b6b4a', border: '#5c4a32', theme: 'kitchen' },
-    { name: 'Garden Path', bg: '#1a3a1a', track: '#6b8b4a', border: '#3a5a2a', theme: 'garden' },
-    { name: 'Bathtub Circuit', bg: '#1a2a3a', track: '#aaccdd', border: '#5588aa', theme: 'bath' },
-    { name: 'Bookshelf Rally', bg: '#2a1a0a', track: '#9b7b5a', border: '#6b4b2a', theme: 'books' },
-    { name: 'Workshop Bench', bg: '#1a1a1a', track: '#7a7a7a', border: '#4a4a4a', theme: 'workshop' },
-    { name: 'Pool Table', bg: '#0a3a1a', track: '#1a8a3a', border: '#0a5a1a', theme: 'pool' },
-    { name: 'Cereal Bowl', bg: '#3a2a1a', track: '#daa844', border: '#8a6a2a', theme: 'cereal' },
-    { name: 'The Reactor', bg: '#0a0a1a', track: '#2a2a4a', border: '#4a1a6a', theme: 'reactor' }
+    { name: 'Kitchen Table', bg: '#2a1f14', track: '#8b6b4a', border: '#5c4a32', theme: 'kitchen', zone: 'hearth' },
+    { name: 'Garden Path', bg: '#1a3a1a', track: '#6b8b4a', border: '#3a5a2a', theme: 'garden', zone: 'forest' },
+    { name: 'Bathtub Circuit', bg: '#1a2a3a', track: '#aaccdd', border: '#5588aa', theme: 'bath', zone: 'water' },
+    { name: 'Bookshelf Rally', bg: '#2a1a0a', track: '#9b7b5a', border: '#6b4b2a', theme: 'books', zone: 'arcane' },
+    { name: 'Workshop Bench', bg: '#1a1a1a', track: '#7a7a7a', border: '#4a4a4a', theme: 'workshop', zone: 'forge' },
+    { name: 'Pool Table', bg: '#0a3a1a', track: '#1a8a3a', border: '#0a5a1a', theme: 'pool', zone: 'swamp' },
+    { name: 'Cereal Bowl', bg: '#3a2a1a', track: '#daa844', border: '#8a6a2a', theme: 'cereal', zone: 'desert' },
+    { name: 'The Reactor', bg: '#0a0a1a', track: '#2a2a4a', border: '#4a1a6a', theme: 'reactor', zone: 'void' }
   ];
 
   var d = defs[idx];
@@ -142,7 +257,6 @@ function generateTrack(idx) {
       var py = cy + sin(t) * 300 * (1 + 0.2 * sin(t * 3));
       cps.push({ x: px, y: py });
     }
-    // Obstacles: plates, cups
     obs.push({ x: cx - 200, y: cy - 100, r: 60, type: 'plate' });
     obs.push({ x: cx + 150, y: cy + 50, r: 40, type: 'cup' });
     obs.push({ x: cx + 50, y: cy - 200, r: 30, type: 'cup' });
@@ -166,7 +280,6 @@ function generateTrack(idx) {
       var py = cy + sin(t) * 280;
       cps.push({ x: px, y: py });
     }
-    // Soap puddles as hazards
     haz.push({ x: cx + 200, y: cy - 100, r: 40, type: 'soap' });
     haz.push({ x: cx - 250, y: cy + 80, r: 35, type: 'soap' });
     haz.push({ x: cx + 50, y: cy + 150, r: 30, type: 'soap' });
@@ -180,7 +293,6 @@ function generateTrack(idx) {
     for (var i = 0; i < shapes.length; i++) {
       cps.push({ x: cx + shapes[i][0], y: cy + shapes[i][1] });
     }
-    // Add intermediate points for smoothing
     var smooth = [];
     for (var i = 0; i < cps.length; i++) {
       var next = (i + 1) % cps.length;
@@ -210,7 +322,6 @@ function generateTrack(idx) {
       var py = cy + sin(t) * r2 * 0.7;
       cps.push({ x: px, y: py });
     }
-    // Billiard balls
     for (var i = 0; i < 6; i++) {
       var angle2 = i / 6 * PI2;
       obs.push({ x: cx + cos(angle2) * 150, y: cy + sin(angle2) * 120, r: 25, type: 'ball' });
@@ -243,18 +354,20 @@ function generateTrack(idx) {
     obs.push({ x: cx, y: cy, r: 70, type: 'core' });
   }
 
-  // Add powerup spots along track
-  for (var i = 0; i < 5; i++) {
-    var cpIdx = floor(cps.length * i / 5);
+  // Add powerup spots along track - CHA_DROPS affects count
+  var pupCount = floor(5 * CHA_DROPS);
+  if (pupCount < 3) pupCount = 3;
+  if (pupCount > 10) pupCount = 10;
+  for (var i = 0; i < pupCount; i++) {
+    var cpIdx = floor(cps.length * i / pupCount);
     var cpNext = (cpIdx + 1) % cps.length;
     var mx = (cps[cpIdx].x + cps[cpNext].x) / 2;
     var my = (cps[cpIdx].y + cps[cpNext].y) / 2;
-    // Offset slightly from center
     var offAngle = random() * PI2;
     pups.push({
       x: mx + cos(offAngle) * 20,
       y: my + sin(offAngle) * 20,
-      type: ['boost', 'oil', 'shield', 'missile'][floor(random() * 4)],
+      type: POWERUP_TYPES[floor(random() * POWERUP_TYPES.length)],
       active: true,
       respawn: 0
     });
@@ -267,24 +380,63 @@ function generateTrack(idx) {
     boostPads.push({ x: cps[cpIdx].x, y: cps[cpIdx].y, angle: 0 });
   }
 
+  // Track-specific hazard additions (Pass 2)
+  if (idx === 0) {
+    haz.push({ x: cx + 300, y: cy, r: 25, type: 'grease', dmg: 0 });
+    haz.push({ x: cx - 300, y: cy + 50, r: 20, type: 'grease', dmg: 0 });
+  }
+  if (idx === 7) {
+    haz.push({ x: cx + 150, y: cy + 150, r: 35, type: 'plasma', dmg: 1 });
+    haz.push({ x: cx - 150, y: cy - 150, r: 35, type: 'plasma', dmg: 1 });
+  }
+
   return {
     name: d.name,
     bg: d.bg,
     trackColor: d.track,
     borderColor: d.border,
     theme: d.theme,
+    zone: d.zone,
     checkpoints: cps,
     obstacles: obs,
     hazards: haz,
     powerups: pups,
     boostPads: boostPads,
-    width: trackWidth + idx * 3 // tracks get slightly wider
+    width: trackWidth + idx * 3
   };
 }
 
 // === INITIALIZE TRACKS ===
 for (var i = 0; i < 8; i++) {
   TRACKS.push(generateTrack(i));
+}
+
+// === SPAWN ENEMIES FOR TRACK ===
+function spawnTrackEnemies(trackIdx) {
+  enemies = [];
+  var t = TRACKS[trackIdx];
+  var cx = 1200, cy = 1200;
+  // Each track gets themed enemies
+  var enemySets = [
+    ['slime', 'mushroom'],           // Kitchen
+    ['spider', 'bat'],               // Garden
+    ['wisp', 'slime'],               // Bathtub
+    ['skeleton', 'mimic'],           // Bookshelf
+    ['goblin', 'bat'],               // Workshop
+    ['spider', 'goblin'],            // Pool
+    ['mushroom', 'wisp'],            // Cereal
+    ['skeleton', 'bat', 'wisp']      // Reactor
+  ];
+  var types = enemySets[trackIdx] || ['slime'];
+  var count = 3 + floor(trackIdx * 0.8);
+  for (var i = 0; i < count; i++) {
+    var cpIdx = floor(t.checkpoints.length * i / count);
+    var cp = t.checkpoints[cpIdx];
+    var offX = (random() - 0.5) * 120;
+    var offY = (random() - 0.5) * 120;
+    var type = types[floor(random() * types.length)];
+    enemies.push(createEnemy(type, cp.x + offX, cp.y + offY));
+  }
 }
 
 // === RACE SETUP ===
@@ -298,6 +450,13 @@ function startRace(trackIdx) {
   finishOrder = [];
   countdown = 3;
   countdownTimer = 0;
+  raceScore = 0;
+  missiles = [];
+  oilDrops = [];
+  scorePopups = [];
+  zoneParticles = [];
+  boss = null;
+  bossActive = false;
 
   // Reset powerups
   for (var i = 0; i < track.powerups.length; i++) {
@@ -305,9 +464,12 @@ function startRace(trackIdx) {
     track.powerups[i].respawn = 0;
   }
 
+  // Spawn enemies
+  spawnTrackEnemies(trackIdx);
+
   // Player colors
   var colors = [
-    { c: '#44dd88', b: '#228855' },
+    { c: statB.color, b: '#228855' },
     { c: '#dd4444', b: '#882222' },
     { c: '#4488dd', b: '#224488' },
     { c: '#ddaa44', b: '#886622' }
@@ -315,6 +477,8 @@ function startRace(trackIdx) {
 
   // Create racers
   player = createRacer(0, colors[0].c, colors[0].b, true);
+  playerHP = playerMaxHP;
+  playerLives = 1 + EXTRA_LIVES;
   aiRacers = [];
   for (var i = 1; i < 4; i++) {
     aiRacers.push(createRacer(i, colors[i].c, colors[i].b, false));
@@ -347,17 +511,53 @@ function startRace(trackIdx) {
     r.hasOil = false;
     r.hasShield = false;
     r.hasBoost = false;
+    r.hasMagnet = false;
+    r.magnetTimer = 0;
     r.targetCP = 1;
     r.steerNoise = (random() - 0.5) * 0.3;
+    r.hitFlash = 0;
+    r.invincible = 0;
   }
 
   state = 'racing';
+}
+
+// === SCORE POPUP SYSTEM (Pass 2) ===
+function addScorePopup(x, y, text, color) {
+  scorePopups.push({ x: x, y: y, text: text, color: color || '#ffdd44', life: 1.5, startY: y });
+}
+
+function updateScorePopups(dt) {
+  for (var i = scorePopups.length - 1; i >= 0; i--) {
+    var p = scorePopups[i];
+    p.life -= dt;
+    p.y -= 40 * dt;
+    if (p.life <= 0) scorePopups.splice(i, 1);
+  }
+}
+
+function drawScorePopups() {
+  ctx.textAlign = 'center';
+  ctx.font = 'bold 11px monospace';
+  for (var i = 0; i < scorePopups.length; i++) {
+    var p = scorePopups[i];
+    ctx.globalAlpha = min(1, p.life * 2);
+    ctx.fillStyle = '#000';
+    ctx.fillText(p.text, p.x - camX + 1, p.y - camY + 1);
+    ctx.fillStyle = p.color;
+    ctx.fillText(p.text, p.x - camX, p.y - camY);
+  }
+  ctx.globalAlpha = 1;
 }
 
 // === PHYSICS UPDATE ===
 function updateRacer(r, dt, accelInput, steerInput) {
   if (r.finished) return;
   if (countdown > 0) return;
+
+  // Hit flash decay
+  if (r.hitFlash > 0) r.hitFlash -= dt * 4;
+  if (r.invincible > 0) r.invincible -= dt;
 
   // Spin out
   if (r.spinOut > 0) {
@@ -373,6 +573,22 @@ function updateRacer(r, dt, accelInput, steerInput) {
     r.x += cos(r.angle) * r.speed * dt;
     r.y += sin(r.angle) * r.speed * dt;
     return;
+  }
+
+  // Magnet pull toward nearest powerup (WIS reduces cooldown)
+  if (r.isPlayer && r.hasMagnet && r.magnetTimer > 0) {
+    r.magnetTimer -= dt;
+    if (r.magnetTimer <= 0) r.hasMagnet = false;
+    for (var i = 0; i < track.powerups.length; i++) {
+      var pp = track.powerups[i];
+      if (!pp.active) continue;
+      var md = TAS.math.dist(r.x, r.y, pp.x, pp.y);
+      if (md < 150) {
+        var ma = atan2(r.y - pp.y, r.x - pp.x);
+        pp.x += cos(ma) * 120 * dt;
+        pp.y += sin(ma) * 120 * dt;
+      }
+    }
   }
 
   // Boost
@@ -391,7 +607,7 @@ function updateRacer(r, dt, accelInput, steerInput) {
   }
 
   // Steering
-  var turnMod = 1 - abs(r.speed) / (currentMax * 1.5); // less turn at high speed
+  var turnMod = 1 - abs(r.speed) / (currentMax * 1.5);
   turnMod = max(0.4, turnMod);
   r.angle += steerInput * r.turnSpeed * turnMod * dt;
 
@@ -404,19 +620,32 @@ function updateRacer(r, dt, accelInput, steerInput) {
 
   // Friction
   var onSlick = false;
-  // Check hazards
   for (var i = 0; i < track.hazards.length; i++) {
     var h = track.hazards[i];
     var dx = r.x - h.x, dy = r.y - h.y;
     if (dx * dx + dy * dy < (h.r + 10) * (h.r + 10)) {
       onSlick = true;
+      // Plasma hazards deal damage
+      if (h.type === 'plasma' && r.isPlayer && r.shield <= 0 && r.invincible <= 0) {
+        playerHP--;
+        r.hitFlash = 1;
+        r.invincible = 1.5;
+        TAS.fx.shake(4, 0.88);
+        addScorePopup(r.x, r.y, 'PLASMA!', '#ff44ff');
+        if (playerHP <= 0) {
+          playerLives--;
+          if (playerLives > 0) {
+            playerHP = playerMaxHP;
+            addScorePopup(r.x, r.y - 20, 'EXTRA LIFE!', '#44ff44');
+          }
+        }
+      }
       break;
     }
   }
 
   if (onSlick && r.shield <= 0) {
     r.speed *= r.driftFriction;
-    // Small chance to spin
     if (random() < 0.005) {
       r.spinOut = 0.8;
       if (r.isPlayer) {
@@ -436,6 +665,7 @@ function updateRacer(r, dt, accelInput, steerInput) {
       r.speed = min(r.speed + 80, currentMax * 1.3);
       if (r.isPlayer) {
         TAS.audio.playTone(600, 0.15, 'sine', 0.06, 900);
+        addScorePopup(r.x, r.y, 'BOOST!', '#ffaa00');
       }
     }
   }
@@ -450,18 +680,17 @@ function updateRacer(r, dt, accelInput, steerInput) {
   // Shield timer
   if (r.shield > 0) r.shield -= dt;
 
-  // Obstacle collision
+  // Obstacle collision - STR affects knockback
   for (var i = 0; i < track.obstacles.length; i++) {
     var ob = track.obstacles[i];
     var dx = r.x - ob.x, dy = r.y - ob.y;
     var dist2 = sqrt(dx * dx + dy * dy);
     var minDist = ob.r + 12;
     if (dist2 < minDist) {
-      // Push out
       var pushAngle = atan2(dy, dx);
       r.x = ob.x + cos(pushAngle) * minDist;
       r.y = ob.y + sin(pushAngle) * minDist;
-      r.speed *= -0.3;
+      r.speed *= r.isPlayer ? (-0.3 / STR_DAMAGE) : -0.3; // STR reduces self-knockback
       if (r.isPlayer) {
         TAS.audio.playNoise(0.1, 0.06, 400);
         TAS.fx.shake(2, 0.9);
@@ -469,7 +698,7 @@ function updateRacer(r, dt, accelInput, steerInput) {
     }
   }
 
-  // Track boundary - push back toward track center
+  // Track boundary
   var nearestCP = findNearestCheckpoint(r.x, r.y);
   var nextCP2 = (nearestCP + 1) % track.checkpoints.length;
   var cp1 = track.checkpoints[nearestCP];
@@ -479,7 +708,6 @@ function updateRacer(r, dt, accelInput, steerInput) {
   var distFromTrack = TAS.math.dist(r.x, r.y, trackMidX, trackMidY);
   var tw = track.width + 40;
   if (distFromTrack > tw * 2.5) {
-    // Way off track, pull back hard
     var pullAngle = atan2(trackMidY - r.y, trackMidX - r.x);
     r.x += cos(pullAngle) * 3;
     r.y += sin(pullAngle) * 3;
@@ -493,6 +721,11 @@ function updateRacer(r, dt, accelInput, steerInput) {
 
   if (nextCpDist < 80) {
     r.checkpoint = nextCheckpoint;
+    // INT score bonus per checkpoint
+    if (r.isPlayer) {
+      var cpScore = floor(10 * INT_SCORE);
+      raceScore += cpScore;
+    }
     if (r.checkpoint === 0) {
       r.lap++;
       if (r.isPlayer) {
@@ -500,8 +733,20 @@ function updateRacer(r, dt, accelInput, steerInput) {
           r.finished = true;
           r.finishTime = raceTime;
           finishOrder.push(r.id);
+          // Final lap bonus with INT multiplier
+          var finishBonus = floor(200 * INT_SCORE);
+          raceScore += finishBonus;
+          addScorePopup(r.x, r.y, '+' + finishBonus + ' FINISH!', '#ffdd44');
           TAS.audio.playMelody([[523, 0.1], [659, 0.1], [784, 0.15], [1047, 0.2]], 100);
+          // Spawn boss on last lap of championship
+          if (championship && !bossActive) {
+            boss = createBoss(currentTrack);
+            bossActive = true;
+          }
         } else {
+          var lapBonus = floor(50 * INT_SCORE);
+          raceScore += lapBonus;
+          addScorePopup(r.x, r.y, '+' + lapBonus + ' LAP!', '#44ddff');
           TAS.audio.playTone(880, 0.15, 'sine', 0.08);
         }
       } else {
@@ -530,31 +775,25 @@ function findNearestCheckpoint(x, y) {
 
 // === AI LOGIC ===
 function updateAI(r, dt) {
-  // Target next checkpoint with some noise
   var target = track.checkpoints[r.targetCP];
   var dx = target.x - r.x;
   var dy = target.y - r.y;
   var targetAngle = atan2(dy, dx);
   var dist2 = sqrt(dx * dx + dy * dy);
 
-  // Advance target when close
   if (dist2 < 80) {
     r.targetCP = (r.targetCP + 1) % track.checkpoints.length;
     r.steerNoise = (random() - 0.5) * 0.4;
   }
 
-  // Steer toward target
   var angleDiff = targetAngle - r.angle;
   while (angleDiff > PI) angleDiff -= PI2;
   while (angleDiff < -PI) angleDiff += PI2;
 
   var steer = TAS.math.clamp(angleDiff * 3 + r.steerNoise, -1, 1);
   var accel = 1.0;
-
-  // Slow down for sharp turns
   if (abs(angleDiff) > 0.8) accel = 0.4;
 
-  // Rubber band - if behind player, go faster
   var playerDist = player.totalDist;
   var myDist = r.totalDist;
   if (myDist < playerDist - 200) {
@@ -565,7 +804,6 @@ function updateAI(r, dt) {
     r.rubberBand = 1.0;
   }
 
-  // Use powerups
   if (r.hasBoost && random() < 0.01) {
     r.boost = 2;
     r.hasBoost = false;
@@ -578,12 +816,237 @@ function updateAI(r, dt) {
   updateRacer(r, dt, accel, steer);
 }
 
+// === ENEMY AI (Pass 2) ===
+function updateEnemies(dt) {
+  for (var i = enemies.length - 1; i >= 0; i--) {
+    var e = enemies[i];
+    if (!e.alive) continue;
+    if (e.hitFlash > 0) e.hitFlash -= dt * 4;
+
+    e.moveTimer += dt;
+    var distToPlayer = TAS.math.dist(e.x, e.y, player.x, player.y);
+
+    // Patrol or chase
+    if (distToPlayer < e.aggroRange && e.type !== 'mimic') {
+      var chaseAngle = atan2(player.y - e.y, player.x - e.x);
+      e.x += cos(chaseAngle) * e.speed * dt;
+      e.y += sin(chaseAngle) * e.speed * dt;
+      e.angle = chaseAngle;
+    } else if (e.type !== 'mimic') {
+      if (e.moveTimer > 2) {
+        e.patrolAngle += (random() - 0.5) * 1.5;
+        e.moveTimer = 0;
+      }
+      e.x += cos(e.patrolAngle) * e.speed * 0.4 * dt;
+      e.y += sin(e.patrolAngle) * e.speed * 0.4 * dt;
+    }
+
+    // Collision with player
+    if (distToPlayer < e.size + 10 && player.invincible <= 0 && !player.finished) {
+      if (player.shield > 0) {
+        // Shield destroys enemy
+        e.hp = 0;
+        player.shield = max(0, player.shield - 0.5);
+      } else if (player.boost > 0) {
+        // Boost rams through enemies - STR scales damage
+        e.hp -= floor(2 * STR_DAMAGE);
+        var knockAngle = atan2(e.y - player.y, e.x - player.x);
+        e.x += cos(knockAngle) * 60;
+        e.y += sin(knockAngle) * 60;
+        e.hitFlash = 1;
+      } else {
+        // Player takes damage
+        playerHP--;
+        player.hitFlash = 1;
+        player.invincible = 1.0;
+        player.speed *= 0.5;
+        TAS.fx.shake(5, 0.85);
+        TAS.audio.playNoise(0.2, 0.07, 300);
+        addScorePopup(player.x, player.y, '-1 HP', '#ff4444');
+        if (playerHP <= 0) {
+          playerLives--;
+          if (playerLives > 0) {
+            playerHP = playerMaxHP;
+            player.invincible = 2.0;
+            addScorePopup(player.x, player.y - 20, 'REVIVE!', '#44ff44');
+            TAS.audio.playTone(440, 0.2, 'sine', 0.08);
+          } else {
+            player.spinOut = 3;
+          }
+        }
+      }
+    }
+
+    // Check missile hits on enemies
+    for (var j = missiles.length - 1; j >= 0; j--) {
+      var m = missiles[j];
+      if (TAS.math.dist(m.x, m.y, e.x, e.y) < e.size + 5) {
+        e.hp -= floor(1 * STR_DAMAGE); // STR scales missile damage
+        e.hitFlash = 1;
+        missiles.splice(j, 1);
+        TAS.particles.spawn(e.x, e.y, '#ff8800', 8, 2);
+        TAS.audio.playNoise(0.15, 0.05, 500);
+        break;
+      }
+    }
+
+    // Enemy death
+    if (e.hp <= 0) {
+      e.alive = false;
+      var killScore = floor(e.score * INT_SCORE); // INT scales kill score
+      raceScore += killScore;
+      addScorePopup(e.x, e.y, '+' + killScore, '#ffdd44');
+      TAS.particles.spawn(e.x, e.y, e.color, 15, 3);
+      TAS.audio.playTone(600, 0.1, 'square', 0.06, 300);
+      // CHA chance for bonus drop
+      if (random() < 0.3 * CHA_DROPS) {
+        var nearPup = floor(random() * track.powerups.length);
+        if (!track.powerups[nearPup].active) {
+          track.powerups[nearPup].active = true;
+          track.powerups[nearPup].x = e.x;
+          track.powerups[nearPup].y = e.y;
+        }
+      }
+    }
+  }
+}
+
+// === BOSS UPDATE (Pass 2) ===
+function updateBoss(dt) {
+  if (!boss || !boss.alive) return;
+  if (boss.hitFlash > 0) boss.hitFlash -= dt * 4;
+  boss.phaseTimer += dt;
+  boss.attackTimer += dt;
+
+  var distToPlayer = TAS.math.dist(boss.x, boss.y, player.x, player.y);
+
+  // Pattern-based movement
+  if (boss.pattern === 'chase') {
+    var chaseAngle = atan2(player.y - boss.y, player.x - boss.x);
+    boss.x += cos(chaseAngle) * boss.speed * dt;
+    boss.y += sin(chaseAngle) * boss.speed * dt;
+    boss.angle = chaseAngle;
+    if (boss.attackTimer > 2 * WIS_COOLDOWN) {
+      boss.attackTimer = 0;
+      boss.projectiles.push({ x: boss.x, y: boss.y, angle: chaseAngle, speed: 200, life: 3 });
+      TAS.audio.playTone(300, 0.15, 'sawtooth', 0.06, 100);
+    }
+  } else if (boss.pattern === 'split') {
+    boss.x += cos(boss.phaseTimer) * boss.speed * dt;
+    boss.y += sin(boss.phaseTimer * 0.7) * boss.speed * dt;
+    if (boss.hp <= boss.maxHp / 2 && boss.children.length === 0) {
+      for (var i = 0; i < 3; i++) {
+        enemies.push(createEnemy('slime', boss.x + (random() - 0.5) * 80, boss.y + (random() - 0.5) * 80));
+      }
+      boss.children = [1, 2, 3];
+      addScorePopup(boss.x, boss.y, 'SPLIT!', '#22cc44');
+    }
+  } else if (boss.pattern === 'mirror') {
+    boss.x = player.x + cos(boss.phaseTimer * 2) * 200;
+    boss.y = player.y + sin(boss.phaseTimer * 2) * 200;
+    boss.angle = atan2(player.y - boss.y, player.x - boss.x);
+    if (boss.attackTimer > 1.5 * WIS_COOLDOWN) {
+      boss.attackTimer = 0;
+      for (var i = 0; i < 4; i++) {
+        var a = boss.angle + (i - 1.5) * 0.3;
+        boss.projectiles.push({ x: boss.x, y: boss.y, angle: a, speed: 180, life: 2.5 });
+      }
+    }
+  } else if (boss.pattern === 'stomp') {
+    var toPlayer = atan2(player.y - boss.y, player.x - boss.x);
+    boss.x += cos(toPlayer) * boss.speed * dt;
+    boss.y += sin(toPlayer) * boss.speed * dt;
+    if (boss.attackTimer > 3 * WIS_COOLDOWN) {
+      boss.attackTimer = 0;
+      TAS.fx.shake(8, 0.82);
+      TAS.audio.playNoise(0.4, 0.1, 100);
+      for (var i = 0; i < 8; i++) {
+        var a = i / 8 * PI2;
+        boss.projectiles.push({ x: boss.x, y: boss.y, angle: a, speed: 150, life: 2 });
+      }
+      addScorePopup(boss.x, boss.y, 'STOMP!', '#ff8800');
+    }
+  }
+
+  // Update boss projectiles
+  for (var i = boss.projectiles.length - 1; i >= 0; i--) {
+    var p = boss.projectiles[i];
+    p.x += cos(p.angle) * p.speed * dt;
+    p.y += sin(p.angle) * p.speed * dt;
+    p.life -= dt;
+    if (p.life <= 0) { boss.projectiles.splice(i, 1); continue; }
+    // Hit player
+    if (TAS.math.dist(p.x, p.y, player.x, player.y) < 15 && player.invincible <= 0) {
+      if (player.shield > 0) {
+        player.shield = 0;
+      } else {
+        playerHP--;
+        player.hitFlash = 1;
+        player.invincible = 1.5;
+        TAS.fx.shake(5, 0.85);
+        addScorePopup(player.x, player.y, '-1 HP', '#ff4444');
+        if (playerHP <= 0) {
+          playerLives--;
+          if (playerLives > 0) { playerHP = playerMaxHP; player.invincible = 2; }
+        }
+      }
+      boss.projectiles.splice(i, 1);
+    }
+  }
+
+  // Boss takes damage from player missiles
+  for (var j = missiles.length - 1; j >= 0; j--) {
+    var m = missiles[j];
+    if (TAS.math.dist(m.x, m.y, boss.x, boss.y) < boss.size + 5) {
+      boss.hp -= floor(1 * STR_DAMAGE);
+      boss.hitFlash = 1;
+      missiles.splice(j, 1);
+      TAS.particles.spawn(boss.x, boss.y, '#ff8800', 12, 3);
+      TAS.audio.playNoise(0.2, 0.06, 400);
+      addScorePopup(boss.x, boss.y, 'HIT!', '#ff8844');
+    }
+  }
+
+  // Boss collision with player (boost rams)
+  if (distToPlayer < boss.size + 12 && player.invincible <= 0) {
+    if (player.boost > 0) {
+      boss.hp -= floor(3 * STR_DAMAGE);
+      boss.hitFlash = 1;
+      TAS.fx.shake(6, 0.83);
+      addScorePopup(boss.x, boss.y, 'RAM!', '#ff4444');
+    } else if (player.shield <= 0) {
+      playerHP -= 2;
+      player.hitFlash = 1;
+      player.invincible = 2;
+      player.speed *= 0.3;
+      TAS.fx.shake(8, 0.8);
+      addScorePopup(player.x, player.y, '-2 HP!', '#ff0000');
+      if (playerHP <= 0) {
+        playerLives--;
+        if (playerLives > 0) { playerHP = playerMaxHP; }
+      }
+    }
+  }
+
+  // Boss death
+  if (boss.hp <= 0) {
+    boss.alive = false;
+    var bossScore = floor(boss.score * INT_SCORE);
+    raceScore += bossScore;
+    addScorePopup(boss.x, boss.y, '+' + bossScore + ' BOSS!', '#ffdd44');
+    TAS.particles.spawn(boss.x, boss.y, boss.color, 30, 5);
+    TAS.particles.spawn(boss.x, boss.y, '#ffdd44', 20, 4);
+    TAS.audio.playMelody([[523, 0.1], [659, 0.1], [784, 0.1], [1047, 0.15], [1318, 0.2]], 80);
+    TAS.fx.shake(10, 0.75);
+    bossActive = false;
+  }
+}
+
 // === POWERUP / MISSILE ===
 var missiles = [];
 var oilDrops = [];
 
 function fireMissile(r) {
-  // Find nearest racer ahead
   var bestTarget = null, bestDist = Infinity;
   for (var i = 0; i < allRacers.length; i++) {
     var other = allRacers[i];
@@ -594,7 +1057,6 @@ function fireMissile(r) {
     }
   }
   if (!bestTarget) {
-    // Just fire forward
     missiles.push({ x: r.x, y: r.y, angle: r.angle, speed: 300, owner: r.id, life: 3 });
   } else {
     var a = atan2(bestTarget.y - r.y, bestTarget.x - r.x);
@@ -606,6 +1068,78 @@ function fireMissile(r) {
 function dropOil(r) {
   oilDrops.push({ x: r.x - cos(r.angle) * 20, y: r.y - sin(r.angle) * 20, life: 15 });
   if (r.isPlayer) TAS.audio.playNoise(0.1, 0.04, 200);
+}
+
+// === ZONE AMBIENT PARTICLES (Pass 3) ===
+function updateZoneParticles(dt) {
+  var zone = track.zone;
+  zonePulse += dt;
+
+  // Spawn zone-specific ambient particles
+  if (frame % 3 === 0) {
+    var px = camX + random() * GW;
+    var py = camY + random() * GH;
+    if (zone === 'forest') {
+      zoneParticles.push({ x: px, y: py, vx: (random() - 0.5) * 20, vy: 15 + random() * 10, life: 3, color: '#4a8a2a', size: 2, type: 'leaf' });
+    } else if (zone === 'water') {
+      zoneParticles.push({ x: px, y: py, vx: (random() - 0.5) * 5, vy: -5, life: 2, color: 'rgba(150,200,255,0.3)', size: 3, type: 'bubble' });
+    } else if (zone === 'void') {
+      zoneParticles.push({ x: px, y: py, vx: 0, vy: 0, life: 1.5, color: '#6622aa', size: 1, type: 'spark' });
+    } else if (zone === 'forge') {
+      zoneParticles.push({ x: px, y: py + GH * 0.8, vx: (random() - 0.5) * 30, vy: -30 - random() * 20, life: 1, color: '#ff6600', size: 2, type: 'ember' });
+    } else if (zone === 'desert') {
+      zoneParticles.push({ x: px, y: py, vx: 30 + random() * 20, vy: (random() - 0.5) * 5, life: 2.5, color: '#daa844', size: 1, type: 'sand' });
+    } else if (zone === 'arcane') {
+      if (random() < 0.3) {
+        zoneParticles.push({ x: px, y: py, vx: 0, vy: -10, life: 2, color: '#8866dd', size: 2, type: 'rune' });
+      }
+    } else if (zone === 'swamp') {
+      if (random() < 0.4) {
+        zoneParticles.push({ x: px, y: py, vx: (random() - 0.5) * 10, vy: -8, life: 3, color: 'rgba(100,200,100,0.3)', size: 4, type: 'fog' });
+      }
+    } else if (zone === 'hearth') {
+      if (random() < 0.2) {
+        zoneParticles.push({ x: px, y: py, vx: 0, vy: -5, life: 2, color: 'rgba(255,200,100,0.2)', size: 5, type: 'warmth' });
+      }
+    }
+  }
+
+  // Update
+  for (var i = zoneParticles.length - 1; i >= 0; i--) {
+    var p = zoneParticles[i];
+    p.x += p.vx * dt;
+    p.y += p.vy * dt;
+    p.life -= dt;
+    if (p.life <= 0) zoneParticles.splice(i, 1);
+  }
+  // Cap particles
+  if (zoneParticles.length > 80) zoneParticles.splice(0, zoneParticles.length - 80);
+}
+
+function drawZoneParticles() {
+  for (var i = 0; i < zoneParticles.length; i++) {
+    var p = zoneParticles[i];
+    var sx = p.x - camX, sy = p.y - camY;
+    if (sx < -10 || sx > GW + 10 || sy < -10 || sy > GH + 10) continue;
+    ctx.globalAlpha = min(1, p.life);
+    ctx.fillStyle = p.color;
+    if (p.type === 'leaf') {
+      ctx.save();
+      ctx.translate(sx, sy);
+      ctx.rotate(p.life * 3);
+      ctx.fillRect(-2, -1, 4, 2);
+      ctx.restore();
+    } else if (p.type === 'rune') {
+      ctx.font = '8px monospace';
+      ctx.textAlign = 'center';
+      ctx.fillText('*', sx, sy);
+    } else {
+      ctx.beginPath();
+      ctx.arc(sx, sy, p.size, 0, PI2);
+      ctx.fill();
+    }
+  }
+  ctx.globalAlpha = 1;
 }
 
 // === MAIN UPDATE ===
@@ -643,7 +1177,6 @@ function update(dt) {
       startRace(currentTrack);
       TAS.audio.playTone(660, 0.1, 'square', 0.06);
     }
-    // C for championship
     if (TAS.input.keys['c'] || TAS.input.keys['C']) {
       TAS.input.keys['c'] = false;
       TAS.input.keys['C'] = false;
@@ -682,6 +1215,18 @@ function update(dt) {
 
     raceTime += dt;
 
+    // Tutorial timer
+    if (showTutorial) {
+      tutorialTimer += dt;
+      if (tutorialTimer > 8) showTutorial = false;
+    }
+
+    // Update zone particles
+    updateZoneParticles(dt);
+
+    // Update score popups
+    updateScorePopups(dt);
+
     // Player input
     var accelInput = 0, steerInput = 0;
     if (TAS.input.keys['ArrowUp'] || TAS.input.keys['w'] || TAS.input.keys['W'] || TAS.input.touch.a || TAS.input.touch.up) accelInput = 1;
@@ -702,15 +1247,15 @@ function update(dt) {
       player.hasOil = false;
       TAS.input.keys['z'] = false;
     }
-    // Use shield
+    // Use shield - WIS_COOLDOWN affects duration
     if ((TAS.input.keys['Shift'] || TAS.input.keys['ShiftLeft']) && player.hasShield) {
-      player.shield = 5;
+      player.shield = 5 / WIS_COOLDOWN; // WIS extends shield duration
       player.hasShield = false;
       TAS.audio.playTone(1000, 0.2, 'sine', 0.06);
     }
     // Use boost
     if ((TAS.input.keys['Control'] || TAS.input.keys['ControlLeft']) && player.hasBoost) {
-      player.boost = 2;
+      player.boost = 2 / WIS_COOLDOWN; // WIS extends boost duration
       player.hasBoost = false;
       TAS.audio.playTone(500, 0.2, 'sawtooth', 0.06, 1000);
     }
@@ -722,7 +1267,13 @@ function update(dt) {
       updateAI(aiRacers[i], dt);
     }
 
-    // Racer-to-racer collision
+    // Enemies
+    updateEnemies(dt);
+
+    // Boss
+    if (bossActive) updateBoss(dt);
+
+    // Racer-to-racer collision - STR affects push
     for (var i = 0; i < allRacers.length; i++) {
       for (var j = i + 1; j < allRacers.length; j++) {
         var a = allRacers[i], b = allRacers[j];
@@ -731,11 +1282,12 @@ function update(dt) {
         if (d < 20 && d > 0) {
           var pushAngle = atan2(dy, dx);
           var overlap = (20 - d) / 2;
-          a.x -= cos(pushAngle) * overlap;
-          a.y -= sin(pushAngle) * overlap;
-          b.x += cos(pushAngle) * overlap;
-          b.y += sin(pushAngle) * overlap;
-          // Exchange some speed
+          var pushA = a.isPlayer ? (1 / STR_DAMAGE) : 1; // STR reduces push taken
+          var pushB = b.isPlayer ? (1 / STR_DAMAGE) : 1;
+          a.x -= cos(pushAngle) * overlap * pushA;
+          a.y -= sin(pushAngle) * overlap * pushA;
+          b.x += cos(pushAngle) * overlap * pushB;
+          b.y += sin(pushAngle) * overlap * pushB;
           var avgSpeed = (a.speed + b.speed) / 2;
           a.speed = avgSpeed * 0.9;
           b.speed = avgSpeed * 0.9;
@@ -751,7 +1303,6 @@ function update(dt) {
       m.life -= dt;
       if (m.life <= 0) { missiles.splice(i, 1); continue; }
 
-      // Hit check
       for (var j = 0; j < allRacers.length; j++) {
         var r = allRacers[j];
         if (r.id === m.owner || r.finished) continue;
@@ -803,7 +1354,7 @@ function update(dt) {
         p.respawn -= dt;
         if (p.respawn <= 0) {
           p.active = true;
-          p.type = ['boost', 'oil', 'shield', 'missile'][floor(random() * 4)];
+          p.type = POWERUP_TYPES[floor(random() * POWERUP_TYPES.length)];
         }
         continue;
       }
@@ -811,11 +1362,37 @@ function update(dt) {
         var r = allRacers[j];
         if (TAS.math.dist(r.x, r.y, p.x, p.y) < 20) {
           p.active = false;
-          p.respawn = 8 + random() * 4;
-          if (p.type === 'boost') r.hasBoost = true;
-          else if (p.type === 'oil') r.hasOil = true;
-          else if (p.type === 'shield') r.hasShield = true;
-          else if (p.type === 'missile') r.hasMissile = true;
+          p.respawn = (8 + random() * 4) * WIS_COOLDOWN; // WIS speeds respawn
+          if (p.type === 'boost') { r.hasBoost = true; }
+          else if (p.type === 'oil') { r.hasOil = true; }
+          else if (p.type === 'shield') { r.hasShield = true; }
+          else if (p.type === 'missile') { r.hasMissile = true; }
+          else if (p.type === 'magnet' && r.isPlayer) { r.hasMagnet = true; r.magnetTimer = 8; }
+          else if (p.type === 'star' && r.isPlayer) {
+            // Star = brief invincibility + score burst
+            r.invincible = 4;
+            r.shield = 4;
+            var starScore = floor(100 * INT_SCORE);
+            raceScore += starScore;
+            addScorePopup(r.x, r.y, '+' + starScore + ' STAR!', '#ffff00');
+          }
+          else if (p.type === 'bomb') {
+            // Bomb = area damage to nearby enemies
+            for (var k = 0; k < enemies.length; k++) {
+              if (enemies[k].alive && TAS.math.dist(r.x, r.y, enemies[k].x, enemies[k].y) < 120) {
+                enemies[k].hp -= floor(2 * STR_DAMAGE);
+                enemies[k].hitFlash = 1;
+              }
+            }
+            TAS.particles.spawn(r.x, r.y, '#ff4400', 20, 4);
+            TAS.fx.shake(6, 0.82);
+            if (r.isPlayer) TAS.audio.playNoise(0.3, 0.08, 200);
+          }
+          else if (p.type === 'wrench' && r.isPlayer) {
+            // Wrench = heal 1 HP
+            playerHP = min(playerHP + 1, playerMaxHP);
+            addScorePopup(r.x, r.y, '+1 HP', '#44ff44');
+          }
           if (r.isPlayer) {
             TAS.audio.playTone(880, 0.08, 'sine', 0.05);
             TAS.particles.spawn(p.x, p.y, '#ffff00', 6, 2);
@@ -842,8 +1419,7 @@ function update(dt) {
     for (var i = 0; i < allRacers.length; i++) {
       if (!allRacers[i].finished) { allDone = false; break; }
     }
-    if (player.finished || allDone || raceTime > 180) {
-      // Force finish anyone not done
+    if (player.finished || allDone || raceTime > 180 || (playerLives <= 0 && playerHP <= 0)) {
       for (var i = 0; i < allRacers.length; i++) {
         if (!allRacers[i].finished) {
           allRacers[i].finished = true;
@@ -858,15 +1434,15 @@ function update(dt) {
 
   if (state === 'raceEnd') {
     if (Object.values(TAS.input.keys).some(Boolean) || TAS.input.touch.a) {
-      // Reset keys
       for (var k in TAS.input.keys) TAS.input.keys[k] = false;
 
       if (championship) {
-        // Award points
         var pts = [10, 6, 3, 1];
         for (var i = 0; i < finishOrder.length; i++) {
           champPoints[finishOrder[i]] += pts[i] || 0;
         }
+        // Add race score to championship points for player
+        champPoints[0] += floor(raceScore / 100);
         champTrack++;
         if (champTrack >= totalRaces) {
           state = 'champion';
@@ -889,7 +1465,6 @@ function update(dt) {
   }
 
   if (state === 'champion') {
-    // Save high score (total points)
     if (champPoints[0] > highScore) {
       highScore = champPoints[0];
       TAS.score.save('microbaselings_hi', highScore);
@@ -938,9 +1513,8 @@ function draw(dt) {
   }
 }
 
-// === TITLE SCREEN ===
+// === TITLE SCREEN (Pass 1 - NES controls + stat display) ===
 function drawTitle() {
-  // Background
   ctx.fillStyle = '#0a0a1a';
   ctx.fillRect(0, 0, GW, GH);
 
@@ -957,30 +1531,81 @@ function drawTitle() {
   // Title
   ctx.fillStyle = '#000';
   ctx.font = 'bold 36px monospace';
-  ctx.fillText('MICRO BASELINGS', GW / 2 + 2, 110 + 2);
-  ctx.fillStyle = '#44dd88';
-  ctx.fillText('MICRO BASELINGS', GW / 2, 110);
+  ctx.fillText('MICRO BASELINGS', GW / 2 + 2, 100 + 2);
+  ctx.fillStyle = statB.color;
+  ctx.font = 'bold 36px monospace';
+  ctx.fillText('MICRO BASELINGS', GW / 2, 100);
 
   // Subtitle
   ctx.fillStyle = '#888';
   ctx.font = '14px monospace';
-  ctx.fillText('Top-Down Racing', GW / 2, 140);
+  ctx.fillText('Top-Down Racing', GW / 2, 125);
 
-  // Draw a tiny car
-  drawMiniCar(GW / 2, 200, 0, '#44dd88', '#228855', 3);
+  // Draw baseling kart
+  drawMiniCar(GW / 2, 165, 0, statB.color, '#228855', 3);
 
-  // Instructions
+  // Baseling name & level
+  if (STAT_LEVEL > 0) {
+    ctx.fillStyle = statB.color;
+    ctx.font = 'bold 12px monospace';
+    ctx.fillText(statB.name + ' Lv.' + STAT_LEVEL, GW / 2, 200);
+  }
+
+  // NES-style control reference box
+  ctx.strokeStyle = '#444';
+  ctx.lineWidth = 1;
+  ctx.strokeRect(60, 215, GW - 120, 115);
+  ctx.fillStyle = '#222';
+  ctx.fillRect(61, 216, GW - 122, 113);
+
+  ctx.fillStyle = '#666';
+  ctx.font = '10px monospace';
+  ctx.fillText('- CONTROLS -', GW / 2, 232);
+
   ctx.fillStyle = '#aaa';
-  ctx.font = '12px monospace';
-  ctx.fillText('Arrow Keys / WASD to drive', GW / 2, 270);
-  ctx.fillText('SPACE = Missile | Z = Oil Drop', GW / 2, 290);
-  ctx.fillText('SHIFT = Shield | CTRL = Boost', GW / 2, 310);
+  ctx.font = '11px monospace';
+  var cy = 250;
+  ctx.textAlign = 'left';
+  ctx.fillText('ARROWS/WASD', 80, cy);
+  ctx.fillStyle = '#777'; ctx.fillText('Drive & Steer', 280, cy);
+  cy += 16;
+  ctx.fillStyle = '#aaa'; ctx.fillText('SPACE / X', 80, cy);
+  ctx.fillStyle = '#777'; ctx.fillText('Fire Missile', 280, cy);
+  cy += 16;
+  ctx.fillStyle = '#aaa'; ctx.fillText('Z', 80, cy);
+  ctx.fillStyle = '#777'; ctx.fillText('Drop Oil', 280, cy);
+  cy += 16;
+  ctx.fillStyle = '#aaa'; ctx.fillText('SHIFT', 80, cy);
+  ctx.fillStyle = '#777'; ctx.fillText('Activate Shield', 280, cy);
+  cy += 16;
+  ctx.fillStyle = '#aaa'; ctx.fillText('CTRL', 80, cy);
+  ctx.fillStyle = '#777'; ctx.fillText('Use Boost', 280, cy);
+
+  // Stat bonuses display if baseling loaded
+  if (STAT_LEVEL > 0) {
+    ctx.textAlign = 'center';
+    ctx.fillStyle = '#555';
+    ctx.font = '9px monospace';
+    ctx.fillText('STR:' + statB.str + ' DEX:' + statB.dex + ' CON:' + statB.con + ' INT:' + statB.int + ' WIS:' + statB.wis + ' CHA:' + statB.cha, GW / 2, 345);
+
+    ctx.fillStyle = '#448844';
+    ctx.font = '9px monospace';
+    var bonusY = 360;
+    var bonuses = [];
+    if (STR_DAMAGE > 1.05) bonuses.push('DMG+' + floor((STR_DAMAGE - 1) * 100) + '%');
+    if (DEX_SPEED > 1.05) bonuses.push('SPD+' + floor((DEX_SPEED - 1) * 100) + '%');
+    if (CON_HP > 1.05) bonuses.push('HP+' + floor((CON_HP - 1) * 100) + '%');
+    if (INT_SCORE > 1.05) bonuses.push('SCR+' + floor((INT_SCORE - 1) * 100) + '%');
+    if (EXTRA_LIVES > 0) bonuses.push('+' + EXTRA_LIVES + ' LIVES');
+    if (bonuses.length > 0) ctx.fillText(bonuses.join('  '), GW / 2, bonusY);
+  }
 
   // Start prompt
   var pulse = sin(frame * 0.05) * 0.3 + 0.7;
   ctx.globalAlpha = pulse;
   ctx.fillStyle = '#ffdd44';
   ctx.font = 'bold 16px monospace';
+  ctx.textAlign = 'center';
   ctx.fillText('PRESS ANY KEY', GW / 2, 400);
   ctx.globalAlpha = 1;
 
@@ -1006,7 +1631,7 @@ function drawTrackSelect() {
   ctx.fillRect(0, 0, GW, GH);
 
   ctx.textAlign = 'center';
-  ctx.fillStyle = '#44dd88';
+  ctx.fillStyle = statB.color;
   ctx.font = 'bold 22px monospace';
   ctx.fillText('SELECT TRACK', GW / 2, 40);
 
@@ -1014,11 +1639,11 @@ function drawTrackSelect() {
   for (var i = 0; i < 8; i++) {
     var y = 70 + i * 38;
     var selected = i === currentTrack;
-    ctx.fillStyle = selected ? '#44dd88' : '#444';
+    ctx.fillStyle = selected ? statB.color : '#444';
     ctx.font = (selected ? 'bold ' : '') + '14px monospace';
     ctx.fillText((i + 1) + '. ' + TRACKS[i].name, GW / 2, y);
     if (selected) {
-      ctx.fillStyle = '#44dd88';
+      ctx.fillStyle = statB.color;
       ctx.fillText('>', GW / 2 - 130, y);
       ctx.fillText('<', GW / 2 + 130, y);
     }
@@ -1054,9 +1679,12 @@ function drawRace(dt) {
   ctx.save();
   TAS.fx.applyShake();
 
-  // Background
+  // Background with zone tint
   ctx.fillStyle = track.bg;
   ctx.fillRect(0, 0, GW, GH);
+
+  // Zone ambient layer (Pass 3)
+  drawZoneBackground();
 
   // Draw track
   ctx.save();
@@ -1064,6 +1692,9 @@ function drawRace(dt) {
 
   // Track surface
   drawTrackSurface();
+
+  // Zone particles behind entities
+  drawZoneParticles();
 
   // Hazards
   drawHazards();
@@ -1090,6 +1721,12 @@ function drawRace(dt) {
   // Powerups
   drawPowerups();
 
+  // Enemies (Pass 2)
+  drawEnemies();
+
+  // Boss (Pass 2)
+  if (bossActive && boss && boss.alive) drawBoss();
+
   // Missiles
   for (var i = 0; i < missiles.length; i++) {
     var m = missiles[i];
@@ -1104,7 +1741,6 @@ function drawRace(dt) {
     ctx.closePath();
     ctx.fill();
     ctx.restore();
-    // Trail
     TAS.particles.spawn(m.x - cos(m.angle) * 5, m.y - sin(m.angle) * 5, '#ff8800', 1, 1, { size: 1, gravity: 0 });
   }
 
@@ -1116,6 +1752,9 @@ function drawRace(dt) {
 
   // Particles
   TAS.particles.draw();
+
+  // Score popups
+  drawScorePopups();
 
   ctx.restore();
 
@@ -1130,6 +1769,11 @@ function drawRace(dt) {
   // Minimap
   drawMinimap();
 
+  // Boss HP bar
+  if (bossActive && boss && boss.alive) {
+    drawBossHPBar();
+  }
+
   // Countdown
   if (countdown > 0) {
     ctx.textAlign = 'center';
@@ -1138,15 +1782,337 @@ function drawRace(dt) {
     ctx.fillText(String(countdown), GW / 2, GH / 2 + 20);
   }
 
+  // Tutorial overlay (Pass 3)
+  if (showTutorial && countdown <= 0) {
+    drawTutorial();
+  }
+
   // Touch controls
   TAS.input.drawTouchControls(GW, GH);
+}
+
+// === ZONE BACKGROUND (Pass 3 - themed visual layers) ===
+function drawZoneBackground() {
+  var zone = track.zone;
+  if (zone === 'void') {
+    // Swirling void stars
+    ctx.fillStyle = 'rgba(100,50,200,0.05)';
+    for (var i = 0; i < 5; i++) {
+      var sx = GW / 2 + sin(zonePulse * 0.3 + i * 1.2) * GW * 0.3;
+      var sy = GH / 2 + cos(zonePulse * 0.4 + i * 0.9) * GH * 0.3;
+      ctx.beginPath();
+      ctx.arc(sx, sy, 50 + sin(zonePulse + i) * 20, 0, PI2);
+      ctx.fill();
+    }
+  } else if (zone === 'water') {
+    // Subtle wave pattern
+    ctx.fillStyle = 'rgba(60,120,180,0.03)';
+    for (var y = 0; y < GH; y += 30) {
+      var waveX = sin(zonePulse + y * 0.02) * 10;
+      ctx.fillRect(waveX, y, GW, 15);
+    }
+  } else if (zone === 'forge') {
+    // Orange glow at bottom
+    var grd = ctx.createLinearGradient(0, GH * 0.7, 0, GH);
+    grd.addColorStop(0, 'rgba(255,100,0,0)');
+    grd.addColorStop(1, 'rgba(255,80,0,0.08)');
+    ctx.fillStyle = grd;
+    ctx.fillRect(0, 0, GW, GH);
+  }
+}
+
+// === DRAW ENEMIES (Pass 2) ===
+function drawEnemies() {
+  for (var i = 0; i < enemies.length; i++) {
+    var e = enemies[i];
+    if (!e.alive) continue;
+
+    ctx.save();
+    ctx.translate(e.x, e.y);
+
+    if (e.hitFlash > 0) {
+      ctx.globalAlpha = 0.5 + sin(e.hitFlash * 20) * 0.5;
+    }
+
+    // Draw enemy based on type
+    if (e.type === 'slime') {
+      ctx.fillStyle = e.color;
+      ctx.beginPath();
+      ctx.arc(0, 2, e.size * 0.8, 0, PI);
+      ctx.arc(0, 0, e.size, PI, 0);
+      ctx.fill();
+      // Eyes
+      ctx.fillStyle = '#fff';
+      ctx.beginPath();
+      ctx.arc(-4, -2, 3, 0, PI2);
+      ctx.arc(4, -2, 3, 0, PI2);
+      ctx.fill();
+      ctx.fillStyle = '#111';
+      ctx.beginPath();
+      ctx.arc(-3, -2, 1.5, 0, PI2);
+      ctx.arc(5, -2, 1.5, 0, PI2);
+      ctx.fill();
+    } else if (e.type === 'bat') {
+      ctx.fillStyle = e.color;
+      // Wings
+      var wingFlap = sin(frame * 0.3) * 0.4;
+      ctx.save();
+      ctx.rotate(wingFlap);
+      ctx.beginPath();
+      ctx.moveTo(0, 0);
+      ctx.lineTo(-e.size, -e.size * 0.5);
+      ctx.lineTo(-e.size * 0.3, 0);
+      ctx.fill();
+      ctx.restore();
+      ctx.save();
+      ctx.rotate(-wingFlap);
+      ctx.beginPath();
+      ctx.moveTo(0, 0);
+      ctx.lineTo(e.size, -e.size * 0.5);
+      ctx.lineTo(e.size * 0.3, 0);
+      ctx.fill();
+      ctx.restore();
+      // Body
+      ctx.beginPath();
+      ctx.arc(0, 0, e.size * 0.4, 0, PI2);
+      ctx.fill();
+      // Eyes
+      ctx.fillStyle = '#ff4444';
+      ctx.beginPath();
+      ctx.arc(-2, -1, 1.5, 0, PI2);
+      ctx.arc(2, -1, 1.5, 0, PI2);
+      ctx.fill();
+    } else if (e.type === 'goblin') {
+      ctx.fillStyle = e.color;
+      ctx.beginPath();
+      ctx.arc(0, 0, e.size, 0, PI2);
+      ctx.fill();
+      // Pointy ears
+      ctx.beginPath();
+      ctx.moveTo(-e.size, -2);
+      ctx.lineTo(-e.size - 6, -8);
+      ctx.lineTo(-e.size + 2, -4);
+      ctx.fill();
+      ctx.beginPath();
+      ctx.moveTo(e.size, -2);
+      ctx.lineTo(e.size + 6, -8);
+      ctx.lineTo(e.size - 2, -4);
+      ctx.fill();
+      // Face
+      ctx.fillStyle = '#fff';
+      ctx.beginPath();
+      ctx.arc(-3, -2, 2.5, 0, PI2);
+      ctx.arc(3, -2, 2.5, 0, PI2);
+      ctx.fill();
+      ctx.fillStyle = '#440000';
+      ctx.beginPath();
+      ctx.arc(-3, -2, 1.2, 0, PI2);
+      ctx.arc(3, -2, 1.2, 0, PI2);
+      ctx.fill();
+    } else if (e.type === 'skeleton') {
+      ctx.fillStyle = e.color;
+      ctx.beginPath();
+      ctx.arc(0, 0, e.size, 0, PI2);
+      ctx.fill();
+      // Skull face
+      ctx.fillStyle = '#111';
+      ctx.beginPath();
+      ctx.arc(-3, -2, 3, 0, PI2);
+      ctx.arc(3, -2, 3, 0, PI2);
+      ctx.fill();
+      ctx.fillRect(-3, 3, 6, 2); // mouth
+    } else if (e.type === 'spider') {
+      ctx.fillStyle = e.color;
+      ctx.beginPath();
+      ctx.arc(0, 0, e.size * 0.6, 0, PI2);
+      ctx.fill();
+      // Legs
+      for (var l = 0; l < 8; l++) {
+        var la = l / 8 * PI2 + sin(frame * 0.15 + l) * 0.2;
+        ctx.strokeStyle = e.color;
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        ctx.moveTo(0, 0);
+        ctx.lineTo(cos(la) * e.size, sin(la) * e.size);
+        ctx.stroke();
+      }
+      // Eyes
+      ctx.fillStyle = '#ff2222';
+      ctx.beginPath();
+      ctx.arc(-2, -3, 2, 0, PI2);
+      ctx.arc(2, -3, 2, 0, PI2);
+      ctx.fill();
+    } else if (e.type === 'mushroom') {
+      // Cap
+      ctx.fillStyle = '#cc4422';
+      ctx.beginPath();
+      ctx.arc(0, -3, e.size, PI, 0);
+      ctx.fill();
+      // Spots
+      ctx.fillStyle = '#ffccaa';
+      ctx.beginPath();
+      ctx.arc(-3, -6, 2, 0, PI2);
+      ctx.arc(3, -5, 1.5, 0, PI2);
+      ctx.fill();
+      // Stem
+      ctx.fillStyle = '#eeddcc';
+      ctx.fillRect(-4, -3, 8, 8);
+    } else if (e.type === 'wisp') {
+      var wPulse = 0.5 + sin(frame * 0.15 + i) * 0.5;
+      ctx.globalAlpha = wPulse * (e.hitFlash > 0 ? 0.5 : 1);
+      ctx.fillStyle = e.color;
+      ctx.beginPath();
+      ctx.arc(0, 0, e.size, 0, PI2);
+      ctx.fill();
+      ctx.fillStyle = '#fff';
+      ctx.beginPath();
+      ctx.arc(0, 0, e.size * 0.5, 0, PI2);
+      ctx.fill();
+    } else if (e.type === 'mimic') {
+      // Looks like a powerup box until close
+      var distToP = TAS.math.dist(e.x, e.y, player.x, player.y);
+      if (distToP > 100) {
+        ctx.fillStyle = '#222';
+        ctx.strokeStyle = '#ffdd44';
+        ctx.lineWidth = 2;
+        ctx.fillRect(-8, -8, 16, 16);
+        ctx.strokeRect(-8, -8, 16, 16);
+        ctx.fillStyle = '#fff';
+        ctx.font = 'bold 10px monospace';
+        ctx.textAlign = 'center';
+        ctx.fillText('?', 0, 4);
+      } else {
+        // Revealed!
+        ctx.fillStyle = e.color;
+        ctx.beginPath();
+        ctx.arc(0, 0, e.size, 0, PI2);
+        ctx.fill();
+        ctx.fillStyle = '#fff';
+        ctx.beginPath();
+        ctx.arc(-4, -3, 3, 0, PI2);
+        ctx.arc(4, -3, 3, 0, PI2);
+        ctx.fill();
+        ctx.fillStyle = '#ff0000';
+        ctx.beginPath();
+        ctx.arc(-4, -3, 1.5, 0, PI2);
+        ctx.arc(4, -3, 1.5, 0, PI2);
+        ctx.fill();
+        // Teeth
+        ctx.fillStyle = '#fff';
+        ctx.fillRect(-5, 2, 10, 3);
+        ctx.fillStyle = '#111';
+        for (var ti = -4; ti <= 4; ti += 2) {
+          ctx.fillRect(ti, 2, 1, 3);
+        }
+      }
+    }
+
+    // HP bar for enemies with hp > 1
+    if (e.maxHp > 1 && e.hp < e.maxHp) {
+      ctx.globalAlpha = 1;
+      ctx.fillStyle = '#333';
+      ctx.fillRect(-e.size, -e.size - 6, e.size * 2, 3);
+      ctx.fillStyle = '#ff4444';
+      ctx.fillRect(-e.size, -e.size - 6, e.size * 2 * (e.hp / e.maxHp), 3);
+    }
+
+    ctx.globalAlpha = 1;
+    ctx.restore();
+  }
+}
+
+// === DRAW BOSS (Pass 2) ===
+function drawBoss() {
+  ctx.save();
+  ctx.translate(boss.x, boss.y);
+
+  if (boss.hitFlash > 0) {
+    ctx.globalAlpha = 0.5 + sin(boss.hitFlash * 20) * 0.5;
+  }
+
+  // Boss body
+  ctx.fillStyle = boss.color;
+  ctx.beginPath();
+  ctx.arc(0, 0, boss.size, 0, PI2);
+  ctx.fill();
+
+  // Inner detail
+  ctx.fillStyle = '#111';
+  ctx.beginPath();
+  ctx.arc(0, 0, boss.size * 0.6, 0, PI2);
+  ctx.fill();
+
+  // Boss eyes
+  ctx.fillStyle = '#fff';
+  var eyeOff = boss.size * 0.3;
+  ctx.beginPath();
+  ctx.arc(-eyeOff, -eyeOff * 0.5, boss.size * 0.2, 0, PI2);
+  ctx.arc(eyeOff, -eyeOff * 0.5, boss.size * 0.2, 0, PI2);
+  ctx.fill();
+  ctx.fillStyle = '#ff0000';
+  ctx.beginPath();
+  ctx.arc(-eyeOff, -eyeOff * 0.5, boss.size * 0.1, 0, PI2);
+  ctx.arc(eyeOff, -eyeOff * 0.5, boss.size * 0.1, 0, PI2);
+  ctx.fill();
+
+  // Crown/horns
+  ctx.fillStyle = boss.color;
+  ctx.beginPath();
+  ctx.moveTo(-boss.size * 0.5, -boss.size);
+  ctx.lineTo(-boss.size * 0.3, -boss.size * 1.4);
+  ctx.lineTo(-boss.size * 0.1, -boss.size);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.moveTo(boss.size * 0.1, -boss.size);
+  ctx.lineTo(boss.size * 0.3, -boss.size * 1.4);
+  ctx.lineTo(boss.size * 0.5, -boss.size);
+  ctx.fill();
+
+  // Aura pulse
+  var auraPulse = 0.2 + sin(frame * 0.1) * 0.15;
+  ctx.globalAlpha = auraPulse;
+  ctx.strokeStyle = boss.color;
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.arc(0, 0, boss.size * 1.3, 0, PI2);
+  ctx.stroke();
+
+  ctx.globalAlpha = 1;
+  ctx.restore();
+
+  // Boss projectiles
+  for (var i = 0; i < boss.projectiles.length; i++) {
+    var p = boss.projectiles[i];
+    ctx.fillStyle = boss.color;
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, 6, 0, PI2);
+    ctx.fill();
+    ctx.fillStyle = '#fff';
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, 3, 0, PI2);
+    ctx.fill();
+  }
+}
+
+function drawBossHPBar() {
+  var barW = 200, barH = 10;
+  var bx = (GW - barW) / 2, by = 35;
+  ctx.fillStyle = 'rgba(0,0,0,0.7)';
+  ctx.fillRect(bx - 2, by - 2, barW + 4, barH + 4);
+  ctx.fillStyle = '#333';
+  ctx.fillRect(bx, by, barW, barH);
+  ctx.fillStyle = boss.color;
+  ctx.fillRect(bx, by, barW * (boss.hp / boss.maxHp), barH);
+  ctx.fillStyle = '#fff';
+  ctx.font = 'bold 8px monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText(boss.name, GW / 2, by - 3);
 }
 
 function drawTrackSurface() {
   var cps = track.checkpoints;
   var tw = track.width;
 
-  // Draw track as thick line segments
   ctx.lineCap = 'round';
   ctx.lineJoin = 'round';
 
@@ -1209,7 +2175,6 @@ function drawObstacles() {
     ctx.translate(ob.x, ob.y);
 
     if (ob.type === 'plate' || ob.type === 'bowl') {
-      // White/cream circle
       ctx.fillStyle = '#eee8dd';
       ctx.beginPath();
       ctx.arc(0, 0, ob.r, 0, PI2);
@@ -1217,7 +2182,6 @@ function drawObstacles() {
       ctx.strokeStyle = '#ccc';
       ctx.lineWidth = 2;
       ctx.stroke();
-      // Inner ring
       ctx.strokeStyle = '#ddd';
       ctx.beginPath();
       ctx.arc(0, 0, ob.r * 0.6, 0, PI2);
@@ -1240,7 +2204,6 @@ function drawObstacles() {
       ctx.beginPath();
       ctx.arc(0, 0, ob.r * 0.7, 0, PI2);
       ctx.fill();
-      // Soil
       ctx.fillStyle = '#553311';
       ctx.beginPath();
       ctx.arc(0, 0, ob.r * 0.5, 0, PI2);
@@ -1265,19 +2228,16 @@ function drawObstacles() {
       ctx.arc(0, 0, ob.r * 0.3, 0, PI2);
       ctx.fill();
     } else if (ob.type === 'ball') {
-      // Billiard ball
       var ballColors = ['#dd2222', '#0022aa', '#884400', '#008800', '#aa0088', '#dd8800'];
       ctx.fillStyle = ballColors[i % ballColors.length];
       ctx.beginPath();
       ctx.arc(0, 0, ob.r, 0, PI2);
       ctx.fill();
-      // Shine
       ctx.fillStyle = 'rgba(255,255,255,0.3)';
       ctx.beginPath();
       ctx.arc(-ob.r * 0.3, -ob.r * 0.3, ob.r * 0.3, 0, PI2);
       ctx.fill();
     } else if (ob.type === 'core') {
-      // Reactor core - pulsing
       var pulse = 0.8 + sin(frame * 0.1) * 0.2;
       ctx.fillStyle = '#2a0a4a';
       ctx.beginPath();
@@ -1310,7 +2270,6 @@ function drawHazards() {
       ctx.beginPath();
       ctx.arc(0, 0, h.r, 0, PI2);
       ctx.fill();
-      // Bubbles
       ctx.fillStyle = 'rgba(255,255,255,0.3)';
       for (var j = 0; j < 4; j++) {
         var bx = sin(frame * 0.03 + j) * h.r * 0.5;
@@ -1340,6 +2299,33 @@ function drawHazards() {
       ctx.arc(0, 0, h.r * 0.5, 0, PI2);
       ctx.fill();
       ctx.globalAlpha = 1;
+    } else if (h.type === 'grease') {
+      ctx.fillStyle = 'rgba(180,150,50,0.4)';
+      ctx.beginPath();
+      ctx.arc(0, 0, h.r, 0, PI2);
+      ctx.fill();
+      ctx.fillStyle = 'rgba(200,180,80,0.2)';
+      ctx.beginPath();
+      ctx.arc(4, -2, h.r * 0.7, 0, PI2);
+      ctx.fill();
+    } else if (h.type === 'plasma') {
+      var pp = 0.5 + sin(frame * 0.2 + i * 3) * 0.5;
+      ctx.globalAlpha = pp;
+      ctx.fillStyle = '#ff22ff';
+      ctx.beginPath();
+      ctx.arc(0, 0, h.r + sin(frame * 0.15) * 5, 0, PI2);
+      ctx.fill();
+      ctx.fillStyle = '#ffffff';
+      ctx.beginPath();
+      ctx.arc(0, 0, h.r * 0.3, 0, PI2);
+      ctx.fill();
+      ctx.globalAlpha = 1;
+      // Warning ring
+      ctx.strokeStyle = 'rgba(255,100,255,0.3)';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.arc(0, 0, h.r + 10, 0, PI2);
+      ctx.stroke();
     }
 
     ctx.restore();
@@ -1378,9 +2364,16 @@ function drawPowerups() {
 
     // Box
     ctx.fillStyle = '#222';
-    ctx.strokeStyle = '#ffdd44';
     ctx.lineWidth = 2;
     ctx.fillRect(-8, -8, 16, 16);
+
+    // Color-coded border by type
+    var borderColor = '#ffdd44';
+    if (p.type === 'star') borderColor = '#ffff00';
+    else if (p.type === 'bomb') borderColor = '#ff4444';
+    else if (p.type === 'wrench') borderColor = '#44ff44';
+    else if (p.type === 'magnet') borderColor = '#ff44ff';
+    ctx.strokeStyle = borderColor;
     ctx.strokeRect(-8, -8, 16, 16);
 
     // Icon
@@ -1391,6 +2384,10 @@ function drawPowerups() {
     else if (p.type === 'oil') ctx.fillText('O', 0, 4);
     else if (p.type === 'shield') ctx.fillText('S', 0, 4);
     else if (p.type === 'missile') ctx.fillText('M', 0, 4);
+    else if (p.type === 'magnet') { ctx.fillStyle = '#ff44ff'; ctx.fillText('G', 0, 4); }
+    else if (p.type === 'star') { ctx.fillStyle = '#ffff00'; ctx.fillText('*', 0, 4); }
+    else if (p.type === 'bomb') { ctx.fillStyle = '#ff4444'; ctx.fillText('X', 0, 4); }
+    else if (p.type === 'wrench') { ctx.fillStyle = '#44ff44'; ctx.fillText('+', 0, 4); }
 
     ctx.restore();
   }
@@ -1400,12 +2397,21 @@ function drawRacer(r) {
   ctx.save();
   ctx.translate(r.x, r.y);
 
+  // Hit flash effect
+  if (r.hitFlash > 0) {
+    ctx.globalAlpha = 0.5 + sin(r.hitFlash * 20) * 0.3;
+  }
+
+  // Invincibility blink
+  if (r.invincible > 0 && floor(r.invincible * 10) % 2 === 0) {
+    ctx.globalAlpha = 0.4;
+  }
+
   // Air time effect
   if (r.airTime > 0) {
     ctx.save();
     var airScale = 1 + r.airTime * 0.5;
     ctx.scale(airScale, airScale);
-    // Shadow
     ctx.fillStyle = 'rgba(0,0,0,0.3)';
     ctx.beginPath();
     ctx.ellipse(3, 5, 10, 6, 0, 0, PI2);
@@ -1431,9 +2437,7 @@ function drawRacer(r) {
 
   // Body (baseling-shaped kart)
   ctx.fillStyle = r.bodyColor;
-  // Kart body
   ctx.fillRect(-10, -7, 20, 14);
-  // Hood
   ctx.fillStyle = r.color;
   ctx.fillRect(-4, -6, 14, 12);
   // Wheels
@@ -1442,7 +2446,7 @@ function drawRacer(r) {
   ctx.fillRect(-9, 5, 5, 4);
   ctx.fillRect(5, -9, 5, 4);
   ctx.fillRect(5, 5, 5, 4);
-  // Eyes (baseling face at front)
+  // Eyes
   ctx.fillStyle = '#fff';
   ctx.beginPath();
   ctx.arc(6, -2, 2.5, 0, PI2);
@@ -1454,6 +2458,14 @@ function drawRacer(r) {
   ctx.arc(7, 2, 1.2, 0, PI2);
   ctx.fill();
 
+  // Baseling icon on hood if player
+  if (r.isPlayer && statB.icon) {
+    ctx.fillStyle = 'rgba(0,0,0,0.3)';
+    ctx.font = 'bold 7px monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText(statB.icon, 2, 2);
+  }
+
   // Boost flame
   if (r.boost > 0) {
     ctx.fillStyle = '#ff8800';
@@ -1463,6 +2475,23 @@ function drawRacer(r) {
     ctx.lineTo(-18 - random() * 6, 4);
     ctx.closePath();
     ctx.fill();
+    // Extra flame for strong boost
+    ctx.fillStyle = '#ffdd00';
+    ctx.beginPath();
+    ctx.moveTo(-12, 0);
+    ctx.lineTo(-15 - random() * 4, -2);
+    ctx.lineTo(-15 - random() * 4, 2);
+    ctx.closePath();
+    ctx.fill();
+  }
+
+  // Magnet indicator
+  if (r.isPlayer && r.hasMagnet) {
+    ctx.strokeStyle = 'rgba(255,80,255,0.4)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.arc(0, 0, 20 + sin(frame * 0.2) * 3, 0, PI2);
+    ctx.stroke();
   }
 
   ctx.globalAlpha = 1;
@@ -1515,7 +2544,7 @@ function drawRaceHUD() {
   // Position
   var pos = getPosition(player);
   var posStr = pos + getSuffix(pos);
-  ctx.fillStyle = pos === 1 ? '#44dd88' : '#fff';
+  ctx.fillStyle = pos === 1 ? statB.color : '#fff';
   ctx.textAlign = 'center';
   ctx.fillText(posStr, GW / 2, 18);
 
@@ -1524,12 +2553,36 @@ function drawRaceHUD() {
   ctx.textAlign = 'right';
   ctx.fillText(formatTime(raceTime), GW - 8, 18);
 
+  // HP bar (Pass 1 - CON affects max)
+  var hpBarW = 60, hpBarH = 6;
+  var hpX = 8, hpY = 24;
+  ctx.fillStyle = '#333';
+  ctx.fillRect(hpX, hpY, hpBarW, hpBarH);
+  var hpColor = playerHP > playerMaxHP * 0.5 ? '#44dd88' : (playerHP > 1 ? '#ddaa44' : '#dd4444');
+  ctx.fillStyle = hpColor;
+  ctx.fillRect(hpX, hpY, hpBarW * (playerHP / playerMaxHP), hpBarH);
+
+  // Lives display
+  if (EXTRA_LIVES > 0) {
+    ctx.fillStyle = '#aaa';
+    ctx.font = '8px monospace';
+    ctx.textAlign = 'left';
+    ctx.fillText('x' + playerLives, hpX + hpBarW + 3, hpY + 5);
+  }
+
+  // Score (Pass 2 - INT multiplied)
+  ctx.fillStyle = '#ffdd44';
+  ctx.font = 'bold 10px monospace';
+  ctx.textAlign = 'right';
+  ctx.fillText('SCR: ' + raceScore, GW - 8, 28);
+
   // Powerup indicator
   var pStr = '';
-  if (player.hasMissile) pStr += '[M]issile ';
+  if (player.hasMissile) pStr += '[X]Missile ';
   if (player.hasOil) pStr += '[Z]Oil ';
-  if (player.hasShield) pStr += '[Shift]Shield ';
-  if (player.hasBoost) pStr += '[Ctrl]Boost ';
+  if (player.hasShield) pStr += '[Sh]Shield ';
+  if (player.hasBoost) pStr += '[Ct]Boost ';
+  if (player.hasMagnet) pStr += 'MAGNET ';
   if (pStr) {
     ctx.fillStyle = '#ffdd44';
     ctx.font = '10px monospace';
@@ -1560,6 +2613,25 @@ function drawMinimap() {
   ctx.closePath();
   ctx.stroke();
 
+  // Enemies on minimap
+  for (var i = 0; i < enemies.length; i++) {
+    if (!enemies[i].alive) continue;
+    var ex = mmX + (enemies[i].x - 800) / (900 / mmSize);
+    var ey = mmY + (enemies[i].y - 800) / (900 / mmSize);
+    ctx.fillStyle = '#ff4444';
+    ctx.fillRect(ex - 1, ey - 1, 2, 2);
+  }
+
+  // Boss on minimap
+  if (bossActive && boss && boss.alive) {
+    var bx = mmX + (boss.x - 800) / (900 / mmSize);
+    var by = mmY + (boss.y - 800) / (900 / mmSize);
+    ctx.fillStyle = boss.color;
+    ctx.beginPath();
+    ctx.arc(bx, by, 4, 0, PI2);
+    ctx.fill();
+  }
+
   // Racers on minimap
   for (var i = 0; i < allRacers.length; i++) {
     var r = allRacers[i];
@@ -1572,13 +2644,36 @@ function drawMinimap() {
   }
 }
 
+// === TUTORIAL OVERLAY (Pass 3) ===
+function drawTutorial() {
+  var alpha = tutorialTimer < 1 ? tutorialTimer : (tutorialTimer > 6 ? max(0, 1 - (tutorialTimer - 6) / 2) : 1);
+  ctx.globalAlpha = alpha * 0.85;
+  ctx.fillStyle = 'rgba(0,0,0,0.7)';
+  ctx.fillRect(GW * 0.1, GH * 0.3, GW * 0.8, GH * 0.35);
+  ctx.globalAlpha = alpha;
+  ctx.textAlign = 'center';
+  ctx.fillStyle = statB.color;
+  ctx.font = 'bold 14px monospace';
+  ctx.fillText('RACE TUTORIAL', GW / 2, GH * 0.36);
+  ctx.fillStyle = '#ccc';
+  ctx.font = '11px monospace';
+  ctx.fillText('UP/W = Gas | DOWN/S = Brake', GW / 2, GH * 0.42);
+  ctx.fillText('LEFT/RIGHT or A/D = Steer', GW / 2, GH * 0.47);
+  ctx.fillText('Collect powerup boxes on track', GW / 2, GH * 0.52);
+  ctx.fillText('Watch out for enemies!', GW / 2, GH * 0.57);
+  ctx.fillStyle = '#888';
+  ctx.font = '9px monospace';
+  ctx.fillText('Complete 3 laps to finish', GW / 2, GH * 0.63);
+  ctx.globalAlpha = 1;
+}
+
 // === RACE END ===
 function drawRaceEnd() {
   ctx.fillStyle = 'rgba(0,0,0,0.85)';
   ctx.fillRect(0, 0, GW, GH);
 
   ctx.textAlign = 'center';
-  ctx.fillStyle = '#44dd88';
+  ctx.fillStyle = statB.color;
   ctx.font = 'bold 24px monospace';
   ctx.fillText('RACE COMPLETE', GW / 2, 60);
 
@@ -1587,8 +2682,8 @@ function drawRaceEnd() {
   ctx.fillText(track.name, GW / 2, 90);
 
   // Results
-  var names = ['YOU', 'RED', 'BLUE', 'GOLD'];
-  var colors = ['#44dd88', '#dd4444', '#4488dd', '#ddaa44'];
+  var names = [statB.name || 'YOU', 'RED', 'BLUE', 'GOLD'];
+  var colors = [statB.color, '#dd4444', '#4488dd', '#ddaa44'];
 
   ctx.font = '14px monospace';
   for (var i = 0; i < finishOrder.length; i++) {
@@ -1603,6 +2698,11 @@ function drawRaceEnd() {
     ctx.font = '14px monospace';
   }
 
+  // Race score
+  ctx.fillStyle = '#ffdd44';
+  ctx.font = 'bold 14px monospace';
+  ctx.fillText('SCORE: ' + raceScore, GW / 2, 290);
+
   // Player position highlight
   var playerPos = finishOrder.indexOf(0) + 1;
   if (playerPos === 1) {
@@ -1610,7 +2710,7 @@ function drawRaceEnd() {
     ctx.globalAlpha = pulse;
     ctx.fillStyle = '#ffdd44';
     ctx.font = 'bold 20px monospace';
-    ctx.fillText('WINNER!', GW / 2, 320);
+    ctx.fillText('WINNER!', GW / 2, 330);
     ctx.globalAlpha = 1;
   }
 
@@ -1632,14 +2732,13 @@ function drawStandings() {
   ctx.font = '12px monospace';
   ctx.fillText('Race ' + champTrack + ' of ' + totalRaces + ' complete', GW / 2, 65);
 
-  ctx.fillStyle = '#44dd88';
+  ctx.fillStyle = statB.color;
   ctx.font = 'bold 16px monospace';
   ctx.fillText('STANDINGS', GW / 2, 100);
 
-  var names = ['YOU', 'RED', 'BLUE', 'GOLD'];
-  var colors = ['#44dd88', '#dd4444', '#4488dd', '#ddaa44'];
+  var names = [statB.name || 'YOU', 'RED', 'BLUE', 'GOLD'];
+  var colors = [statB.color, '#dd4444', '#4488dd', '#ddaa44'];
 
-  // Sort by points
   var order = [0, 1, 2, 3].sort(function(a, b) { return champPoints[b] - champPoints[a]; });
 
   ctx.font = '14px monospace';
@@ -1663,7 +2762,6 @@ function drawChampion() {
 
   ctx.textAlign = 'center';
 
-  // Check if player won
   var order = [0, 1, 2, 3].sort(function(a, b) { return champPoints[b] - champPoints[a]; });
   var playerRank = order.indexOf(0) + 1;
 
@@ -1677,7 +2775,7 @@ function drawChampion() {
 
     ctx.fillStyle = '#fff';
     ctx.font = '16px monospace';
-    ctx.fillText('You won the championship!', GW / 2, 140);
+    ctx.fillText(statB.name + ' won the championship!', GW / 2, 140);
   } else {
     ctx.fillStyle = '#aaa';
     ctx.font = 'bold 22px monospace';
@@ -1687,9 +2785,8 @@ function drawChampion() {
     ctx.fillText('You finished ' + playerRank + getSuffix(playerRank), GW / 2, 130);
   }
 
-  // Final standings
-  var names = ['YOU', 'RED', 'BLUE', 'GOLD'];
-  var colors = ['#44dd88', '#dd4444', '#4488dd', '#ddaa44'];
+  var names = [statB.name || 'YOU', 'RED', 'BLUE', 'GOLD'];
+  var colors = [statB.color, '#dd4444', '#4488dd', '#ddaa44'];
   ctx.font = '14px monospace';
   for (var i = 0; i < 4; i++) {
     var id = order[i];

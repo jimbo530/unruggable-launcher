@@ -28,6 +28,33 @@ var ctx = TAS.ctx;
 TAS.initCanvas(GW, GH);
 TAS.input.initTouch({ buttons: ['a', 'b'], labels: { a: 'FIRE', b: 'TURBO' } });
 
+// === STAT B SYSTEM ===
+// STR=weapon power, DEX=speed/steering, CON=HP/lives, INT=score mult, WIS=fire rate, CHA=power-up drops
+var statB = { STR: 5, DEX: 5, CON: 5, INT: 5, WIS: 5, CHA: 5 };
+
+function loadStatB() {
+  if (window.TAS && TAS.nft && TAS.nft.statB) {
+    var s = TAS.nft.statB;
+    statB.STR = Math.floor(s.STR || s.str || 5);
+    statB.DEX = Math.floor(s.DEX || s.dex || 5);
+    statB.CON = Math.floor(s.CON || s.con || 5);
+    statB.INT = Math.floor(s.INT || s.int || 5);
+    statB.WIS = Math.floor(s.WIS || s.wis || 5);
+    statB.CHA = Math.floor(s.CHA || s.cha || 5);
+  }
+}
+
+// Stat helpers - all use Math.floor
+function weaponDmg() { return Math.floor(1 + statB.STR * 0.15); }
+function boatSpeed() { return 3.0 + Math.floor(statB.DEX * 0.3 * 10) / 10; }
+function steerLerp() { return 0.12 + Math.floor(statB.DEX * 0.01 * 100) / 100; }
+function maxHpFromCon() { return Math.floor(2 + statB.CON * 0.4); }
+function maxLivesFromCon() { return Math.floor(2 + statB.CON * 0.15); }
+function scoreMult() { return 1 + Math.floor(statB.INT * 0.08 * 100) / 100; }
+function fireRateBonus() { return Math.floor(statB.WIS * 0.6); }
+function powerupChance() { return 0.4 + Math.floor(statB.CHA * 0.04 * 100) / 100; }
+function chargedShotReady() { return statB.STR >= 10; }
+
 // === GAME STATE ===
 var state = 'title';
 var score = 0;
@@ -45,10 +72,28 @@ var deathTimer = 0;
 var stageClearTimer = 0;
 var scrollSpeed = 1.5;
 var baseScrollSpeed = 1.5;
+var shakeX = 0, shakeY = 0;
+var shakeIntensity = 0;
+
+// Zone system - visual themes per stage cluster
+var ZONE_NAMES = [
+  'MYCELIAL SHALLOWS', 'SPORE RIVER', 'REACTOR RAPIDS',
+  'FUNGAL DEPTHS', 'THE KRAKEN WASTES'
+];
+var ZONE_COLORS = [
+  { water1: '#1a3a5c', water2: '#1e4470', water3: '#163050', bank: '#2d5a27', edge: '#8b6914', accent: '#4488bb' },
+  { water1: '#1a2a3a', water2: '#223355', water3: '#1a2840', bank: '#3a2a4a', edge: '#6b3a8b', accent: '#8855cc' },
+  { water1: '#2a1a1a', water2: '#3a2020', water3: '#251515', bank: '#4a3a1a', edge: '#aa6622', accent: '#ff6633' },
+  { water1: '#0a1a2a', water2: '#0e2238', water3: '#081420', bank: '#1a3a2a', edge: '#2a6644', accent: '#22aa88' },
+  { water1: '#1a0a2a', water2: '#220e38', water3: '#140820', bank: '#2a1a3a', edge: '#5522aa', accent: '#aa44ff' }
+];
+
+function getZone() { return Math.floor(Math.min(4, (stage - 1) / 5)); }
+function getZoneColors() { return ZONE_COLORS[getZone()]; }
 
 // Mission types
 var MISSIONS = ['race', 'protect', 'boss', 'collect', 'survive'];
-var MISSION_NAMES = ['RACE TO FINISH', 'PROTECT THE BASELINGS', 'BOSS FIGHT', 'COLLECT TOKENS', 'SURVIVE THE RAPIDS'];
+var MISSION_NAMES = ['RACE THE RAPIDS', 'PROTECT THE BASELINGS', 'BOSS FIGHT', 'COLLECT SPORE TOKENS', 'SURVIVE THE CURRENT'];
 var missionType = 'race';
 var missionFlashTimer = 0;
 
@@ -61,9 +106,14 @@ var turboFuel = 100;
 var shieldActive = false;
 var shieldTimer = 0;
 
+// Charged shot (STR >= 10)
+var chargeTimer = 0;
+var chargeMax = 45;
+var isCharging = false;
+
 // Weapons
 var WEAPON_TYPES = ['cannon', 'spread', 'missile', 'turbo'];
-var WEAPON_NAMES = ['CANNON', 'SPREAD SHOT', 'MISSILES', 'TURBO FIRE'];
+var WEAPON_NAMES = ['SPORE CANNON', 'SPREAD SPORE', 'HOMING MYCELIUM', 'TURBO SPORE'];
 var weaponLevel = 0;
 var fireTimer = 0;
 var fireCooldown = 12;
@@ -92,6 +142,7 @@ var mines = [];
 var icePatches = [];
 var ramps = [];
 var waterfalls = [];
+var sporeFog = [];
 
 // Enemies
 var enemies = [];
@@ -119,10 +170,59 @@ var bossHits = 0;
 var bossMaxHits = 10;
 var bossPhase = 0;
 var bossBullets = [];
-var BOSS_NAMES = ['GIANT SQUID', 'SEA DRAGON', 'MECH SHARK', 'STORM WHALE', 'THE KRAKEN'];
+var BOSS_NAMES = ['SPORE KRAKEN', 'MYCELIAL SERPENT', 'REACTOR SHARK', 'STORM WHALE', 'THE ELDER FUNGUS'];
 
 // Scenery / decoration
 var foamBubbles = [];
+
+// Particles system (supplemental for NES-style sparks)
+var nesParticles = [];
+
+function spawnNesParticles(x, y, color, count, speed, opts) {
+  opts = opts || {};
+  for (var i = 0; i < count; i++) {
+    var ang = Math.random() * Math.PI * 2;
+    var spd = (speed || 2) * (0.5 + Math.random());
+    nesParticles.push({
+      x: x, y: y,
+      vx: Math.cos(ang) * spd,
+      vy: Math.sin(ang) * spd - (opts.upward ? 1.5 : 0),
+      life: 1,
+      decay: 0.02 + Math.random() * 0.02,
+      size: opts.size || (1 + Math.floor(Math.random() * 3)),
+      color: color,
+      gravity: opts.gravity || 0.04,
+      shape: opts.shape || 'rect'
+    });
+  }
+}
+
+function updateNesParticles() {
+  for (var i = nesParticles.length - 1; i >= 0; i--) {
+    var p = nesParticles[i];
+    p.x += p.vx;
+    p.y += p.vy;
+    p.vy += p.gravity;
+    p.life -= p.decay;
+    if (p.life <= 0) nesParticles.splice(i, 1);
+  }
+}
+
+function drawNesParticles() {
+  for (var i = 0; i < nesParticles.length; i++) {
+    var p = nesParticles[i];
+    ctx.globalAlpha = Math.min(1, p.life);
+    ctx.fillStyle = p.color;
+    if (p.shape === 'circle') {
+      ctx.beginPath();
+      ctx.arc(Math.floor(p.x), Math.floor(p.y), p.size, 0, Math.PI * 2);
+      ctx.fill();
+    } else {
+      ctx.fillRect(Math.floor(p.x), Math.floor(p.y), p.size, p.size);
+    }
+  }
+  ctx.globalAlpha = 1;
+}
 
 // Stage configuration
 function getMissionForStage(s) {
@@ -133,6 +233,12 @@ function getMissionForStage(s) {
 
 function getDifficultyMult() {
   return 1 + (stage - 1) * 0.12;
+}
+
+// Custom shake (NES-style integer offsets)
+function triggerShake(intensity, duration) {
+  shakeIntensity = intensity;
+  // Duration handled by decay in update
 }
 
 // === INIT STAGE ===
@@ -155,6 +261,7 @@ function initStage() {
   icePatches = [];
   ramps = [];
   waterfalls = [];
+  sporeFog = [];
   enemies = [];
   enemyBullets = [];
   helicopters = [];
@@ -167,8 +274,11 @@ function initStage() {
   bossBullets = [];
   bankSegments = [];
   foamBubbles = [];
+  nesParticles = [];
   waterCurrentX = 0;
   waterCurrentY = 0;
+  chargeTimer = 0;
+  isCharging = false;
 
   // Reset boat position
   boat.x = GW / 2;
@@ -215,7 +325,7 @@ function initStage() {
       tokens.push({
         x: TAS.math.randRange(bankLeft + 30, bankRight - 30),
         y: TAS.math.randRange(-GH, 0) - t * 60,
-        sinkTimer: 300 + Math.random() * 200,
+        sinkTimer: 300 + Math.floor(Math.random() * 200),
         bobTimer: Math.random() * 100,
         collected: false
       });
@@ -224,7 +334,7 @@ function initStage() {
     stageGoal = 500 + stage * 30;
   } else if (missionType === 'boss') {
     var bossIndex = Math.min(Math.floor((stage - 1) / 5), 4);
-    bossMaxHits = 10 + bossIndex * 5;
+    bossMaxHits = Math.floor((10 + bossIndex * 5) * 1.2);
     bossHits = 0;
     bossPhase = 0;
     boss = {
@@ -239,7 +349,8 @@ function initStage() {
       flashTimer: 0,
       tentacles: [],
       width: 50 + bossIndex * 10,
-      height: 40 + bossIndex * 8
+      height: 40 + bossIndex * 8,
+      enraged: false
     };
     // Stop scrolling for boss
     scrollSpeed = 0;
@@ -248,10 +359,12 @@ function initStage() {
 
 // === START GAME ===
 function startGame() {
+  loadStatB();
   state = 'playing';
   score = 0;
-  lives = 3;
-  hp = 3;
+  lives = maxLivesFromCon();
+  hp = maxHpFromCon();
+  maxHp = maxHpFromCon();
   stage = 1;
   weaponLevel = 0;
   shieldActive = false;
@@ -260,6 +373,7 @@ function startGame() {
   ripples = [];
   wakeTrail = [];
   splashes = [];
+  nesParticles = [];
   initStage();
 }
 
@@ -287,12 +401,14 @@ function spawnLog() {
 
 function spawnWhirlpool() {
   var seg = bankSegments[0] || { left: bankLeft, right: bankRight };
+  // Goo whirlpool (Tasern-themed)
   whirlpools.push({
     x: TAS.math.randRange(seg.left + 40, seg.right - 40),
     y: -30,
     radius: TAS.math.randRange(20, 35),
     angle: 0,
-    strength: 0.8 + getDifficultyMult() * 0.3
+    strength: 0.8 + getDifficultyMult() * 0.3,
+    goo: Math.random() < 0.4 // 40% chance of goo whirlpool
   });
 }
 
@@ -316,18 +432,30 @@ function spawnRamp() {
   });
 }
 
+function spawnSporeFog() {
+  var seg = bankSegments[0] || { left: bankLeft, right: bankRight };
+  sporeFog.push({
+    x: TAS.math.randRange(seg.left + 30, seg.right - 30),
+    y: -40,
+    radius: TAS.math.randRange(30, 60),
+    alpha: 0.5 + Math.random() * 0.3,
+    timer: 0
+  });
+}
+
 function spawnEnemy() {
   var seg = bankSegments[0] || { left: bankLeft, right: bankRight };
-  var type = TAS.math.randInt(0, 2); // 0=basic, 1=shooter, 2=rammer
+  var type = TAS.math.randInt(0, 2); // 0=Reactor Boat, 1=Spore Shooter, 2=Mycelial Rammer
   enemies.push({
     x: TAS.math.randRange(seg.left + 20, seg.right - 20),
     y: -25,
     vx: (Math.random() - 0.5) * 2,
     vy: scrollSpeed * 0.3 + Math.random(),
     type: type,
-    hp: type === 2 ? 2 : 1,
+    hp: type === 2 ? Math.floor(2 + getDifficultyMult() * 0.3) : 1,
     fireTimer: TAS.math.randInt(40, 100),
-    flashTimer: 0
+    flashTimer: 0,
+    animTimer: Math.random() * 100
   });
 }
 
@@ -360,8 +488,15 @@ function spawnSubmarine() {
 
 function spawnPowerup() {
   var seg = bankSegments[0] || { left: bankLeft, right: bankRight };
+  // CHA affects what spawns - higher CHA = better drops
   var types = ['speed', 'weapon', 'shield', 'life', 'score'];
-  var type = types[TAS.math.randInt(0, types.length - 1)];
+  var type;
+  if (Math.random() < powerupChance() * 0.15) {
+    // Better drops at high CHA
+    type = Math.random() < 0.5 ? 'life' : 'shield';
+  } else {
+    type = types[TAS.math.randInt(0, types.length - 1)];
+  }
   powerups.push({
     x: TAS.math.randRange(seg.left + 20, seg.right - 20),
     y: -15,
@@ -373,28 +508,40 @@ function spawnPowerup() {
 // === FIRE WEAPON ===
 function fireWeapon() {
   if (fireTimer > 0) return;
+  var wisBonus = fireRateBonus();
+
+  // Charged shot release (STR >= 10)
+  if (isCharging && chargeTimer >= chargeMax && chargedShotReady()) {
+    isCharging = false;
+    var dmg = weaponDmg() * 3;
+    bullets.push({ x: boat.x, y: boat.y - BOAT_H / 2, vx: 0, vy: -8, type: 'charged', dmg: dmg, size: 8, life: 60 });
+    TAS.audio.playTone(220, 0.2, 'sawtooth', 0.1, 880);
+    triggerShake(3, 0);
+    spawnNesParticles(boat.x, boat.y - BOAT_H / 2, '#ff44ff', 8, 3, { upward: true });
+    fireTimer = Math.max(4, 20 - wisBonus);
+    chargeTimer = 0;
+    return;
+  }
+
   TAS.audio.playTone(440, 0.08, 'square', 0.06, 880);
+  var dmgBase = weaponDmg();
 
   if (weaponLevel === 0) {
-    // Single cannon
-    bullets.push({ x: boat.x, y: boat.y - BOAT_H / 2, vx: 0, vy: -6, type: 'bullet' });
-    fireCooldown = 12;
+    bullets.push({ x: boat.x, y: boat.y - BOAT_H / 2, vx: 0, vy: -6, type: 'bullet', dmg: dmgBase });
+    fireCooldown = Math.max(4, 12 - wisBonus);
   } else if (weaponLevel === 1) {
-    // Spread shot
-    bullets.push({ x: boat.x, y: boat.y - BOAT_H / 2, vx: -1.5, vy: -5.5, type: 'bullet' });
-    bullets.push({ x: boat.x, y: boat.y - BOAT_H / 2, vx: 0, vy: -6, type: 'bullet' });
-    bullets.push({ x: boat.x, y: boat.y - BOAT_H / 2, vx: 1.5, vy: -5.5, type: 'bullet' });
-    fireCooldown = 16;
+    bullets.push({ x: boat.x, y: boat.y - BOAT_H / 2, vx: -1.5, vy: -5.5, type: 'bullet', dmg: dmgBase });
+    bullets.push({ x: boat.x, y: boat.y - BOAT_H / 2, vx: 0, vy: -6, type: 'bullet', dmg: dmgBase });
+    bullets.push({ x: boat.x, y: boat.y - BOAT_H / 2, vx: 1.5, vy: -5.5, type: 'bullet', dmg: dmgBase });
+    fireCooldown = Math.max(6, 16 - wisBonus);
   } else if (weaponLevel === 2) {
-    // Homing missiles
-    bullets.push({ x: boat.x - 6, y: boat.y - BOAT_H / 2, vx: 0, vy: -4, type: 'missile', homing: true, life: 120 });
-    bullets.push({ x: boat.x + 6, y: boat.y - BOAT_H / 2, vx: 0, vy: -4, type: 'missile', homing: true, life: 120 });
-    fireCooldown = 22;
+    bullets.push({ x: boat.x - 6, y: boat.y - BOAT_H / 2, vx: 0, vy: -4, type: 'missile', homing: true, life: 120, dmg: Math.floor(dmgBase * 1.5) });
+    bullets.push({ x: boat.x + 6, y: boat.y - BOAT_H / 2, vx: 0, vy: -4, type: 'missile', homing: true, life: 120, dmg: Math.floor(dmgBase * 1.5) });
+    fireCooldown = Math.max(8, 22 - wisBonus);
   } else {
-    // Turbo fire (rapid)
-    bullets.push({ x: boat.x - 4, y: boat.y - BOAT_H / 2, vx: 0, vy: -7, type: 'bullet' });
-    bullets.push({ x: boat.x + 4, y: boat.y - BOAT_H / 2 + 4, vx: 0, vy: -7, type: 'bullet' });
-    fireCooldown = 6;
+    bullets.push({ x: boat.x - 4, y: boat.y - BOAT_H / 2, vx: 0, vy: -7, type: 'bullet', dmg: dmgBase });
+    bullets.push({ x: boat.x + 4, y: boat.y - BOAT_H / 2 + 4, vx: 0, vy: -7, type: 'bullet', dmg: dmgBase });
+    fireCooldown = Math.max(2, 6 - Math.floor(wisBonus * 0.5));
   }
   fireTimer = fireCooldown;
 }
@@ -406,15 +553,18 @@ function damagePlayer() {
       shieldTimer = 0;
       shieldActive = false;
       TAS.audio.playTone(200, 0.2, 'triangle', 0.08, 100);
+      spawnNesParticles(boat.x, boat.y, '#44ffff', 10, 3);
     }
     return;
   }
   hp--;
   invincTimer = 90;
+  triggerShake(6, 0);
   TAS.fx.shake(6, 0.85);
   TAS.fx.flash('#ff3333', 0.4);
   TAS.audio.playTone(150, 0.3, 'sawtooth', 0.1, 50);
   TAS.particles.spawn(boat.x, boat.y, '#ff6600', 12, 3, { gravity: 0.05 });
+  spawnNesParticles(boat.x, boat.y, '#ff4400', 8, 2.5);
 
   if (hp <= 0) {
     lives--;
@@ -426,6 +576,10 @@ function damagePlayer() {
       invincTimer = 120;
       boat.x = GW / 2;
       boat.y = GH - 60;
+      // Death explosion
+      spawnNesParticles(boat.x, boat.y, '#ff8800', 20, 4, { gravity: 0.08 });
+      spawnNesParticles(boat.x, boat.y, '#ffffff', 10, 2);
+      triggerShake(10, 0);
     }
   }
 }
@@ -441,9 +595,10 @@ function gameOver() {
 
 function stageClear() {
   stageClearTimer = 150;
-  score += 500 * stage;
+  score += Math.floor(500 * stage * scoreMult());
   TAS.audio.playMelody([[440, 0.1], [550, 0.1], [660, 0.1], [880, 0.2]], 100);
   TAS.fx.flash('#44ff88', 0.3);
+  spawnNesParticles(GW / 2, GH / 2, '#44ff88', 30, 4, { gravity: 0 });
 }
 
 // === FIND NEAREST ENEMY (for homing) ===
@@ -478,7 +633,7 @@ function addSplash(x, y, count) {
       vy: -2 - Math.random() * 2,
       vx: (Math.random() - 0.5) * 2,
       life: 1,
-      size: 1 + Math.random() * 2
+      size: 1 + Math.floor(Math.random() * 2)
     });
   }
 }
@@ -488,6 +643,15 @@ function update(dt) {
   frame++;
   TAS.particles.update(dt);
   TAS.fx.updateEffects(dt);
+  updateNesParticles();
+
+  // Shake decay
+  if (shakeIntensity > 0) {
+    shakeX = Math.floor((Math.random() - 0.5) * shakeIntensity * 2);
+    shakeY = Math.floor((Math.random() - 0.5) * shakeIntensity * 2);
+    shakeIntensity *= 0.88;
+    if (shakeIntensity < 0.5) { shakeIntensity = 0; shakeX = 0; shakeY = 0; }
+  }
 
   if (state === 'title') {
     waterOffset += 0.5;
@@ -514,7 +678,6 @@ function update(dt) {
     if (stageClearTimer <= 0) {
       stage++;
       if (stage > 25) {
-        // Game complete
         score += 10000;
         gameOver();
         return;
@@ -549,16 +712,17 @@ function update(dt) {
 
   var currentScroll = scrollSpeed * (turboActive ? 1.8 : 1);
 
-  // Input - steering
+  // Input - steering (DEX affects speed and lerp)
   var moveX = 0, moveY = 0;
   if (TAS.input.keys['ArrowLeft'] || TAS.input.keys['a'] || TAS.input.keys['KeyA'] || TAS.input.touch.left) moveX = -1;
   if (TAS.input.keys['ArrowRight'] || TAS.input.keys['d'] || TAS.input.keys['KeyD'] || TAS.input.touch.right) moveX = 1;
   if (TAS.input.keys['ArrowUp'] || TAS.input.keys['w'] || TAS.input.keys['KeyW'] || TAS.input.touch.up) moveY = -1;
   if (TAS.input.keys['ArrowDown'] || TAS.input.keys['s'] || TAS.input.keys['KeyS'] || TAS.input.touch.down) moveY = 1;
 
-  var speed = BOAT_SPEED * (turboActive ? 1.4 : 1);
-  boat.vx = TAS.math.lerp(boat.vx, moveX * speed, 0.15);
-  boat.vy = TAS.math.lerp(boat.vy, moveY * speed * 0.7, 0.12);
+  var speed = boatSpeed() * (turboActive ? 1.4 : 1);
+  var sLerp = steerLerp();
+  boat.vx = TAS.math.lerp(boat.vx, moveX * speed, sLerp);
+  boat.vy = TAS.math.lerp(boat.vy, moveY * speed * 0.7, sLerp * 0.85);
 
   // Apply water current
   boat.vx += waterCurrentX * 0.3;
@@ -578,9 +742,31 @@ function update(dt) {
   if (boat.x > rightB) { boat.x = rightB; boat.vx = -0.5; damagePlayer(); }
   boat.y = TAS.math.clamp(boat.y, 40, GH - 20);
 
-  // Fire weapon
-  if (TAS.input.keys['Space'] || TAS.input.keys[' '] || TAS.input.keys['KeyX'] || TAS.input.keys['x'] || TAS.input.touch.a) {
-    fireWeapon();
+  // Fire weapon - hold to charge if STR >= 10
+  var fireBtn = TAS.input.keys['Space'] || TAS.input.keys[' '] || TAS.input.keys['KeyX'] || TAS.input.keys['x'] || TAS.input.touch.a;
+  if (fireBtn) {
+    if (chargedShotReady()) {
+      if (!isCharging && fireTimer <= 0) {
+        isCharging = true;
+        chargeTimer = 0;
+      }
+      if (isCharging) {
+        chargeTimer++;
+        if (chargeTimer < chargeMax) {
+          // Still charging - fire normally at reduced rate
+          if (chargeTimer === 1) fireWeapon();
+        }
+      }
+    } else {
+      fireWeapon();
+    }
+  } else {
+    if (isCharging && chargeTimer >= chargeMax) {
+      // Release charged shot
+      fireWeapon();
+    }
+    isCharging = false;
+    chargeTimer = 0;
   }
 
   // Water scroll
@@ -618,7 +804,6 @@ function update(dt) {
   for (var bs = 0; bs < bankSegments.length; bs++) {
     bankSegments[bs].y += currentScroll;
   }
-  // Remove off-screen, add new
   while (bankSegments.length > 0 && bankSegments[bankSegments.length - 1].y > GH + 40) {
     bankSegments.pop();
   }
@@ -646,10 +831,10 @@ function update(dt) {
     // Rocks
     if (frame % Math.max(20, Math.floor(60 / diff)) === 0) spawnRock();
 
-    // Logs (less frequent)
+    // Logs
     if (frame % Math.max(50, Math.floor(120 / diff)) === 0 && Math.random() < 0.6) spawnLog();
 
-    // Whirlpools (survive mission spawns more)
+    // Goo Whirlpools (survive mission spawns more)
     var whirlChance = missionType === 'survive' ? 80 : 200;
     if (frame % Math.max(40, Math.floor(whirlChance / diff)) === 0 && Math.random() < 0.4) spawnWhirlpool();
 
@@ -658,6 +843,9 @@ function update(dt) {
 
     // Ramps
     if (frame % 200 === 0 && Math.random() < 0.3) spawnRamp();
+
+    // Spore fog (zone 2+)
+    if (getZone() >= 1 && frame % Math.floor(300 / diff) === 0 && sporeFog.length < 3) spawnSporeFog();
 
     // Enemies (more on protect missions)
     var enemyRate = missionType === 'protect' ? 70 : 120;
@@ -669,8 +857,9 @@ function update(dt) {
     // Submarines (later stages)
     if (stage >= 3 && frame % Math.floor(250 / diff) === 0 && submarines.length < 2) spawnSubmarine();
 
-    // Power-ups
-    if (frame % 180 === 0 && Math.random() < 0.5) spawnPowerup();
+    // Power-ups (CHA boosts spawn rate)
+    var puRate = Math.max(80, Math.floor(180 - statB.CHA * 4));
+    if (frame % puRate === 0 && Math.random() < powerupChance()) spawnPowerup();
   }
 
   // Water current changes (survive mission has strong currents)
@@ -689,11 +878,23 @@ function update(dt) {
 
   // === UPDATE OBJECTS ===
 
+  // Spore fog
+  for (var sf = sporeFog.length - 1; sf >= 0; sf--) {
+    sporeFog[sf].y += currentScroll * 0.6;
+    sporeFog[sf].timer++;
+    if (sporeFog[sf].y > GH + 60) { sporeFog.splice(sf, 1); continue; }
+    // Slow player in fog
+    var fogDist = TAS.math.dist(boat.x, boat.y, sporeFog[sf].x, sporeFog[sf].y);
+    if (fogDist < sporeFog[sf].radius) {
+      boat.vx *= 0.96;
+      boat.vy *= 0.96;
+    }
+  }
+
   // Rocks
   for (var r = rocks.length - 1; r >= 0; r--) {
     rocks[r].y += currentScroll;
     if (rocks[r].y > GH + 20) { rocks.splice(r, 1); continue; }
-    // Collision with boat
     if (invincTimer <= 0 && TAS.hit.circleOverlap(boat.x, boat.y, BOAT_W / 2, rocks[r].x, rocks[r].y, rocks[r].size)) {
       damagePlayer();
       addSplash(rocks[r].x, rocks[r].y, 8);
@@ -713,12 +914,11 @@ function update(dt) {
     }
   }
 
-  // Whirlpools
+  // Goo Whirlpools
   for (var wp = whirlpools.length - 1; wp >= 0; wp--) {
-    whirlpools[wp].y += currentScroll * 0.5; // Slower scroll (semi-stationary)
+    whirlpools[wp].y += currentScroll * 0.5;
     whirlpools[wp].angle += 0.05;
     if (whirlpools[wp].y > GH + 40) { whirlpools.splice(wp, 1); continue; }
-    // Pull boat toward center
     var wdx = whirlpools[wp].x - boat.x;
     var wdy = whirlpools[wp].y - boat.y;
     var wDist = Math.sqrt(wdx * wdx + wdy * wdy);
@@ -726,7 +926,11 @@ function update(dt) {
       var pull = whirlpools[wp].strength * (1 - wDist / (whirlpools[wp].radius * 2)) * 0.08;
       boat.vx += wdx / wDist * pull;
       boat.vy += wdy / wDist * pull;
-      // Damage if sucked in
+      // Goo whirlpools also slow
+      if (whirlpools[wp].goo && wDist < whirlpools[wp].radius * 1.2) {
+        boat.vx *= 0.94;
+        boat.vy *= 0.94;
+      }
       if (wDist < whirlpools[wp].radius * 0.4 && invincTimer <= 0) {
         damagePlayer();
       }
@@ -740,6 +944,8 @@ function update(dt) {
     if (mines[mi].y > GH + 20) { mines.splice(mi, 1); continue; }
     if (invincTimer <= 0 && TAS.hit.circleOverlap(boat.x, boat.y, BOAT_W / 2, mines[mi].x, mines[mi].y, 8)) {
       TAS.particles.spawn(mines[mi].x, mines[mi].y, '#ff8800', 20, 4, { gravity: 0.1 });
+      spawnNesParticles(mines[mi].x, mines[mi].y, '#ffaa00', 15, 4);
+      triggerShake(8, 0);
       TAS.fx.shake(8, 0.8);
       TAS.audio.playNoise(0.3, 0.12, 400);
       addSplash(mines[mi].x, mines[mi].y, 15);
@@ -755,12 +961,12 @@ function update(dt) {
     if (ramps[rp].y > GH + 20) { ramps.splice(rp, 1); continue; }
     if (TAS.hit.rectOverlap(boat.x - BOAT_W / 2, boat.y - BOAT_H / 2, BOAT_W, BOAT_H,
         ramps[rp].x - ramps[rp].width / 2, ramps[rp].y - ramps[rp].height / 2, ramps[rp].width, ramps[rp].height)) {
-      // Jump! brief invincibility + score
       invincTimer = Math.max(invincTimer, 45);
       boat.vy = -3;
-      score += 50;
+      score += Math.floor(50 * scoreMult());
       TAS.audio.playTone(600, 0.15, 'triangle', 0.08, 900);
       addSplash(boat.x, boat.y + BOAT_H, 10);
+      spawnNesParticles(boat.x, boat.y + BOAT_H, '#aaddff', 8, 2, { upward: true });
       ramps.splice(rp, 1);
       continue;
     }
@@ -771,9 +977,9 @@ function update(dt) {
     var en = enemies[e];
     en.y += currentScroll + en.vy;
     en.x += en.vx;
+    en.animTimer += 0.05;
     if (en.flashTimer > 0) en.flashTimer--;
 
-    // Bounce off banks
     var eSeg = getCurrentBankAt(en.y);
     if (en.x < eSeg.left + 10) en.vx = Math.abs(en.vx);
     if (en.x > eSeg.right - 10) en.vx = -Math.abs(en.vx);
@@ -781,7 +987,7 @@ function update(dt) {
     if (en.y > GH + 30 || en.y < -60) { enemies.splice(e, 1); continue; }
 
     // Type-specific behavior
-    if (en.type === 1) { // Shooter
+    if (en.type === 1) { // Spore Shooter
       en.fireTimer--;
       if (en.fireTimer <= 0) {
         en.fireTimer = TAS.math.randInt(50, 90);
@@ -789,7 +995,7 @@ function update(dt) {
         enemyBullets.push({ x: en.x, y: en.y, vx: Math.cos(ang) * 3, vy: Math.sin(ang) * 3 });
         TAS.audio.playTone(200, 0.05, 'square', 0.03);
       }
-    } else if (en.type === 2) { // Rammer - aim at boat
+    } else if (en.type === 2) { // Mycelial Rammer
       var rAng = TAS.math.angle(en.x, en.y, boat.x, boat.y);
       en.vx = TAS.math.lerp(en.vx, Math.cos(rAng) * 2, 0.02);
       en.vy = TAS.math.lerp(en.vy, Math.sin(rAng) * 1.5, 0.02);
@@ -802,8 +1008,9 @@ function update(dt) {
       en.hp--;
       if (en.hp <= 0) {
         TAS.particles.spawn(en.x, en.y, '#ff6600', 10, 3);
+        spawnNesParticles(en.x, en.y, '#ff8800', 8, 3);
         addSplash(en.x, en.y, 8);
-        score += 100;
+        score += Math.floor(100 * scoreMult());
         enemies.splice(e, 1);
       }
     }
@@ -821,7 +1028,6 @@ function update(dt) {
         var ba = TAS.math.angle(en.x, en.y, nearestBaseling.x, nearestBaseling.y);
         en.vx = TAS.math.lerp(en.vx, Math.cos(ba) * 1.5, 0.03);
         en.vy = TAS.math.lerp(en.vy, Math.sin(ba) * 1.5, 0.03);
-        // Kidnap baseling
         if (nearDist < 12) {
           nearestBaseling.alive = false;
           baselingLostCount++;
@@ -857,8 +1063,10 @@ function update(dt) {
     if (invincTimer <= 0 && TAS.hit.circleOverlap(boat.x, boat.y, BOAT_W / 2,
         helicopterBombs[hb].x, helicopterBombs[hb].y, 10)) {
       TAS.particles.spawn(helicopterBombs[hb].x, helicopterBombs[hb].y, '#ff4400', 15, 4);
+      spawnNesParticles(helicopterBombs[hb].x, helicopterBombs[hb].y, '#ffaa00', 12, 3);
       TAS.audio.playNoise(0.2, 0.1, 500);
       addSplash(helicopterBombs[hb].x, helicopterBombs[hb].y, 12);
+      triggerShake(5, 0);
       helicopterBombs.splice(hb, 1);
       damagePlayer();
       continue;
@@ -915,6 +1123,16 @@ function update(dt) {
   // Player bullets
   for (var pb = bullets.length - 1; pb >= 0; pb--) {
     var bul = bullets[pb];
+    var bulDmg = bul.dmg || 1;
+
+    // Charged shot
+    if (bul.type === 'charged') {
+      bul.life--;
+      if (bul.life <= 0) { bullets.splice(pb, 1); continue; }
+      // Charged shots leave a trail
+      if (frame % 2 === 0) spawnNesParticles(bul.x, bul.y, '#ff88ff', 2, 1, { gravity: 0 });
+    }
+
     // Homing logic
     if (bul.homing) {
       bul.life--;
@@ -932,88 +1150,109 @@ function update(dt) {
       bullets.splice(pb, 1); continue;
     }
 
+    var hitRadius = bul.type === 'charged' ? (bul.size || 8) : 4;
     var hitSomething = false;
+
     // Hit enemies
     for (var he = enemies.length - 1; he >= 0; he--) {
-      if (TAS.hit.circleOverlap(bul.x, bul.y, 4, enemies[he].x, enemies[he].y, 10)) {
-        enemies[he].hp--;
+      if (TAS.hit.circleOverlap(bul.x, bul.y, hitRadius, enemies[he].x, enemies[he].y, 10)) {
+        enemies[he].hp -= bulDmg;
         enemies[he].flashTimer = 6;
         if (enemies[he].hp <= 0) {
           TAS.particles.spawn(enemies[he].x, enemies[he].y, '#ff8800', 12, 3);
+          spawnNesParticles(enemies[he].x, enemies[he].y, '#ffaa44', 10, 3);
           addSplash(enemies[he].x, enemies[he].y, 8);
           addRipple(enemies[he].x, enemies[he].y, 18);
           TAS.audio.playNoise(0.15, 0.08, 600);
-          score += 100;
+          score += Math.floor(100 * scoreMult());
           enemies.splice(he, 1);
         }
-        hitSomething = true; break;
+        if (bul.type !== 'charged') hitSomething = true;
+        break;
       }
     }
     if (hitSomething) { bullets.splice(pb, 1); continue; }
 
     // Hit helicopters
     for (var hhe = helicopters.length - 1; hhe >= 0; hhe--) {
-      if (TAS.hit.circleOverlap(bul.x, bul.y, 4, helicopters[hhe].x, helicopters[hhe].y, 14)) {
-        helicopters[hhe].hp--;
+      if (TAS.hit.circleOverlap(bul.x, bul.y, hitRadius, helicopters[hhe].x, helicopters[hhe].y, 14)) {
+        helicopters[hhe].hp -= bulDmg;
         helicopters[hhe].flashTimer = 6;
         if (helicopters[hhe].hp <= 0) {
           TAS.particles.spawn(helicopters[hhe].x, helicopters[hhe].y, '#ffaa00', 15, 4);
+          spawnNesParticles(helicopters[hhe].x, helicopters[hhe].y, '#ff6600', 12, 4);
           TAS.audio.playNoise(0.2, 0.1, 500);
-          score += 200;
+          score += Math.floor(200 * scoreMult());
           helicopters.splice(hhe, 1);
         }
-        hitSomething = true; break;
+        if (bul.type !== 'charged') hitSomething = true;
+        break;
       }
     }
     if (hitSomething) { bullets.splice(pb, 1); continue; }
 
     // Hit submarines (only if surfaced)
     for (var hsu = submarines.length - 1; hsu >= 0; hsu--) {
-      if (submarines[hsu].surfaced && TAS.hit.circleOverlap(bul.x, bul.y, 4, submarines[hsu].x, submarines[hsu].y, 12)) {
-        submarines[hsu].hp--;
+      if (submarines[hsu].surfaced && TAS.hit.circleOverlap(bul.x, bul.y, hitRadius, submarines[hsu].x, submarines[hsu].y, 12)) {
+        submarines[hsu].hp -= bulDmg;
         submarines[hsu].flashTimer = 6;
         if (submarines[hsu].hp <= 0) {
           TAS.particles.spawn(submarines[hsu].x, submarines[hsu].y, '#4488ff', 12, 3);
+          spawnNesParticles(submarines[hsu].x, submarines[hsu].y, '#88aaff', 8, 2);
           addSplash(submarines[hsu].x, submarines[hsu].y, 10);
           TAS.audio.playNoise(0.15, 0.08, 300);
-          score += 150;
+          score += Math.floor(150 * scoreMult());
           submarines.splice(hsu, 1);
         }
-        hitSomething = true; break;
+        if (bul.type !== 'charged') hitSomething = true;
+        break;
       }
     }
     if (hitSomething) { bullets.splice(pb, 1); continue; }
 
     // Hit rocks (destroy small ones)
     for (var hr = rocks.length - 1; hr >= 0; hr--) {
-      if (rocks[hr].size < 12 && TAS.hit.circleOverlap(bul.x, bul.y, 4, rocks[hr].x, rocks[hr].y, rocks[hr].size)) {
+      if (rocks[hr].size < 12 && TAS.hit.circleOverlap(bul.x, bul.y, hitRadius, rocks[hr].x, rocks[hr].y, rocks[hr].size)) {
         TAS.particles.spawn(rocks[hr].x, rocks[hr].y, '#888', 6, 2, { shape: 'rect' });
+        spawnNesParticles(rocks[hr].x, rocks[hr].y, '#aaa', 6, 2);
         addSplash(rocks[hr].x, rocks[hr].y, 4);
         rocks.splice(hr, 1);
-        score += 10;
-        hitSomething = true; break;
+        score += Math.floor(10 * scoreMult());
+        if (bul.type !== 'charged') hitSomething = true;
+        break;
       }
     }
     if (hitSomething) { bullets.splice(pb, 1); continue; }
 
     // Hit boss
-    if (boss && boss.hp > 0 && TAS.hit.circleOverlap(bul.x, bul.y, 4, boss.x, boss.y, boss.width / 2)) {
-      boss.hp--;
+    if (boss && boss.hp > 0 && TAS.hit.circleOverlap(bul.x, bul.y, hitRadius, boss.x, boss.y, boss.width / 2)) {
+      boss.hp -= bulDmg;
       boss.flashTimer = 8;
       TAS.audio.playTone(300, 0.08, 'square', 0.06);
       TAS.particles.spawn(bul.x, bul.y, '#ffff44', 5, 2);
+      spawnNesParticles(bul.x, bul.y, '#ffff88', 4, 2);
+      // Enrage at 30% HP
+      if (!boss.enraged && boss.hp <= Math.floor(bossMaxHits * 0.3)) {
+        boss.enraged = true;
+        boss.vx *= 1.5;
+        TAS.fx.flash('#ff4444', 0.3);
+        triggerShake(8, 0);
+      }
       if (boss.hp <= 0) {
-        // Boss defeated
         TAS.particles.spawn(boss.x, boss.y, '#ff6600', 30, 5, { gravity: 0.05 });
         TAS.particles.spawn(boss.x, boss.y, '#ffdd00', 20, 4);
+        spawnNesParticles(boss.x, boss.y, '#ff4400', 25, 5);
+        spawnNesParticles(boss.x, boss.y, '#ffffff', 15, 3);
+        triggerShake(14, 0);
         TAS.fx.shake(12, 0.8);
         TAS.fx.flash('#ffffff', 0.5);
         TAS.audio.playNoise(0.4, 0.15, 200);
         addSplash(boss.x, boss.y, 20);
-        score += 1000 * (boss.type + 1);
+        score += Math.floor(1000 * (boss.type + 1) * scoreMult());
         stageClear();
       }
-      bullets.splice(pb, 1); continue;
+      if (bul.type !== 'charged') { bullets.splice(pb, 1); continue; }
+      else { bul.life = Math.max(0, bul.life - 10); }
     }
   }
 
@@ -1044,9 +1283,10 @@ function update(dt) {
       if (pType === 'speed') { turboFuel = 100; TAS.audio.playTone(600, 0.1, 'triangle', 0.06, 800); }
       else if (pType === 'weapon') { weaponLevel = Math.min(3, weaponLevel + 1); TAS.audio.playMelody([[440, 0.08], [660, 0.08], [880, 0.1]], 80); }
       else if (pType === 'shield') { shieldActive = true; shieldTimer = 300; TAS.audio.playTone(500, 0.15, 'sine', 0.06, 700); }
-      else if (pType === 'life') { lives = Math.min(5, lives + 1); TAS.audio.playMelody([[523, 0.1], [659, 0.1], [784, 0.15]], 100); }
-      else if (pType === 'score') { score += 200; TAS.audio.playTone(800, 0.1, 'square', 0.05); }
+      else if (pType === 'life') { lives = Math.min(maxLivesFromCon() + 2, lives + 1); TAS.audio.playMelody([[523, 0.1], [659, 0.1], [784, 0.15]], 100); }
+      else if (pType === 'score') { score += Math.floor(200 * scoreMult()); TAS.audio.playTone(800, 0.1, 'square', 0.05); }
       TAS.particles.spawn(powerups[pu].x, powerups[pu].y, '#ffff44', 8, 2);
+      spawnNesParticles(powerups[pu].x, powerups[pu].y, '#ffff88', 6, 2, { upward: true });
       powerups.splice(pu, 1);
     }
   }
@@ -1058,11 +1298,9 @@ function update(dt) {
     bas.bobTimer += 0.06;
     bas.x += bas.vx + Math.sin(bas.bobTimer) * 0.2;
     bas.y += bas.vy + currentScroll * 0.3;
-    // Keep in bounds
     var bSeg = getCurrentBankAt(bas.y);
     bas.x = TAS.math.clamp(bas.x, bSeg.left + 15, bSeg.right - 15);
     bas.y = TAS.math.clamp(bas.y, 40, GH - 40);
-    // Random direction changes
     if (Math.random() < 0.01) { bas.vx = (Math.random() - 0.5) * 0.6; bas.vy = (Math.random() - 0.5) * 0.4; }
   }
 
@@ -1073,90 +1311,89 @@ function update(dt) {
     tok.y += currentScroll;
     tok.bobTimer += 0.07;
     tok.sinkTimer--;
-    if (tok.sinkTimer <= 0) { tok.collected = true; continue; } // Sank
+    if (tok.sinkTimer <= 0) { tok.collected = true; continue; }
     if (tok.y > GH + 20) continue;
     if (tok.y > -10 && TAS.hit.circleOverlap(boat.x, boat.y, BOAT_W / 2 + 6, tok.x, tok.y, 8)) {
       tok.collected = true;
       tokensCollected++;
-      score += 50;
+      score += Math.floor(50 * scoreMult());
       TAS.audio.playTone(700 + tokensCollected * 30, 0.1, 'sine', 0.06);
       TAS.particles.spawn(tok.x, tok.y, '#ffdd44', 6, 2);
+      spawnNesParticles(tok.x, tok.y, '#ffee88', 6, 2, { upward: true });
     }
   }
 
   // Boss update
   if (boss && boss.hp > 0) {
     boss.timer++;
-    boss.x += boss.vx;
+    var enrageMult = boss.enraged ? 1.4 : 1;
+    boss.x += boss.vx * enrageMult;
     if (boss.x < bankLeft + boss.width / 2 + 20) boss.vx = Math.abs(boss.vx);
     if (boss.x > bankRight - boss.width / 2 - 20) boss.vx = -Math.abs(boss.vx);
     if (boss.flashTimer > 0) boss.flashTimer--;
 
-    // Boss attacks based on type
     var bossType = boss.type;
-    if (bossType === 0) { // Giant Squid - tentacle sweep + ink bullets
-      if (boss.timer % 60 === 0) {
-        for (var tl = 0; tl < 3; tl++) {
-          var ta = -Math.PI / 2 + (tl - 1) * 0.4;
-          bossBullets.push({ x: boss.x, y: boss.y + boss.height / 2, vx: Math.cos(ta) * 2, vy: Math.sin(ta) * 2 + 1, size: 5 });
+    if (bossType === 0) { // Spore Kraken - tentacle sweep + spore ink
+      if (boss.timer % Math.floor(60 / enrageMult) === 0) {
+        for (var tl = 0; tl < (boss.enraged ? 5 : 3); tl++) {
+          var ta = -Math.PI / 2 + (tl - (boss.enraged ? 2 : 1)) * 0.3;
+          bossBullets.push({ x: boss.x, y: boss.y + boss.height / 2, vx: Math.cos(ta) * 2 * enrageMult, vy: Math.sin(ta) * 2 + 1, size: 5, color: '#884488' });
         }
         TAS.audio.playTone(150, 0.1, 'sawtooth', 0.05);
       }
-    } else if (bossType === 1) { // Sea Dragon - fire streams
-      if (boss.timer % 40 === 0) {
+    } else if (bossType === 1) { // Mycelial Serpent - hyphae streams
+      if (boss.timer % Math.floor(40 / enrageMult) === 0) {
         var fa = TAS.math.angle(boss.x, boss.y, boat.x, boat.y);
-        for (var fi = 0; fi < 5; fi++) {
-          var spread = (fi - 2) * 0.15;
-          bossBullets.push({ x: boss.x, y: boss.y + 20, vx: Math.cos(fa + spread) * 3, vy: Math.sin(fa + spread) * 3, size: 4 });
+        for (var fi = 0; fi < (boss.enraged ? 7 : 5); fi++) {
+          var spread = (fi - (boss.enraged ? 3 : 2)) * 0.12;
+          bossBullets.push({ x: boss.x, y: boss.y + 20, vx: Math.cos(fa + spread) * 3, vy: Math.sin(fa + spread) * 3, size: 4, color: '#44aa22' });
         }
         TAS.audio.playTone(200, 0.15, 'sawtooth', 0.06, 100);
       }
-      boss.vy = Math.sin(boss.timer * 0.03) * 0.8;
+      boss.vy = Math.sin(boss.timer * 0.03) * 0.8 * enrageMult;
       boss.y += boss.vy;
       boss.y = TAS.math.clamp(boss.y, 40, GH / 2 - 20);
-    } else if (bossType === 2) { // Mech Shark - charges + torpedoes
-      if (boss.timer % 100 < 30) {
-        // Charging phase
+    } else if (bossType === 2) { // Reactor Shark - charges + torpedoes
+      if (boss.timer % 100 < Math.floor(30 * enrageMult)) {
         var ca = TAS.math.angle(boss.x, boss.y, boat.x, boat.y);
-        boss.x += Math.cos(ca) * 3;
-        boss.y += Math.sin(ca) * 3;
+        boss.x += Math.cos(ca) * 3 * enrageMult;
+        boss.y += Math.sin(ca) * 3 * enrageMult;
         boss.y = TAS.math.clamp(boss.y, 30, GH - 60);
       } else {
         boss.y = TAS.math.lerp(boss.y, 70, 0.02);
       }
-      if (boss.timer % 50 === 0) {
-        bossBullets.push({ x: boss.x - 15, y: boss.y + boss.height / 2, vx: 0, vy: 3, size: 6 });
-        bossBullets.push({ x: boss.x + 15, y: boss.y + boss.height / 2, vx: 0, vy: 3, size: 6 });
+      if (boss.timer % Math.floor(50 / enrageMult) === 0) {
+        bossBullets.push({ x: boss.x - 15, y: boss.y + boss.height / 2, vx: 0, vy: 3 * enrageMult, size: 6, color: '#ff6622' });
+        bossBullets.push({ x: boss.x + 15, y: boss.y + boss.height / 2, vx: 0, vy: 3 * enrageMult, size: 6, color: '#ff6622' });
         TAS.audio.playTone(120, 0.12, 'square', 0.05);
       }
     } else if (bossType === 3) { // Storm Whale - wave attacks + minion spawns
       boss.y = 50 + Math.sin(boss.timer * 0.02) * 20;
-      if (boss.timer % 80 === 0) {
-        // Wave of bullets
-        for (var wv = 0; wv < 8; wv++) {
-          var wa = (wv / 8) * Math.PI + Math.PI / 2;
-          bossBullets.push({ x: boss.x, y: boss.y + 20, vx: Math.cos(wa) * 2, vy: Math.sin(wa) * 2, size: 5 });
+      if (boss.timer % Math.floor(80 / enrageMult) === 0) {
+        for (var wv = 0; wv < (boss.enraged ? 12 : 8); wv++) {
+          var wa = (wv / (boss.enraged ? 12 : 8)) * Math.PI + Math.PI / 2;
+          bossBullets.push({ x: boss.x, y: boss.y + 20, vx: Math.cos(wa) * 2, vy: Math.sin(wa) * 2, size: 5, color: '#4488dd' });
         }
         TAS.audio.playNoise(0.2, 0.08, 300);
       }
-      if (boss.timer % 120 === 0 && enemies.length < 3) {
+      if (boss.timer % Math.floor(120 / enrageMult) === 0 && enemies.length < 3) {
         spawnEnemy();
       }
-    } else if (bossType === 4) { // Kraken - all attacks combined
+    } else if (bossType === 4) { // Elder Fungus - all attacks combined
       boss.y = 50 + Math.sin(boss.timer * 0.015) * 25;
-      boss.vx = Math.sin(boss.timer * 0.02) * 2;
-      if (boss.timer % 30 === 0) {
+      boss.vx = Math.sin(boss.timer * 0.02) * 2 * enrageMult;
+      if (boss.timer % Math.floor(30 / enrageMult) === 0) {
         var ka = TAS.math.angle(boss.x, boss.y, boat.x, boat.y);
-        bossBullets.push({ x: boss.x, y: boss.y + 20, vx: Math.cos(ka) * 3.5, vy: Math.sin(ka) * 3.5, size: 6 });
+        bossBullets.push({ x: boss.x, y: boss.y + 20, vx: Math.cos(ka) * 3.5, vy: Math.sin(ka) * 3.5, size: 6, color: '#aa44ff' });
       }
-      if (boss.timer % 60 === 0) {
-        for (var kr = 0; kr < 6; kr++) {
-          var kra = (kr / 6) * Math.PI * 2;
-          bossBullets.push({ x: boss.x, y: boss.y, vx: Math.cos(kra) * 2, vy: Math.sin(kra) * 2, size: 4 });
+      if (boss.timer % Math.floor(60 / enrageMult) === 0) {
+        for (var kr = 0; kr < (boss.enraged ? 10 : 6); kr++) {
+          var kra = (kr / (boss.enraged ? 10 : 6)) * Math.PI * 2;
+          bossBullets.push({ x: boss.x, y: boss.y, vx: Math.cos(kra) * 2, vy: Math.sin(kra) * 2, size: 4, color: '#cc88ff' });
         }
         TAS.audio.playTone(100, 0.2, 'sawtooth', 0.07, 50);
       }
-      if (boss.timer % 150 === 0 && enemies.length < 4) {
+      if (boss.timer % Math.floor(150 / enrageMult) === 0 && enemies.length < 4) {
         spawnEnemy();
         spawnEnemy();
       }
@@ -1177,26 +1414,23 @@ function update(dt) {
         gameOver();
       }
     }
-    // All enemies cleared and baselings survived long enough
     if (stageTimer > 600 && aliveCount > 0) {
       baselingSafeCount = aliveCount;
-      score += aliveCount * 100;
+      score += Math.floor(aliveCount * 100 * scoreMult());
       stageClear();
     }
   } else if (missionType === 'collect') {
     if (tokensCollected >= tokensNeeded) {
       stageClear();
     }
-    // Check if impossible (all sank)
     var remaining = tokens.filter(function(t) { return !t.collected; }).length;
     var canStillWin = tokensCollected + remaining >= tokensNeeded;
     if (!canStillWin && tokensCollected < tokensNeeded) {
       damagePlayer();
       damagePlayer();
-      damagePlayer(); // Fail = death
+      damagePlayer();
     }
   }
-  // Boss mission completes when boss HP = 0 (handled in bullet collision)
 }
 
 // === GET BANK AT Y ===
@@ -1231,14 +1465,16 @@ function draw(dt) {
 
   // === GAME RENDERING ===
   ctx.save();
+  // NES-style integer shake
+  ctx.translate(shakeX, shakeY);
   TAS.fx.applyShake();
 
   drawWater();
   drawBanks();
   drawRipples();
   drawWake();
+  drawSporeFog();
 
-  // Draw objects from back to front
   drawWhirlpools();
   drawRocks();
   drawLogs();
@@ -1259,46 +1495,58 @@ function draw(dt) {
   drawSplashes();
 
   TAS.particles.draw();
+  drawNesParticles();
   ctx.restore();
 
   TAS.fx.drawFlash(GW, GH);
 
-  // HUD
   drawHUD();
   TAS.input.drawTouchControls(GW, GH);
 
-  // Mission flash
   if (missionFlashTimer > 0) {
     drawMissionBanner();
   }
 
-  // Stage clear
   if (stageClearTimer > 0) {
     drawStageClear();
+  }
+
+  // Charge indicator
+  if (isCharging && chargedShotReady()) {
+    var chgPct = Math.min(1, chargeTimer / chargeMax);
+    ctx.fillStyle = 'rgba(0,0,0,0.5)';
+    ctx.fillRect(boat.x - 12, boat.y - BOAT_H - 8, 24, 4);
+    ctx.fillStyle = chgPct >= 1 ? '#ff44ff' : '#884488';
+    ctx.fillRect(boat.x - 11, boat.y - BOAT_H - 7, Math.floor(22 * chgPct), 2);
+    if (chgPct >= 1 && frame % 8 < 4) {
+      ctx.fillStyle = '#ff88ff';
+      ctx.globalAlpha = 0.4;
+      ctx.beginPath();
+      ctx.arc(Math.floor(boat.x), Math.floor(boat.y), BOAT_W + 6, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.globalAlpha = 1;
+    }
   }
 }
 
 // === DRAW WATER ===
 function drawWater() {
-  // Base water color with subtle gradient
+  var zc = getZoneColors();
   var grad = ctx.createLinearGradient(0, 0, 0, GH);
-  grad.addColorStop(0, '#1a3a5c');
-  grad.addColorStop(0.5, '#1e4470');
-  grad.addColorStop(1, '#163050');
+  grad.addColorStop(0, zc.water1);
+  grad.addColorStop(0.5, zc.water2);
+  grad.addColorStop(1, zc.water3);
   ctx.fillStyle = grad;
   ctx.fillRect(0, 0, GW, GH);
 
   // Animated water ripple pattern
   ctx.globalAlpha = 0.15;
   for (var wy = 0; wy < GH; wy += 8) {
-    var waveX = Math.sin((wy + waterOffset * 3) * 0.03) * 3;
-    ctx.fillStyle = '#4488bb';
+    ctx.fillStyle = zc.accent;
     ctx.fillRect(0, wy, GW, 2);
-    // Lighter streaks
     if (wy % 24 === 0) {
-      ctx.fillStyle = '#6699cc';
       var streakX = Math.sin((wy + waterOffset * 2) * 0.05) * 20 + GW / 2;
-      ctx.fillRect(streakX - 30, wy, 60, 1);
+      ctx.fillRect(Math.floor(streakX) - 30, wy, 60, 1);
     }
   }
 
@@ -1310,7 +1558,7 @@ function drawWater() {
       var bobY = Math.cos((fx - fy + waterOffset * 1.5) * 0.04) * 3;
       ctx.fillStyle = '#88ccee';
       ctx.beginPath();
-      ctx.arc(fx + bobX + 20, fy + bobY + 20, 2 + Math.sin((fx + waterOffset) * 0.1) * 1, 0, Math.PI * 2);
+      ctx.arc(Math.floor(fx + bobX + 20), Math.floor(fy + bobY + 20), 2, 0, Math.PI * 2);
       ctx.fill();
     }
   }
@@ -1319,69 +1567,112 @@ function drawWater() {
 
 // === DRAW BANKS ===
 function drawBanks() {
+  var zc = getZoneColors();
+
   // Left bank
-  ctx.fillStyle = '#2d5a27';
+  ctx.fillStyle = zc.bank;
   ctx.beginPath();
   ctx.moveTo(0, 0);
   for (var i = 0; i < bankSegments.length; i++) {
-    ctx.lineTo(bankSegments[i].left, bankSegments[i].y);
+    ctx.lineTo(Math.floor(bankSegments[i].left), Math.floor(bankSegments[i].y));
   }
   ctx.lineTo(0, GH);
   ctx.closePath();
   ctx.fill();
 
-  // Left bank edge (dirt/sand)
-  ctx.strokeStyle = '#8b6914';
+  // Left bank edge
+  ctx.strokeStyle = zc.edge;
   ctx.lineWidth = 3;
   ctx.beginPath();
   for (var i2 = 0; i2 < bankSegments.length; i2++) {
-    if (i2 === 0) ctx.moveTo(bankSegments[i2].left, bankSegments[i2].y);
-    else ctx.lineTo(bankSegments[i2].left, bankSegments[i2].y);
+    if (i2 === 0) ctx.moveTo(Math.floor(bankSegments[i2].left), Math.floor(bankSegments[i2].y));
+    else ctx.lineTo(Math.floor(bankSegments[i2].left), Math.floor(bankSegments[i2].y));
   }
   ctx.stroke();
 
   // Right bank
-  ctx.fillStyle = '#2d5a27';
+  ctx.fillStyle = zc.bank;
   ctx.beginPath();
   ctx.moveTo(GW, 0);
   for (var j = 0; j < bankSegments.length; j++) {
-    ctx.lineTo(bankSegments[j].right, bankSegments[j].y);
+    ctx.lineTo(Math.floor(bankSegments[j].right), Math.floor(bankSegments[j].y));
   }
   ctx.lineTo(GW, GH);
   ctx.closePath();
   ctx.fill();
 
   // Right bank edge
-  ctx.strokeStyle = '#8b6914';
+  ctx.strokeStyle = zc.edge;
   ctx.lineWidth = 3;
   ctx.beginPath();
   for (var j2 = 0; j2 < bankSegments.length; j2++) {
-    if (j2 === 0) ctx.moveTo(bankSegments[j2].right, bankSegments[j2].y);
-    else ctx.lineTo(bankSegments[j2].right, bankSegments[j2].y);
+    if (j2 === 0) ctx.moveTo(Math.floor(bankSegments[j2].right), Math.floor(bankSegments[j2].y));
+    else ctx.lineTo(Math.floor(bankSegments[j2].right), Math.floor(bankSegments[j2].y));
   }
   ctx.stroke();
 
-  // Bank vegetation dots
-  ctx.fillStyle = '#1a4a1a';
+  // Bank vegetation - zone-themed
+  var zone = getZone();
+  var vegColor = zone >= 3 ? '#1a4a3a' : zone >= 1 ? '#2a1a3a' : '#1a4a1a';
+  ctx.fillStyle = vegColor;
   for (var v = 0; v < bankSegments.length; v += 2) {
-    var seg = bankSegments[v];
-    // Left side trees
+    var vseg = bankSegments[v];
     for (var lv = 0; lv < 3; lv++) {
-      var tx = seg.left - 10 - lv * 12;
-      var ty = seg.y + lv * 5;
+      var tx = Math.floor(vseg.left - 10 - lv * 12);
+      var ty = Math.floor(vseg.y + lv * 5);
       ctx.beginPath();
       ctx.arc(tx, ty, 5 + lv * 2, 0, Math.PI * 2);
       ctx.fill();
     }
-    // Right side trees
     for (var rv = 0; rv < 3; rv++) {
-      var trx = seg.right + 10 + rv * 12;
-      var try2 = seg.y + rv * 5;
+      var trx = Math.floor(vseg.right + 10 + rv * 12);
+      var try2 = Math.floor(vseg.y + rv * 5);
       ctx.beginPath();
       ctx.arc(trx, try2, 5 + rv * 2, 0, Math.PI * 2);
       ctx.fill();
     }
+    // Mushroom sprites on banks (Tasern theme)
+    if (v % 4 === 0 && zone >= 1) {
+      var mx = Math.floor(vseg.left - 5);
+      var my = Math.floor(vseg.y);
+      ctx.fillStyle = '#aa4488';
+      ctx.fillRect(mx - 1, my - 4, 3, 4);
+      ctx.beginPath();
+      ctx.arc(mx, my - 5, 4, Math.PI, 0);
+      ctx.fill();
+      ctx.fillStyle = '#ffaadd';
+      ctx.fillRect(mx - 1, my - 6, 1, 1);
+      ctx.fillRect(mx + 1, my - 7, 1, 1);
+      ctx.fillStyle = vegColor;
+    }
   }
+}
+
+// === DRAW SPORE FOG ===
+function drawSporeFog() {
+  for (var i = 0; i < sporeFog.length; i++) {
+    var fog = sporeFog[i];
+    ctx.globalAlpha = fog.alpha * 0.35;
+    var grd = ctx.createRadialGradient(Math.floor(fog.x), Math.floor(fog.y), 0, Math.floor(fog.x), Math.floor(fog.y), fog.radius);
+    grd.addColorStop(0, '#88aa44');
+    grd.addColorStop(0.5, '#556622');
+    grd.addColorStop(1, 'rgba(85,102,34,0)');
+    ctx.fillStyle = grd;
+    ctx.beginPath();
+    ctx.arc(Math.floor(fog.x), Math.floor(fog.y), fog.radius, 0, Math.PI * 2);
+    ctx.fill();
+    // Floating spore dots
+    if (frame % 4 === 0) {
+      ctx.globalAlpha = 0.5;
+      ctx.fillStyle = '#ccdd88';
+      for (var sd = 0; sd < 3; sd++) {
+        var sx = Math.floor(fog.x + Math.sin(fog.timer * 0.03 + sd * 2) * fog.radius * 0.6);
+        var sy = Math.floor(fog.y + Math.cos(fog.timer * 0.04 + sd * 3) * fog.radius * 0.4);
+        ctx.fillRect(sx, sy, 2, 2);
+      }
+    }
+  }
+  ctx.globalAlpha = 1;
 }
 
 // === DRAW RIPPLES ===
@@ -1392,7 +1683,7 @@ function drawRipples() {
     ctx.strokeStyle = '#88ccff';
     ctx.lineWidth = 1;
     ctx.beginPath();
-    ctx.arc(rip.x, rip.y, rip.r, 0, Math.PI * 2);
+    ctx.arc(Math.floor(rip.x), Math.floor(rip.y), Math.floor(rip.r), 0, Math.PI * 2);
     ctx.stroke();
   }
   ctx.globalAlpha = 1;
@@ -1405,19 +1696,19 @@ function drawWake() {
     ctx.globalAlpha = wk.life * 0.4;
     ctx.strokeStyle = '#ffffff';
     ctx.lineWidth = 1;
+    var wx = Math.floor(wk.x);
+    var wy = Math.floor(wk.y);
+    var ws = Math.floor(wk.spread);
     ctx.beginPath();
-    ctx.moveTo(wk.x - wk.spread, wk.y);
-    ctx.lineTo(wk.x - wk.spread - 3, wk.y + 4);
-    ctx.moveTo(wk.x + wk.spread, wk.y);
-    ctx.lineTo(wk.x + wk.spread + 3, wk.y + 4);
+    ctx.moveTo(wx - ws, wy);
+    ctx.lineTo(wx - ws - 3, wy + 4);
+    ctx.moveTo(wx + ws, wy);
+    ctx.lineTo(wx + ws + 3, wy + 4);
     ctx.stroke();
-    // Foam dots
-    if (wk.spread > 2) {
+    if (ws > 2) {
       ctx.fillStyle = '#aaddff';
-      ctx.beginPath();
-      ctx.arc(wk.x - wk.spread, wk.y, 1, 0, Math.PI * 2);
-      ctx.arc(wk.x + wk.spread, wk.y, 1, 0, Math.PI * 2);
-      ctx.fill();
+      ctx.fillRect(wx - ws, wy, 2, 2);
+      ctx.fillRect(wx + ws, wy, 2, 2);
     }
   }
   ctx.globalAlpha = 1;
@@ -1429,26 +1720,23 @@ function drawSplashes() {
     var sp = splashes[i];
     ctx.globalAlpha = sp.life;
     ctx.fillStyle = '#cceeFF';
-    ctx.beginPath();
-    ctx.arc(sp.x, sp.y, sp.size, 0, Math.PI * 2);
-    ctx.fill();
+    ctx.fillRect(Math.floor(sp.x), Math.floor(sp.y), sp.size, sp.size);
   }
   ctx.globalAlpha = 1;
 }
 
 // === DRAW BOAT ===
 function drawBoat() {
-  // Invincibility blink
   if (invincTimer > 0 && frame % 6 < 3) return;
 
   ctx.save();
-  ctx.translate(boat.x, boat.y);
+  ctx.translate(Math.floor(boat.x), Math.floor(boat.y));
   ctx.rotate(boat.angle);
 
   // Hull
   ctx.fillStyle = '#dd3333';
   ctx.beginPath();
-  ctx.moveTo(0, -BOAT_H / 2); // Bow
+  ctx.moveTo(0, -BOAT_H / 2);
   ctx.lineTo(-BOAT_W / 2, BOAT_H / 3);
   ctx.lineTo(-BOAT_W / 3, BOAT_H / 2);
   ctx.lineTo(BOAT_W / 3, BOAT_H / 2);
@@ -1481,6 +1769,15 @@ function drawBoat() {
     ctx.fill();
   }
 
+  // Turbo exhaust particles
+  if (turboActive) {
+    ctx.fillStyle = '#ffaa22';
+    ctx.globalAlpha = 0.6 + Math.random() * 0.4;
+    ctx.fillRect(-3, BOAT_H / 2, 2, 3 + Math.floor(Math.random() * 4));
+    ctx.fillRect(1, BOAT_H / 2, 2, 3 + Math.floor(Math.random() * 4));
+    ctx.globalAlpha = 1;
+  }
+
   ctx.restore();
 
   // Shield effect
@@ -1489,7 +1786,7 @@ function drawBoat() {
     ctx.strokeStyle = '#44ffff';
     ctx.lineWidth = 2;
     ctx.beginPath();
-    ctx.arc(boat.x, boat.y, BOAT_W + 4, 0, Math.PI * 2);
+    ctx.arc(Math.floor(boat.x), Math.floor(boat.y), BOAT_W + 4, 0, Math.PI * 2);
     ctx.stroke();
     ctx.globalAlpha = 1;
   }
@@ -1499,21 +1796,21 @@ function drawBoat() {
 function drawRocks() {
   for (var i = 0; i < rocks.length; i++) {
     var rk = rocks[i];
+    var rx = Math.floor(rk.x);
+    var ry = Math.floor(rk.y);
     ctx.fillStyle = rk.type === 0 ? '#555' : rk.type === 1 ? '#666' : '#777';
     ctx.beginPath();
-    ctx.arc(rk.x, rk.y, rk.size, 0, Math.PI * 2);
+    ctx.arc(rx, ry, rk.size, 0, Math.PI * 2);
     ctx.fill();
-    // Highlight
     ctx.fillStyle = '#888';
     ctx.beginPath();
-    ctx.arc(rk.x - rk.size * 0.2, rk.y - rk.size * 0.2, rk.size * 0.4, 0, Math.PI * 2);
+    ctx.arc(rx - Math.floor(rk.size * 0.2), ry - Math.floor(rk.size * 0.2), Math.floor(rk.size * 0.4), 0, Math.PI * 2);
     ctx.fill();
-    // Water ring around rock
     ctx.globalAlpha = 0.3;
     ctx.strokeStyle = '#88bbdd';
     ctx.lineWidth = 1;
     ctx.beginPath();
-    ctx.arc(rk.x, rk.y, rk.size + 3 + Math.sin(frame * 0.05 + i) * 2, 0, Math.PI * 2);
+    ctx.arc(rx, ry, rk.size + 3 + Math.floor(Math.sin(frame * 0.05 + i) * 2), 0, Math.PI * 2);
     ctx.stroke();
     ctx.globalAlpha = 1;
   }
@@ -1524,12 +1821,18 @@ function drawLogs() {
   for (var i = 0; i < logs.length; i++) {
     var lg = logs[i];
     ctx.save();
-    ctx.translate(lg.x, lg.y);
+    ctx.translate(Math.floor(lg.x), Math.floor(lg.y));
     ctx.rotate(lg.angle);
     ctx.fillStyle = '#6b4226';
-    ctx.fillRect(-lg.length / 2, -3, lg.length, 6);
+    ctx.fillRect(-Math.floor(lg.length / 2), -3, lg.length, 6);
     ctx.fillStyle = '#8b5a2b';
-    ctx.fillRect(-lg.length / 2, -2, lg.length, 2);
+    ctx.fillRect(-Math.floor(lg.length / 2), -2, lg.length, 2);
+    // Fungal growth on logs (Tasern)
+    if (getZone() >= 1) {
+      ctx.fillStyle = '#66aa44';
+      ctx.fillRect(-Math.floor(lg.length / 4), -4, 4, 2);
+      ctx.fillRect(Math.floor(lg.length / 4) - 2, -4, 3, 2);
+    }
     ctx.restore();
   }
 }
@@ -1539,23 +1842,30 @@ function drawWhirlpools() {
   for (var i = 0; i < whirlpools.length; i++) {
     var wp = whirlpools[i];
     ctx.save();
-    ctx.translate(wp.x, wp.y);
-    // Concentric spinning rings
+    ctx.translate(Math.floor(wp.x), Math.floor(wp.y));
     for (var ring = 0; ring < 4; ring++) {
-      var r = wp.radius * (ring + 1) / 4;
+      var r = Math.floor(wp.radius * (ring + 1) / 4);
       ctx.globalAlpha = 0.3 - ring * 0.05;
-      ctx.strokeStyle = ring < 2 ? '#112244' : '#224466';
+      ctx.strokeStyle = wp.goo ? (ring < 2 ? '#334411' : '#557722') : (ring < 2 ? '#112244' : '#224466');
       ctx.lineWidth = 2;
       ctx.beginPath();
       ctx.arc(0, 0, r, wp.angle + ring * 0.5, wp.angle + ring * 0.5 + Math.PI * 1.5);
       ctx.stroke();
     }
-    // Dark center
+    // Center
     ctx.globalAlpha = 0.6;
-    ctx.fillStyle = '#0a1520';
+    ctx.fillStyle = wp.goo ? '#223300' : '#0a1520';
     ctx.beginPath();
-    ctx.arc(0, 0, wp.radius * 0.25, 0, Math.PI * 2);
+    ctx.arc(0, 0, Math.floor(wp.radius * 0.25), 0, Math.PI * 2);
     ctx.fill();
+    // Goo bubbles
+    if (wp.goo && frame % 6 < 3) {
+      ctx.globalAlpha = 0.5;
+      ctx.fillStyle = '#88aa22';
+      ctx.beginPath();
+      ctx.arc(Math.floor(Math.sin(frame * 0.1) * 6), Math.floor(Math.cos(frame * 0.08) * 4), 2, 0, Math.PI * 2);
+      ctx.fill();
+    }
     ctx.globalAlpha = 1;
     ctx.restore();
   }
@@ -1565,26 +1875,21 @@ function drawWhirlpools() {
 function drawMines() {
   for (var i = 0; i < mines.length; i++) {
     var mn = mines[i];
-    // Bobbing
-    var bob = Math.sin(mn.timer * 0.05) * 2;
+    var bob = Math.floor(Math.sin(mn.timer * 0.05) * 2);
+    var mx = Math.floor(mn.x);
+    var my = Math.floor(mn.y) + bob;
     ctx.fillStyle = '#333';
     ctx.beginPath();
-    ctx.arc(mn.x, mn.y + bob, 7, 0, Math.PI * 2);
+    ctx.arc(mx, my, 7, 0, Math.PI * 2);
     ctx.fill();
-    // Spikes
     ctx.fillStyle = '#555';
     for (var sp = 0; sp < 4; sp++) {
       var sa = sp * Math.PI / 2;
-      ctx.beginPath();
-      ctx.arc(mn.x + Math.cos(sa) * 8, mn.y + bob + Math.sin(sa) * 8, 2, 0, Math.PI * 2);
-      ctx.fill();
+      ctx.fillRect(mx + Math.floor(Math.cos(sa) * 8) - 1, my + Math.floor(Math.sin(sa) * 8) - 1, 3, 3);
     }
-    // Blinking light
     if (mn.timer % 30 < 15) {
       ctx.fillStyle = '#ff0000';
-      ctx.beginPath();
-      ctx.arc(mn.x, mn.y + bob - 3, 2, 0, Math.PI * 2);
-      ctx.fill();
+      ctx.fillRect(mx - 1, my - 4, 3, 3);
     }
   }
 }
@@ -1593,18 +1898,19 @@ function drawMines() {
 function drawRamps() {
   for (var i = 0; i < ramps.length; i++) {
     var rp = ramps[i];
+    var rx = Math.floor(rp.x - rp.width / 2);
+    var ry = Math.floor(rp.y - rp.height / 2);
     ctx.fillStyle = '#887744';
-    ctx.fillRect(rp.x - rp.width / 2, rp.y - rp.height / 2, rp.width, rp.height);
-    // Stripes
+    ctx.fillRect(rx, ry, rp.width, rp.height);
     ctx.fillStyle = '#aaaa44';
-    ctx.fillRect(rp.x - rp.width / 2 + 3, rp.y - rp.height / 2 + 2, rp.width - 6, 3);
-    ctx.fillRect(rp.x - rp.width / 2 + 3, rp.y + rp.height / 2 - 5, rp.width - 6, 3);
+    ctx.fillRect(rx + 3, ry + 2, rp.width - 6, 3);
+    ctx.fillRect(rx + 3, ry + rp.height - 5, rp.width - 6, 3);
     // Arrow
     ctx.fillStyle = '#ffff88';
     ctx.beginPath();
-    ctx.moveTo(rp.x, rp.y - rp.height / 2 - 3);
-    ctx.lineTo(rp.x - 5, rp.y + 2);
-    ctx.lineTo(rp.x + 5, rp.y + 2);
+    ctx.moveTo(Math.floor(rp.x), ry - 3);
+    ctx.lineTo(Math.floor(rp.x) - 5, Math.floor(rp.y) + 2);
+    ctx.lineTo(Math.floor(rp.x) + 5, Math.floor(rp.y) + 2);
     ctx.closePath();
     ctx.fill();
   }
@@ -1616,9 +1922,9 @@ function drawEnemies() {
     var en = enemies[i];
     var flash = en.flashTimer > 0;
     ctx.save();
-    ctx.translate(en.x, en.y);
+    ctx.translate(Math.floor(en.x), Math.floor(en.y));
 
-    if (en.type === 0) { // Basic (chaser in protect, generic otherwise)
+    if (en.type === 0) { // Reactor Boat
       ctx.fillStyle = flash ? '#fff' : '#44aa44';
       ctx.beginPath();
       ctx.moveTo(0, 10);
@@ -1628,7 +1934,12 @@ function drawEnemies() {
       ctx.lineTo(8, -5);
       ctx.closePath();
       ctx.fill();
-    } else if (en.type === 1) { // Shooter
+      // Reactor core
+      ctx.fillStyle = flash ? '#fff' : '#88ff44';
+      ctx.globalAlpha = 0.5 + Math.sin(en.animTimer * 2) * 0.3;
+      ctx.fillRect(-2, -3, 4, 4);
+      ctx.globalAlpha = 1;
+    } else if (en.type === 1) { // Spore Shooter
       ctx.fillStyle = flash ? '#fff' : '#aa44aa';
       ctx.beginPath();
       ctx.moveTo(0, 10);
@@ -1638,10 +1949,13 @@ function drawEnemies() {
       ctx.lineTo(10, -3);
       ctx.closePath();
       ctx.fill();
-      // Gun turret
-      ctx.fillStyle = '#666';
-      ctx.fillRect(-2, -12, 4, 6);
-    } else { // Rammer
+      // Spore turret
+      ctx.fillStyle = flash ? '#fff' : '#cc66cc';
+      ctx.fillRect(-2, -13, 4, 6);
+      ctx.beginPath();
+      ctx.arc(0, -14, 3, 0, Math.PI * 2);
+      ctx.fill();
+    } else { // Mycelial Rammer
       ctx.fillStyle = flash ? '#fff' : '#dd6600';
       ctx.beginPath();
       ctx.moveTo(0, 12);
@@ -1651,9 +1965,18 @@ function drawEnemies() {
       ctx.lineTo(12, -2);
       ctx.closePath();
       ctx.fill();
-      // Ram
-      ctx.fillStyle = '#aa4400';
+      // Hyphae ram
+      ctx.fillStyle = flash ? '#fff' : '#ffaa44';
       ctx.fillRect(-4, 10, 8, 5);
+      // Tendrils
+      ctx.strokeStyle = '#aa6622';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(-4, 14);
+      ctx.lineTo(-6 + Math.floor(Math.sin(en.animTimer * 3) * 2), 18);
+      ctx.moveTo(4, 14);
+      ctx.lineTo(6 + Math.floor(Math.sin(en.animTimer * 3 + 1) * 2), 18);
+      ctx.stroke();
     }
     ctx.restore();
   }
@@ -1663,30 +1986,24 @@ function drawEnemies() {
 function drawSubmarines() {
   for (var i = 0; i < submarines.length; i++) {
     var sub = submarines[i];
+    var sx = Math.floor(sub.x);
+    var sy = Math.floor(sub.y);
     if (!sub.surfaced) {
-      // Periscope bubble trail
       ctx.globalAlpha = 0.3;
       ctx.fillStyle = '#aaddff';
-      ctx.beginPath();
-      ctx.arc(sub.x, sub.y, 3, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.beginPath();
-      ctx.arc(sub.x + 3, sub.y - 4, 2, 0, Math.PI * 2);
-      ctx.fill();
+      ctx.fillRect(sx - 1, sy - 1, 3, 3);
+      ctx.fillRect(sx + 2, sy - 4, 2, 2);
       ctx.globalAlpha = 1;
     } else {
       var flash = sub.flashTimer > 0;
       ctx.fillStyle = flash ? '#fff' : '#445566';
-      // Sub body
       ctx.beginPath();
-      ctx.ellipse(sub.x, sub.y, 14, 8, 0, 0, Math.PI * 2);
+      ctx.ellipse(sx, sy, 14, 8, 0, 0, Math.PI * 2);
       ctx.fill();
-      // Conning tower
       ctx.fillStyle = flash ? '#fff' : '#556677';
-      ctx.fillRect(sub.x - 4, sub.y - 12, 8, 8);
-      // Periscope
+      ctx.fillRect(sx - 4, sy - 12, 8, 8);
       ctx.fillStyle = '#777';
-      ctx.fillRect(sub.x - 1, sub.y - 16, 2, 6);
+      ctx.fillRect(sx - 1, sy - 16, 2, 6);
     }
   }
 }
@@ -1696,28 +2013,28 @@ function drawHelicopters() {
   for (var i = 0; i < helicopters.length; i++) {
     var heli = helicopters[i];
     var flash = heli.flashTimer > 0;
-    // Shadow on water
+    var hx = Math.floor(heli.x);
+    var hy = Math.floor(heli.y);
+    // Shadow
     ctx.globalAlpha = 0.25;
     ctx.fillStyle = '#000';
     ctx.beginPath();
-    ctx.ellipse(heli.x + 5, heli.y + 20, 12, 6, 0, 0, Math.PI * 2);
+    ctx.ellipse(hx + 5, hy + 20, 12, 6, 0, 0, Math.PI * 2);
     ctx.fill();
     ctx.globalAlpha = 1;
-
     // Body
     ctx.fillStyle = flash ? '#fff' : '#556655';
     ctx.beginPath();
-    ctx.ellipse(heli.x, heli.y, 10, 7, 0, 0, Math.PI * 2);
+    ctx.ellipse(hx, hy, 10, 7, 0, 0, Math.PI * 2);
     ctx.fill();
-    // Tail
-    ctx.fillRect(heli.x + 8, heli.y - 2, 10, 3);
-    // Rotor (spinning)
+    ctx.fillRect(hx + 8, hy - 2, 10, 3);
+    // Rotor
     ctx.strokeStyle = '#888';
     ctx.lineWidth = 2;
     var rotAngle = frame * 0.3;
     ctx.beginPath();
-    ctx.moveTo(heli.x + Math.cos(rotAngle) * 14, heli.y + Math.sin(rotAngle) * 3);
-    ctx.lineTo(heli.x - Math.cos(rotAngle) * 14, heli.y - Math.sin(rotAngle) * 3);
+    ctx.moveTo(hx + Math.floor(Math.cos(rotAngle) * 14), hy + Math.floor(Math.sin(rotAngle) * 3));
+    ctx.lineTo(hx - Math.floor(Math.cos(rotAngle) * 14), hy - Math.floor(Math.sin(rotAngle) * 3));
     ctx.stroke();
   }
 }
@@ -1726,22 +2043,20 @@ function drawHelicopters() {
 function drawHelicopterBombs() {
   for (var i = 0; i < helicopterBombs.length; i++) {
     var b = helicopterBombs[i];
-    // Shadow grows as bomb falls
+    var bx = Math.floor(b.x);
+    var by = Math.floor(b.y);
     ctx.globalAlpha = 0.3;
     ctx.fillStyle = '#000';
     ctx.beginPath();
-    ctx.arc(b.x, b.y + b.shadow, 4 + b.shadow * 0.2, 0, Math.PI * 2);
+    ctx.arc(bx, by + Math.floor(b.shadow), 4 + Math.floor(b.shadow * 0.2), 0, Math.PI * 2);
     ctx.fill();
     ctx.globalAlpha = 1;
-    // Bomb
     ctx.fillStyle = '#333';
     ctx.beginPath();
-    ctx.arc(b.x, b.y, 5, 0, Math.PI * 2);
+    ctx.arc(bx, by, 5, 0, Math.PI * 2);
     ctx.fill();
     ctx.fillStyle = '#aa0000';
-    ctx.beginPath();
-    ctx.arc(b.x, b.y - 2, 2, 0, Math.PI * 2);
-    ctx.fill();
+    ctx.fillRect(bx - 1, by - 3, 3, 3);
   }
 }
 
@@ -1749,10 +2064,25 @@ function drawHelicopterBombs() {
 function drawBullets() {
   for (var i = 0; i < bullets.length; i++) {
     var bul = bullets[i];
-    if (bul.type === 'missile') {
+    var bx = Math.floor(bul.x);
+    var by = Math.floor(bul.y);
+
+    if (bul.type === 'charged') {
+      // Big purple blast
+      ctx.fillStyle = '#ff44ff';
+      ctx.globalAlpha = 0.6 + Math.sin(frame * 0.2) * 0.3;
+      ctx.beginPath();
+      ctx.arc(bx, by, bul.size, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = '#ffaaff';
+      ctx.globalAlpha = 1;
+      ctx.beginPath();
+      ctx.arc(bx, by, Math.floor(bul.size * 0.5), 0, Math.PI * 2);
+      ctx.fill();
+    } else if (bul.type === 'missile') {
       ctx.fillStyle = '#ff8844';
       ctx.save();
-      ctx.translate(bul.x, bul.y);
+      ctx.translate(bx, by);
       var mAng = Math.atan2(bul.vy, bul.vx);
       ctx.rotate(mAng + Math.PI / 2);
       ctx.beginPath();
@@ -1762,18 +2092,15 @@ function drawBullets() {
       ctx.closePath();
       ctx.fill();
       ctx.restore();
-      // Trail
       ctx.globalAlpha = 0.4;
       ctx.fillStyle = '#ffaa44';
-      ctx.beginPath();
-      ctx.arc(bul.x - bul.vx * 0.5, bul.y - bul.vy * 0.5, 2, 0, Math.PI * 2);
-      ctx.fill();
+      ctx.fillRect(bx - Math.floor(bul.vx * 0.5) - 1, by - Math.floor(bul.vy * 0.5) - 1, 3, 3);
       ctx.globalAlpha = 1;
     } else {
       ctx.fillStyle = '#ffff44';
-      ctx.fillRect(bul.x - 2, bul.y - 3, 4, 6);
+      ctx.fillRect(bx - 2, by - 3, 4, 6);
       ctx.fillStyle = '#ffffff';
-      ctx.fillRect(bul.x - 1, bul.y - 2, 2, 4);
+      ctx.fillRect(bx - 1, by - 2, 2, 4);
     }
   }
 }
@@ -1782,14 +2109,12 @@ function drawBullets() {
 function drawEnemyBullets() {
   for (var i = 0; i < enemyBullets.length; i++) {
     var eb = enemyBullets[i];
+    var ex = Math.floor(eb.x);
+    var ey = Math.floor(eb.y);
     ctx.fillStyle = '#ff4488';
-    ctx.beginPath();
-    ctx.arc(eb.x, eb.y, 3, 0, Math.PI * 2);
-    ctx.fill();
+    ctx.fillRect(ex - 3, ey - 3, 6, 6);
     ctx.fillStyle = '#ff88aa';
-    ctx.beginPath();
-    ctx.arc(eb.x, eb.y, 1.5, 0, Math.PI * 2);
-    ctx.fill();
+    ctx.fillRect(ex - 1, ey - 1, 3, 3);
   }
 }
 
@@ -1798,14 +2123,18 @@ function drawBossBullets() {
   for (var i = 0; i < bossBullets.length; i++) {
     var bb = bossBullets[i];
     var sz = bb.size || 4;
-    ctx.fillStyle = '#cc22ff';
+    var bx = Math.floor(bb.x);
+    var by = Math.floor(bb.y);
+    ctx.fillStyle = bb.color || '#cc22ff';
     ctx.beginPath();
-    ctx.arc(bb.x, bb.y, sz, 0, Math.PI * 2);
+    ctx.arc(bx, by, sz, 0, Math.PI * 2);
     ctx.fill();
-    ctx.fillStyle = '#ee88ff';
+    ctx.fillStyle = '#ffffff';
+    ctx.globalAlpha = 0.5;
     ctx.beginPath();
-    ctx.arc(bb.x, bb.y, sz * 0.5, 0, Math.PI * 2);
+    ctx.arc(bx, by, Math.floor(sz * 0.4), 0, Math.PI * 2);
     ctx.fill();
+    ctx.globalAlpha = 1;
   }
 }
 
@@ -1813,31 +2142,45 @@ function drawBossBullets() {
 function drawBoss() {
   if (!boss || boss.hp <= 0) return;
   var flash = boss.flashTimer > 0;
+  var bx = Math.floor(boss.x);
+  var by = Math.floor(boss.y);
 
   ctx.save();
-  ctx.translate(boss.x, boss.y);
+  ctx.translate(bx, by);
 
-  if (boss.type === 0) { // Giant Squid
-    // Tentacles
+  if (boss.type === 0) { // Spore Kraken
+    // Tentacles with spore nodes
     ctx.strokeStyle = flash ? '#fff' : '#884488';
     ctx.lineWidth = 3;
     for (var t = 0; t < 6; t++) {
       var ta = (t / 6) * Math.PI + Math.PI * 0.25;
       var tLen = boss.width * 0.6;
       ctx.beginPath();
-      ctx.moveTo(Math.cos(ta) * 10, boss.height / 2);
-      var cx1 = Math.cos(ta) * tLen * 0.5 + Math.sin(boss.timer * 0.05 + t) * 8;
-      var cy1 = boss.height / 2 + tLen * 0.5;
-      var ex = Math.cos(ta) * tLen + Math.sin(boss.timer * 0.03 + t) * 12;
-      var ey = boss.height / 2 + tLen;
+      ctx.moveTo(Math.floor(Math.cos(ta) * 10), Math.floor(boss.height / 2));
+      var cx1 = Math.floor(Math.cos(ta) * tLen * 0.5 + Math.sin(boss.timer * 0.05 + t) * 8);
+      var cy1 = Math.floor(boss.height / 2 + tLen * 0.5);
+      var ex = Math.floor(Math.cos(ta) * tLen + Math.sin(boss.timer * 0.03 + t) * 12);
+      var ey = Math.floor(boss.height / 2 + tLen);
       ctx.bezierCurveTo(cx1, cy1, ex - 5, ey - 10, ex, ey);
       ctx.stroke();
+      // Spore node at tip
+      ctx.fillStyle = flash ? '#fff' : '#cc66cc';
+      ctx.beginPath();
+      ctx.arc(ex, ey, 3, 0, Math.PI * 2);
+      ctx.fill();
     }
     // Body
     ctx.fillStyle = flash ? '#fff' : '#995599';
     ctx.beginPath();
-    ctx.ellipse(0, 0, boss.width / 2, boss.height / 2, 0, 0, Math.PI * 2);
+    ctx.ellipse(0, 0, Math.floor(boss.width / 2), Math.floor(boss.height / 2), 0, 0, Math.PI * 2);
     ctx.fill();
+    // Spore spots
+    if (!flash) {
+      ctx.fillStyle = '#bb77bb';
+      ctx.fillRect(-8, -2, 3, 3);
+      ctx.fillRect(6, 4, 3, 3);
+      ctx.fillRect(-3, 6, 3, 3);
+    }
     // Eyes
     ctx.fillStyle = '#ffff00';
     ctx.beginPath();
@@ -1845,42 +2188,53 @@ function drawBoss() {
     ctx.arc(12, -5, 5, 0, Math.PI * 2);
     ctx.fill();
     ctx.fillStyle = '#000';
-    ctx.beginPath();
-    ctx.arc(-12, -5, 2, 0, Math.PI * 2);
-    ctx.arc(12, -5, 2, 0, Math.PI * 2);
-    ctx.fill();
-  } else if (boss.type === 1) { // Sea Dragon
-    // Body segments
-    for (var seg = 4; seg >= 0; seg--) {
-      var sx = Math.sin(boss.timer * 0.04 + seg * 0.8) * 10;
-      var sy = seg * 12;
-      ctx.fillStyle = flash ? '#fff' : (seg % 2 === 0 ? '#22aa44' : '#119933');
+    ctx.fillRect(-13, -6, 3, 3);
+    ctx.fillRect(11, -6, 3, 3);
+  } else if (boss.type === 1) { // Mycelial Serpent
+    // Body segments with hyphae
+    for (var seg2 = 4; seg2 >= 0; seg2--) {
+      var sx2 = Math.floor(Math.sin(boss.timer * 0.04 + seg2 * 0.8) * 10);
+      var sy2 = seg2 * 12;
+      ctx.fillStyle = flash ? '#fff' : (seg2 % 2 === 0 ? '#22aa44' : '#119933');
       ctx.beginPath();
-      ctx.arc(sx, sy, 12 - seg, 0, Math.PI * 2);
+      ctx.arc(sx2, sy2, 12 - seg2, 0, Math.PI * 2);
       ctx.fill();
+      // Mycelial branching
+      if (!flash && seg2 % 2 === 0) {
+        ctx.strokeStyle = '#44cc66';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(sx2 + 8, sy2);
+        ctx.lineTo(sx2 + 14 + Math.floor(Math.sin(boss.timer * 0.06 + seg2) * 3), sy2 - 4);
+        ctx.stroke();
+      }
     }
     // Head
     ctx.fillStyle = flash ? '#fff' : '#33cc55';
     ctx.beginPath();
     ctx.arc(0, -5, 16, 0, Math.PI * 2);
     ctx.fill();
-    // Horns
-    ctx.fillStyle = '#886600';
+    // Mycelial horns
+    ctx.fillStyle = flash ? '#fff' : '#66dd88';
     ctx.beginPath();
-    ctx.moveTo(-10, -15); ctx.lineTo(-8, -25); ctx.lineTo(-5, -15);
-    ctx.moveTo(10, -15); ctx.lineTo(8, -25); ctx.lineTo(5, -15);
+    ctx.moveTo(-10, -15); ctx.lineTo(-8, -28); ctx.lineTo(-5, -15);
+    ctx.moveTo(10, -15); ctx.lineTo(8, -28); ctx.lineTo(5, -15);
     ctx.fill();
+    // Spore drip from horns
+    if (!flash && frame % 10 < 5) {
+      ctx.fillStyle = '#88ff66';
+      ctx.fillRect(-8, -27, 2, 2);
+      ctx.fillRect(7, -27, 2, 2);
+    }
     // Eyes
     ctx.fillStyle = '#ff4400';
-    ctx.beginPath();
-    ctx.arc(-6, -8, 3, 0, Math.PI * 2);
-    ctx.arc(6, -8, 3, 0, Math.PI * 2);
-    ctx.fill();
-  } else if (boss.type === 2) { // Mech Shark
+    ctx.fillRect(-8, -10, 4, 4);
+    ctx.fillRect(4, -10, 4, 4);
+  } else if (boss.type === 2) { // Reactor Shark
     // Fin
     ctx.fillStyle = flash ? '#fff' : '#667788';
     ctx.beginPath();
-    ctx.moveTo(0, -boss.height / 2 - 10);
+    ctx.moveTo(0, -Math.floor(boss.height / 2) - 10);
     ctx.lineTo(-8, 0);
     ctx.lineTo(8, 0);
     ctx.closePath();
@@ -1888,91 +2242,106 @@ function drawBoss() {
     // Body
     ctx.fillStyle = flash ? '#fff' : '#778899';
     ctx.beginPath();
-    ctx.ellipse(0, 0, boss.width / 2, boss.height / 2, 0, 0, Math.PI * 2);
+    ctx.ellipse(0, 0, Math.floor(boss.width / 2), Math.floor(boss.height / 2), 0, 0, Math.PI * 2);
     ctx.fill();
     // Metal plates
-    ctx.fillStyle = '#556677';
-    ctx.fillRect(-boss.width / 3, -boss.height / 4, boss.width * 2 / 3, boss.height / 2);
-    // Red eye
-    ctx.fillStyle = '#ff0000';
+    ctx.fillStyle = flash ? '#fff' : '#556677';
+    ctx.fillRect(Math.floor(-boss.width / 3), Math.floor(-boss.height / 4), Math.floor(boss.width * 2 / 3), Math.floor(boss.height / 2));
+    // Reactor core (glowing)
+    ctx.fillStyle = boss.enraged ? '#ff4400' : '#44aaff';
+    ctx.globalAlpha = 0.5 + Math.sin(boss.timer * 0.1) * 0.3;
     ctx.beginPath();
-    ctx.arc(0, -5, 4, 0, Math.PI * 2);
+    ctx.arc(0, -2, 6, 0, Math.PI * 2);
     ctx.fill();
-    // Teeth
+    ctx.globalAlpha = 1;
+    // Teeth (NES pixel style)
     ctx.fillStyle = '#ffffff';
     for (var tooth = 0; tooth < 5; tooth++) {
-      ctx.fillRect(-10 + tooth * 5, boss.height / 2 - 4, 3, 6);
+      ctx.fillRect(-10 + tooth * 5, Math.floor(boss.height / 2) - 4, 3, 6);
     }
   } else if (boss.type === 3) { // Storm Whale
     // Body
     ctx.fillStyle = flash ? '#fff' : '#445577';
     ctx.beginPath();
-    ctx.ellipse(0, 0, boss.width / 2, boss.height / 2, 0, 0, Math.PI * 2);
+    ctx.ellipse(0, 0, Math.floor(boss.width / 2), Math.floor(boss.height / 2), 0, 0, Math.PI * 2);
     ctx.fill();
     // Belly
-    ctx.fillStyle = '#667799';
+    ctx.fillStyle = flash ? '#fff' : '#667799';
     ctx.beginPath();
-    ctx.ellipse(0, boss.height / 4, boss.width / 2.5, boss.height / 4, 0, 0, Math.PI * 2);
+    ctx.ellipse(0, Math.floor(boss.height / 4), Math.floor(boss.width / 2.5), Math.floor(boss.height / 4), 0, 0, Math.PI * 2);
     ctx.fill();
     // Tail
     ctx.fillStyle = flash ? '#fff' : '#3a4a6a';
     ctx.beginPath();
-    ctx.moveTo(0, -boss.height / 2);
-    ctx.lineTo(-20, -boss.height / 2 - 15);
-    ctx.lineTo(20, -boss.height / 2 - 15);
+    ctx.moveTo(0, Math.floor(-boss.height / 2));
+    ctx.lineTo(-20, Math.floor(-boss.height / 2) - 15);
+    ctx.lineTo(20, Math.floor(-boss.height / 2) - 15);
     ctx.closePath();
     ctx.fill();
-    // Eye
+    // Eyes
     ctx.fillStyle = '#aaccff';
-    ctx.beginPath();
-    ctx.arc(-boss.width / 4, 0, 4, 0, Math.PI * 2);
-    ctx.arc(boss.width / 4, 0, 4, 0, Math.PI * 2);
-    ctx.fill();
+    ctx.fillRect(Math.floor(-boss.width / 4) - 2, -2, 4, 4);
+    ctx.fillRect(Math.floor(boss.width / 4) - 2, -2, 4, 4);
     // Storm sparks
     if (boss.timer % 10 < 5) {
       ctx.strokeStyle = '#88ddff';
       ctx.lineWidth = 1;
       ctx.beginPath();
-      ctx.moveTo(-boss.width / 2, -10);
-      ctx.lineTo(-boss.width / 2 - 10 + Math.random() * 5, -15 + Math.random() * 10);
+      ctx.moveTo(Math.floor(-boss.width / 2), -10);
+      ctx.lineTo(Math.floor(-boss.width / 2 - 10 + Math.random() * 5), Math.floor(-15 + Math.random() * 10));
+      ctx.moveTo(Math.floor(boss.width / 2), -8);
+      ctx.lineTo(Math.floor(boss.width / 2 + 8 + Math.random() * 5), Math.floor(-12 + Math.random() * 10));
       ctx.stroke();
     }
-  } else { // Kraken
-    // Many tentacles
+  } else { // Elder Fungus
+    // Giant hyphae tentacles
     ctx.strokeStyle = flash ? '#fff' : '#663366';
     ctx.lineWidth = 4;
     for (var kt = 0; kt < 8; kt++) {
       var kta = (kt / 8) * Math.PI * 2;
       ctx.beginPath();
-      ctx.moveTo(Math.cos(kta) * 15, Math.sin(kta) * 15);
-      var ktx = Math.cos(kta) * 40 + Math.sin(boss.timer * 0.04 + kt) * 15;
-      var kty = Math.sin(kta) * 40 + Math.cos(boss.timer * 0.03 + kt) * 10;
-      ctx.quadraticCurveTo(Math.cos(kta) * 25, Math.sin(kta) * 25, ktx, kty);
+      ctx.moveTo(Math.floor(Math.cos(kta) * 15), Math.floor(Math.sin(kta) * 15));
+      var ktx = Math.floor(Math.cos(kta) * 40 + Math.sin(boss.timer * 0.04 + kt) * 15);
+      var kty = Math.floor(Math.sin(kta) * 40 + Math.cos(boss.timer * 0.03 + kt) * 10);
+      ctx.quadraticCurveTo(Math.floor(Math.cos(kta) * 25), Math.floor(Math.sin(kta) * 25), ktx, kty);
       ctx.stroke();
+      // Spore nodes at tips
+      ctx.fillStyle = flash ? '#fff' : '#aa66aa';
+      ctx.beginPath();
+      ctx.arc(ktx, kty, 3, 0, Math.PI * 2);
+      ctx.fill();
     }
-    // Body
+    // Body - giant mushroom cap
     ctx.fillStyle = flash ? '#fff' : '#884488';
     ctx.beginPath();
-    ctx.arc(0, 0, boss.width / 2.5, 0, Math.PI * 2);
+    ctx.arc(0, 0, Math.floor(boss.width / 2.5), 0, Math.PI * 2);
     ctx.fill();
-    // Crown
-    ctx.fillStyle = '#aa55aa';
+    // Mushroom cap top
+    ctx.fillStyle = flash ? '#fff' : '#aa55aa';
     ctx.beginPath();
-    ctx.moveTo(-15, -20); ctx.lineTo(-10, -30); ctx.lineTo(-5, -20);
-    ctx.moveTo(-5, -20); ctx.lineTo(0, -33); ctx.lineTo(5, -20);
-    ctx.moveTo(5, -20); ctx.lineTo(10, -30); ctx.lineTo(15, -20);
+    ctx.ellipse(0, -8, Math.floor(boss.width / 2), 12, 0, Math.PI, 0);
+    ctx.fill();
+    // Spots on cap
+    if (!flash) {
+      ctx.fillStyle = '#cc88cc';
+      ctx.fillRect(-10, -14, 3, 3);
+      ctx.fillRect(5, -16, 3, 3);
+      ctx.fillRect(-2, -18, 3, 3);
+    }
+    // Crown spores
+    ctx.fillStyle = flash ? '#fff' : '#cc88ff';
+    ctx.beginPath();
+    ctx.moveTo(-15, -20); ctx.lineTo(-10, -32); ctx.lineTo(-5, -20);
+    ctx.moveTo(-5, -20); ctx.lineTo(0, -36); ctx.lineTo(5, -20);
+    ctx.moveTo(5, -20); ctx.lineTo(10, -32); ctx.lineTo(15, -20);
     ctx.fill();
     // Eyes
     ctx.fillStyle = '#ff88ff';
-    ctx.beginPath();
-    ctx.arc(-8, -5, 5, 0, Math.PI * 2);
-    ctx.arc(8, -5, 5, 0, Math.PI * 2);
-    ctx.fill();
+    ctx.fillRect(-10, -7, 5, 5);
+    ctx.fillRect(5, -7, 5, 5);
     ctx.fillStyle = '#440044';
-    ctx.beginPath();
-    ctx.arc(-8, -5, 2, 0, Math.PI * 2);
-    ctx.arc(8, -5, 2, 0, Math.PI * 2);
-    ctx.fill();
+    ctx.fillRect(-9, -6, 3, 3);
+    ctx.fillRect(6, -6, 3, 3);
   }
   ctx.restore();
 
@@ -1980,8 +2349,14 @@ function drawBoss() {
   var bHpPct = boss.hp / bossMaxHits;
   ctx.fillStyle = 'rgba(0,0,0,0.5)';
   ctx.fillRect(GW / 2 - 60, GH - 18, 120, 8);
-  ctx.fillStyle = bHpPct > 0.3 ? '#ff4444' : '#ff0000';
-  ctx.fillRect(GW / 2 - 59, GH - 17, 118 * bHpPct, 6);
+  ctx.fillStyle = bHpPct > 0.3 ? '#ff4444' : (frame % 8 < 4 ? '#ff0000' : '#ff4444');
+  ctx.fillRect(GW / 2 - 59, GH - 17, Math.floor(118 * bHpPct), 6);
+  // Enrage indicator
+  if (boss.enraged) {
+    ctx.fillStyle = frame % 10 < 5 ? '#ff6600' : '#ff0000';
+    ctx.fillRect(GW / 2 - 62, GH - 19, 2, 10);
+    ctx.fillRect(GW / 2 + 60, GH - 19, 2, 10);
+  }
   ctx.font = 'bold 8px monospace';
   ctx.fillStyle = '#fff';
   ctx.textAlign = 'center';
@@ -1992,30 +2367,33 @@ function drawBoss() {
 function drawPowerups() {
   for (var i = 0; i < powerups.length; i++) {
     var pu = powerups[i];
-    var bob = Math.sin(pu.bobTimer) * 3;
-    var py = pu.y + bob;
+    var bob = Math.floor(Math.sin(pu.bobTimer) * 3);
+    var px = Math.floor(pu.x);
+    var py = Math.floor(pu.y) + bob;
 
     // Glow
     ctx.globalAlpha = 0.3 + Math.sin(pu.bobTimer * 2) * 0.1;
     var colors = { speed: '#44ff44', weapon: '#ff8844', shield: '#44ffff', life: '#ff44ff', score: '#ffff44' };
     ctx.fillStyle = colors[pu.type] || '#fff';
     ctx.beginPath();
-    ctx.arc(pu.x, py, 10, 0, Math.PI * 2);
+    ctx.arc(px, py, 10, 0, Math.PI * 2);
     ctx.fill();
     ctx.globalAlpha = 1;
 
-    // Icon
+    // Icon - NES pixel style
     ctx.fillStyle = colors[pu.type] || '#fff';
-    ctx.beginPath();
-    ctx.arc(pu.x, py, 6, 0, Math.PI * 2);
-    ctx.fill();
+    ctx.fillRect(px - 5, py - 5, 10, 10);
+    // Border
+    ctx.strokeStyle = '#000';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(px - 5, py - 5, 10, 10);
 
     // Symbol
     ctx.fillStyle = '#000';
     ctx.font = 'bold 8px monospace';
     ctx.textAlign = 'center';
     var symbols = { speed: 'S', weapon: 'W', shield: '#', life: '+', score: '$' };
-    ctx.fillText(symbols[pu.type] || '?', pu.x, py + 3);
+    ctx.fillText(symbols[pu.type] || '?', px, py + 3);
   }
 }
 
@@ -2024,30 +2402,30 @@ function drawBaselings() {
   for (var i = 0; i < baselings.length; i++) {
     var bas = baselings[i];
     if (!bas.alive) continue;
-    var bob = Math.sin(bas.bobTimer) * 2;
+    var bob = Math.floor(Math.sin(bas.bobTimer) * 2);
+    var bx = Math.floor(bas.x);
+    var by = Math.floor(bas.y) + bob;
 
-    // Little creature swimming
+    // Body
     ctx.fillStyle = '#66ddaa';
     ctx.beginPath();
-    ctx.ellipse(bas.x, bas.y + bob, 6, 5, 0, 0, Math.PI * 2);
+    ctx.ellipse(bx, by, 6, 5, 0, 0, Math.PI * 2);
     ctx.fill();
     // Head
     ctx.fillStyle = '#88eebb';
     ctx.beginPath();
-    ctx.arc(bas.x, bas.y + bob - 5, 4, 0, Math.PI * 2);
+    ctx.arc(bx, by - 5, 4, 0, Math.PI * 2);
     ctx.fill();
-    // Eyes
+    // Eyes (NES pixels)
     ctx.fillStyle = '#000';
-    ctx.beginPath();
-    ctx.arc(bas.x - 2, bas.y + bob - 6, 1, 0, Math.PI * 2);
-    ctx.arc(bas.x + 2, bas.y + bob - 6, 1, 0, Math.PI * 2);
-    ctx.fill();
-    // Tiny ripple
+    ctx.fillRect(bx - 3, by - 7, 2, 2);
+    ctx.fillRect(bx + 1, by - 7, 2, 2);
+    // Ripple
     ctx.globalAlpha = 0.3;
     ctx.strokeStyle = '#aaddff';
-    ctx.lineWidth = 0.5;
+    ctx.lineWidth = 1;
     ctx.beginPath();
-    ctx.arc(bas.x, bas.y + bob + 3, 5 + Math.sin(bas.bobTimer * 2), 0, Math.PI);
+    ctx.arc(bx, by + 3, 5 + Math.floor(Math.sin(bas.bobTimer * 2)), 0, Math.PI);
     ctx.stroke();
     ctx.globalAlpha = 1;
   }
@@ -2058,24 +2436,27 @@ function drawTokens() {
   for (var i = 0; i < tokens.length; i++) {
     var tok = tokens[i];
     if (tok.collected || tok.y < -10) continue;
-    var bob = Math.sin(tok.bobTimer) * 2;
+    var bob = Math.floor(Math.sin(tok.bobTimer) * 2);
     var sinkAlpha = tok.sinkTimer > 60 ? 1 : tok.sinkTimer / 60;
+    var tx = Math.floor(tok.x);
+    var ty = Math.floor(tok.y) + bob;
 
     ctx.globalAlpha = sinkAlpha;
-    // Coin
-    ctx.fillStyle = '#ffcc00';
+    // Spore token (Tasern themed)
+    ctx.fillStyle = '#88aa44';
     ctx.beginPath();
-    ctx.arc(tok.x, tok.y + bob, 7, 0, Math.PI * 2);
+    ctx.arc(tx, ty, 7, 0, Math.PI * 2);
     ctx.fill();
-    ctx.fillStyle = '#ffee44';
+    ctx.fillStyle = '#aacc66';
     ctx.beginPath();
-    ctx.arc(tok.x, tok.y + bob, 5, 0, Math.PI * 2);
+    ctx.arc(tx, ty, 5, 0, Math.PI * 2);
     ctx.fill();
-    // M symbol
-    ctx.fillStyle = '#886600';
-    ctx.font = 'bold 7px monospace';
-    ctx.textAlign = 'center';
-    ctx.fillText('M', tok.x, tok.y + bob + 3);
+    // Mushroom icon
+    ctx.fillStyle = '#556622';
+    ctx.fillRect(tx - 1, ty - 1, 2, 4);
+    ctx.beginPath();
+    ctx.arc(tx, ty - 2, 3, Math.PI, 0);
+    ctx.fill();
     ctx.globalAlpha = 1;
   }
 }
@@ -2088,19 +2469,23 @@ function drawHUD() {
 
   ctx.font = 'bold 11px monospace';
 
-  // Score
+  // Score (INT affects display via scoreMult)
   ctx.fillStyle = '#ffdd44';
   ctx.textAlign = 'left';
   ctx.fillText('SCORE: ' + score, 6, 18);
 
-  // Stage
+  // Stage + zone name
   ctx.fillStyle = '#88ccff';
   ctx.textAlign = 'center';
-  ctx.fillText('STG ' + stage, GW / 2, 18);
+  ctx.fillText('STG ' + stage, GW / 2, 12);
+  ctx.font = '7px monospace';
+  ctx.fillStyle = '#6699aa';
+  ctx.fillText(ZONE_NAMES[getZone()], GW / 2, 22);
 
   // Lives (boat icons)
   ctx.fillStyle = '#44dd88';
   ctx.textAlign = 'right';
+  ctx.font = 'bold 11px monospace';
   for (var i = 0; i < lives; i++) {
     var lx = GW - 10 - i * 18;
     ctx.beginPath();
@@ -2111,11 +2496,11 @@ function drawHUD() {
     ctx.fill();
   }
 
-  // HP bar (bottom-left)
+  // HP bar
   ctx.fillStyle = 'rgba(10,5,20,0.6)';
   ctx.fillRect(4, GH - 14, 54, 10);
-  ctx.fillStyle = hp > 1 ? '#44dd88' : '#ff4444';
-  ctx.fillRect(5, GH - 13, (50 * hp / maxHp), 8);
+  ctx.fillStyle = hp > 1 ? '#44dd88' : (frame % 10 < 5 ? '#ff4444' : '#ff0000');
+  ctx.fillRect(5, GH - 13, Math.floor(50 * hp / maxHp), 8);
   ctx.font = '8px monospace';
   ctx.fillStyle = '#fff';
   ctx.textAlign = 'left';
@@ -2125,7 +2510,7 @@ function drawHUD() {
   ctx.fillStyle = 'rgba(10,5,20,0.6)';
   ctx.fillRect(4, GH - 26, 54, 10);
   ctx.fillStyle = turboActive ? '#ffff44' : '#4488ff';
-  ctx.fillRect(5, GH - 25, (50 * turboFuel / 100), 8);
+  ctx.fillRect(5, GH - 25, Math.floor(50 * turboFuel / 100), 8);
   ctx.fillStyle = '#fff';
   ctx.fillText('TB', 6, GH - 17);
 
@@ -2135,16 +2520,23 @@ function drawHUD() {
   ctx.textAlign = 'right';
   ctx.fillText(WEAPON_NAMES[weaponLevel], GW - 6, GH - 6);
 
+  // Charged shot ready indicator
+  if (chargedShotReady()) {
+    ctx.fillStyle = '#ff88ff';
+    ctx.font = '7px monospace';
+    ctx.fillText('CHARGE RDY', GW - 6, GH - 16);
+  }
+
   // Mission progress
   if (missionType === 'race' || missionType === 'survive') {
     var pct = Math.min(1, stageProgress / stageGoal);
     ctx.fillStyle = 'rgba(10,5,20,0.6)';
     ctx.fillRect(GW / 2 - 40, GH - 14, 80, 8);
     ctx.fillStyle = '#88ccff';
-    ctx.fillRect(GW / 2 - 39, GH - 13, 78 * pct, 6);
+    ctx.fillRect(GW / 2 - 39, GH - 13, Math.floor(78 * pct), 6);
   } else if (missionType === 'collect') {
     ctx.font = 'bold 10px monospace';
-    ctx.fillStyle = '#ffcc00';
+    ctx.fillStyle = '#88aa44';
     ctx.textAlign = 'center';
     ctx.fillText(tokensCollected + '/' + tokensNeeded, GW / 2, GH - 6);
   } else if (missionType === 'protect') {
@@ -2162,18 +2554,28 @@ function drawMissionBanner() {
               missionFlashTimer < 30 ? missionFlashTimer / 30 : 1;
   ctx.globalAlpha = alpha * 0.85;
   ctx.fillStyle = '#000';
-  ctx.fillRect(0, GH / 2 - 30, GW, 60);
+  ctx.fillRect(0, GH / 2 - 35, GW, 70);
   ctx.globalAlpha = alpha;
+
+  // Zone name
+  ctx.font = '9px monospace';
+  ctx.fillStyle = '#6699aa';
+  ctx.textAlign = 'center';
+  ctx.fillText(ZONE_NAMES[getZone()], GW / 2, GH / 2 - 18);
 
   ctx.font = 'bold 14px monospace';
   ctx.fillStyle = '#ffdd44';
-  ctx.textAlign = 'center';
-  ctx.fillText('STAGE ' + stage, GW / 2, GH / 2 - 8);
+  ctx.fillText('STAGE ' + stage, GW / 2, GH / 2 - 2);
 
   ctx.font = 'bold 11px monospace';
   var mIdx = MISSIONS.indexOf(missionType);
   ctx.fillStyle = '#88ccff';
-  ctx.fillText(MISSION_NAMES[mIdx], GW / 2, GH / 2 + 12);
+  ctx.fillText(MISSION_NAMES[mIdx], GW / 2, GH / 2 + 16);
+
+  // Stat summary
+  ctx.font = '7px monospace';
+  ctx.fillStyle = '#888';
+  ctx.fillText('STR:' + statB.STR + ' DEX:' + statB.DEX + ' CON:' + statB.CON + ' INT:' + statB.INT + ' WIS:' + statB.WIS + ' CHA:' + statB.CHA, GW / 2, GH / 2 + 28);
   ctx.globalAlpha = 1;
 }
 
@@ -2192,18 +2594,17 @@ function drawStageClear() {
 
   ctx.font = '10px monospace';
   ctx.fillStyle = '#ffdd44';
-  ctx.fillText('+' + (500 * stage) + ' BONUS', GW / 2, GH / 2 + 18);
+  ctx.fillText('+' + Math.floor(500 * stage * scoreMult()) + ' BONUS', GW / 2, GH / 2 + 18);
   ctx.globalAlpha = 1;
 }
 
 // === TITLE SCREEN ===
 function drawTitleScreen() {
-  // Animated water background
   drawWater();
 
   // Title boat animation
-  var titleBoatX = GW / 2 + Math.sin(frame * 0.02) * 30;
-  var titleBoatY = GH * 0.55 + Math.sin(frame * 0.03) * 5;
+  var titleBoatX = Math.floor(GW / 2 + Math.sin(frame * 0.02) * 30);
+  var titleBoatY = Math.floor(GH * 0.55 + Math.sin(frame * 0.03) * 5);
   ctx.save();
   ctx.translate(titleBoatX, titleBoatY);
   ctx.rotate(Math.sin(frame * 0.02) * 0.1);
@@ -2218,7 +2619,7 @@ function drawTitleScreen() {
   ctx.fill();
   ctx.restore();
 
-  // Wake behind title boat
+  // Wake
   ctx.globalAlpha = 0.3;
   ctx.strokeStyle = '#fff';
   ctx.lineWidth = 1;
@@ -2229,43 +2630,43 @@ function drawTitleScreen() {
   }
   ctx.globalAlpha = 1;
 
-  // Title text
+  // Title text with NES-style shadow
   ctx.textAlign = 'center';
-  ctx.fillStyle = '#000';
   ctx.font = 'bold 22px monospace';
-  ctx.fillText('COBRA TRIANGLE', GW / 2 + 2, GH * 0.18 + 2);
+  ctx.fillStyle = '#000';
+  ctx.fillText('COBRA TRIANGLE', GW / 2 + 2, Math.floor(GH * 0.18) + 2);
   ctx.fillStyle = '#44ddff';
-  ctx.fillText('COBRA TRIANGLE', GW / 2, GH * 0.18);
+  ctx.fillText('COBRA TRIANGLE', GW / 2, Math.floor(GH * 0.18));
 
   ctx.fillStyle = '#88aacc';
   ctx.font = '10px monospace';
-  ctx.fillText('A Tasern Tale', GW / 2, GH * 0.25);
+  ctx.fillText('A Tasern Tale', GW / 2, Math.floor(GH * 0.25));
 
-  // Features list
+  // Features
   ctx.font = '9px monospace';
   ctx.fillStyle = '#aaa';
-  ctx.fillText('25 STAGES - 5 MISSION TYPES - 5 BOSSES', GW / 2, GH * 0.35);
-  ctx.fillText('RACE / PROTECT / COLLECT / SURVIVE / BOSS', GW / 2, GH * 0.41);
+  ctx.fillText('25 STAGES - 5 ZONES - 5 BOSSES', GW / 2, Math.floor(GH * 0.35));
+  ctx.fillText('RACE / PROTECT / COLLECT / SURVIVE / BOSS', GW / 2, Math.floor(GH * 0.41));
 
   // High score
   if (highScore > 0) {
     ctx.fillStyle = '#ffdd44';
     ctx.font = 'bold 10px monospace';
-    ctx.fillText('HIGH SCORE: ' + highScore, GW / 2, GH * 0.76);
+    ctx.fillText('HIGH SCORE: ' + highScore, GW / 2, Math.floor(GH * 0.76));
   }
 
-  // Start prompt
-  var pulse = Math.sin(frame * 0.05) * 0.3 + 0.7;
+  // Start prompt (NES pulse)
+  var pulse = frame % 40 < 20 ? 1 : 0.4;
   ctx.globalAlpha = pulse;
   ctx.fillStyle = '#ffdd44';
   ctx.font = 'bold 12px monospace';
-  ctx.fillText('PRESS ANY KEY TO START', GW / 2, GH * 0.88);
+  ctx.fillText('PRESS ANY KEY TO START', GW / 2, Math.floor(GH * 0.88));
   ctx.globalAlpha = 1;
 
   // Controls hint
   ctx.fillStyle = '#666';
   ctx.font = '8px monospace';
-  ctx.fillText('ARROWS: Steer | SPACE/X: Fire | Z: Turbo', GW / 2, GH * 0.95);
+  ctx.fillText('ARROWS: Steer | SPACE/X: Fire | Z: Turbo', GW / 2, Math.floor(GH * 0.95));
 }
 
 // === START ===

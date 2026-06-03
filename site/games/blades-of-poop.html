@@ -29,6 +29,10 @@ canvas { display: block; margin: 0 auto; }
 const GW = 480, GH = 320;
 const ctx = TAS.ctx;
 
+// === BASELING STAT INTEGRATION ===
+var statB = { damage: 1, speed: 1, lives: 0, hpMult: 1, scoreMult: 1, cooldown: 1, luck: 1, str: 10, dex: 10, con: 10, int: 10, wis: 10, cha: 10, level: 0, color: '#44dd88', name: 'Baseling', icon: 'B' };
+try { if (window.NftLoader && NftLoader.getStatBonuses) statB = NftLoader.getStatBonuses(); } catch(e) {}
+
 // Rink dimensions (vertical orientation - top to bottom)
 const RINK_X = 40, RINK_Y = 0;
 const RINK_W = 400, RINK_H = 800;
@@ -43,7 +47,7 @@ let camY = 0;
 const CAM_MIN = 0;
 const CAM_MAX = RINK_H - GH;
 
-// Player physics
+// Player physics - statB.speed (DEX) scales movement
 const SKATE_SPEED = 180;
 const SKATE_ACCEL = 600;
 const FRICTION = 0.92;
@@ -59,10 +63,61 @@ const PUCK_RADIUS = 4;
 const GOALIE_SPEED = 120;
 
 // Timing
-const PERIOD_LENGTH = 120; // 2 minutes per period
-const PENALTY_TIME = 60;   // 1 minute penalty
+const PERIOD_LENGTH = 120;
+const PENALTY_TIME = 60;
 const FACEOFF_DELAY = 1.5;
 const FIGHT_HP = 100;
+
+// === ZONE SYSTEM (5 themed zones based on tournament round) ===
+const ZONES = [
+  { name: 'Frozen Spore Fields',  iceColor: '#d8eef8', boardColor: '#2244aa', lineColor: '#cc2222', fogColor: 'rgba(100,200,150,0.04)', particleColor: '#88ffaa' },
+  { name: 'Reactor Core Arena',   iceColor: '#e0ddf0', boardColor: '#6622aa', lineColor: '#ff6600', fogColor: 'rgba(255,100,50,0.04)',  particleColor: '#ff8844' },
+  { name: 'Mycelial Caverns',     iceColor: '#d4e8d8', boardColor: '#225522', lineColor: '#88cc44', fogColor: 'rgba(80,200,80,0.06)',   particleColor: '#44ff88' },
+  { name: 'Fungal Abyss',         iceColor: '#d8d4e8', boardColor: '#442266', lineColor: '#cc44ff', fogColor: 'rgba(180,80,255,0.05)',  particleColor: '#cc88ff' },
+  { name: 'Championship Nexus',   iceColor: '#f0e8d0', boardColor: '#886611', lineColor: '#ffdd44', fogColor: 'rgba(255,220,80,0.05)',  particleColor: '#ffdd44' }
+];
+let currentZone = 0;
+
+// === HAZARD SYSTEM ===
+let hazards = []; // { type, x, y, vx, vy, timer, radius }
+let hazardSpawnTimer = 0;
+const HAZARD_TYPES = ['goo_trail', 'spore_rain', 'reactor_vent'];
+
+// === PICKUP SYSTEM ===
+let pickups = []; // { type, x, y, timer }
+let pickupSpawnTimer = 0;
+const PICKUP_TYPES = ['spore_shield', 'reactor_core', 'fungal_extract', 'speed_mushroom'];
+let activePickup = null; // { type, timer }
+
+// === SCORE POPUP SYSTEM ===
+let scorePopups = []; // { text, x, y, timer, color }
+
+// === BOSS SYSTEM ===
+let bossActive = false;
+let boss = null; // { type, x, y, hp, maxHp, timer, phase, attackTimer }
+const BOSS_TYPES = [
+  { name: 'Mycelial Golem',    color: '#44aa44', hp: 200, speed: 40,  pattern: 'charge' },
+  { name: 'Reactor Overlord',  color: '#ff6622', hp: 250, speed: 50,  pattern: 'orbit' },
+  { name: 'Spore Titan',       color: '#88ccff', hp: 300, speed: 35,  pattern: 'slam' }
+];
+
+// === ENEMY SYSTEM (rink hazard enemies) ===
+let enemies = []; // { type, x, y, vx, vy, hp, timer }
+let enemySpawnTimer = 0;
+const ENEMY_TYPES = [
+  { name: 'Reactor Bug',     color: '#ff4422', radius: 6,  speed: 80,  hp: 1 },
+  { name: 'Spore Crawler',   color: '#44cc44', radius: 8,  speed: 50,  hp: 2 },
+  { name: 'Mycelial Worm',   color: '#8844cc', radius: 5,  speed: 120, hp: 1 },
+  { name: 'Fungal Lurker',   color: '#448844', radius: 10, speed: 30,  hp: 3 }
+];
+
+// === TUTORIAL STATE ===
+let tutorialShown = false;
+let showTutorial = false;
+let tutorialTimer = 0;
+
+// === SCREEN SHAKE ENHANCEMENT ===
+let impactShakeX = 0, impactShakeY = 0;
 
 // === INIT ===
 TAS.initCanvas(GW, GH);
@@ -84,6 +139,7 @@ const TEAMS = [
 let state = 'title';
 let frame = 0;
 let highScore = TAS.score.load('blades_poop_hi');
+let totalTournamentGoals = 0;
 
 // Tournament state
 let tournament = null;
@@ -100,12 +156,13 @@ let period = 1, periodTimer = PERIOD_LENGTH;
 let controlledPlayer = null;
 let shotCharging = false, shotPower = 0;
 let faceoffTimer = 0;
-let penaltyBox = []; // { team, timer }
-let checkCounts = {}; // track checks between player pairs
+let penaltyBox = [];
+let checkCounts = {};
 let overtime = false;
+let matchNumber = 0;
 
 // Fight state
-let fightState = null; // { player1, player2, hp1, hp2, timer, p1Action, p2Action, hitTimer1, hitTimer2 }
+let fightState = null;
 
 // === HELPER FUNCTIONS ===
 function lerp(a, b, t) { return a + (b - a) * t; }
@@ -114,8 +171,14 @@ function dist(x1, y1, x2, y2) { const dx = x2 - x1, dy = y2 - y1; return Math.sq
 function angle(x1, y1, x2, y2) { return Math.atan2(y2 - y1, x2 - x1); }
 function randRange(a, b) { return a + Math.random() * (b - a); }
 
+// === SCORE POPUP HELPER ===
+function spawnScorePopup(text, x, y, color) {
+  scorePopups.push({ text: text, x: x, y: y, timer: 1.2, color: color || '#ffdd44' });
+}
+
 // === PLAYER FACTORY ===
 function createPlayer(team, idx, x, y, isHome) {
+  // CON (statB.hpMult) boosts stun resistance for home team
   return {
     team, idx, x, y,
     vx: 0, vy: 0,
@@ -124,7 +187,9 @@ function createPlayer(team, idx, x, y, isHome) {
     isHome,
     stunTimer: 0,
     penalized: false,
-    fightAggro: 0 // tracks checks received
+    fightAggro: 0,
+    shielded: false,
+    shieldTimer: 0
   };
 }
 
@@ -153,17 +218,30 @@ function setupMatch(home, away) {
   overtime = false;
   penaltyBox = [];
   checkCounts = {};
+  hazards = [];
+  pickups = [];
+  enemies = [];
+  scorePopups = [];
+  activePickup = null;
+  hazardSpawnTimer = 8;
+  pickupSpawnTimer = 12;
+  enemySpawnTimer = 15;
+  bossActive = false;
+  boss = null;
+  // Zone based on tournament round
+  if (tournament) {
+    currentZone = Math.min(tournament.currentRound, ZONES.length - 1);
+    if (tournament.currentRound >= 2) currentZone = 4; // Championship
+  }
   setupPeriod();
 }
 
 function setupPeriod() {
-  // Home attacks downward (toward high Y), away attacks upward (toward low Y)
   homePlayers = [];
   awayPlayers = [];
 
-  // Home team positions (bottom half defenders, top half when attacking)
-  const homeActive = 3 - penaltyBox.filter(p => p.team === 'home').length;
-  const awayActive = 3 - penaltyBox.filter(p => p.team === 'away').length;
+  const homeActive = 3 - penaltyBox.filter(function(p) { return p.team === 'home'; }).length;
+  const awayActive = 3 - penaltyBox.filter(function(p) { return p.team === 'away'; }).length;
 
   for (let i = 0; i < 3; i++) {
     const penalized = i >= homeActive;
@@ -185,11 +263,9 @@ function setupPeriod() {
     awayPlayers.push(p);
   }
 
-  // Goalies
   homeGoalie = createGoalie(homeTeam, RINK_X + RINK_W / 2, RINK_Y + 30, true);
   awayGoalie = createGoalie(awayTeam, RINK_X + RINK_W / 2, RINK_Y + RINK_H - 30, false);
 
-  // Puck at center
   puck = createPuck(RINK_X + RINK_W / 2, CENTER_Y);
   controlledPlayer = homePlayers[0];
   shotCharging = false;
@@ -208,7 +284,6 @@ function faceoff(x, y) {
   shotCharging = false;
   shotPower = 0;
 
-  // Reset player positions around faceoff
   const cx = x, cy = y;
   for (let i = 0; i < homePlayers.length; i++) {
     if (!homePlayers[i].penalized) {
@@ -226,7 +301,7 @@ function faceoff(x, y) {
       awayPlayers[i].vy = 0;
     }
   }
-  controlledPlayer = homePlayers.find(p => !p.penalized) || homePlayers[0];
+  controlledPlayer = homePlayers.find(function(p) { return !p.penalized; }) || homePlayers[0];
 }
 
 // === INPUT ===
@@ -242,117 +317,28 @@ function inputAPressed() { const v = inputA() && !prevA; return v; }
 function inputBPressed() { const v = inputB() && !prevB; return v; }
 
 // === TOURNAMENT ===
-function initTournament(teamIdx) {
-  playerTeamIdx = teamIdx;
-  const order = [0, 1, 2, 3, 4, 5, 6, 7];
-  // Shuffle but keep player's team in
-  for (let i = order.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
-    [order[i], order[j]] = [order[j], order[i]];
-  }
-  tournament = {
-    bracket: order,
-    round: 0, // 0=quarterfinal, 1=semi, 2=final
-    matchIdx: 0,
-    results: []
-  };
-  startNextMatch();
-}
-
-function startNextMatch() {
-  const round = tournament.round;
-  const teams = tournament.bracket;
-  const matchIdx = tournament.matchIdx;
-  const idx1 = matchIdx * 2;
-  const idx2 = matchIdx * 2 + 1;
-
-  if (idx2 >= teams.length) {
-    // Tournament complete
-    state = 'tournamentWin';
-    const totalGoals = tournament.results.reduce((s, r) => s + r.playerGoals, 0);
-    if (totalGoals > highScore) {
-      highScore = totalGoals;
-      TAS.score.save('blades_poop_hi', highScore);
-    }
-    return;
-  }
-
-  const home = TEAMS[teams[idx1]];
-  const away = TEAMS[teams[idx2]];
-
-  // Player always plays as home in their matches
-  const playerInMatch = teams[idx1] === playerTeamIdx || teams[idx2] === playerTeamIdx;
-
-  if (playerInMatch) {
-    if (teams[idx1] === playerTeamIdx) {
-      setupMatch(home, away);
-    } else {
-      setupMatch(away, home);
-      // Swap so player is always "home" in code
-      [homeTeam, awayTeam] = [awayTeam, homeTeam];
-      setupMatch(TEAMS[playerTeamIdx], teams[idx1] === playerTeamIdx ? away : home);
-    }
-    state = 'playing';
-  } else {
-    // Simulate match
-    const winner = Math.random() < 0.5 ? teams[idx1] : teams[idx2];
-    tournament.results.push({ winner, playerGoals: 0 });
-    advanceTournament(winner);
-  }
-}
-
-function advanceTournament(winnerIdx) {
-  const nextBracket = [];
-  // Build next round bracket from current results
-  if (tournament.matchIdx >= Math.floor(tournament.bracket.length / 2) - 1) {
-    // All matches in this round done
-    const winners = [];
-    for (let i = 0; i < tournament.bracket.length; i += 2) {
-      const res = tournament.results[tournament.round * 4 + i / 2];
-      if (res) winners.push(res.winner);
-      else winners.push(winnerIdx);
-    }
-    // Last winner
-    if (winners.length === 0) winners.push(winnerIdx);
-
-    tournament.bracket = winners.length > 1 ? winners : [winnerIdx];
-    tournament.round++;
-    tournament.matchIdx = 0;
-
-    if (tournament.bracket.length <= 1) {
-      // Tournament over
-      if (tournament.bracket[0] === playerTeamIdx) {
-        state = 'tournamentWin';
-      } else {
-        state = 'tournamentLoss';
-      }
-      return;
-    }
-    startNextMatch();
-  } else {
-    tournament.matchIdx++;
-    startNextMatch();
-  }
-}
-
-// === SIMPLIFIED TOURNAMENT ===
-// Let me redo this more cleanly
 function resetTournament(teamIdx) {
   playerTeamIdx = teamIdx;
-  // Create seeded bracket
+  totalTournamentGoals = 0;
+  matchNumber = 0;
   const seeds = [];
   for (let i = 0; i < 8; i++) seeds.push(i);
-  // Shuffle
   for (let i = 7; i > 0; i--) {
     const j = Math.floor(Math.random() * (i + 1));
     [seeds[i], seeds[j]] = [seeds[j], seeds[i]];
   }
   tournament = {
-    rounds: [seeds, [], []], // QF seeds, SF seeds, Final seeds
+    rounds: [seeds, [], []],
     currentRound: 0,
     currentGame: 0,
     playerAlive: true
   };
+  // Show tutorial on first ever play
+  if (!tutorialShown) {
+    showTutorial = true;
+    tutorialTimer = 6;
+    tutorialShown = true;
+  }
   playNextTournamentGame();
 }
 
@@ -361,16 +347,13 @@ function playNextTournamentGame() {
   const gi = tournament.currentGame * 2;
 
   if (gi + 1 >= round.length) {
-    // Round complete, advance
     tournament.currentRound++;
     tournament.currentGame = 0;
     if (tournament.currentRound >= 3 || tournament.rounds[tournament.currentRound].length < 2) {
-      // Tournament over
       if (tournament.playerAlive) {
         state = 'tournamentWin';
-        const totalGoals = homeScore;
-        if (totalGoals > highScore) {
-          highScore = totalGoals;
+        if (totalTournamentGoals > highScore) {
+          highScore = totalTournamentGoals;
           TAS.score.save('blades_poop_hi', highScore);
         }
       } else {
@@ -388,10 +371,10 @@ function playNextTournamentGame() {
 
   if (playerInvolved && tournament.playerAlive) {
     const oppIdx = t1 === playerTeamIdx ? t2 : t1;
+    matchNumber++;
     setupMatch(TEAMS[playerTeamIdx], TEAMS[oppIdx]);
     state = 'matchIntro';
   } else {
-    // Simulate - higher combined stats more likely to win
     const s1 = TEAMS[t1].speed + TEAMS[t1].shot + TEAMS[t1].goalie;
     const s2 = TEAMS[t2].speed + TEAMS[t2].shot + TEAMS[t2].goalie;
     const winner = Math.random() < s1 / (s1 + s2) ? t1 : t2;
@@ -409,35 +392,32 @@ function playNextTournamentGame() {
 function updateAI(player, allTeammates, opponents, dt) {
   if (player === controlledPlayer || player.penalized || player.stunTimer > 0) return;
 
-  const speed = (player.isHome ? homeTeam.speed : awayTeam.speed) * 18;
+  // DEX (statB.speed) scales AI teammate speed too
+  const baseSpeed = (player.isHome ? homeTeam.speed : awayTeam.speed) * 18;
+  const speed = player.isHome ? baseSpeed * statB.speed : baseSpeed;
 
   if (player.hasPuck) {
-    // Offensive AI - move toward opponent goal and shoot
     const goalY = player.isHome ? RINK_Y + RINK_H - 40 : RINK_Y + 40;
     const goalX = RINK_X + RINK_W / 2;
     const distToGoal = dist(player.x, player.y, goalX, goalY);
 
     if (distToGoal < 150) {
-      // Shoot!
-      const shotSpd = PUCK_SPEED * ((player.isHome ? homeTeam.shot : awayTeam.shot) / 10);
+      // STR (statB.damage) scales shot power
+      const shotSpd = PUCK_SPEED * ((player.isHome ? homeTeam.shot : awayTeam.shot) / 10) * (player.isHome ? statB.damage : 1);
       const ang = angle(player.x, player.y, goalX + randRange(-20, 20), goalY);
       shootPuck(player, ang, shotSpd);
     } else {
-      // Skate toward goal with some randomness
       const ang = angle(player.x, player.y, goalX + randRange(-40, 40), goalY);
       player.vx += Math.cos(ang) * speed * dt;
       player.vy += Math.sin(ang) * speed * dt;
     }
   } else if (puck.loose) {
-    // Chase loose puck
     const ang = angle(player.x, player.y, puck.x, puck.y);
     player.vx += Math.cos(ang) * speed * dt;
     player.vy += Math.sin(ang) * speed * dt;
   } else {
-    // Position defensively or support
-    const teamHasPuck = allTeammates.some(p => p.hasPuck);
+    const teamHasPuck = allTeammates.some(function(p) { return p.hasPuck; });
     if (teamHasPuck) {
-      // Support offense - spread out
       const targetX = RINK_X + RINK_W * (0.25 + player.idx * 0.25);
       const targetY = player.isHome ?
         CENTER_Y + 50 + player.idx * 40 :
@@ -449,8 +429,7 @@ function updateAI(player, allTeammates, opponents, dt) {
         player.vy += Math.sin(ang) * speed * 0.7 * dt;
       }
     } else {
-      // Defense - chase puck carrier or get between puck and goal
-      const carrier = opponents.find(p => p.hasPuck);
+      const carrier = opponents.find(function(p) { return p.hasPuck; });
       if (carrier) {
         const myGoalY = player.isHome ? RINK_Y + 30 : RINK_Y + RINK_H - 30;
         const targetX = (carrier.x + RINK_X + RINK_W / 2) / 2;
@@ -459,7 +438,6 @@ function updateAI(player, allTeammates, opponents, dt) {
         player.vx += Math.cos(ang) * speed * dt;
         player.vy += Math.sin(ang) * speed * dt;
 
-        // Try to check if close
         if (dist(player.x, player.y, carrier.x, carrier.y) < CHECK_RANGE && player.checkCooldown <= 0) {
           performCheck(player, carrier);
         }
@@ -473,37 +451,34 @@ function updateGoalie(goalie, team, dt) {
   const goalY = goalie.baseY;
   const goalX = goalie.baseX;
   const rating = (goalie.isHome ? homeTeam.goalie : awayTeam.goalie) / 10;
+  // CON (statB.hpMult) makes home goalie slightly better
+  const conBonus = goalie.isHome ? (1 + (statB.hpMult - 1) * 0.15) : 1;
 
-  // Track puck X position
   let targetX = puck.x;
   let targetY = goalY;
 
-  // If puck is coming toward goal, move to intercept
   const puckMovingToward = goalie.isHome ?
     (puck.vy < -50) : (puck.vy > 50);
 
   if (puckMovingToward) {
-    // Predict where puck will be at goal Y
     const timeToGoal = Math.abs(goalY - puck.y) / Math.abs(puck.vy);
-    targetX = puck.x + puck.vx * timeToGoal * rating;
+    targetX = puck.x + puck.vx * timeToGoal * rating * conBonus;
   }
 
   targetX = clamp(targetX, goalX - GOAL_W / 2 + 10, goalX + GOAL_W / 2 - 10);
 
   const gdx = targetX - goalie.x;
   const gdy = targetY - goalie.y;
-  const gspd = GOALIE_SPEED * rating;
+  const gspd = GOALIE_SPEED * rating * conBonus;
 
   if (Math.abs(gdx) > 2) goalie.x += Math.sign(gdx) * gspd * dt;
   if (Math.abs(gdy) > 2) goalie.y += Math.sign(gdy) * gspd * dt;
 
   goalie.x = clamp(goalie.x, goalX - GOAL_W, goalX + GOAL_W);
 
-  // Save attempt - if puck very close
   if (goalie.saveTimer <= 0) {
     const d = dist(goalie.x, goalie.y, puck.x, puck.y);
     if (d < 18 && puck.loose && puck.speed > 100) {
-      // Save!
       goalie.saveTimer = 0.5;
       goalie.hasPuck = true;
       puck.owner = goalie;
@@ -511,7 +486,6 @@ function updateGoalie(goalie, team, dt) {
       puck.vx = 0;
       puck.vy = 0;
       TAS.audio.playTone(200, 0.1, 'square', 0.08);
-      // Clear puck after delay
       setTimeout(function() {
         if (goalie.hasPuck) {
           goalie.hasPuck = false;
@@ -529,18 +503,19 @@ function updateGoalie(goalie, team, dt) {
 
 // === SHOOTING ===
 function shootPuck(player, ang, speed) {
+  // STR (statB.damage) amplifies shot power for home team
+  const finalSpeed = player.isHome ? speed * statB.damage : speed;
   player.hasPuck = false;
   puck.owner = null;
   puck.loose = true;
-  puck.vx = Math.cos(ang) * speed;
-  puck.vy = Math.sin(ang) * speed;
-  puck.speed = speed;
+  puck.vx = Math.cos(ang) * finalSpeed;
+  puck.vy = Math.sin(ang) * finalSpeed;
+  puck.speed = finalSpeed;
   TAS.audio.playTone(400, 0.15, 'sawtooth', 0.1, 200);
   TAS.particles.spawn(puck.x, puck.y, '#88ccff', 5, 3);
 }
 
 function passPuck(player) {
-  // Find nearest teammate
   const teammates = player.isHome ? homePlayers : awayPlayers;
   let nearest = null, nearDist = Infinity;
   for (const t of teammates) {
@@ -550,12 +525,14 @@ function passPuck(player) {
   }
   if (nearest) {
     const ang = angle(player.x, player.y, nearest.x, nearest.y);
+    // DEX (statB.speed) scales pass speed for home team
+    const passSpd = player.isHome ? PASS_SPEED * statB.speed : PASS_SPEED;
     player.hasPuck = false;
     puck.owner = null;
     puck.loose = true;
-    puck.vx = Math.cos(ang) * PASS_SPEED;
-    puck.vy = Math.sin(ang) * PASS_SPEED;
-    puck.speed = PASS_SPEED;
+    puck.vx = Math.cos(ang) * passSpd;
+    puck.vy = Math.sin(ang) * passSpd;
+    puck.speed = passSpd;
     TAS.audio.playTone(300, 0.08, 'square', 0.06);
   }
 }
@@ -563,17 +540,29 @@ function passPuck(player) {
 // === BODY CHECK ===
 function performCheck(checker, target) {
   if (checker.checkCooldown > 0) return;
-  checker.checkCooldown = CHECK_COOLDOWN;
+  // WIS (statB.cooldown) reduces check cooldown for home team
+  checker.checkCooldown = checker.isHome ? CHECK_COOLDOWN * statB.cooldown : CHECK_COOLDOWN;
 
   const d = dist(checker.x, checker.y, target.x, target.y);
   if (d > CHECK_RANGE * 1.5) return;
 
-  const ang = angle(checker.x, checker.y, target.x, target.y);
-  target.vx += Math.cos(ang) * CHECK_SPEED;
-  target.vy += Math.sin(ang) * CHECK_SPEED;
-  target.stunTimer = 0.3;
+  // Spore shield blocks check
+  if (target.shielded) {
+    TAS.audio.playTone(600, 0.1, 'sine', 0.08);
+    TAS.particles.spawn(target.x, target.y - camY, '#44ffaa', 8, 3);
+    target.shielded = false;
+    target.shieldTimer = 0;
+    return;
+  }
 
-  // Knock puck loose
+  const ang = angle(checker.x, checker.y, target.x, target.y);
+  // STR (statB.damage) scales check knockback for home team
+  const checkPow = checker.isHome ? CHECK_SPEED * statB.damage : CHECK_SPEED;
+  target.vx += Math.cos(ang) * checkPow;
+  target.vy += Math.sin(ang) * checkPow;
+  // CON (statB.hpMult) reduces stun duration when being checked (home team)
+  target.stunTimer = target.isHome ? 0.3 / statB.hpMult : 0.3;
+
   if (target.hasPuck) {
     target.hasPuck = false;
     puck.owner = null;
@@ -583,18 +572,27 @@ function performCheck(checker, target) {
     puck.speed = 80;
   }
 
-  // Screen shake and effects
+  // Enhanced screen shake
   TAS.fx.shake(4, 0.85);
+  impactShakeX = (Math.random() - 0.5) * 6;
+  impactShakeY = (Math.random() - 0.5) * 6;
   TAS.audio.playNoise(0.12, 0.15, 800);
   TAS.audio.playTone(150, 0.1, 'square', 0.08);
+  // Death/hit particles based on zone
+  const zone = ZONES[currentZone];
   TAS.particles.spawn(target.x, target.y - camY, '#fff', 8, 4);
+  TAS.particles.spawn(target.x, target.y - camY, zone.particleColor, 4, 3);
 
-  // Track aggro for fights
+  // INT (statB.scoreMult) gives bonus score on checks for home team
+  if (checker.isHome) {
+    const checkScore = Math.round(5 * statB.scoreMult);
+    spawnScorePopup('+' + checkScore, target.x, target.y - camY, '#88ccff');
+  }
+
   const key = checker.isHome + '_' + checker.idx + '_' + target.idx;
   checkCounts[key] = (checkCounts[key] || 0) + 1;
   target.fightAggro++;
 
-  // Trigger fight after 3+ checks
   if (checkCounts[key] >= 3) {
     startFight(checker, target);
     checkCounts[key] = 0;
@@ -603,9 +601,13 @@ function performCheck(checker, target) {
 
 // === FIGHT SYSTEM ===
 function startFight(p1, p2) {
+  // CON (statB.hpMult) scales fight HP for home player
+  const p1Hp = p1.isHome ? Math.round(FIGHT_HP * statB.hpMult) : FIGHT_HP;
+  const p2Hp = p2.isHome ? Math.round(FIGHT_HP * statB.hpMult) : FIGHT_HP;
   fightState = {
     player1: p1, player2: p2,
-    hp1: FIGHT_HP, hp2: FIGHT_HP,
+    hp1: p1Hp, hp2: p2Hp,
+    maxHp1: p1Hp, maxHp2: p2Hp,
     timer: 10,
     p1Action: 'idle', p2Action: 'idle',
     hitTimer1: 0, hitTimer2: 0,
@@ -623,45 +625,46 @@ function updateFight(dt) {
   fightState.hitTimer2 = Math.max(0, fightState.hitTimer2 - dt);
   fightState.aiTimer -= dt;
 
-  // Player controls (player1)
   fightState.p1Block = inputB();
   if (!fightState.p1Block && fightState.hitTimer1 <= 0) {
     if (inputUp() && inputAPressed()) {
-      // High punch
       fightState.p1Action = 'highPunch';
-      fightState.hitTimer1 = 0.4;
+      // WIS (statB.cooldown) speeds up punch recovery
+      fightState.hitTimer1 = 0.4 * statB.cooldown;
       if (!fightState.p2Block) {
-        const dmg = 12 + Math.floor(Math.random() * 8);
+        // STR (statB.damage) amplifies fight damage
+        const dmg = Math.round((12 + Math.floor(Math.random() * 8)) * statB.damage);
         fightState.hp2 -= dmg;
         TAS.audio.playTone(200, 0.1, 'square', 0.12);
         TAS.fx.shake(3, 0.9);
         TAS.particles.spawn(GW * 0.65, GH * 0.45, '#ff4444', 4, 3);
+        spawnScorePopup('-' + dmg, GW * 0.65, GH * 0.45, '#ff4444');
       } else {
         TAS.audio.playTone(100, 0.05, 'square', 0.05);
       }
     } else if (inputDown() && inputAPressed()) {
-      // Low punch
       fightState.p1Action = 'lowPunch';
-      fightState.hitTimer1 = 0.35;
+      fightState.hitTimer1 = 0.35 * statB.cooldown;
       if (!fightState.p2Block) {
-        const dmg = 8 + Math.floor(Math.random() * 6);
+        const dmg = Math.round((8 + Math.floor(Math.random() * 6)) * statB.damage);
         fightState.hp2 -= dmg;
         TAS.audio.playTone(250, 0.08, 'square', 0.1);
         TAS.fx.shake(2, 0.9);
         TAS.particles.spawn(GW * 0.65, GH * 0.55, '#ff4444', 3, 2);
+        spawnScorePopup('-' + dmg, GW * 0.65, GH * 0.55, '#ff4444');
       } else {
         TAS.audio.playTone(100, 0.05, 'square', 0.05);
       }
     } else if (inputAPressed()) {
-      // Mid punch
       fightState.p1Action = 'midPunch';
-      fightState.hitTimer1 = 0.35;
+      fightState.hitTimer1 = 0.35 * statB.cooldown;
       if (!fightState.p2Block) {
-        const dmg = 10 + Math.floor(Math.random() * 5);
+        const dmg = Math.round((10 + Math.floor(Math.random() * 5)) * statB.damage);
         fightState.hp2 -= dmg;
         TAS.audio.playTone(220, 0.09, 'square', 0.11);
         TAS.fx.shake(2, 0.9);
         TAS.particles.spawn(GW * 0.65, GH * 0.5, '#ff4444', 3, 2);
+        spawnScorePopup('-' + dmg, GW * 0.65, GH * 0.5, '#ff4444');
       } else {
         TAS.audio.playTone(100, 0.05, 'square', 0.05);
       }
@@ -674,7 +677,6 @@ function updateFight(dt) {
     const action = Math.random();
 
     if (action < 0.3 * fightSkill) {
-      // Attack
       fightState.p2Action = Math.random() < 0.5 ? 'highPunch' : 'lowPunch';
       fightState.hitTimer2 = 0.4;
       if (!fightState.p1Block) {
@@ -683,6 +685,7 @@ function updateFight(dt) {
         TAS.audio.playTone(180, 0.1, 'square', 0.1);
         TAS.fx.shake(2, 0.9);
         TAS.particles.spawn(GW * 0.35, GH * 0.5, '#ff4444', 3, 2);
+        spawnScorePopup('-' + dmg, GW * 0.35, GH * 0.5, '#ff4444');
       }
       fightState.aiTimer = 0.3 + Math.random() * 0.4;
     } else if (action < 0.5) {
@@ -694,7 +697,6 @@ function updateFight(dt) {
     }
   }
 
-  // Check fight end
   if (fightState.hp1 <= 0 || fightState.hp2 <= 0 || fightState.timer <= 0) {
     endFight();
   }
@@ -705,6 +707,12 @@ function endFight() {
   loser.penalized = true;
   penaltyBox.push({ team: loser.isHome ? 'home' : 'away', timer: PENALTY_TIME, player: loser });
 
+  // INT (statB.scoreMult) bonus points for winning fight
+  if (loser !== fightState.player1 && fightState.player1.isHome) {
+    const fightBonus = Math.round(25 * statB.scoreMult);
+    spawnScorePopup('+' + fightBonus + ' FIGHT WIN', GW / 2, GH / 2, '#44ff44');
+  }
+
   TAS.audio.playMelody([[200, 0.15], [150, 0.15], [100, 0.3]], 180);
 
   fightState = null;
@@ -714,7 +722,6 @@ function endFight() {
 
 // === GOAL DETECTION ===
 function checkGoals() {
-  // Home goal (top of rink - away scores here)
   const homeGoalX = RINK_X + RINK_W / 2;
   const homeGoalY = RINK_Y + 10;
   if (puck.y < homeGoalY + GOAL_H && puck.y > homeGoalY - 5 &&
@@ -724,11 +731,11 @@ function checkGoals() {
     return true;
   }
 
-  // Away goal (bottom of rink - home scores here)
   const awayGoalY = RINK_Y + RINK_H - 10;
   if (puck.y > awayGoalY - GOAL_H && puck.y < awayGoalY + 5 &&
       Math.abs(puck.x - homeGoalX) < GOAL_W / 2 && puck.loose) {
     homeScore++;
+    totalTournamentGoals++;
     goalScored(true);
     return true;
   }
@@ -738,34 +745,45 @@ function checkGoals() {
 function goalScored(homeScored) {
   TAS.fx.flash('#fff', 0.5);
   TAS.fx.shake(8, 0.9);
-  // Goal horn
+  impactShakeX = (Math.random() - 0.5) * 10;
+  impactShakeY = (Math.random() - 0.5) * 10;
   TAS.audio.playTone(220, 0.8, 'sawtooth', 0.12);
   TAS.audio.playTone(277, 0.8, 'sawtooth', 0.08);
   TAS.audio.playTone(330, 0.8, 'sawtooth', 0.06);
-  // Crowd roar
   TAS.audio.playNoise(1.5, 0.1, 2000);
 
+  const zone = ZONES[currentZone];
   TAS.particles.spawn(puck.x, puck.y - camY, '#ffdd44', 30, 5, { size: 3, sizeVar: 3 });
   TAS.particles.spawn(puck.x, puck.y - camY, '#ff4444', 20, 4, { size: 2 });
+  TAS.particles.spawn(puck.x, puck.y - camY, zone.particleColor, 15, 4, { size: 2 });
+
+  // INT (statB.scoreMult) bonus on goals
+  if (homeScored) {
+    const goalScore = Math.round(50 * statB.scoreMult);
+    spawnScorePopup('+' + goalScore + ' GOAL!', puck.x, puck.y - camY - 20, '#ffdd44');
+    // CHA (statB.luck) chance for bonus pickup on goal
+    if (Math.random() < 0.15 * statB.luck) {
+      spawnPickupAt(puck.x, CENTER_Y);
+      spawnScorePopup('LUCKY DROP!', puck.x, puck.y - camY - 40, '#44ff88');
+    }
+  }
 
   // Release penalties on goal against
   if (homeScored) {
-    penaltyBox = penaltyBox.filter(p => {
+    penaltyBox = penaltyBox.filter(function(p) {
       if (p.team === 'away') { p.player.penalized = false; return false; }
       return true;
     });
   } else {
-    penaltyBox = penaltyBox.filter(p => {
+    penaltyBox = penaltyBox.filter(function(p) {
       if (p.team === 'home') { p.player.penalized = false; return false; }
       return true;
     });
   }
 
   if (overtime) {
-    // Sudden death - game over
     endMatch();
   } else {
-    // Faceoff at center
     setTimeout(function() {
       faceoff(RINK_X + RINK_W / 2, CENTER_Y);
     }, 1500);
@@ -775,9 +793,7 @@ function goalScored(homeScored) {
 // === ICING ===
 function checkIcing() {
   if (!puck.loose) return false;
-  // Simple icing: puck crosses far goal line from behind center without anyone touching
-  // We'll just do a basic version
-  return false; // Simplified out for fun
+  return false;
 }
 
 // === PUCK PHYSICS ===
@@ -793,16 +809,13 @@ function updatePuck(dt) {
   puck.x += puck.vx * dt;
   puck.y += puck.vy * dt;
 
-  // Friction on ice
   puck.vx *= 0.995;
   puck.vy *= 0.995;
   puck.speed = Math.sqrt(puck.vx * puck.vx + puck.vy * puck.vy);
 
-  // Bounce off rink walls
   if (puck.x < RINK_X + PUCK_RADIUS) { puck.x = RINK_X + PUCK_RADIUS; puck.vx = Math.abs(puck.vx) * 0.7; }
   if (puck.x > RINK_X + RINK_W - PUCK_RADIUS) { puck.x = RINK_X + RINK_W - PUCK_RADIUS; puck.vx = -Math.abs(puck.vx) * 0.7; }
 
-  // Bounce off end boards (but not goal area)
   const goalX = RINK_X + RINK_W / 2;
   if (puck.y < RINK_Y + PUCK_RADIUS) {
     if (Math.abs(puck.x - goalX) > GOAL_W / 2) {
@@ -819,7 +832,7 @@ function updatePuck(dt) {
 
   // Pickup detection
   if (puck.loose && faceoffTimer <= 0) {
-    const allPlayers = [...homePlayers, ...awayPlayers];
+    const allPlayers = homePlayers.concat(awayPlayers);
     for (const p of allPlayers) {
       if (p.penalized || p.stunTimer > 0) continue;
       if (dist(p.x, p.y, puck.x, puck.y) < PLAYER_RADIUS + PUCK_RADIUS + 4) {
@@ -845,38 +858,60 @@ function updatePlayer(player, dt) {
   }
   player.checkCooldown = Math.max(0, player.checkCooldown - dt);
 
-  // Apply friction
+  // Shield timer
+  if (player.shieldTimer > 0) {
+    player.shieldTimer -= dt;
+    if (player.shieldTimer <= 0) {
+      player.shielded = false;
+    }
+  }
+
   player.vx *= FRICTION;
   player.vy *= FRICTION;
 
-  // Move
   player.x += player.vx * dt;
   player.y += player.vy * dt;
 
-  // Clamp to rink bounds
   player.x = clamp(player.x, RINK_X + PLAYER_RADIUS, RINK_X + RINK_W - PLAYER_RADIUS);
   player.y = clamp(player.y, RINK_Y + PLAYER_RADIUS + 15, RINK_Y + RINK_H - PLAYER_RADIUS - 15);
+
+  // Hazard collision for players
+  if (player.isHome) {
+    for (let i = hazards.length - 1; i >= 0; i--) {
+      const h = hazards[i];
+      if (h.type === 'goo_trail' && dist(player.x, player.y, h.x, h.y) < h.radius + PLAYER_RADIUS) {
+        // Goo slows player
+        player.vx *= 0.8;
+        player.vy *= 0.8;
+      }
+      if (h.type === 'reactor_vent' && dist(player.x, player.y, h.x, h.y) < h.radius + PLAYER_RADIUS) {
+        // Vent pushes player away
+        const pushAng = angle(h.x, h.y, player.x, player.y);
+        player.vx += Math.cos(pushAng) * 150 * dt;
+        player.vy += Math.sin(pushAng) * 150 * dt;
+      }
+    }
+  }
 }
 
 // === CONTROLLED PLAYER ===
 function updateControlled(dt) {
   if (!controlledPlayer || controlledPlayer.penalized) {
-    // Switch to nearest available player
-    controlledPlayer = homePlayers.find(p => !p.penalized) || homePlayers[0];
+    controlledPlayer = homePlayers.find(function(p) { return !p.penalized; }) || homePlayers[0];
   }
 
   if (controlledPlayer.stunTimer > 0) return;
 
-  const speed = SKATE_ACCEL * (homeTeam.speed / 8);
+  // DEX (statB.speed) scales player acceleration and max speed
+  const speed = SKATE_ACCEL * (homeTeam.speed / 8) * statB.speed;
 
   if (inputLeft()) controlledPlayer.vx -= speed * dt;
   if (inputRight()) controlledPlayer.vx += speed * dt;
   if (inputUp()) controlledPlayer.vy -= speed * dt;
   if (inputDown()) controlledPlayer.vy += speed * dt;
 
-  // Clamp speed
   const spd = Math.sqrt(controlledPlayer.vx * controlledPlayer.vx + controlledPlayer.vy * controlledPlayer.vy);
-  const maxSpd = SKATE_SPEED * (homeTeam.speed / 8);
+  const maxSpd = SKATE_SPEED * (homeTeam.speed / 8) * statB.speed;
   if (spd > maxSpd) {
     controlledPlayer.vx = (controlledPlayer.vx / spd) * maxSpd;
     controlledPlayer.vy = (controlledPlayer.vy / spd) * maxSpd;
@@ -889,20 +924,17 @@ function updateControlled(dt) {
         shotCharging = true;
         shotPower = 0;
       }
-      shotPower = Math.min(shotPower + SHOT_CHARGE_RATE * dt, SHOT_POWER_MAX);
+      // WIS (statB.cooldown) speeds up shot charge
+      shotPower = Math.min(shotPower + SHOT_CHARGE_RATE * (1 / statB.cooldown) * dt, SHOT_POWER_MAX);
     } else if (shotCharging) {
-      // Release shot
-      const ang = controlledPlayer.isHome ? Math.PI / 2 : -Math.PI / 2; // Shoot toward opponent goal
-      // Add some aim based on movement
+      const ang = controlledPlayer.isHome ? Math.PI / 2 : -Math.PI / 2;
       const aimOff = controlledPlayer.vx * 0.003;
-      shootPuck(controlledPlayer, ang + aimOff, shotPower * (homeTeam.shot / 8));
+      // STR (statB.damage) amplifies shot power
+      shootPuck(controlledPlayer, ang + aimOff, shotPower * (homeTeam.shot / 8) * statB.damage);
       shotCharging = false;
       shotPower = 0;
     }
 
-    // Pass on quick tap (no charge)
-    // Actually let's use: tap A = pass, hold A = shot
-    // We handle this by: if released with power < 80, it's a pass
     if (!inputA() && shotCharging && shotPower < 80) {
       shotCharging = false;
       shotPower = 0;
@@ -912,7 +944,6 @@ function updateControlled(dt) {
     shotCharging = false;
     shotPower = 0;
 
-    // Auto-switch to nearest player to puck on defense
     if (puck.loose || (puck.owner && !puck.owner.isHome)) {
       let nearestDist = dist(controlledPlayer.x, controlledPlayer.y, puck.x, puck.y);
       for (const p of homePlayers) {
@@ -926,9 +957,8 @@ function updateControlled(dt) {
     }
   }
 
-  // Body check
+  // Body check - WIS (statB.cooldown) reduces check cooldown
   if (inputB() && controlledPlayer.checkCooldown <= 0) {
-    // Check nearest opponent
     let nearest = null, nearDist = Infinity;
     for (const p of awayPlayers) {
       if (p.penalized) continue;
@@ -938,27 +968,375 @@ function updateControlled(dt) {
     if (nearest && nearDist < CHECK_RANGE * 1.5) {
       performCheck(controlledPlayer, nearest);
     }
+
+    // Also check enemies with body check
+    for (let i = enemies.length - 1; i >= 0; i--) {
+      const e = enemies[i];
+      if (dist(controlledPlayer.x, controlledPlayer.y, e.x, e.y) < CHECK_RANGE * 2) {
+        e.hp -= statB.damage;
+        TAS.fx.shake(2, 0.9);
+        TAS.particles.spawn(e.x, e.y - camY, e.def.color, 6, 3);
+        if (e.hp <= 0) {
+          // CHA (statB.luck) bonus drop chance from enemies
+          const dropScore = Math.round(15 * statB.scoreMult);
+          spawnScorePopup('+' + dropScore, e.x, e.y - camY, '#ff8844');
+          if (Math.random() < 0.25 * statB.luck) {
+            spawnPickupAt(e.x, e.y);
+          }
+          TAS.particles.spawn(e.x, e.y - camY, '#ff4444', 10, 4);
+          enemies.splice(i, 1);
+        }
+        break;
+      }
+    }
   }
 }
 
 // === CAMERA ===
 function updateCamera(dt) {
-  // Follow puck
   const targetY = puck.y - GH / 2;
   camY = lerp(camY, clamp(targetY, CAM_MIN, CAM_MAX), CAM_SPEED * dt);
+}
+
+// === HAZARD SYSTEM ===
+function updateHazards(dt) {
+  hazardSpawnTimer -= dt;
+  if (hazardSpawnTimer <= 0) {
+    // WIS (statB.cooldown) affects hazard spawn frequency - lower = less frequent
+    hazardSpawnTimer = randRange(6, 12) / statB.cooldown;
+    const type = HAZARD_TYPES[Math.floor(Math.random() * HAZARD_TYPES.length)];
+    const hx = RINK_X + randRange(40, RINK_W - 40);
+    const hy = randRange(RINK_Y + 60, RINK_Y + RINK_H - 60);
+    hazards.push({
+      type: type,
+      x: hx, y: hy,
+      vx: 0, vy: 0,
+      timer: type === 'spore_rain' ? 3 : 8,
+      radius: type === 'reactor_vent' ? 25 : 15
+    });
+  }
+
+  for (let i = hazards.length - 1; i >= 0; i--) {
+    const h = hazards[i];
+    h.timer -= dt;
+    if (h.type === 'spore_rain') {
+      // Spore rain drifts down
+      h.y += 30 * dt;
+      if (frame % 6 === 0) {
+        TAS.particles.spawn(h.x + randRange(-10, 10), h.y - camY, '#88ff88', 1, 1, { size: 1, gravity: 20 });
+      }
+    }
+    if (h.timer <= 0) {
+      hazards.splice(i, 1);
+    }
+  }
+}
+
+// === PICKUP SYSTEM ===
+function spawnPickupAt(px, py) {
+  const type = PICKUP_TYPES[Math.floor(Math.random() * PICKUP_TYPES.length)];
+  pickups.push({ type: type, x: px, y: py, timer: 10 });
+}
+
+function updatePickups(dt) {
+  pickupSpawnTimer -= dt;
+  // CHA (statB.luck) increases pickup frequency
+  if (pickupSpawnTimer <= 0) {
+    pickupSpawnTimer = randRange(10, 18) / statB.luck;
+    const px = RINK_X + randRange(60, RINK_W - 60);
+    const py = randRange(RINK_Y + 80, RINK_Y + RINK_H - 80);
+    spawnPickupAt(px, py);
+  }
+
+  // Check player collision with pickups
+  for (let i = pickups.length - 1; i >= 0; i--) {
+    const pk = pickups[i];
+    pk.timer -= dt;
+    if (pk.timer <= 0) {
+      pickups.splice(i, 1);
+      continue;
+    }
+    // Only home players can pick up
+    for (const p of homePlayers) {
+      if (p.penalized) continue;
+      if (dist(p.x, p.y, pk.x, pk.y) < PLAYER_RADIUS + 12) {
+        activatePickup(pk.type, p);
+        pickups.splice(i, 1);
+        break;
+      }
+    }
+  }
+
+  // Active pickup timer
+  if (activePickup) {
+    activePickup.timer -= dt;
+    if (activePickup.timer <= 0) {
+      activePickup = null;
+    }
+  }
+}
+
+function activatePickup(type, player) {
+  TAS.audio.playTone(800, 0.1, 'sine', 0.08);
+  TAS.audio.playTone(1000, 0.08, 'sine', 0.06);
+  TAS.particles.spawn(player.x, player.y - camY, '#ffff44', 10, 4);
+
+  if (type === 'spore_shield') {
+    player.shielded = true;
+    player.shieldTimer = 8;
+    spawnScorePopup('SPORE SHIELD!', player.x, player.y - camY - 15, '#44ffaa');
+  } else if (type === 'reactor_core') {
+    // Temporary shot power boost
+    activePickup = { type: 'reactor_core', timer: 6 };
+    spawnScorePopup('REACTOR CORE!', player.x, player.y - camY - 15, '#ff8844');
+  } else if (type === 'fungal_extract') {
+    // Heal stun and clear penalty timer
+    for (const hp of homePlayers) {
+      hp.stunTimer = 0;
+    }
+    // Reduce penalty timers
+    for (const pen of penaltyBox) {
+      if (pen.team === 'home') pen.timer = Math.max(0, pen.timer - 15);
+    }
+    spawnScorePopup('FUNGAL EXTRACT!', player.x, player.y - camY - 15, '#88cc44');
+  } else if (type === 'speed_mushroom') {
+    activePickup = { type: 'speed_mushroom', timer: 5 };
+    spawnScorePopup('SPEED SHROOM!', player.x, player.y - camY - 15, '#ff44ff');
+  }
+}
+
+// === ENEMY SYSTEM ===
+function updateEnemies(dt) {
+  enemySpawnTimer -= dt;
+  if (enemySpawnTimer <= 0 && !bossActive && enemies.length < 4) {
+    enemySpawnTimer = randRange(8, 15);
+    const def = ENEMY_TYPES[Math.floor(Math.random() * ENEMY_TYPES.length)];
+    const ex = RINK_X + randRange(40, RINK_W - 40);
+    const ey = Math.random() < 0.5 ? RINK_Y + 40 : RINK_Y + RINK_H - 40;
+    enemies.push({
+      def: def,
+      x: ex, y: ey,
+      vx: (Math.random() - 0.5) * def.speed,
+      vy: (Math.random() - 0.5) * def.speed,
+      hp: def.hp,
+      timer: 20
+    });
+  }
+
+  for (let i = enemies.length - 1; i >= 0; i--) {
+    const e = enemies[i];
+    e.timer -= dt;
+
+    // Move toward nearest home player
+    let nearestP = null, nearD = Infinity;
+    for (const p of homePlayers) {
+      if (p.penalized) continue;
+      const d = dist(p.x, p.y, e.x, e.y);
+      if (d < nearD) { nearD = d; nearestP = p; }
+    }
+    if (nearestP) {
+      const ang = angle(e.x, e.y, nearestP.x, nearestP.y);
+      e.vx = Math.cos(ang) * e.def.speed;
+      e.vy = Math.sin(ang) * e.def.speed;
+    }
+
+    e.x += e.vx * dt;
+    e.y += e.vy * dt;
+    e.x = clamp(e.x, RINK_X + 10, RINK_X + RINK_W - 10);
+    e.y = clamp(e.y, RINK_Y + 20, RINK_Y + RINK_H - 20);
+
+    // Collision with home players - stun on contact
+    for (const p of homePlayers) {
+      if (p.penalized || p.shielded) continue;
+      if (dist(p.x, p.y, e.x, e.y) < PLAYER_RADIUS + e.def.radius) {
+        // CON (statB.hpMult) reduces enemy stun duration
+        p.stunTimer = Math.max(p.stunTimer, 0.5 / statB.hpMult);
+        if (p.hasPuck) {
+          p.hasPuck = false;
+          puck.owner = null;
+          puck.loose = true;
+          puck.vx = (Math.random() - 0.5) * 80;
+          puck.vy = (Math.random() - 0.5) * 80;
+          puck.speed = 60;
+        }
+        TAS.audio.playTone(150, 0.08, 'square', 0.08);
+        TAS.particles.spawn(p.x, p.y - camY, '#ff4444', 4, 2);
+      }
+    }
+
+    // Puck kills enemies
+    if (puck.loose && puck.speed > 150) {
+      if (dist(puck.x, puck.y, e.x, e.y) < PUCK_RADIUS + e.def.radius) {
+        e.hp--;
+        if (e.hp <= 0) {
+          const killScore = Math.round(20 * statB.scoreMult);
+          spawnScorePopup('+' + killScore, e.x, e.y - camY, '#ff8844');
+          TAS.particles.spawn(e.x, e.y - camY, e.def.color, 12, 4);
+          TAS.particles.spawn(e.x, e.y - camY, '#ffdd44', 6, 3);
+          if (Math.random() < 0.3 * statB.luck) {
+            spawnPickupAt(e.x, e.y);
+          }
+          enemies.splice(i, 1);
+        }
+      }
+    }
+
+    if (e.timer <= 0) {
+      enemies.splice(i, 1);
+    }
+  }
+}
+
+// === BOSS SYSTEM ===
+function spawnBoss() {
+  const bossIdx = Math.floor(Math.random() * BOSS_TYPES.length);
+  const def = BOSS_TYPES[bossIdx];
+  boss = {
+    def: def,
+    x: RINK_X + RINK_W / 2,
+    y: CENTER_Y,
+    hp: def.hp,
+    maxHp: def.hp,
+    timer: 30,
+    phase: 0,
+    attackTimer: 2,
+    hitFlash: 0
+  };
+  bossActive = true;
+  enemies = [];
+  TAS.audio.playTone(80, 0.5, 'sawtooth', 0.12, 40);
+  TAS.audio.playTone(100, 0.5, 'sawtooth', 0.08, 50);
+  spawnScorePopup(def.name.toUpperCase() + '!', GW / 2, GH * 0.3, '#ff4444');
+}
+
+function updateBoss(dt) {
+  if (!boss || !bossActive) return;
+
+  boss.timer -= dt;
+  boss.attackTimer -= dt;
+  boss.hitFlash = Math.max(0, boss.hitFlash - dt);
+
+  const def = boss.def;
+
+  // Movement based on pattern
+  if (def.pattern === 'charge') {
+    // Charge at puck carrier
+    const target = controlledPlayer;
+    if (target) {
+      const ang = angle(boss.x, boss.y, target.x, target.y);
+      boss.x += Math.cos(ang) * def.speed * dt;
+      boss.y += Math.sin(ang) * def.speed * dt;
+    }
+  } else if (def.pattern === 'orbit') {
+    // Orbit around center
+    const orbAngle = frame * 0.02;
+    boss.x = RINK_X + RINK_W / 2 + Math.cos(orbAngle) * 120;
+    boss.y = CENTER_Y + Math.sin(orbAngle) * 80;
+  } else if (def.pattern === 'slam') {
+    // Periodic slams
+    if (boss.attackTimer <= 0) {
+      boss.attackTimer = 3;
+      // Slam creates shockwave
+      TAS.fx.shake(6, 0.85);
+      TAS.audio.playTone(60, 0.3, 'sawtooth', 0.15);
+      TAS.particles.spawn(boss.x, boss.y - camY, '#ff8844', 20, 5, { size: 3 });
+      // Stun nearby home players
+      for (const p of homePlayers) {
+        if (dist(p.x, p.y, boss.x, boss.y) < 80) {
+          p.stunTimer = Math.max(p.stunTimer, 0.8 / statB.hpMult);
+          p.vx += (p.x - boss.x) * 3;
+          p.vy += (p.y - boss.y) * 3;
+        }
+      }
+    }
+  }
+
+  boss.x = clamp(boss.x, RINK_X + 30, RINK_X + RINK_W - 30);
+  boss.y = clamp(boss.y, RINK_Y + 40, RINK_Y + RINK_H - 40);
+
+  // Boss attacks: spawn hazards periodically
+  if (boss.attackTimer <= 0 && def.pattern !== 'slam') {
+    boss.attackTimer = 2.5;
+    hazards.push({
+      type: 'reactor_vent',
+      x: boss.x + randRange(-40, 40),
+      y: boss.y + randRange(-40, 40),
+      vx: 0, vy: 0,
+      timer: 4,
+      radius: 20
+    });
+  }
+
+  // Puck damages boss
+  if (puck.loose && puck.speed > 100) {
+    if (dist(puck.x, puck.y, boss.x, boss.y) < 25) {
+      const dmg = Math.round(puck.speed / 10 * statB.damage);
+      boss.hp -= dmg;
+      boss.hitFlash = 0.15;
+      puck.vx *= -0.5;
+      puck.vy *= -0.5;
+      TAS.fx.shake(4, 0.9);
+      TAS.audio.playTone(300, 0.12, 'square', 0.1);
+      TAS.particles.spawn(boss.x, boss.y - camY, '#ffdd44', 8, 4);
+      spawnScorePopup('-' + dmg, boss.x, boss.y - camY - 20, '#ff8844');
+    }
+  }
+
+  // Player check damages boss
+  for (const p of homePlayers) {
+    if (p.penalized) continue;
+    if (dist(p.x, p.y, boss.x, boss.y) < 20) {
+      // CON reduces boss contact stun
+      p.stunTimer = Math.max(p.stunTimer, 0.4 / statB.hpMult);
+      const pushAng = angle(boss.x, boss.y, p.x, p.y);
+      p.vx += Math.cos(pushAng) * 200;
+      p.vy += Math.sin(pushAng) * 200;
+    }
+  }
+
+  // Boss defeated
+  if (boss.hp <= 0) {
+    const bossScore = Math.round(100 * statB.scoreMult);
+    spawnScorePopup('+' + bossScore + ' BOSS SLAIN!', boss.x, boss.y - camY, '#ffdd44');
+    TAS.particles.spawn(boss.x, boss.y - camY, '#ffdd44', 30, 6, { size: 4, sizeVar: 3 });
+    TAS.particles.spawn(boss.x, boss.y - camY, boss.def.color, 20, 5, { size: 3 });
+    TAS.audio.playMelody([[400, 0.1], [500, 0.1], [600, 0.1], [800, 0.3]], 200);
+    // Drop multiple pickups
+    for (let d = 0; d < 3; d++) {
+      spawnPickupAt(boss.x + randRange(-30, 30), boss.y + randRange(-30, 30));
+    }
+    boss = null;
+    bossActive = false;
+  }
+
+  // Boss timeout
+  if (boss && boss.timer <= 0) {
+    boss = null;
+    bossActive = false;
+    spawnScorePopup('BOSS FLED', GW / 2, GH / 2, '#888');
+  }
+}
+
+// === SCORE POPUPS ===
+function updateScorePopups(dt) {
+  for (let i = scorePopups.length - 1; i >= 0; i--) {
+    scorePopups[i].timer -= dt;
+    scorePopups[i].y -= 30 * dt;
+    if (scorePopups[i].timer <= 0) {
+      scorePopups.splice(i, 1);
+    }
+  }
 }
 
 // === MATCH END ===
 function endMatch() {
   state = 'matchEnd';
   if (homeScore > awayScore) {
-    // Player won
     if (tournament) {
       if (!tournament.rounds[tournament.currentRound + 1]) tournament.rounds.push([]);
       tournament.rounds[tournament.currentRound + 1].push(playerTeamIdx);
     }
   } else {
-    // Player lost
     if (tournament) {
       tournament.playerAlive = false;
       const oppIdx = TEAMS.indexOf(awayTeam);
@@ -974,6 +1352,10 @@ function update(dt) {
   TAS.particles.update(dt);
   TAS.fx.updateEffects(dt);
 
+  // Decay impact shake
+  impactShakeX *= 0.85;
+  impactShakeY *= 0.85;
+
   if (state === 'title') {
     if (Object.values(TAS.input.keys).some(Boolean) || TAS.input.touch.a) {
       state = 'teamSelect';
@@ -982,7 +1364,6 @@ function update(dt) {
   }
 
   if (state === 'teamSelect') {
-    // Handle in draw, transitions handled by key
     return;
   }
 
@@ -1016,12 +1397,21 @@ function update(dt) {
 
   if (state === 'fighting') {
     updateFight(dt);
+    updateScorePopups(dt);
     prevA = inputA();
     prevB = inputB();
     return;
   }
 
   if (state === 'playing') {
+    // Tutorial dismiss
+    if (showTutorial) {
+      tutorialTimer -= dt;
+      if (tutorialTimer <= 0 || inputAPressed() || inputBPressed()) {
+        showTutorial = false;
+      }
+    }
+
     // Faceoff countdown
     if (faceoffTimer > 0) {
       faceoffTimer -= dt;
@@ -1036,7 +1426,6 @@ function update(dt) {
       period++;
       if (period > 3) {
         if (homeScore === awayScore) {
-          // Overtime!
           overtime = true;
           period = 4;
           periodTimer = PERIOD_LENGTH;
@@ -1048,6 +1437,11 @@ function update(dt) {
       } else {
         periodTimer = PERIOD_LENGTH;
         faceoff(RINK_X + RINK_W / 2, CENTER_Y);
+      }
+
+      // Boss fight at period transitions (simulates "every 5 levels" for hockey)
+      if (period === 3 && !bossActive) {
+        spawnBoss();
       }
     }
 
@@ -1090,6 +1484,13 @@ function update(dt) {
     // Update camera
     updateCamera(dt);
 
+    // Update content systems
+    updateHazards(dt);
+    updatePickups(dt);
+    updateEnemies(dt);
+    updateBoss(dt);
+    updateScorePopups(dt);
+
     // Ice spray particles on fast turns
     if (controlledPlayer && Math.abs(controlledPlayer.vx) + Math.abs(controlledPlayer.vy) > 100) {
       if (frame % 4 === 0) {
@@ -1098,6 +1499,16 @@ function update(dt) {
           'rgba(200,220,255,0.5)', 1, 1, { size: 1, sizeVar: 1, gravity: 0 }
         );
       }
+    }
+
+    // Zone ambient particles
+    if (frame % 12 === 0) {
+      const zone = ZONES[currentZone];
+      TAS.particles.spawn(
+        RINK_X + Math.random() * RINK_W,
+        Math.random() * GH,
+        zone.particleColor, 1, 1, { size: 1, gravity: -5 }
+      );
     }
   }
 
@@ -1151,6 +1562,7 @@ function draw(dt) {
 
   if (state === 'fighting') {
     drawFight();
+    drawScorePopups();
     TAS.input.drawTouchControls(GW, GH);
     return;
   }
@@ -1158,8 +1570,14 @@ function draw(dt) {
   // === GAME RENDERING ===
   ctx.save();
   TAS.fx.applyShake();
+  // Extra impact shake
+  ctx.translate(Math.round(impactShakeX), Math.round(impactShakeY));
 
   drawRink();
+  drawHazards();
+  drawPickups();
+  drawEnemies();
+  drawBoss();
   drawPlayers();
   drawPuck();
   drawShotMeter();
@@ -1169,22 +1587,25 @@ function draw(dt) {
 
   TAS.fx.drawFlash(GW, GH);
   drawHUD();
+  drawScorePopups();
   drawFaceoffOverlay();
+  drawTutorialOverlay();
   TAS.input.drawTouchControls(GW, GH);
 }
 
 // === DRAW: TITLE ===
 function drawTitle() {
+  const zone = ZONES[0];
   // Ice background
-  ctx.fillStyle = '#d8e8f0';
+  ctx.fillStyle = zone.iceColor;
   ctx.fillRect(30, 30, GW - 60, GH - 60);
-  ctx.strokeStyle = '#4488cc';
+  ctx.strokeStyle = zone.boardColor;
   ctx.lineWidth = 3;
   ctx.strokeRect(30, 30, GW - 60, GH - 60);
 
   // Center circle
   ctx.beginPath();
-  ctx.arc(GW / 2, GH / 2, 40, 0, Math.PI * 2);
+  ctx.arc(GW / 2, GH / 2 - 10, 40, 0, Math.PI * 2);
   ctx.strokeStyle = '#cc2222';
   ctx.lineWidth = 2;
   ctx.stroke();
@@ -1194,34 +1615,65 @@ function drawTitle() {
   // Title
   ctx.fillStyle = '#1a1a3a';
   ctx.font = 'bold 32px monospace';
-  ctx.fillText('BLADES OF POOP', GW / 2 + 2, 82);
+  ctx.fillText('BLADES OF POOP', GW / 2 + 2, 72);
   ctx.fillStyle = '#cc2222';
-  ctx.fillText('BLADES OF POOP', GW / 2, 80);
+  ctx.fillText('BLADES OF POOP', GW / 2, 70);
 
   // Subtitle
   ctx.fillStyle = '#336';
   ctx.font = '12px monospace';
-  ctx.fillText('Tasern Ice Hockey', GW / 2, 100);
+  ctx.fillText('Tasern Ice Hockey', GW / 2, 88);
 
-  // Puck
-  const bobY = Math.sin(frame * 0.05) * 3;
-  ctx.fillStyle = '#111';
-  ctx.beginPath();
-  ctx.ellipse(GW / 2, GH / 2 + bobY, 10, 7, 0, 0, Math.PI * 2);
-  ctx.fill();
+  // Baseling mascot (mushroom on ice)
+  drawBaselingMascot(GW / 2, GH / 2 - 10);
+
+  // NES-style control instructions with dotted leaders
+  ctx.textAlign = 'left';
+  ctx.font = '9px monospace';
+  ctx.fillStyle = '#446';
+  const instrX = 55;
+  const instrX2 = GW - 55;
+  let iy = GH * 0.62;
+  const instructions = [
+    ['ARROWS / WASD', 'SKATE'],
+    ['Z / SPACE', 'SHOOT (HOLD)'],
+    ['Z / SPACE (TAP)', 'PASS'],
+    ['X / SHIFT', 'BODY CHECK'],
+    ['UP+Z (FIGHT)', 'HIGH PUNCH'],
+    ['DOWN+Z (FIGHT)', 'LOW PUNCH'],
+    ['X (FIGHT)', 'BLOCK']
+  ];
+  for (const inst of instructions) {
+    ctx.fillStyle = '#556';
+    ctx.textAlign = 'left';
+    ctx.fillText(inst[0], instrX, iy);
+    ctx.textAlign = 'right';
+    ctx.fillStyle = '#668';
+    ctx.fillText(inst[1], instrX2, iy);
+    // Dotted leader
+    const leftW = ctx.measureText(inst[0]).width;
+    const rightW = ctx.measureText(inst[1]).width;
+    const dotStart = instrX + leftW + 4;
+    const dotEnd = instrX2 - rightW - 4;
+    ctx.fillStyle = '#334';
+    for (let dx = dotStart; dx < dotEnd; dx += 5) {
+      ctx.fillRect(dx, iy - 2, 1, 1);
+    }
+    iy += 12;
+  }
 
   // Teams preview
   ctx.font = '10px monospace';
-  ctx.fillStyle = '#444';
+  ctx.textAlign = 'center';
   for (let i = 0; i < 4; i++) {
     const t = TEAMS[i];
     ctx.fillStyle = t.color1;
-    ctx.fillText(t.abbr, GW * 0.2 + i * 45, GH * 0.7);
+    ctx.fillText(t.abbr, GW * 0.2 + i * 45, GH * 0.89);
   }
   for (let i = 4; i < 8; i++) {
     const t = TEAMS[i];
     ctx.fillStyle = t.color1;
-    ctx.fillText(t.abbr, GW * 0.2 + (i - 4) * 45, GH * 0.77);
+    ctx.fillText(t.abbr, GW * 0.2 + (i - 4) * 45, GH * 0.94);
   }
 
   // Start prompt
@@ -1229,15 +1681,67 @@ function drawTitle() {
   ctx.globalAlpha = pulse;
   ctx.fillStyle = '#cc2222';
   ctx.font = 'bold 14px monospace';
-  ctx.fillText('PRESS ANY KEY TO START', GW / 2, GH * 0.9);
+  ctx.fillText('PRESS ANY KEY TO START', GW / 2, GH - 12);
   ctx.globalAlpha = 1;
 
   // High score
   if (highScore > 0) {
     ctx.fillStyle = '#446';
     ctx.font = '10px monospace';
-    ctx.fillText('Best Tournament Goals: ' + highScore, GW / 2, GH - 40);
+    ctx.fillText('Best Tournament Goals: ' + highScore, GW / 2, GH * 0.53);
   }
+
+  // Baseling stat display
+  if (statB.level > 0) {
+    ctx.fillStyle = statB.color;
+    ctx.font = '9px monospace';
+    ctx.fillText(statB.name + ' Lv.' + statB.level, GW / 2, GH * 0.56);
+  }
+}
+
+// === DRAW: BASELING MASCOT ===
+function drawBaselingMascot(bx, by) {
+  const bob = Math.sin(frame * 0.04) * 2;
+  // Mushroom cap
+  ctx.fillStyle = statB.color;
+  ctx.beginPath();
+  ctx.ellipse(bx, by - 6 + bob, 14, 10, 0, Math.PI, 0);
+  ctx.fill();
+  // Cap spots
+  ctx.fillStyle = 'rgba(255,255,255,0.3)';
+  ctx.beginPath();
+  ctx.arc(bx - 5, by - 10 + bob, 3, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.arc(bx + 4, by - 12 + bob, 2, 0, Math.PI * 2);
+  ctx.fill();
+  // Stem/body
+  ctx.fillStyle = '#eed';
+  ctx.fillRect(bx - 6, by - 4 + bob, 12, 12);
+  // Eyes
+  ctx.fillStyle = '#111';
+  ctx.fillRect(bx - 4, by + bob, 3, 3);
+  ctx.fillRect(bx + 1, by + bob, 3, 3);
+  // Tiny stick
+  ctx.strokeStyle = '#8B4513';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(bx + 6, by + 2 + bob);
+  ctx.lineTo(bx + 14, by + 8 + bob);
+  ctx.stroke();
+  ctx.strokeStyle = '#333';
+  ctx.beginPath();
+  ctx.moveTo(bx + 14, by + 8 + bob);
+  ctx.lineTo(bx + 18, by + 8 + bob);
+  ctx.stroke();
+  // Skates
+  ctx.fillStyle = '#444';
+  ctx.fillRect(bx - 6, by + 8 + bob, 5, 3);
+  ctx.fillRect(bx + 1, by + 8 + bob, 5, 3);
+  // Blade flash
+  ctx.fillStyle = '#aaa';
+  ctx.fillRect(bx - 7, by + 11 + bob, 7, 1);
+  ctx.fillRect(bx, by + 11 + bob, 7, 1);
 }
 
 // === DRAW: TEAM SELECT ===
@@ -1270,20 +1774,24 @@ function drawTeamSelect(dt) {
     const by = 55 + row * 120;
     const selected = i === teamSelectIdx;
 
-    // Card background
     ctx.fillStyle = selected ? '#223355' : '#111122';
     ctx.strokeStyle = selected ? t.color1 : '#333';
     ctx.lineWidth = selected ? 3 : 1;
     ctx.fillRect(bx - 40, by - 10, 80, 100);
     ctx.strokeRect(bx - 40, by - 10, 80, 100);
 
-    // Jersey
+    // Baseling jersey (mushroom head with jersey)
     ctx.fillStyle = t.color1;
-    ctx.fillRect(bx - 12, by + 5, 24, 30);
+    ctx.beginPath();
+    ctx.ellipse(bx, by + 10, 12, 8, 0, Math.PI, 0);
+    ctx.fill();
+    ctx.fillStyle = '#eed';
+    ctx.fillRect(bx - 6, by + 10, 12, 14);
+    ctx.fillStyle = t.color1;
+    ctx.fillRect(bx - 8, by + 14, 16, 10);
     ctx.fillStyle = t.color2;
-    ctx.fillRect(bx - 12, by + 5, 24, 8);
+    ctx.fillRect(bx - 8, by + 14, 16, 4);
 
-    // Name
     ctx.fillStyle = selected ? '#fff' : '#888';
     ctx.font = 'bold 9px monospace';
     ctx.fillText(t.abbr, bx, by + 55);
@@ -1310,30 +1818,48 @@ function drawMatchIntro() {
   const roundNames = ['QUARTER-FINAL', 'SEMI-FINAL', 'CHAMPIONSHIP FINAL'];
   ctx.fillStyle = '#ffdd44';
   ctx.font = 'bold 16px monospace';
-  ctx.fillText(roundNames[tournament.currentRound] || 'MATCH', GW / 2, 50);
+  ctx.fillText(roundNames[tournament.currentRound] || 'MATCH', GW / 2, 40);
 
-  // Home team
+  // Zone name
+  const zone = ZONES[currentZone];
+  ctx.fillStyle = zone.particleColor;
+  ctx.font = '10px monospace';
+  ctx.fillText(zone.name, GW / 2, 58);
+
+  // Home team with baseling
   ctx.fillStyle = homeTeam.color1;
   ctx.font = 'bold 20px monospace';
-  ctx.fillText(homeTeam.name, GW / 2, 110);
-  // Jersey
+  ctx.fillText(homeTeam.name, GW / 2, 100);
+  // Mini baseling
   ctx.fillStyle = homeTeam.color1;
-  ctx.fillRect(GW / 2 - 15, 120, 30, 40);
+  ctx.beginPath();
+  ctx.ellipse(GW / 2, 118, 10, 7, 0, Math.PI, 0);
+  ctx.fill();
+  ctx.fillStyle = '#eed';
+  ctx.fillRect(GW / 2 - 5, 118, 10, 10);
+  ctx.fillStyle = homeTeam.color1;
+  ctx.fillRect(GW / 2 - 6, 122, 12, 10);
   ctx.fillStyle = homeTeam.color2;
-  ctx.fillRect(GW / 2 - 15, 120, 30, 10);
+  ctx.fillRect(GW / 2 - 6, 122, 12, 4);
 
   ctx.fillStyle = '#fff';
   ctx.font = 'bold 16px monospace';
-  ctx.fillText('VS', GW / 2, 190);
+  ctx.fillText('VS', GW / 2, 170);
 
   // Away team
   ctx.fillStyle = awayTeam.color1;
   ctx.font = 'bold 20px monospace';
-  ctx.fillText(awayTeam.name, GW / 2, 230);
+  ctx.fillText(awayTeam.name, GW / 2, 210);
   ctx.fillStyle = awayTeam.color1;
-  ctx.fillRect(GW / 2 - 15, 240, 30, 40);
+  ctx.beginPath();
+  ctx.ellipse(GW / 2, 228, 10, 7, 0, Math.PI, 0);
+  ctx.fill();
+  ctx.fillStyle = '#eed';
+  ctx.fillRect(GW / 2 - 5, 228, 10, 10);
+  ctx.fillStyle = awayTeam.color1;
+  ctx.fillRect(GW / 2 - 6, 232, 12, 10);
   ctx.fillStyle = awayTeam.color2;
-  ctx.fillRect(GW / 2 - 15, 240, 30, 10);
+  ctx.fillRect(GW / 2 - 6, 232, 12, 4);
 
   const pulse = Math.sin(frame * 0.05) * 0.3 + 0.7;
   ctx.globalAlpha = pulse;
@@ -1345,50 +1871,61 @@ function drawMatchIntro() {
 
 // === DRAW: RINK ===
 function drawRink() {
-  const oy = -camY; // offset for camera
+  const oy = -camY;
+  const zone = ZONES[currentZone];
 
-  // Ice surface
-  ctx.fillStyle = '#e0eef8';
+  // Ice surface with zone coloring
+  ctx.fillStyle = zone.iceColor;
   ctx.fillRect(RINK_X, RINK_Y + oy, RINK_W, RINK_H);
 
-  // Boards
-  ctx.strokeStyle = '#2244aa';
+  // Zone fog overlay
+  ctx.fillStyle = zone.fogColor;
+  ctx.fillRect(RINK_X, RINK_Y + oy, RINK_W, RINK_H);
+
+  // Ice texture lines (NES-style)
+  ctx.strokeStyle = 'rgba(200,220,240,0.15)';
+  ctx.lineWidth = 1;
+  for (let iy = 0; iy < RINK_H; iy += 16) {
+    ctx.beginPath();
+    ctx.moveTo(RINK_X, RINK_Y + iy + oy);
+    ctx.lineTo(RINK_X + RINK_W, RINK_Y + iy + oy);
+    ctx.stroke();
+  }
+
+  // Boards with zone color
+  ctx.strokeStyle = zone.boardColor;
   ctx.lineWidth = 4;
   ctx.strokeRect(RINK_X, RINK_Y + oy, RINK_W, RINK_H);
 
-  // Rounded corners (visual only)
-  ctx.fillStyle = '#2244aa';
+  // Rounded corners
   const cr = 20;
-  // Top-left
+  ctx.fillStyle = zone.boardColor;
   ctx.fillRect(RINK_X, RINK_Y + oy, cr, cr);
-  ctx.fillStyle = '#e0eef8';
+  ctx.fillStyle = zone.iceColor;
   ctx.beginPath();
   ctx.arc(RINK_X + cr, RINK_Y + cr + oy, cr, 0, Math.PI * 2);
   ctx.fill();
-  // Top-right
-  ctx.fillStyle = '#2244aa';
+  ctx.fillStyle = zone.boardColor;
   ctx.fillRect(RINK_X + RINK_W - cr, RINK_Y + oy, cr, cr);
-  ctx.fillStyle = '#e0eef8';
+  ctx.fillStyle = zone.iceColor;
   ctx.beginPath();
   ctx.arc(RINK_X + RINK_W - cr, RINK_Y + cr + oy, cr, 0, Math.PI * 2);
   ctx.fill();
-  // Bottom-left
-  ctx.fillStyle = '#2244aa';
+  ctx.fillStyle = zone.boardColor;
   ctx.fillRect(RINK_X, RINK_Y + RINK_H - cr + oy, cr, cr);
-  ctx.fillStyle = '#e0eef8';
+  ctx.fillStyle = zone.iceColor;
   ctx.beginPath();
   ctx.arc(RINK_X + cr, RINK_Y + RINK_H - cr + oy, cr, 0, Math.PI * 2);
   ctx.fill();
-  // Bottom-right
-  ctx.fillStyle = '#2244aa';
+  ctx.fillStyle = zone.boardColor;
   ctx.fillRect(RINK_X + RINK_W - cr, RINK_Y + RINK_H - cr + oy, cr, cr);
-  ctx.fillStyle = '#e0eef8';
+  ctx.fillStyle = zone.iceColor;
   ctx.beginPath();
   ctx.arc(RINK_X + RINK_W - cr, RINK_Y + RINK_H - cr + oy, cr, 0, Math.PI * 2);
   ctx.fill();
 
-  // Center line (red)
-  ctx.strokeStyle = '#cc2222';
+  // Center line with zone color
+  ctx.strokeStyle = zone.lineColor;
   ctx.lineWidth = 2;
   ctx.setLineDash([8, 4]);
   ctx.beginPath();
@@ -1400,18 +1937,18 @@ function drawRink() {
   // Center circle
   ctx.beginPath();
   ctx.arc(RINK_X + RINK_W / 2, CENTER_Y + oy, 35, 0, Math.PI * 2);
-  ctx.strokeStyle = '#cc2222';
+  ctx.strokeStyle = zone.lineColor;
   ctx.lineWidth = 2;
   ctx.stroke();
 
   // Center dot
-  ctx.fillStyle = '#cc2222';
+  ctx.fillStyle = zone.lineColor;
   ctx.beginPath();
   ctx.arc(RINK_X + RINK_W / 2, CENTER_Y + oy, 4, 0, Math.PI * 2);
   ctx.fill();
 
   // Blue lines
-  ctx.strokeStyle = '#2244cc';
+  ctx.strokeStyle = zone.boardColor;
   ctx.lineWidth = 3;
   ctx.beginPath();
   ctx.moveTo(RINK_X, BLUE_LINE_TOP + oy);
@@ -1425,13 +1962,12 @@ function drawRink() {
   // Goal creases
   const goalX = RINK_X + RINK_W / 2;
 
-  // Top goal (home defends)
+  // Top goal
   ctx.fillStyle = 'rgba(100,150,255,0.2)';
   ctx.fillRect(goalX - GOAL_W / 2, RINK_Y + oy, GOAL_W, GOAL_H + 8);
-  ctx.strokeStyle = '#cc2222';
+  ctx.strokeStyle = zone.lineColor;
   ctx.lineWidth = 2;
   ctx.strokeRect(goalX - GOAL_W / 2, RINK_Y + oy - 2, GOAL_W, GOAL_H);
-  // Goal net visual
   ctx.fillStyle = '#fff';
   ctx.fillRect(goalX - GOAL_W / 2 + 2, RINK_Y + oy - 1, GOAL_W - 4, GOAL_H - 2);
   ctx.strokeStyle = '#888';
@@ -1443,10 +1979,10 @@ function drawRink() {
     ctx.stroke();
   }
 
-  // Bottom goal (away defends)
+  // Bottom goal
   ctx.fillStyle = 'rgba(100,150,255,0.2)';
   ctx.fillRect(goalX - GOAL_W / 2, RINK_Y + RINK_H - GOAL_H - 8 + oy, GOAL_W, GOAL_H + 8);
-  ctx.strokeStyle = '#cc2222';
+  ctx.strokeStyle = zone.lineColor;
   ctx.lineWidth = 2;
   ctx.strokeRect(goalX - GOAL_W / 2, RINK_Y + RINK_H - GOAL_H + 2 + oy, GOAL_W, GOAL_H);
   ctx.fillStyle = '#fff';
@@ -1460,7 +1996,7 @@ function drawRink() {
     ctx.stroke();
   }
 
-  // Faceoff circles in zones
+  // Faceoff circles
   const faceoffSpots = [
     { x: RINK_X + RINK_W * 0.25, y: RINK_H * 0.2 },
     { x: RINK_X + RINK_W * 0.75, y: RINK_H * 0.2 },
@@ -1470,33 +2006,349 @@ function drawRink() {
   for (const spot of faceoffSpots) {
     ctx.beginPath();
     ctx.arc(spot.x, spot.y + oy, 20, 0, Math.PI * 2);
-    ctx.strokeStyle = '#cc2222';
+    ctx.strokeStyle = zone.lineColor;
     ctx.lineWidth = 1;
     ctx.stroke();
-    ctx.fillStyle = '#cc2222';
+    ctx.fillStyle = zone.lineColor;
     ctx.beginPath();
     ctx.arc(spot.x, spot.y + oy, 3, 0, Math.PI * 2);
     ctx.fill();
   }
 }
 
+// === DRAW: HAZARDS ===
+function drawHazards() {
+  const oy = -camY;
+  for (const h of hazards) {
+    const hx = h.x, hy = h.y + oy;
+    if (hy < -30 || hy > GH + 30) continue;
+
+    if (h.type === 'goo_trail') {
+      // Green goo puddle
+      ctx.fillStyle = 'rgba(50,180,50,0.4)';
+      ctx.beginPath();
+      ctx.ellipse(hx, hy, h.radius, h.radius * 0.6, 0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = 'rgba(80,220,80,0.3)';
+      ctx.beginPath();
+      ctx.ellipse(hx - 3, hy - 2, h.radius * 0.5, h.radius * 0.3, 0, 0, Math.PI * 2);
+      ctx.fill();
+    } else if (h.type === 'spore_rain') {
+      // Falling spore cluster
+      ctx.fillStyle = 'rgba(100,255,100,0.5)';
+      for (let s = 0; s < 5; s++) {
+        const sx = hx + Math.sin(frame * 0.1 + s) * 8;
+        const sy = hy + Math.cos(frame * 0.08 + s * 2) * 6;
+        ctx.beginPath();
+        ctx.arc(sx, sy, 2, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    } else if (h.type === 'reactor_vent') {
+      // Pulsing orange vent
+      const pulse = 0.7 + Math.sin(frame * 0.15) * 0.3;
+      ctx.fillStyle = 'rgba(255,120,40,' + (0.3 * pulse) + ')';
+      ctx.beginPath();
+      ctx.arc(hx, hy, h.radius * pulse, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.strokeStyle = 'rgba(255,80,20,0.6)';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(hx, hy, h.radius * 0.5, 0, Math.PI * 2);
+      ctx.stroke();
+      // Vent glow center
+      ctx.fillStyle = 'rgba(255,200,100,0.5)';
+      ctx.beginPath();
+      ctx.arc(hx, hy, 4, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+}
+
+// === DRAW: PICKUPS ===
+function drawPickups() {
+  const oy = -camY;
+  for (const pk of pickups) {
+    const px = pk.x, py = pk.y + oy;
+    if (py < -20 || py > GH + 20) continue;
+
+    const bob = Math.sin(frame * 0.08 + pk.x) * 3;
+    const sparkle = Math.sin(frame * 0.12) * 0.3 + 0.7;
+
+    if (pk.type === 'spore_shield') {
+      ctx.fillStyle = 'rgba(68,255,170,' + sparkle + ')';
+      ctx.beginPath();
+      ctx.arc(px, py + bob, 8, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.strokeStyle = '#44ffaa';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      // Shield shape
+      ctx.moveTo(px, py + bob - 8);
+      ctx.lineTo(px + 6, py + bob - 4);
+      ctx.lineTo(px + 6, py + bob + 3);
+      ctx.lineTo(px, py + bob + 8);
+      ctx.lineTo(px - 6, py + bob + 3);
+      ctx.lineTo(px - 6, py + bob - 4);
+      ctx.closePath();
+      ctx.stroke();
+    } else if (pk.type === 'reactor_core') {
+      ctx.fillStyle = 'rgba(255,136,68,' + sparkle + ')';
+      ctx.beginPath();
+      ctx.arc(px, py + bob, 7, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = '#ffdd44';
+      ctx.beginPath();
+      ctx.arc(px, py + bob, 3, 0, Math.PI * 2);
+      ctx.fill();
+      // Radiation lines
+      ctx.strokeStyle = '#ff8844';
+      ctx.lineWidth = 1;
+      for (let r = 0; r < 4; r++) {
+        const ra = frame * 0.05 + r * Math.PI / 2;
+        ctx.beginPath();
+        ctx.moveTo(px + Math.cos(ra) * 5, py + bob + Math.sin(ra) * 5);
+        ctx.lineTo(px + Math.cos(ra) * 10, py + bob + Math.sin(ra) * 10);
+        ctx.stroke();
+      }
+    } else if (pk.type === 'fungal_extract') {
+      ctx.fillStyle = 'rgba(136,204,68,' + sparkle + ')';
+      ctx.beginPath();
+      ctx.ellipse(px, py + bob, 6, 8, 0, 0, Math.PI * 2);
+      ctx.fill();
+      // Potion bottle shape
+      ctx.fillStyle = '#88cc44';
+      ctx.fillRect(px - 2, py + bob - 10, 4, 4);
+    } else if (pk.type === 'speed_mushroom') {
+      // Pink mushroom
+      ctx.fillStyle = 'rgba(255,68,255,' + sparkle + ')';
+      ctx.beginPath();
+      ctx.ellipse(px, py + bob - 3, 7, 5, 0, Math.PI, 0);
+      ctx.fill();
+      ctx.fillStyle = '#eed';
+      ctx.fillRect(px - 3, py + bob - 2, 6, 6);
+      // Speed lines
+      ctx.strokeStyle = '#ff44ff';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(px - 10, py + bob);
+      ctx.lineTo(px - 14, py + bob);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.moveTo(px - 10, py + bob - 3);
+      ctx.lineTo(px - 13, py + bob - 3);
+      ctx.stroke();
+    }
+  }
+}
+
+// === DRAW: ENEMIES ===
+function drawEnemies() {
+  const oy = -camY;
+  for (const e of enemies) {
+    const ex = e.x, ey = e.y + oy;
+    if (ey < -20 || ey > GH + 20) continue;
+
+    const def = e.def;
+    // Shadow
+    ctx.fillStyle = 'rgba(0,0,0,0.2)';
+    ctx.beginPath();
+    ctx.ellipse(ex, ey + def.radius, def.radius, def.radius * 0.4, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    if (def.name === 'Reactor Bug') {
+      // Spiky bug
+      ctx.fillStyle = def.color;
+      ctx.beginPath();
+      ctx.arc(ex, ey, def.radius, 0, Math.PI * 2);
+      ctx.fill();
+      // Legs
+      ctx.strokeStyle = '#aa2211';
+      ctx.lineWidth = 1;
+      for (let l = 0; l < 4; l++) {
+        const la = frame * 0.15 + l * Math.PI / 2;
+        ctx.beginPath();
+        ctx.moveTo(ex, ey);
+        ctx.lineTo(ex + Math.cos(la) * 10, ey + Math.sin(la) * 10);
+        ctx.stroke();
+      }
+      // Eyes
+      ctx.fillStyle = '#ff0';
+      ctx.fillRect(ex - 3, ey - 2, 2, 2);
+      ctx.fillRect(ex + 1, ey - 2, 2, 2);
+    } else if (def.name === 'Spore Crawler') {
+      // Slug-like with mushroom cap
+      ctx.fillStyle = def.color;
+      ctx.beginPath();
+      ctx.ellipse(ex, ey, def.radius, def.radius * 0.7, 0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = '#66dd66';
+      ctx.beginPath();
+      ctx.ellipse(ex, ey - 4, def.radius * 0.7, 4, 0, Math.PI, 0);
+      ctx.fill();
+      // Trail
+      ctx.fillStyle = 'rgba(80,200,80,0.3)';
+      ctx.beginPath();
+      ctx.ellipse(ex - e.vx * 0.1, ey - e.vy * 0.1, 4, 2, 0, 0, Math.PI * 2);
+      ctx.fill();
+    } else if (def.name === 'Mycelial Worm') {
+      // Segmented worm
+      for (let s = 0; s < 4; s++) {
+        const wx = ex - s * 4 * Math.sign(e.vx || 1);
+        const wy = ey + Math.sin(frame * 0.2 + s) * 3;
+        ctx.fillStyle = s === 0 ? def.color : '#6633aa';
+        ctx.beginPath();
+        ctx.arc(wx, wy, def.radius - s * 0.5, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      // Head eyes
+      ctx.fillStyle = '#ff88ff';
+      ctx.fillRect(ex - 2, ey - 2, 2, 2);
+      ctx.fillRect(ex + 1, ey - 2, 2, 2);
+    } else if (def.name === 'Fungal Lurker') {
+      // Big mushroom monster
+      ctx.fillStyle = def.color;
+      ctx.beginPath();
+      ctx.ellipse(ex, ey - 4, def.radius, def.radius * 0.7, 0, Math.PI, 0);
+      ctx.fill();
+      // Spots
+      ctx.fillStyle = 'rgba(255,255,255,0.3)';
+      ctx.beginPath();
+      ctx.arc(ex - 4, ey - 6, 2, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.beginPath();
+      ctx.arc(ex + 3, ey - 8, 1.5, 0, Math.PI * 2);
+      ctx.fill();
+      // Body
+      ctx.fillStyle = '#336633';
+      ctx.fillRect(ex - 5, ey - 2, 10, 8);
+      // Eyes (angry)
+      ctx.fillStyle = '#ff2222';
+      ctx.fillRect(ex - 4, ey, 3, 2);
+      ctx.fillRect(ex + 1, ey, 3, 2);
+    }
+  }
+}
+
+// === DRAW: BOSS ===
+function drawBoss() {
+  if (!boss || !bossActive) return;
+  const oy = -camY;
+  const bx = boss.x, by = boss.y + oy;
+  if (by < -40 || by > GH + 40) return;
+
+  const def = boss.def;
+  const flash = boss.hitFlash > 0;
+
+  // Shadow
+  ctx.fillStyle = 'rgba(0,0,0,0.3)';
+  ctx.beginPath();
+  ctx.ellipse(bx, by + 20, 25, 8, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Boss body
+  ctx.fillStyle = flash ? '#fff' : def.color;
+  if (def.pattern === 'charge') {
+    // Golem - big rectangle with mushroom head
+    ctx.fillRect(bx - 18, by - 10, 36, 30);
+    ctx.beginPath();
+    ctx.ellipse(bx, by - 15, 20, 14, 0, Math.PI, 0);
+    ctx.fill();
+    // Cap spots
+    if (!flash) {
+      ctx.fillStyle = 'rgba(255,255,255,0.3)';
+      ctx.beginPath();
+      ctx.arc(bx - 8, by - 20, 4, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.beginPath();
+      ctx.arc(bx + 5, by - 22, 3, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    // Arms
+    ctx.fillStyle = flash ? '#ddd' : '#338833';
+    ctx.fillRect(bx - 26, by - 5, 8, 20);
+    ctx.fillRect(bx + 18, by - 5, 8, 20);
+    // Angry eyes
+    ctx.fillStyle = '#ff2222';
+    ctx.fillRect(bx - 8, by - 4, 5, 4);
+    ctx.fillRect(bx + 3, by - 4, 5, 4);
+  } else if (def.pattern === 'orbit') {
+    // Overlord - orb with tendrils
+    ctx.beginPath();
+    ctx.arc(bx, by, 18, 0, Math.PI * 2);
+    ctx.fill();
+    // Tendrils
+    ctx.strokeStyle = flash ? '#ddd' : '#cc4411';
+    ctx.lineWidth = 3;
+    for (let t = 0; t < 6; t++) {
+      const ta = frame * 0.03 + t * Math.PI / 3;
+      ctx.beginPath();
+      ctx.moveTo(bx, by);
+      ctx.quadraticCurveTo(
+        bx + Math.cos(ta) * 20, by + Math.sin(ta) * 20,
+        bx + Math.cos(ta + 0.5) * 30, by + Math.sin(ta + 0.5) * 30
+      );
+      ctx.stroke();
+    }
+    // Core eye
+    ctx.fillStyle = '#ffdd44';
+    ctx.beginPath();
+    ctx.arc(bx, by, 6, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = '#ff2222';
+    ctx.beginPath();
+    ctx.arc(bx, by, 3, 0, Math.PI * 2);
+    ctx.fill();
+  } else if (def.pattern === 'slam') {
+    // Titan - huge mushroom
+    ctx.beginPath();
+    ctx.ellipse(bx, by - 10, 24, 18, 0, Math.PI, 0);
+    ctx.fill();
+    // Body
+    ctx.fillStyle = flash ? '#ddd' : '#5588cc';
+    ctx.fillRect(bx - 14, by - 8, 28, 28);
+    // Feet
+    ctx.fillStyle = flash ? '#ccc' : '#4466aa';
+    ctx.fillRect(bx - 16, by + 18, 12, 6);
+    ctx.fillRect(bx + 4, by + 18, 12, 6);
+    // Face
+    ctx.fillStyle = '#ff4444';
+    ctx.fillRect(bx - 8, by, 5, 5);
+    ctx.fillRect(bx + 3, by, 5, 5);
+    // Mouth
+    ctx.fillStyle = '#222';
+    ctx.fillRect(bx - 6, by + 8, 12, 3);
+  }
+
+  // Boss HP bar
+  ctx.fillStyle = '#333';
+  ctx.fillRect(bx - 30, by - 35, 60, 6);
+  ctx.fillStyle = boss.hp > boss.maxHp * 0.3 ? '#ff4444' : '#ff0000';
+  ctx.fillRect(bx - 30, by - 35, 60 * (boss.hp / boss.maxHp), 6);
+  ctx.strokeStyle = '#fff';
+  ctx.lineWidth = 1;
+  ctx.strokeRect(bx - 30, by - 35, 60, 6);
+
+  // Boss name
+  ctx.fillStyle = '#fff';
+  ctx.font = 'bold 8px monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText(def.name, bx, by - 40);
+}
+
 // === DRAW: PLAYERS ===
 function drawPlayers() {
   const oy = -camY;
 
-  // Draw home players
   for (const p of homePlayers) {
     if (p.penalized) continue;
     drawSkater(p, homeTeam, oy, p === controlledPlayer);
   }
 
-  // Draw away players
   for (const p of awayPlayers) {
     if (p.penalized) continue;
     drawSkater(p, awayTeam, oy, false);
   }
 
-  // Draw goalies
   drawGoalieSprite(homeGoalie, homeTeam, oy);
   drawGoalieSprite(awayGoalie, awayTeam, oy);
 }
@@ -1504,46 +2356,76 @@ function drawPlayers() {
 function drawSkater(p, team, oy, isControlled) {
   const sx = p.x, sy = p.y + oy;
 
-  // Skip if off screen
   if (sy < -20 || sy > GH + 20) return;
 
   // Shadow
   ctx.fillStyle = 'rgba(0,0,0,0.2)';
   ctx.beginPath();
-  ctx.ellipse(sx, sy + 6, 7, 3, 0, 0, Math.PI * 2);
+  ctx.ellipse(sx, sy + 8, 7, 3, 0, 0, Math.PI * 2);
   ctx.fill();
 
-  // Body
+  // Baseling mushroom player (NES-style)
+  // Mushroom cap
   ctx.fillStyle = team.color1;
   ctx.beginPath();
-  ctx.arc(sx, sy, PLAYER_RADIUS, 0, Math.PI * 2);
+  ctx.ellipse(sx, sy - 3, 8, 6, 0, Math.PI, 0);
   ctx.fill();
-
-  // Jersey stripe
-  ctx.fillStyle = team.color2;
-  ctx.fillRect(sx - 5, sy - 2, 10, 4);
-
-  // Helmet
-  ctx.fillStyle = team.color2;
+  // Cap spots
+  ctx.fillStyle = 'rgba(255,255,255,0.25)';
   ctx.beginPath();
-  ctx.arc(sx, sy - 4, 4, 0, Math.PI * 2);
+  ctx.arc(sx - 3, sy - 6, 1.5, 0, Math.PI * 2);
   ctx.fill();
+  ctx.beginPath();
+  ctx.arc(sx + 2, sy - 7, 1, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Body/stem
+  ctx.fillStyle = '#eed';
+  ctx.fillRect(sx - 4, sy - 2, 8, 6);
+
+  // Jersey overlay
+  ctx.fillStyle = team.color1;
+  ctx.fillRect(sx - 5, sy + 1, 10, 5);
+  ctx.fillStyle = team.color2;
+  ctx.fillRect(sx - 5, sy + 1, 10, 2);
+
+  // Eyes
+  ctx.fillStyle = '#111';
+  ctx.fillRect(sx - 3, sy - 1, 2, 2);
+  ctx.fillRect(sx + 1, sy - 1, 2, 2);
 
   // Stick
   ctx.strokeStyle = '#8B4513';
   ctx.lineWidth = 2;
   const stickDir = p.vy > 0 ? 1 : -1;
   ctx.beginPath();
-  ctx.moveTo(sx + 6, sy);
-  ctx.lineTo(sx + 12, sy + 8 * stickDir);
+  ctx.moveTo(sx + 5, sy + 2);
+  ctx.lineTo(sx + 11, sy + 6 * stickDir);
   ctx.stroke();
-  // Blade
   ctx.strokeStyle = '#333';
   ctx.lineWidth = 2;
   ctx.beginPath();
-  ctx.moveTo(sx + 12, sy + 8 * stickDir);
-  ctx.lineTo(sx + 16, sy + 8 * stickDir);
+  ctx.moveTo(sx + 11, sy + 6 * stickDir);
+  ctx.lineTo(sx + 15, sy + 6 * stickDir);
   ctx.stroke();
+
+  // Skates
+  ctx.fillStyle = '#444';
+  ctx.fillRect(sx - 5, sy + 6, 4, 2);
+  ctx.fillRect(sx + 1, sy + 6, 4, 2);
+  // Blades
+  ctx.fillStyle = '#aaa';
+  ctx.fillRect(sx - 5, sy + 8, 5, 1);
+  ctx.fillRect(sx + 1, sy + 8, 5, 1);
+
+  // Shield effect
+  if (p.shielded) {
+    ctx.strokeStyle = 'rgba(68,255,170,' + (0.5 + Math.sin(frame * 0.1) * 0.3) + ')';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.arc(sx, sy, PLAYER_RADIUS + 6, 0, Math.PI * 2);
+    ctx.stroke();
+  }
 
   // Selection indicator
   if (isControlled) {
@@ -1553,27 +2435,43 @@ function drawSkater(p, team, oy, isControlled) {
     ctx.arc(sx, sy, PLAYER_RADIUS + 4, 0, Math.PI * 2);
     ctx.stroke();
 
-    // Arrow above
     const bob = Math.sin(frame * 0.1) * 2;
     ctx.fillStyle = '#ffdd44';
     ctx.beginPath();
-    ctx.moveTo(sx, sy - 18 + bob);
-    ctx.lineTo(sx - 4, sy - 14 + bob);
-    ctx.lineTo(sx + 4, sy - 14 + bob);
+    ctx.moveTo(sx, sy - 16 + bob);
+    ctx.lineTo(sx - 4, sy - 12 + bob);
+    ctx.lineTo(sx + 4, sy - 12 + bob);
     ctx.closePath();
     ctx.fill();
   }
 
-  // Stun effect
+  // Stun effect - stars
   if (p.stunTimer > 0) {
-    ctx.strokeStyle = '#ffff00';
-    ctx.lineWidth = 1;
+    ctx.fillStyle = '#ffff00';
     const starAngle = frame * 0.2;
     for (let i = 0; i < 3; i++) {
       const a = starAngle + i * (Math.PI * 2 / 3);
+      const stX = sx + Math.cos(a) * 10;
+      const stY = sy - 8 + Math.sin(a) * 4;
+      // 4-point star
       ctx.beginPath();
-      ctx.arc(sx + Math.cos(a) * 10, sy - 8 + Math.sin(a) * 4, 2, 0, Math.PI * 2);
-      ctx.stroke();
+      ctx.moveTo(stX, stY - 3);
+      ctx.lineTo(stX + 1, stY - 1);
+      ctx.lineTo(stX + 3, stY);
+      ctx.lineTo(stX + 1, stY + 1);
+      ctx.lineTo(stX, stY + 3);
+      ctx.lineTo(stX - 1, stY + 1);
+      ctx.lineTo(stX - 3, stY);
+      ctx.lineTo(stX - 1, stY - 1);
+      ctx.closePath();
+      ctx.fill();
+    }
+  }
+
+  // Speed mushroom trails
+  if (activePickup && activePickup.type === 'speed_mushroom' && isControlled) {
+    if (frame % 3 === 0) {
+      TAS.particles.spawn(sx, sy + 4, '#ff44ff', 1, 1, { size: 2, gravity: 0 });
     }
   }
 }
@@ -1582,28 +2480,46 @@ function drawGoalieSprite(g, team, oy) {
   const sx = g.x, sy = g.y + oy;
   if (sy < -20 || sy > GH + 20) return;
 
-  // Larger body for goalie
+  // Baseling goalie - wider mushroom
   ctx.fillStyle = team.color1;
-  ctx.fillRect(sx - 10, sy - 8, 20, 16);
+  ctx.beginPath();
+  ctx.ellipse(sx, sy - 4, 12, 8, 0, Math.PI, 0);
+  ctx.fill();
+  // Cap spots
+  ctx.fillStyle = 'rgba(255,255,255,0.2)';
+  ctx.beginPath();
+  ctx.arc(sx - 5, sy - 7, 2, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Body
+  ctx.fillStyle = '#eed';
+  ctx.fillRect(sx - 7, sy - 2, 14, 8);
+  ctx.fillStyle = team.color1;
+  ctx.fillRect(sx - 8, sy + 1, 16, 6);
   ctx.fillStyle = team.color2;
-  ctx.fillRect(sx - 10, sy - 8, 20, 5);
+  ctx.fillRect(sx - 8, sy + 1, 16, 3);
 
   // Mask
   ctx.fillStyle = '#fff';
-  ctx.fillRect(sx - 4, sy - 10, 8, 6);
+  ctx.fillRect(sx - 4, sy - 4, 8, 4);
+
+  // Eyes through mask
+  ctx.fillStyle = '#111';
+  ctx.fillRect(sx - 3, sy - 3, 2, 2);
+  ctx.fillRect(sx + 1, sy - 3, 2, 2);
 
   // Pads
   ctx.fillStyle = '#ddd';
-  ctx.fillRect(sx - 12, sy + 2, 6, 10);
-  ctx.fillRect(sx + 6, sy + 2, 6, 10);
+  ctx.fillRect(sx - 10, sy + 4, 5, 8);
+  ctx.fillRect(sx + 5, sy + 4, 5, 8);
 
   // Glove
   ctx.fillStyle = team.color1;
   ctx.beginPath();
-  ctx.arc(sx - 14, sy, 4, 0, Math.PI * 2);
+  ctx.arc(sx - 12, sy + 2, 4, 0, Math.PI * 2);
   ctx.fill();
   // Blocker
-  ctx.fillRect(sx + 10, sy - 4, 5, 10);
+  ctx.fillRect(sx + 9, sy - 2, 5, 8);
 }
 
 // === DRAW: PUCK ===
@@ -1635,6 +2551,15 @@ function drawPuck() {
   ctx.strokeStyle = '#333';
   ctx.lineWidth = 1;
   ctx.stroke();
+
+  // Puck glow when reactor core active
+  if (activePickup && activePickup.type === 'reactor_core') {
+    ctx.strokeStyle = 'rgba(255,136,68,0.6)';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.arc(px, py, PUCK_RADIUS + 4, 0, Math.PI * 2);
+    ctx.stroke();
+  }
 }
 
 // === DRAW: SHOT METER ===
@@ -1655,6 +2580,20 @@ function drawShotMeter() {
   ctx.strokeRect(px - w / 2, py, w, h);
 }
 
+// === DRAW: SCORE POPUPS ===
+function drawScorePopups() {
+  ctx.textAlign = 'center';
+  ctx.font = 'bold 10px monospace';
+  for (const sp of scorePopups) {
+    ctx.globalAlpha = Math.min(1, sp.timer * 2);
+    ctx.fillStyle = '#000';
+    ctx.fillText(sp.text, sp.x + 1, sp.y + 1);
+    ctx.fillStyle = sp.color;
+    ctx.fillText(sp.text, sp.x, sp.y);
+  }
+  ctx.globalAlpha = 1;
+}
+
 // === DRAW: HUD ===
 function drawHUD() {
   // Scoreboard background
@@ -1670,11 +2609,9 @@ function drawHUD() {
   ctx.fillStyle = '#fff';
   ctx.fillText(String(homeScore), 50, 18);
 
-  // Dash
   ctx.fillStyle = '#666';
   ctx.fillText('-', 62, 18);
 
-  // Away team
   ctx.fillStyle = '#fff';
   ctx.fillText(String(awayScore), 72, 18);
   ctx.fillStyle = awayTeam.color1;
@@ -1690,8 +2627,8 @@ function drawHUD() {
   ctx.fillText(perStr + ' ' + timeStr, GW / 2, 18);
 
   // Power play indicator
-  const homePen = penaltyBox.filter(p => p.team === 'home').length;
-  const awayPen = penaltyBox.filter(p => p.team === 'away').length;
+  const homePen = penaltyBox.filter(function(p) { return p.team === 'home'; }).length;
+  const awayPen = penaltyBox.filter(function(p) { return p.team === 'away'; }).length;
   if (awayPen > homePen) {
     ctx.fillStyle = '#ffdd44';
     ctx.font = 'bold 10px monospace';
@@ -1703,6 +2640,21 @@ function drawHUD() {
     ctx.textAlign = 'right';
     ctx.fillText('SHORT HANDED', GW - 8, 18);
   }
+
+  // Active pickup indicator
+  if (activePickup) {
+    ctx.textAlign = 'center';
+    ctx.fillStyle = activePickup.type === 'reactor_core' ? '#ff8844' : '#ff44ff';
+    ctx.font = 'bold 9px monospace';
+    const pickupName = activePickup.type === 'reactor_core' ? 'REACTOR CORE' : 'SPEED SHROOM';
+    ctx.fillText(pickupName + ' ' + Math.ceil(activePickup.timer) + 's', GW / 2, GH - 24);
+  }
+
+  // Zone name (subtle)
+  ctx.textAlign = 'left';
+  ctx.fillStyle = 'rgba(150,180,200,0.3)';
+  ctx.font = '8px monospace';
+  ctx.fillText(ZONES[currentZone].name, 4, GH - 4);
 
   // Penalty box display
   if (penaltyBox.length > 0) {
@@ -1717,6 +2669,21 @@ function drawHUD() {
       penY += 11;
     }
   }
+
+  // Boss HP bar at top if active
+  if (bossActive && boss) {
+    ctx.fillStyle = 'rgba(10,5,30,0.8)';
+    ctx.fillRect(GW * 0.25, 28, GW * 0.5, 10);
+    ctx.fillStyle = '#ff4444';
+    ctx.fillRect(GW * 0.25, 28, GW * 0.5 * (boss.hp / boss.maxHp), 10);
+    ctx.strokeStyle = '#ff8844';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(GW * 0.25, 28, GW * 0.5, 10);
+    ctx.fillStyle = '#fff';
+    ctx.font = 'bold 8px monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText(boss.def.name, GW / 2, 36);
+  }
 }
 
 // === DRAW: FACEOFF OVERLAY ===
@@ -1730,49 +2697,89 @@ function drawFaceoffOverlay() {
   ctx.fillText(num > 0 ? String(num) : 'GO!', GW / 2, GH / 2);
 }
 
+// === DRAW: TUTORIAL OVERLAY ===
+function drawTutorialOverlay() {
+  if (!showTutorial) return;
+
+  ctx.fillStyle = 'rgba(0,0,10,0.85)';
+  ctx.fillRect(20, 30, GW - 40, GH - 60);
+  ctx.strokeStyle = '#44aaff';
+  ctx.lineWidth = 2;
+  ctx.strokeRect(20, 30, GW - 40, GH - 60);
+
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#ffdd44';
+  ctx.font = 'bold 16px monospace';
+  ctx.fillText('HOW TO PLAY', GW / 2, 58);
+
+  ctx.fillStyle = '#ccc';
+  ctx.font = '10px monospace';
+  const tips = [
+    'ARROWS/WASD to skate around the rink',
+    'HOLD Z/SPACE to charge a shot, release to fire',
+    'TAP Z/SPACE briefly to pass to a teammate',
+    'X/SHIFT to body check opponents (knock puck loose)',
+    '3 checks on same player triggers a FIGHT!',
+    'Collect pickups for shields, speed, and power',
+    'Watch out for reactor vents and spore rain!',
+    'Score goals to advance through the tournament',
+    'Boss fights appear at period 3!'
+  ];
+  let ty = 80;
+  for (const tip of tips) {
+    ctx.fillText(tip, GW / 2, ty);
+    ty += 16;
+  }
+
+  const pulse = Math.sin(frame * 0.06) * 0.3 + 0.7;
+  ctx.globalAlpha = pulse;
+  ctx.fillStyle = '#88ccff';
+  ctx.font = 'bold 11px monospace';
+  ctx.fillText('PRESS ANY BUTTON TO START', GW / 2, GH - 42);
+  ctx.globalAlpha = 1;
+}
+
 // === DRAW: FIGHT ===
 function drawFight() {
-  // Dark arena background
+  const zone = ZONES[currentZone];
+  // Dark arena background with zone tint
   ctx.fillStyle = '#1a0a0a';
+  ctx.fillRect(0, 0, GW, GH);
+  ctx.fillStyle = zone.fogColor;
   ctx.fillRect(0, 0, GW, GH);
 
   // Ring floor
-  ctx.fillStyle = '#e0eef8';
+  ctx.fillStyle = zone.iceColor;
   ctx.fillRect(40, GH * 0.6, GW - 80, GH * 0.35);
 
   // Ropes
-  ctx.strokeStyle = '#cc2222';
+  ctx.strokeStyle = zone.lineColor;
   ctx.lineWidth = 3;
   ctx.beginPath();
   ctx.moveTo(40, GH * 0.4);
   ctx.lineTo(GW - 40, GH * 0.4);
   ctx.stroke();
 
-  // FIGHT text
   ctx.textAlign = 'center';
   ctx.fillStyle = '#ff4444';
   ctx.font = 'bold 20px monospace';
   ctx.fillText('FIGHT!', GW / 2, 30);
 
-  // Timer
   ctx.fillStyle = '#fff';
   ctx.font = '12px monospace';
   ctx.fillText(Math.ceil(fightState.timer) + 's', GW / 2, 50);
 
-  // Player 1 (left) - home team player
   const p1x = GW * 0.3, p1y = GH * 0.55;
   drawFighter(p1x, p1y, homeTeam, fightState.p1Action, fightState.hitTimer1, fightState.p1Block, true);
 
-  // Player 2 (right) - away team player
   const p2x = GW * 0.7, p2y = GH * 0.55;
   drawFighter(p2x, p2y, awayTeam, fightState.p2Action, fightState.hitTimer2, fightState.p2Block, false);
 
   // Health bars
-  // P1
   ctx.fillStyle = '#333';
   ctx.fillRect(40, GH * 0.15, 160, 16);
-  ctx.fillStyle = fightState.hp1 > 30 ? '#44cc44' : '#ff4444';
-  ctx.fillRect(40, GH * 0.15, 160 * (fightState.hp1 / FIGHT_HP), 16);
+  ctx.fillStyle = fightState.hp1 > fightState.maxHp1 * 0.3 ? '#44cc44' : '#ff4444';
+  ctx.fillRect(40, GH * 0.15, 160 * (fightState.hp1 / fightState.maxHp1), 16);
   ctx.strokeStyle = '#fff';
   ctx.lineWidth = 1;
   ctx.strokeRect(40, GH * 0.15, 160, 16);
@@ -1781,18 +2788,16 @@ function drawFight() {
   ctx.textAlign = 'left';
   ctx.fillText(homeTeam.abbr, 45, GH * 0.15 + 12);
 
-  // P2
   ctx.fillStyle = '#333';
   ctx.fillRect(GW - 200, GH * 0.15, 160, 16);
-  ctx.fillStyle = fightState.hp2 > 30 ? '#44cc44' : '#ff4444';
-  ctx.fillRect(GW - 200, GH * 0.15, 160 * (fightState.hp2 / FIGHT_HP), 16);
+  ctx.fillStyle = fightState.hp2 > fightState.maxHp2 * 0.3 ? '#44cc44' : '#ff4444';
+  ctx.fillRect(GW - 200, GH * 0.15, 160 * (fightState.hp2 / fightState.maxHp2), 16);
   ctx.strokeStyle = '#fff';
   ctx.strokeRect(GW - 200, GH * 0.15, 160, 16);
   ctx.fillStyle = '#fff';
   ctx.textAlign = 'right';
   ctx.fillText(awayTeam.abbr, GW - 45, GH * 0.15 + 12);
 
-  // Controls hint
   ctx.textAlign = 'center';
   ctx.fillStyle = '#666';
   ctx.font = '9px monospace';
@@ -1802,30 +2807,40 @@ function drawFight() {
 function drawFighter(x, y, team, action, hitTimer, blocking, facingRight) {
   const dir = facingRight ? 1 : -1;
 
+  // Baseling fighter - mushroom creature
+  // Mushroom cap
+  ctx.fillStyle = team.color1;
+  ctx.beginPath();
+  ctx.ellipse(x, y - 22, 14, 10, 0, Math.PI, 0);
+  ctx.fill();
+  // Cap spots
+  ctx.fillStyle = 'rgba(255,255,255,0.25)';
+  ctx.beginPath();
+  ctx.arc(x - 5, y - 26, 3, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.arc(x + 4, y - 28, 2, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Face
+  ctx.fillStyle = '#eed';
+  ctx.fillRect(x - 8, y - 18, 16, 10);
+  // Eyes
+  ctx.fillStyle = '#111';
+  ctx.fillRect(x - 5, y - 14, 3, 3);
+  ctx.fillRect(x + 2, y - 14, 3, 3);
+
   // Body
   ctx.fillStyle = team.color1;
   ctx.fillRect(x - 12, y - 10, 24, 35);
-
-  // Jersey detail
   ctx.fillStyle = team.color2;
   ctx.fillRect(x - 12, y - 10, 24, 8);
 
-  // Head
-  ctx.fillStyle = '#ffcc99';
-  ctx.beginPath();
-  ctx.arc(x, y - 18, 10, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.fillStyle = team.color2;
-  ctx.beginPath();
-  ctx.arc(x, y - 20, 8, Math.PI, 0);
-  ctx.fill();
-
   // Arms based on action
-  ctx.strokeStyle = '#ffcc99';
+  ctx.strokeStyle = '#eed';
   ctx.lineWidth = 4;
 
   if (blocking) {
-    // Block pose - arms crossed in front
     ctx.beginPath();
     ctx.moveTo(x - 8 * dir, y - 5);
     ctx.lineTo(x + 15 * dir, y - 8);
@@ -1834,13 +2849,11 @@ function drawFighter(x, y, team, action, hitTimer, blocking, facingRight) {
     ctx.moveTo(x - 8 * dir, y + 5);
     ctx.lineTo(x + 15 * dir, y - 2);
     ctx.stroke();
-    // Gloves
     ctx.fillStyle = team.color1;
     ctx.beginPath();
     ctx.arc(x + 15 * dir, y - 5, 5, 0, Math.PI * 2);
     ctx.fill();
   } else if (hitTimer > 0) {
-    // Punching
     const extend = (1 - hitTimer / 0.4) * 20;
     if (action === 'highPunch') {
       ctx.beginPath();
@@ -1871,7 +2884,6 @@ function drawFighter(x, y, team, action, hitTimer, blocking, facingRight) {
       ctx.fill();
     }
   } else {
-    // Idle stance
     ctx.beginPath();
     ctx.moveTo(x, y - 3);
     ctx.lineTo(x + 12 * dir, y - 8);
@@ -1905,6 +2917,10 @@ function drawFighter(x, y, team, action, hitTimer, blocking, facingRight) {
   ctx.fillStyle = '#222';
   ctx.fillRect(x - 8, y + 38, 8, 5);
   ctx.fillRect(x + 2, y + 38, 8, 5);
+  // Blades
+  ctx.fillStyle = '#aaa';
+  ctx.fillRect(x - 8, y + 43, 9, 1);
+  ctx.fillRect(x + 2, y + 43, 9, 1);
 }
 
 // === DRAW: MATCH END ===
@@ -1927,7 +2943,9 @@ function drawMatchEnd() {
     const roundNames = ['Quarter-Final', 'Semi-Final', 'Final'];
     ctx.fillStyle = '#88aacc';
     ctx.font = '12px monospace';
-    ctx.fillText(roundNames[tournament.currentRound] + ' Complete!', GW / 2, GH * 0.65);
+    ctx.fillText(roundNames[tournament.currentRound] + ' Complete!', GW / 2, GH * 0.62);
+    ctx.fillStyle = '#ffdd44';
+    ctx.fillText('Tournament Goals: ' + totalTournamentGoals, GW / 2, GH * 0.7);
   }
 
   const pulse = Math.sin(frame * 0.05) * 0.3 + 0.7;
@@ -1954,32 +2972,36 @@ function drawTournamentWin() {
   ctx.textAlign = 'center';
   ctx.fillStyle = '#ffdd44';
   ctx.font = 'bold 28px monospace';
-  ctx.fillText('CHAMPIONS!', GW / 2, GH * 0.25);
+  ctx.fillText('CHAMPIONS!', GW / 2, GH * 0.2);
 
   ctx.fillStyle = homeTeam ? homeTeam.color1 : '#fff';
   ctx.font = 'bold 20px monospace';
-  ctx.fillText(TEAMS[playerTeamIdx].name, GW / 2, GH * 0.4);
+  ctx.fillText(TEAMS[playerTeamIdx].name, GW / 2, GH * 0.32);
 
   // Trophy
   ctx.fillStyle = '#ffdd44';
-  ctx.fillRect(GW / 2 - 15, GH * 0.5, 30, 40);
-  ctx.fillRect(GW / 2 - 25, GH * 0.48, 50, 10);
-  ctx.fillRect(GW / 2 - 10, GH * 0.5 + 40, 20, 10);
-  ctx.fillRect(GW / 2 - 20, GH * 0.5 + 50, 40, 6);
+  ctx.fillRect(GW / 2 - 15, GH * 0.4, 30, 40);
+  ctx.fillRect(GW / 2 - 25, GH * 0.38, 50, 10);
+  ctx.fillRect(GW / 2 - 10, GH * 0.4 + 40, 20, 10);
+  ctx.fillRect(GW / 2 - 20, GH * 0.4 + 50, 40, 6);
 
-  // Handles
   ctx.strokeStyle = '#ffdd44';
   ctx.lineWidth = 4;
   ctx.beginPath();
-  ctx.arc(GW / 2 - 25, GH * 0.55, 10, -Math.PI / 2, Math.PI / 2);
+  ctx.arc(GW / 2 - 25, GH * 0.45, 10, -Math.PI / 2, Math.PI / 2);
   ctx.stroke();
   ctx.beginPath();
-  ctx.arc(GW / 2 + 25, GH * 0.55, 10, Math.PI / 2, -Math.PI / 2);
+  ctx.arc(GW / 2 + 25, GH * 0.45, 10, Math.PI / 2, -Math.PI / 2);
   ctx.stroke();
+
+  // Winning baseling next to trophy
+  drawBaselingMascot(GW / 2 - 50, GH * 0.48);
+  drawBaselingMascot(GW / 2 + 50, GH * 0.48);
 
   ctx.fillStyle = '#88aacc';
   ctx.font = '12px monospace';
-  ctx.fillText('Tournament Goals Record: ' + highScore, GW / 2, GH * 0.82);
+  ctx.fillText('Tournament Goals: ' + totalTournamentGoals, GW / 2, GH * 0.78);
+  ctx.fillText('Goals Record: ' + highScore, GW / 2, GH * 0.83);
 
   const pulse = Math.sin(frame * 0.05) * 0.3 + 0.7;
   ctx.globalAlpha = pulse;
@@ -1997,22 +3019,42 @@ function drawTournamentLoss() {
   ctx.textAlign = 'center';
   ctx.fillStyle = '#ff4444';
   ctx.font = 'bold 24px monospace';
-  ctx.fillText('ELIMINATED', GW / 2, GH * 0.3);
+  ctx.fillText('ELIMINATED', GW / 2, GH * 0.25);
 
   ctx.fillStyle = '#888';
   ctx.font = '14px monospace';
   const roundNames = ['Quarter-Finals', 'Semi-Finals', 'Final'];
-  ctx.fillText('Knocked out in the ' + (roundNames[tournament.currentRound] || 'Tournament'), GW / 2, GH * 0.5);
+  ctx.fillText('Knocked out in the ' + (roundNames[tournament.currentRound] || 'Tournament'), GW / 2, GH * 0.45);
 
   ctx.fillStyle = '#ffdd44';
   ctx.font = '12px monospace';
-  ctx.fillText('Final Score: ' + homeScore + ' - ' + awayScore, GW / 2, GH * 0.6);
+  ctx.fillText('Final Score: ' + homeScore + ' - ' + awayScore, GW / 2, GH * 0.55);
+  ctx.fillText('Tournament Goals: ' + totalTournamentGoals, GW / 2, GH * 0.63);
+
+  // Sad baseling
+  const bx = GW / 2, by = GH * 0.75;
+  ctx.fillStyle = statB.color;
+  ctx.beginPath();
+  ctx.ellipse(bx, by - 6, 14, 10, 0, Math.PI, 0);
+  ctx.fill();
+  ctx.fillStyle = '#eed';
+  ctx.fillRect(bx - 6, by - 4, 12, 12);
+  // Sad eyes
+  ctx.fillStyle = '#111';
+  ctx.fillRect(bx - 4, by + 1, 3, 2);
+  ctx.fillRect(bx + 1, by + 1, 3, 2);
+  // Frown
+  ctx.strokeStyle = '#111';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.arc(bx, by + 8, 4, Math.PI * 0.2, Math.PI * 0.8);
+  ctx.stroke();
 
   const pulse = Math.sin(frame * 0.05) * 0.3 + 0.7;
   ctx.globalAlpha = pulse;
   ctx.fillStyle = '#88ccff';
   ctx.font = 'bold 12px monospace';
-  ctx.fillText('PRESS ANY KEY', GW / 2, GH * 0.85);
+  ctx.fillText('PRESS ANY KEY', GW / 2, GH * 0.92);
   ctx.globalAlpha = 1;
 }
 
@@ -2020,7 +3062,7 @@ function drawTournamentLoss() {
 function saveTournament() {
   try {
     localStorage.setItem('blades_poop_tournament', JSON.stringify({
-      tournament, playerTeamIdx, homeScore, awayScore
+      tournament: tournament, playerTeamIdx: playerTeamIdx, homeScore: homeScore, awayScore: awayScore
     }));
   } catch(e) { console.warn('Save failed:', e); }
 }

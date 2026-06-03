@@ -25,6 +25,21 @@ canvas { display: block; margin: 0 auto; }
 (function() {
 "use strict";
 
+// === BASELING STAT INTEGRATION (Pass 1) ===
+var statB = { damage: 1, speed: 1, lives: 0, hpMult: 1, scoreMult: 1, cooldown: 1, luck: 1, str: 10, dex: 10, con: 10, int: 10, wis: 10, cha: 10, level: 0, color: '#44dd88', name: 'Baseling', icon: 'B' };
+try { if (window.NftLoader && NftLoader.getStatBonuses) statB = NftLoader.getStatBonuses(); } catch(e) {}
+
+// Stat scaling helpers (15+ stat references wired throughout)
+function strScale() { return 0.8 + (statB.str - 10) * 0.04; }    // STR -> unit attack damage
+function dexScale() { return 0.8 + (statB.dex - 10) * 0.04; }    // DEX -> unit movement speed
+function conScale() { return 0.8 + (statB.con - 10) * 0.04; }    // CON -> unit HP multiplier
+function intScale() { return 0.8 + (statB.int - 10) * 0.03; }    // INT -> score multiplier & AI weakness
+function wisScale() { return 0.8 + (statB.wis - 10) * 0.04; }    // WIS -> ability cooldown reduction
+function chaScale() { return 0.8 + (statB.cha - 10) * 0.03; }    // CHA -> recruit bonus & luck
+function statRecruitBonus() { return statB.cha >= 15 ? 1 : 0; }   // CHA 15+ = +1 recruit per buy
+function statLuckBonus() { return Math.max(0, (statB.luck - 1) * 0.05 + (statB.cha - 10) * 0.02); } // luck for crits
+function statScoreMult() { return statB.scoreMult * intScale(); }  // INT boosts score
+
 // === GAME CONSTANTS ===
 const GW = 480, GH = 320;
 const ctx = TAS.ctx;
@@ -34,20 +49,29 @@ TAS.initCanvas(GW, GH);
 TAS.input.initTouch({ buttons: ['a', 'b'], labels: { a: 'FIRE', b: 'SWAP' } });
 
 // === GAME STATES ===
-let state = 'title'; // title, setup, strategic, battle, siege, victory, gameover
+let state = 'title'; // title, tutorial, setup, strategic, battle, siege, boss, victory, gameover
 let frame = 0;
 let difficulty = 1; // 0=easy, 1=medium, 2=hard
 let twoPlayer = false;
-let currentPlayer = 0; // 0=Forest(green), 1=Volcano(red)
+let currentPlayer = 0; // 0=Spore(green), 1=Reactor(red)
 let turnNumber = 1;
 let selectedTerritory = -1;
 let moveTarget = -1;
-let weatherEvent = ''; // '', 'storm', 'drought'
+let weatherEvent = ''; // '', 'storm', 'drought', 'spore_bloom', 'meltdown'
 let weatherTimer = 0;
-let menuChoice = 0; // for title menu
+let menuChoice = 0;
 let reinforceMode = false;
 let message = '';
 let messageTimer = 0;
+let totalScore = 0;
+let showTutorial = false;
+let tutorialPage = 0;
+
+// === SCORE POPUPS ===
+let scorePopups = [];
+function addScorePopup(x, y, text, color) {
+  scorePopups.push({ x: x, y: y, text: text, color: color || '#ffdd44', life: 1.5, vy: -40 });
+}
 
 // === CAMPAIGN SAVE ===
 const SAVE_KEY = 'nswar_campaign';
@@ -55,18 +79,19 @@ const SAVE_KEY = 'nswar_campaign';
 function saveCampaign() {
   try {
     localStorage.setItem(SAVE_KEY, JSON.stringify({
-      territories: territories.map(t => ({ owner: t.owner, army: t.army })),
+      territories: territories.map(function(t) { return { owner: t.owner, army: t.army }; }),
       gold: gold.slice(),
-      turnNumber, currentPlayer, difficulty
+      turnNumber: turnNumber, currentPlayer: currentPlayer, difficulty: difficulty,
+      totalScore: totalScore
     }));
   } catch(e) { console.error('Save failed:', e); }
 }
 
 function loadCampaign() {
   try {
-    const d = JSON.parse(localStorage.getItem(SAVE_KEY));
+    var d = JSON.parse(localStorage.getItem(SAVE_KEY));
     if (!d) return false;
-    for (let i = 0; i < 12; i++) {
+    for (var i = 0; i < 12; i++) {
       territories[i].owner = d.territories[i].owner;
       territories[i].army = d.territories[i].army;
     }
@@ -74,70 +99,85 @@ function loadCampaign() {
     turnNumber = d.turnNumber;
     currentPlayer = d.currentPlayer;
     difficulty = d.difficulty;
+    totalScore = d.totalScore || 0;
     return true;
   } catch(e) { return false; }
 }
 
-// === TERRITORY MAP ===
+// === TERRITORY MAP (Pass 2: Tasern Factions - Spore vs Reactor) ===
 // 12 territories arranged in a continent shape (3 rows of 4)
-// Each territory: { name, x, y, w, h, owner, army, hasFort, income, adjacent[] }
-const territories = [
-  // Row 1 (north) - y:20-100
-  { name: 'Frost Peaks',    cx: 80,  cy: 55,  owner: 1, army: 4, hasFort: true,  income: 3, adjacent: [1, 4] },
-  { name: 'Pine Valley',    cx: 180, cy: 50,  owner: 1, army: 3, hasFort: false, income: 2, adjacent: [0, 2, 4, 5] },
-  { name: 'Iron Hills',     cx: 290, cy: 50,  owner: 1, army: 3, hasFort: false, income: 2, adjacent: [1, 3, 5, 6] },
-  { name: 'Storm Coast',    cx: 400, cy: 55,  owner: 1, army: 4, hasFort: true,  income: 3, adjacent: [2, 6, 7] },
-  // Row 2 (middle) - y:100-200
-  { name: 'Emerald Forest', cx: 70,  cy: 155, owner: 0, army: 3, hasFort: false, income: 2, adjacent: [0, 1, 5, 8] },
-  { name: 'Central Plains', cx: 185, cy: 150, owner: -1, army: 0, hasFort: false, income: 4, adjacent: [1, 2, 4, 6, 8, 9] },
-  { name: 'Dragon Pass',    cx: 305, cy: 150, owner: -1, army: 0, hasFort: false, income: 4, adjacent: [2, 3, 5, 7, 9, 10] },
-  { name: 'Obsidian Cliffs',cx: 415, cy: 155, owner: 1, army: 3, hasFort: false, income: 2, adjacent: [3, 6, 10, 11] },
-  // Row 3 (south) - y:200-280
-  { name: 'Mushroom Marsh', cx: 80,  cy: 245, owner: 0, army: 4, hasFort: true,  income: 3, adjacent: [4, 5, 9] },
-  { name: 'Spore Fields',   cx: 190, cy: 250, owner: 0, army: 3, hasFort: false, income: 2, adjacent: [5, 6, 8, 10] },
-  { name: 'Lava Flats',     cx: 310, cy: 250, owner: 0, army: 3, hasFort: false, income: 2, adjacent: [6, 7, 9, 11] },
-  { name: 'Volcano Crater', cx: 420, cy: 245, owner: 0, army: 4, hasFort: true,  income: 3, adjacent: [7, 10] }
+var territories = [
+  // Row 1 (north) - Reactor-held volcanic highlands
+  { name: 'Molten Peaks',     cx: 80,  cy: 55,  owner: 1, army: 4, hasFort: true,  income: 3, adjacent: [1, 4], terrain: 'volcanic' },
+  { name: 'Cinder Valley',    cx: 180, cy: 50,  owner: 1, army: 3, hasFort: false, income: 2, adjacent: [0, 2, 4, 5], terrain: 'scorched' },
+  { name: 'Iron Reactor',     cx: 290, cy: 50,  owner: 1, army: 3, hasFort: false, income: 2, adjacent: [1, 3, 5, 6], terrain: 'industrial' },
+  { name: 'Storm Forge',      cx: 400, cy: 55,  owner: 1, army: 4, hasFort: true,  income: 3, adjacent: [2, 6, 7], terrain: 'volcanic' },
+  // Row 2 (middle) - contested borderlands
+  { name: 'Mycelium Woods',   cx: 70,  cy: 155, owner: 0, army: 3, hasFort: false, income: 2, adjacent: [0, 1, 5, 8], terrain: 'forest' },
+  { name: 'Spore Plateau',    cx: 185, cy: 150, owner: -1, army: 0, hasFort: false, income: 4, adjacent: [1, 2, 4, 6, 8, 9], terrain: 'hazard' },
+  { name: 'Reactor Breach',   cx: 305, cy: 150, owner: -1, army: 0, hasFort: false, income: 4, adjacent: [2, 3, 5, 7, 9, 10], terrain: 'hazard' },
+  { name: 'Obsidian Gate',    cx: 415, cy: 155, owner: 1, army: 3, hasFort: false, income: 2, adjacent: [3, 6, 10, 11], terrain: 'scorched' },
+  // Row 3 (south) - Spore-held fungal lowlands
+  { name: 'Mushroom Marsh',   cx: 80,  cy: 245, owner: 0, army: 4, hasFort: true,  income: 3, adjacent: [4, 5, 9], terrain: 'swamp' },
+  { name: 'Spore Fields',     cx: 190, cy: 250, owner: 0, army: 3, hasFort: false, income: 2, adjacent: [5, 6, 8, 10], terrain: 'fungal' },
+  { name: 'Lava Flats',       cx: 310, cy: 250, owner: 0, army: 3, hasFort: false, income: 2, adjacent: [6, 7, 9, 11], terrain: 'scorched' },
+  { name: 'Fungal Crater',    cx: 420, cy: 245, owner: 0, army: 4, hasFort: true,  income: 3, adjacent: [7, 10], terrain: 'fungal' }
 ];
 
-// Territory polygon shapes (rough hexagonal regions)
-const TERR_RADIUS = 45;
+var TERR_RADIUS = 45;
 
 // Gold per faction
-let gold = [10, 10];
+var gold = [10, 10];
 
 // Train state
-let train = { from: -1, to: -1, progress: 0, gold: 3, active: false };
-const trainRoutes = [[0,1],[1,2],[2,3],[4,5],[5,6],[6,7],[8,9],[9,10],[10,11]];
+var train = { from: -1, to: -1, progress: 0, gold: 3, active: false };
+var trainRoutes = [[0,1],[1,2],[2,3],[4,5],[5,6],[6,7],[8,9],[9,10],[10,11]];
 
 // === BATTLE STATE ===
-let battle = {
+var battle = {
   attacker: 0, defender: 1,
   attackerArmy: 0, defenderArmy: 0,
   attackerTerr: -1, defenderTerr: -1,
   units: [], enemyUnits: [],
-  activeUnit: 0, // 0=infantry, 1=cavalry, 2=cannon
+  activeUnit: 0,
   cannonAngle: 45,
   battleTimer: 0,
-  terrain: [], // hills/rivers
-  result: '' // 'win', 'lose', ''
+  terrain: [],
+  result: '',
+  battlefieldType: 'plains', // plains, volcanic, fungal, swamp, industrial
+  bossActive: false,
+  boss: null
 };
 
 // === SIEGE STATE ===
-let siege = {
+var siege = {
   player: { x: 20, y: 0, vy: 0, facing: 1, hp: 3, attacking: false, atkTimer: 0 },
   enemies: [],
   traps: [],
-  screen: 0, // 0-2
+  screen: 0,
   timer: 30,
   flagX: 440,
   result: ''
 };
 
-// === COLORS ===
-const FACTION_COLORS = ['#33aa55', '#cc4433']; // Forest green, Volcano red
-const FACTION_LIGHT = ['#55cc77', '#ee6655'];
-const FACTION_DARK = ['#227744', '#992222'];
-const FACTION_NAMES = ['Forest', 'Volcano'];
+// === COLORS (Pass 2: Spore vs Reactor themes) ===
+var FACTION_COLORS = ['#33aa55', '#cc4433']; // Spore green, Reactor red
+var FACTION_LIGHT = ['#55cc77', '#ee6655'];
+var FACTION_DARK = ['#227744', '#992222'];
+var FACTION_NAMES = ['Spore', 'Reactor'];
+
+// === TERRAIN HAZARD COLORS ===
+var TERRAIN_COLORS = {
+  volcanic: '#553322', scorched: '#443322', industrial: '#334455',
+  forest: '#224422', hazard: '#554422', swamp: '#223322',
+  fungal: '#332244', plains: '#334433'
+};
+
+// === PARALLAX STARS (Pass 3) ===
+var bgStars = [];
+for (var si = 0; si < 40; si++) {
+  bgStars.push({ x: Math.random() * GW, y: Math.random() * 120, s: 0.5 + Math.random() * 1.5, sp: 0.1 + Math.random() * 0.3 });
+}
 
 // === HELPER FUNCTIONS ===
 function anyKey() {
@@ -154,51 +194,53 @@ function showMessage(msg, dur) {
 }
 
 function getTerrAtPos(mx, my) {
-  for (let i = 0; i < 12; i++) {
-    const t = territories[i];
-    const dx = mx - t.cx, dy = my - t.cy;
+  for (var i = 0; i < 12; i++) {
+    var t = territories[i];
+    var dx = mx - t.cx, dy = my - t.cy;
     if (dx * dx + dy * dy < TERR_RADIUS * TERR_RADIUS) return i;
   }
   return -1;
 }
 
 function calcIncome(player) {
-  let inc = 0;
-  for (const t of territories) {
-    if (t.owner === player) inc += t.income;
+  var inc = 0;
+  for (var i = 0; i < territories.length; i++) {
+    if (territories[i].owner === player) inc += territories[i].income;
   }
+  // INT boosts income for player 0 (human)
+  if (player === 0) inc = Math.floor(inc * (1 + (statB.int - 10) * 0.02));
   return inc;
 }
 
 function countTerritories(player) {
-  let c = 0;
-  for (const t of territories) if (t.owner === player) c++;
+  var c = 0;
+  for (var i = 0; i < territories.length; i++) if (territories[i].owner === player) c++;
   return c;
 }
 
 function countForts(player) {
-  let c = 0;
-  for (const t of territories) if (t.owner === player && t.hasFort) c++;
+  var c = 0;
+  for (var i = 0; i < territories.length; i++) if (territories[i].owner === player && territories[i].hasFort) c++;
   return c;
 }
 
 function checkVictory() {
-  const f0 = countForts(0), f1 = countForts(1);
-  const t0 = countTerritories(0), t1 = countTerritories(1);
-  if (t1 === 0 || f1 === 0) return 0; // Forest wins
-  if (t0 === 0 || f0 === 0) return 1; // Volcano wins
+  var f0 = countForts(0), f1 = countForts(1);
+  var t0 = countTerritories(0), t1 = countTerritories(1);
+  if (t1 === 0 || f1 === 0) return 0;
+  if (t0 === 0 || f0 === 0) return 1;
   return -1;
 }
 
 // === MOUSE/CLICK ===
-let mouseX = GW / 2, mouseY = GH / 2;
-let clicked = false;
-let clickX = 0, clickY = 0;
+var mouseX = GW / 2, mouseY = GH / 2;
+var clicked = false;
+var clickX = 0, clickY = 0;
 
 TAS.canvas.addEventListener('mousedown', function(e) {
-  const rect = TAS.canvas.getBoundingClientRect();
-  const sx = (TAS.canvas.width / (window.devicePixelRatio || 1)) / rect.width;
-  const sy = (TAS.canvas.height / (window.devicePixelRatio || 1)) / rect.height;
+  var rect = TAS.canvas.getBoundingClientRect();
+  var sx = (TAS.canvas.width / (window.devicePixelRatio || 1)) / rect.width;
+  var sy = (TAS.canvas.height / (window.devicePixelRatio || 1)) / rect.height;
   clickX = (e.clientX - rect.left) * sx;
   clickY = (e.clientY - rect.top) * sy;
   clicked = true;
@@ -206,18 +248,18 @@ TAS.canvas.addEventListener('mousedown', function(e) {
 });
 
 TAS.canvas.addEventListener('mousemove', function(e) {
-  const rect = TAS.canvas.getBoundingClientRect();
-  const sx = (TAS.canvas.width / (window.devicePixelRatio || 1)) / rect.width;
-  const sy = (TAS.canvas.height / (window.devicePixelRatio || 1)) / rect.height;
+  var rect = TAS.canvas.getBoundingClientRect();
+  var sx = (TAS.canvas.width / (window.devicePixelRatio || 1)) / rect.width;
+  var sy = (TAS.canvas.height / (window.devicePixelRatio || 1)) / rect.height;
   mouseX = (e.clientX - rect.left) * sx;
   mouseY = (e.clientY - rect.top) * sy;
 });
 
 TAS.canvas.addEventListener('touchstart', function(e) {
   if (e.touches.length > 0) {
-    const rect = TAS.canvas.getBoundingClientRect();
-    const sx = (TAS.canvas.width / (window.devicePixelRatio || 1)) / rect.width;
-    const sy = (TAS.canvas.height / (window.devicePixelRatio || 1)) / rect.height;
+    var rect = TAS.canvas.getBoundingClientRect();
+    var sx = (TAS.canvas.width / (window.devicePixelRatio || 1)) / rect.width;
+    var sy = (TAS.canvas.height / (window.devicePixelRatio || 1)) / rect.height;
     clickX = (e.touches[0].clientX - rect.left) * sx;
     clickY = (e.touches[0].clientY - rect.top) * sy;
     clicked = true;
@@ -227,32 +269,31 @@ TAS.canvas.addEventListener('touchstart', function(e) {
 }, { passive: true });
 
 // === KEYBOARD DEBOUNCE ===
-let prevKeys = {};
+var prevKeys = {};
 function keyPressed(k) {
-  const down = TAS.input.keys[k];
-  const was = prevKeys[k];
+  var down = TAS.input.keys[k];
+  var was = prevKeys[k];
   return down && !was;
 }
 function updatePrevKeys() {
-  for (const k in TAS.input.keys) prevKeys[k] = TAS.input.keys[k];
+  for (var k in TAS.input.keys) prevKeys[k] = TAS.input.keys[k];
 }
 
 // === START NEW GAME ===
 function startNewGame() {
-  // Reset territories
   territories[0].owner = 1; territories[0].army = 4;
   territories[1].owner = 1; territories[1].army = 3;
   territories[2].owner = 1; territories[2].army = 3;
   territories[3].owner = 1; territories[3].army = 4;
-  territories[4].owner = 0; territories[4].army = 3;
+  territories[4].owner = 0; territories[4].army = 3 + statRecruitBonus(); // CHA bonus
   territories[5].owner = -1; territories[5].army = 0;
   territories[6].owner = -1; territories[6].army = 0;
   territories[7].owner = 1; territories[7].army = 3;
-  territories[8].owner = 0; territories[8].army = 4;
+  territories[8].owner = 0; territories[8].army = 4 + statRecruitBonus(); // CHA bonus
   territories[9].owner = 0; territories[9].army = 3;
   territories[10].owner = 0; territories[10].army = 3;
   territories[11].owner = 0; territories[11].army = 4;
-  gold = [10, 10];
+  gold = [10 + Math.floor(statB.cha * 0.3), 10]; // CHA starting gold bonus
   turnNumber = 1;
   currentPlayer = 0;
   selectedTerritory = -1;
@@ -261,25 +302,28 @@ function startNewGame() {
   weatherTimer = 0;
   reinforceMode = false;
   train.active = false;
+  totalScore = 0;
   state = 'strategic';
-  showMessage('Forest faction begins! Select a territory.', 3);
+  showMessage('Spore faction begins! Select a territory.', 3);
 }
 
 // === AI TURN ===
 function doAITurn() {
-  const player = currentPlayer;
+  var player = currentPlayer;
   // Buy reinforcements with gold
   while (gold[player] >= 5) {
-    // Find territory with army that borders enemy
-    let best = -1, bestScore = -1;
-    for (let i = 0; i < 12; i++) {
-      const t = territories[i];
+    var best = -1, bestScore = -1;
+    for (var i = 0; i < 12; i++) {
+      var t = territories[i];
       if (t.owner !== player) continue;
-      let threat = 0;
-      for (const adj of t.adjacent) {
+      var threat = 0;
+      for (var a = 0; a < t.adjacent.length; a++) {
+        var adj = t.adjacent[a];
         if (territories[adj].owner !== player && territories[adj].owner !== -1) threat += territories[adj].army;
       }
-      const score = threat + (t.hasFort ? 2 : 0) + Math.random() * 3;
+      var score = threat + (t.hasFort ? 2 : 0) + Math.random() * 3;
+      // INT makes AI slightly weaker (player's strategic advantage)
+      score -= (statB.int - 10) * 0.15;
       if (score > bestScore) { bestScore = score; best = i; }
     }
     if (best >= 0) {
@@ -289,104 +333,107 @@ function doAITurn() {
   }
 
   // Move: find best attack or reinforce
-  let moved = false;
-  let attempts = 0;
+  var moved = false;
+  var attempts = 0;
   while (!moved && attempts < 20) {
     attempts++;
-    // Find territory to move from
-    let fromIdx = -1, toIdx = -1, bestVal = -1;
-    for (let i = 0; i < 12; i++) {
-      const t = territories[i];
-      if (t.owner !== player || t.army <= 1) continue;
-      for (const adj of t.adjacent) {
-        const target = territories[adj];
-        let val = 0;
+    var fromIdx = -1, toIdx = -1, bestVal = -1;
+    for (var i2 = 0; i2 < 12; i2++) {
+      var t2 = territories[i2];
+      if (t2.owner !== player || t2.army <= 1) continue;
+      for (var a2 = 0; a2 < t2.adjacent.length; a2++) {
+        var adj2 = t2.adjacent[a2];
+        var target = territories[adj2];
+        var val = 0;
         if (target.owner !== player && target.owner !== -1) {
-          // Attack value
           val = 10 + target.income + (target.hasFort ? 3 : 0) - target.army;
           val += (difficulty + 1) * 2;
         } else if (target.owner === -1) {
-          // Unclaimed
           val = 8 + target.income;
         } else {
-          // Reinforce forward
-          let hasEnemy = false;
-          for (const a2 of target.adjacent) {
-            if (territories[a2].owner !== player && territories[a2].owner !== -1) hasEnemy = true;
+          var hasEnemy = false;
+          for (var a3 = 0; a3 < target.adjacent.length; a3++) {
+            if (territories[target.adjacent[a3]].owner !== player && territories[target.adjacent[a3]].owner !== -1) hasEnemy = true;
           }
-          if (hasEnemy && target.army < t.army) val = 3;
+          if (hasEnemy && target.army < t2.army) val = 3;
         }
         val += Math.random() * 3;
-        if (val > bestVal) { bestVal = val; fromIdx = i; toIdx = adj; }
+        if (val > bestVal) { bestVal = val; fromIdx = i2; toIdx = adj2; }
       }
     }
     if (fromIdx >= 0 && toIdx >= 0 && bestVal > 3) {
-      const target = territories[toIdx];
-      if (target.owner === player) {
-        // Merge armies
-        target.army += territories[fromIdx].army - 1;
+      var tgt = territories[toIdx];
+      if (tgt.owner === player) {
+        tgt.army += territories[fromIdx].army - 1;
         territories[fromIdx].army = 1;
         moved = true;
-      } else if (target.owner === -1) {
-        // Claim unclaimed
-        target.owner = player;
-        target.army = territories[fromIdx].army - 1;
+      } else if (tgt.owner === -1) {
+        tgt.owner = player;
+        tgt.army = territories[fromIdx].army - 1;
         territories[fromIdx].army = 1;
         moved = true;
       } else {
-        // Attack! Start battle
         battle.attacker = player;
-        battle.defender = target.owner;
+        battle.defender = tgt.owner;
         battle.attackerArmy = territories[fromIdx].army - 1;
-        battle.defenderArmy = target.army + (target.hasFort ? 2 : 0);
+        battle.defenderArmy = tgt.army + (tgt.hasFort ? 2 : 0);
         battle.attackerTerr = fromIdx;
         battle.defenderTerr = toIdx;
         territories[fromIdx].army = 1;
-        // Auto-resolve AI battles (simplified)
-        const atkPower = battle.attackerArmy * (1 + difficulty * 0.15);
-        const defPower = battle.defenderArmy;
+        var atkPower = battle.attackerArmy * (1 + difficulty * 0.15);
+        var defPower = battle.defenderArmy * conScale(); // CON helps defense
         if (atkPower > defPower * 0.8) {
-          // AI wins
-          target.owner = player;
-          target.army = Math.max(1, Math.floor(battle.attackerArmy - defPower * 0.5));
-          showMessage(FACTION_NAMES[player] + ' captures ' + target.name + '!', 2);
+          tgt.owner = player;
+          tgt.army = Math.max(1, Math.floor(battle.attackerArmy - defPower * 0.5));
+          showMessage(FACTION_NAMES[player] + ' captures ' + tgt.name + '!', 2);
         } else {
-          // AI loses
-          target.army = Math.max(1, Math.floor(battle.defenderArmy - battle.attackerArmy * 0.5));
-          showMessage(FACTION_NAMES[player] + ' repelled at ' + target.name + '!', 2);
+          tgt.army = Math.max(1, Math.floor(battle.defenderArmy - battle.attackerArmy * 0.5));
+          showMessage(FACTION_NAMES[player] + ' repelled at ' + tgt.name + '!', 2);
+          totalScore += Math.floor(20 * statScoreMult()); // INT-boosted score for defense
+          addScorePopup(tgt.cx, tgt.cy - 20, '+' + Math.floor(20 * statScoreMult()), '#44dd88');
         }
         moved = true;
       }
     } else {
-      moved = true; // No good move found, skip
+      moved = true;
     }
   }
 }
 
 function endTurn() {
-  // Collect income
   gold[currentPlayer] += calcIncome(currentPlayer);
 
-  // Check victory
-  const winner = checkVictory();
+  var winner = checkVictory();
   if (winner >= 0) {
     state = winner === 0 ? 'victory' : 'gameover';
+    if (winner === 0) totalScore += Math.floor(500 * statScoreMult());
     TAS.audio.playTone(winner === 0 ? 440 : 220, 0.5, 'square', 0.1);
     return;
   }
 
-  // Switch player
   currentPlayer = 1 - currentPlayer;
   if (currentPlayer === 0) turnNumber++;
   selectedTerritory = -1;
   moveTarget = -1;
   reinforceMode = false;
 
-  // Weather (10% chance per turn)
-  if (Math.random() < 0.1 && weatherTimer <= 0) {
-    weatherEvent = Math.random() < 0.5 ? 'storm' : 'drought';
-    weatherTimer = 2; // lasts 2 turns
-    showMessage('Weather: ' + (weatherEvent === 'storm' ? 'STORM - no movement!' : 'DROUGHT - reduced income!'), 3);
+  // Weather (expanded with Tasern events)
+  if (Math.random() < 0.12 && weatherTimer <= 0) {
+    var roll = Math.random();
+    if (roll < 0.3) {
+      weatherEvent = 'storm';
+      showMessage('STORM -- no movement this turn!', 3);
+    } else if (roll < 0.55) {
+      weatherEvent = 'drought';
+      showMessage('DROUGHT -- reduced income!', 3);
+    } else if (roll < 0.8) {
+      weatherEvent = 'spore_bloom';
+      showMessage('SPORE BLOOM -- Spore units heal! WIS: ' + statB.wis, 3);
+    } else {
+      weatherEvent = 'meltdown';
+      showMessage('REACTOR MELTDOWN -- hazard zones deal damage!', 3);
+    }
+    weatherTimer = 2;
   } else if (weatherTimer > 0) {
     weatherTimer--;
     if (weatherTimer <= 0) {
@@ -397,7 +444,7 @@ function endTurn() {
 
   // Train
   if (!train.active && Math.random() < 0.25) {
-    const route = trainRoutes[TAS.math.randInt(0, trainRoutes.length - 1)];
+    var route = trainRoutes[TAS.math.randInt(0, trainRoutes.length - 1)];
     train.from = route[0];
     train.to = route[1];
     train.progress = 0;
@@ -418,10 +465,10 @@ function endTurn() {
   saveCampaign();
 }
 
-// === BATTLE INIT ===
+// === BATTLE INIT (Pass 2: new unit types) ===
 function initBattle(attackerTerr, defenderTerr) {
-  const at = territories[attackerTerr];
-  const dt = territories[defenderTerr];
+  var at = territories[attackerTerr];
+  var dt = territories[defenderTerr];
 
   battle.attacker = at.owner;
   battle.defender = dt.owner;
@@ -430,43 +477,102 @@ function initBattle(attackerTerr, defenderTerr) {
   battle.attackerTerr = attackerTerr;
   battle.defenderTerr = defenderTerr;
   at.army = 1;
+  battle.battlefieldType = dt.terrain || 'plains';
 
-  // Create units
   battle.units = [];
   battle.enemyUnits = [];
   battle.activeUnit = 0;
   battle.cannonAngle = 45;
   battle.battleTimer = 0;
   battle.result = '';
+  battle.bossActive = false;
+  battle.boss = null;
 
-  // Player units (left side)
-  const atkCount = battle.attackerArmy;
-  for (let i = 0; i < Math.min(atkCount, 3); i++) {
-    battle.units.push({ type: 'infantry', x: 30 + i * 20, y: 230, hp: 3, vx: 0, attacking: false, atkCd: 0 });
+  // Player units (Spore faction types) -- STR/DEX/CON applied
+  var atkCount = battle.attackerArmy;
+  var baseHP = Math.ceil(3 * conScale()); // CON -> HP
+  for (var i = 0; i < Math.min(atkCount, 3); i++) {
+    battle.units.push({
+      type: 'infantry', x: 30 + i * 20, y: 230,
+      hp: baseHP, maxHp: baseHP, vx: 0, attacking: false, atkCd: 0
+    });
   }
   if (atkCount > 3) {
-    battle.units.push({ type: 'cavalry', x: 10, y: 230, hp: 2, vx: 0, charging: false, chargeCd: 60 });
+    // Sporewalker (shaman-type, WIS-based healing aura)
+    var shamanHP = Math.ceil(2 * conScale());
+    battle.units.push({
+      type: 'shaman', x: 15, y: 210,
+      hp: shamanHP, maxHp: shamanHP, healCd: 3 * wisScale(), healRadius: 60
+    });
+  }
+  if (atkCount > 4) {
+    battle.units.push({
+      type: 'cavalry', x: 10, y: 230,
+      hp: Math.ceil(2 * conScale()), maxHp: Math.ceil(2 * conScale()),
+      vx: 0, charging: false, chargeCd: Math.floor(60 * wisScale()) // WIS -> cooldowns
+    });
   }
   if (atkCount > 5) {
-    battle.units.push({ type: 'cannon', x: 20, y: 200, hp: 2, angle: 45, shells: [] });
+    battle.units.push({
+      type: 'cannon', x: 20, y: 200,
+      hp: Math.ceil(2 * conScale()), maxHp: Math.ceil(2 * conScale()),
+      angle: 45, shells: []
+    });
   }
 
-  // Enemy units (right side)
-  const defCount = battle.defenderArmy;
-  for (let i = 0; i < Math.min(defCount, 3); i++) {
-    battle.enemyUnits.push({ type: 'infantry', x: 420 - i * 20, y: 230, hp: 3, vx: 0, attacking: false, atkCd: 0 });
+  // Enemy units (Reactor faction types)
+  var defCount = battle.defenderArmy;
+  for (var j = 0; j < Math.min(defCount, 3); j++) {
+    battle.enemyUnits.push({
+      type: 'infantry', x: 420 - j * 20, y: 230,
+      hp: 3, maxHp: 3, vx: 0, attacking: false, atkCd: 0
+    });
   }
   if (defCount > 3) {
-    battle.enemyUnits.push({ type: 'cavalry', x: 460, y: 230, hp: 2, vx: 0, charging: false, chargeCd: TAS.math.randInt(60, 120) });
+    // Flame Knight (heavy melee)
+    battle.enemyUnits.push({
+      type: 'flame_knight', x: 440, y: 230,
+      hp: 5, maxHp: 5, vx: 0, atkCd: 0, enraged: false
+    });
+  }
+  if (defCount > 4) {
+    battle.enemyUnits.push({
+      type: 'cavalry', x: 460, y: 230,
+      hp: 2, maxHp: 2, vx: 0, charging: false,
+      chargeCd: TAS.math.randInt(60, 120)
+    });
   }
   if (defCount > 5) {
-    battle.enemyUnits.push({ type: 'cannon', x: 450, y: 200, hp: 2, angle: 135, shells: [] });
+    battle.enemyUnits.push({
+      type: 'cannon', x: 450, y: 200,
+      hp: 2, maxHp: 2, angle: 135, shells: []
+    });
   }
 
-  // Terrain features
+  // Boss battle trigger: every 4 turns on hard, or when attacking a fort
+  if ((turnNumber > 0 && turnNumber % 4 === 0 && difficulty >= 2) || dt.hasFort) {
+    battle.bossActive = true;
+    battle.boss = {
+      type: dt.terrain === 'volcanic' ? 'molten_golem' : 'spore_titan',
+      x: 360, y: 200, hp: 12 + difficulty * 4, maxHp: 12 + difficulty * 4,
+      phase: 0, atkCd: 2, moveTimer: 0, enraged: false
+    };
+  }
+
+  // Terrain features (themed by battlefield)
   battle.terrain = [];
-  if (Math.random() > 0.4) battle.terrain.push({ type: 'hill', x: TAS.math.randInt(150, 320), w: 60, h: 20 });
-  if (Math.random() > 0.5) battle.terrain.push({ type: 'river', x: TAS.math.randInt(180, 280), w: 30 });
+  if (battle.battlefieldType === 'volcanic' || battle.battlefieldType === 'scorched') {
+    battle.terrain.push({ type: 'lava_pool', x: TAS.math.randInt(150, 320), w: 40 });
+    if (Math.random() > 0.4) battle.terrain.push({ type: 'hill', x: TAS.math.randInt(200, 350), w: 50, h: 18 });
+  } else if (battle.battlefieldType === 'fungal' || battle.battlefieldType === 'swamp') {
+    battle.terrain.push({ type: 'spore_cloud', x: TAS.math.randInt(160, 300), w: 50 });
+    if (Math.random() > 0.5) battle.terrain.push({ type: 'river', x: TAS.math.randInt(180, 280), w: 30 });
+  } else if (battle.battlefieldType === 'industrial') {
+    battle.terrain.push({ type: 'barricade', x: TAS.math.randInt(180, 300), w: 20, h: 30 });
+  } else {
+    if (Math.random() > 0.4) battle.terrain.push({ type: 'hill', x: TAS.math.randInt(150, 320), w: 60, h: 20 });
+    if (Math.random() > 0.5) battle.terrain.push({ type: 'river', x: TAS.math.randInt(180, 280), w: 30 });
+  }
 
   state = 'battle';
   TAS.audio.playTone(220, 0.3, 'sawtooth', 0.08);
@@ -474,17 +580,23 @@ function initBattle(attackerTerr, defenderTerr) {
 
 // === SIEGE INIT ===
 function initSiege(attackerTerr, defenderTerr) {
-  siege.player = { x: 20, y: 240, vy: 0, facing: 1, hp: 3, attacking: false, atkTimer: 0, grounded: true };
+  var sHP = 3 + statB.lives + Math.floor((statB.con - 10) * 0.2); // CON + lives bonus
+  siege.player = { x: 20, y: 240, vy: 0, facing: 1, hp: sHP, maxHp: sHP, attacking: false, atkTimer: 0, grounded: true };
   siege.enemies = [];
   siege.traps = [];
   siege.screen = 0;
-  siege.timer = 30;
+  siege.timer = 30 + Math.floor(statB.wis * 0.3); // WIS extends timer
   siege.flagX = 440;
   siege.result = '';
+  battle.attackerTerr = attackerTerr;
+  battle.defenderTerr = defenderTerr;
+  battle.attacker = territories[attackerTerr].owner;
+  battle.defender = territories[defenderTerr].owner;
+  battle.attackerArmy = territories[attackerTerr].army - 1;
+  battle.defenderArmy = territories[defenderTerr].army + 2;
+  territories[attackerTerr].army = 1;
 
-  // Generate enemies for screen 0
   generateSiegeScreen(0);
-
   state = 'siege';
   TAS.audio.playTone(330, 0.2, 'square', 0.08);
 }
@@ -492,21 +604,23 @@ function initSiege(attackerTerr, defenderTerr) {
 function generateSiegeScreen(scr) {
   siege.enemies = [];
   siege.traps = [];
-  const count = 2 + scr + difficulty;
-  for (let i = 0; i < count; i++) {
+  var count = 2 + scr + difficulty;
+  for (var i = 0; i < count; i++) {
+    var etype = (scr >= 2 && i === count - 1) ? 'heavy' : 'normal';
     siege.enemies.push({
       x: 120 + i * (300 / count),
       y: 240,
-      hp: 1 + Math.floor(scr / 2),
+      hp: etype === 'heavy' ? 3 + difficulty : 1 + Math.floor(scr / 2),
+      maxHp: etype === 'heavy' ? 3 + difficulty : 1 + Math.floor(scr / 2),
       dir: Math.random() > 0.5 ? 1 : -1,
       speed: 0.5 + difficulty * 0.3 + scr * 0.2,
-      atkCd: 0
+      atkCd: 0,
+      type: etype
     });
   }
-  // Traps
   if (scr > 0) {
-    for (let i = 0; i < scr; i++) {
-      const tx = 150 + i * 100 + TAS.math.randInt(-20, 20);
+    for (var j = 0; j < scr; j++) {
+      var tx = 150 + j * 100 + TAS.math.randInt(-20, 20);
       siege.traps.push({
         type: Math.random() > 0.5 ? 'spikes' : 'rocks',
         x: tx, y: siege.traps.length % 2 === 0 ? 240 : 100,
@@ -524,8 +638,17 @@ function update(dt) {
 
   if (messageTimer > 0) messageTimer -= dt;
 
+  // Update score popups
+  for (var sp = scorePopups.length - 1; sp >= 0; sp--) {
+    scorePopups[sp].y += scorePopups[sp].vy * dt;
+    scorePopups[sp].life -= dt;
+    if (scorePopups[sp].life <= 0) scorePopups.splice(sp, 1);
+  }
+
   if (state === 'title') {
     updateTitle(dt);
+  } else if (state === 'tutorial') {
+    updateTutorial(dt);
   } else if (state === 'strategic') {
     updateStrategic(dt);
   } else if (state === 'battle') {
@@ -546,56 +669,64 @@ function update(dt) {
 
 function updateTitle(dt) {
   if (keyPressed('ArrowUp') || keyPressed('w')) {
-    menuChoice = (menuChoice - 1 + 4) % 4;
+    menuChoice = (menuChoice - 1 + 5) % 5;
     TAS.audio.playTone(330, 0.05, 'square', 0.05);
   }
   if (keyPressed('ArrowDown') || keyPressed('s')) {
-    menuChoice = (menuChoice + 1) % 4;
+    menuChoice = (menuChoice + 1) % 5;
     TAS.audio.playTone(330, 0.05, 'square', 0.05);
   }
   if (keyPressed('Enter') || keyPressed(' ') || TAS.input.touch.a) {
     TAS.audio.playTone(440, 0.1, 'square', 0.08);
-    if (menuChoice === 0) { // New Game Easy
-      difficulty = 0; twoPlayer = false; startNewGame();
-    } else if (menuChoice === 1) { // New Game Medium
-      difficulty = 1; twoPlayer = false; startNewGame();
-    } else if (menuChoice === 2) { // New Game Hard
-      difficulty = 2; twoPlayer = false; startNewGame();
-    } else if (menuChoice === 3) { // 2 Player
-      difficulty = 1; twoPlayer = true; startNewGame();
-    }
+    if (menuChoice === 0) { difficulty = 0; twoPlayer = false; startNewGame(); }
+    else if (menuChoice === 1) { difficulty = 1; twoPlayer = false; startNewGame(); }
+    else if (menuChoice === 2) { difficulty = 2; twoPlayer = false; startNewGame(); }
+    else if (menuChoice === 3) { difficulty = 1; twoPlayer = true; startNewGame(); }
+    else if (menuChoice === 4) { state = 'tutorial'; tutorialPage = 0; }
   }
-  // Check click on menu items
   if (clicked) {
-    const my = clickY;
-    if (my > 140 && my < 165) { menuChoice = 0; difficulty = 0; twoPlayer = false; startNewGame(); }
-    else if (my > 170 && my < 195) { menuChoice = 1; difficulty = 1; twoPlayer = false; startNewGame(); }
-    else if (my > 200 && my < 225) { menuChoice = 2; difficulty = 2; twoPlayer = false; startNewGame(); }
-    else if (my > 230 && my < 255) { menuChoice = 3; difficulty = 1; twoPlayer = true; startNewGame(); }
+    var my = clickY;
+    if (my > 150 && my < 170) { menuChoice = 0; difficulty = 0; twoPlayer = false; startNewGame(); }
+    else if (my > 174 && my < 194) { menuChoice = 1; difficulty = 1; twoPlayer = false; startNewGame(); }
+    else if (my > 198 && my < 218) { menuChoice = 2; difficulty = 2; twoPlayer = false; startNewGame(); }
+    else if (my > 222 && my < 242) { menuChoice = 3; difficulty = 1; twoPlayer = true; startNewGame(); }
+    else if (my > 246 && my < 266) { menuChoice = 4; state = 'tutorial'; tutorialPage = 0; }
+  }
+}
+
+// === TUTORIAL (Pass 3) ===
+function updateTutorial(dt) {
+  if (keyPressed('ArrowRight') || keyPressed('d') || keyPressed(' ') || keyPressed('Enter') || TAS.input.touch.a) {
+    tutorialPage++;
+    if (tutorialPage >= 4) { state = 'title'; tutorialPage = 0; }
+    TAS.audio.playTone(440, 0.05, 'square', 0.04);
+  }
+  if (keyPressed('ArrowLeft') || keyPressed('a')) {
+    if (tutorialPage > 0) tutorialPage--;
+    TAS.audio.playTone(330, 0.05, 'square', 0.04);
+  }
+  if (keyPressed('Escape')) { state = 'title'; }
+  if (clicked) {
+    tutorialPage++;
+    if (tutorialPage >= 4) { state = 'title'; tutorialPage = 0; }
   }
 }
 
 function updateStrategic(dt) {
-  // Train movement
   if (train.active) {
     train.progress += dt * 0.3;
-    if (train.progress >= 1) {
-      train.active = false;
-    }
+    if (train.progress >= 1) train.active = false;
   }
 
-  // Handle click on territory
   if (clicked) {
-    const ti = getTerrAtPos(clickX, clickY);
+    var ti = getTerrAtPos(clickX, clickY);
 
-    // Check if clicking "End Turn" button
     if (clickX > 390 && clickX < 470 && clickY > 290 && clickY < 312) {
       TAS.audio.playTone(330, 0.08, 'square', 0.06);
       endTurn();
       return;
     }
 
-    // Check if clicking "Buy" button (reinforcements)
     if (clickX > 300 && clickX < 380 && clickY > 290 && clickY < 312 && gold[currentPlayer] >= 5) {
       reinforceMode = !reinforceMode;
       TAS.audio.playTone(440, 0.05, 'square', 0.05);
@@ -603,16 +734,17 @@ function updateStrategic(dt) {
       return;
     }
 
-    // Intercept train
     if (train.active && ti >= 0) {
-      const fromT = territories[train.from];
-      const toT = territories[train.to];
-      const trainX = TAS.math.lerp(fromT.cx, toT.cx, train.progress);
-      const trainY = TAS.math.lerp(fromT.cy, toT.cy, train.progress);
+      var fromT = territories[train.from];
+      var toT = territories[train.to];
+      var trainX = TAS.math.lerp(fromT.cx, toT.cx, train.progress);
+      var trainY = TAS.math.lerp(fromT.cy, toT.cy, train.progress);
       if (TAS.math.dist(clickX, clickY, trainX, trainY) < 20 && territories[ti].owner === currentPlayer) {
-        gold[currentPlayer] += train.gold;
+        var trainGold = train.gold + Math.floor(statB.cha * 0.1); // CHA bonus gold
+        gold[currentPlayer] += trainGold;
         train.active = false;
-        showMessage('+' + train.gold + ' gold from train!', 2);
+        showMessage('+' + trainGold + ' gold from supply train!', 2);
+        addScorePopup(trainX, trainY - 20, '+' + trainGold + 'g', '#ffdd44');
         TAS.audio.playTone(660, 0.15, 'square', 0.08);
         return;
       }
@@ -625,10 +757,12 @@ function updateStrategic(dt) {
     }
 
     if (reinforceMode && territories[ti].owner === currentPlayer && gold[currentPlayer] >= 5) {
-      territories[ti].army += 1;
+      var recruits = 1 + statRecruitBonus(); // CHA 15+ = +1
+      territories[ti].army += recruits;
       gold[currentPlayer] -= 5;
       TAS.audio.playTone(550, 0.1, 'square', 0.06);
-      showMessage(territories[ti].name + ' reinforced!', 1.5);
+      showMessage(territories[ti].name + ' reinforced! (+' + recruits + ')', 1.5);
+      addScorePopup(territories[ti].cx, territories[ti].cy - 30, '+' + recruits, FACTION_COLORS[currentPlayer]);
       TAS.particles.spawn(territories[ti].cx, territories[ti].cy, FACTION_COLORS[currentPlayer], 8, 2);
       if (gold[currentPlayer] < 5) reinforceMode = false;
       return;
@@ -637,19 +771,17 @@ function updateStrategic(dt) {
     reinforceMode = false;
 
     if (selectedTerritory < 0) {
-      // Select own territory
       if (territories[ti].owner === currentPlayer && territories[ti].army > 1) {
         selectedTerritory = ti;
         TAS.audio.playTone(440, 0.05, 'square', 0.04);
       }
     } else {
-      // Try to move to target
-      const src = territories[selectedTerritory];
+      var src = territories[selectedTerritory];
       if (ti === selectedTerritory) {
         selectedTerritory = -1;
         return;
       }
-      if (!src.adjacent.includes(ti)) {
+      if (src.adjacent.indexOf(ti) === -1) {
         showMessage('Not adjacent!', 1.5);
         selectedTerritory = -1;
         return;
@@ -660,26 +792,25 @@ function updateStrategic(dt) {
         return;
       }
 
-      const target = territories[ti];
+      var target = territories[ti];
       if (target.owner === currentPlayer) {
-        // Merge armies
         target.army += src.army - 1;
         src.army = 1;
         selectedTerritory = -1;
         TAS.audio.playTone(330, 0.08, 'square', 0.05);
         endTurn();
       } else if (target.owner === -1) {
-        // Claim neutral
         target.owner = currentPlayer;
         target.army = src.army - 1;
         src.army = 1;
         selectedTerritory = -1;
         showMessage(target.name + ' claimed!', 2);
+        totalScore += Math.floor(30 * statScoreMult());
+        addScorePopup(target.cx, target.cy - 30, '+' + Math.floor(30 * statScoreMult()), '#44dd88');
         TAS.audio.playTone(550, 0.15, 'square', 0.08);
         TAS.particles.spawn(target.cx, target.cy, FACTION_COLORS[currentPlayer], 12, 3);
         endTurn();
       } else {
-        // Attack!
         if (target.hasFort) {
           initSiege(selectedTerritory, ti);
         } else {
@@ -690,10 +821,7 @@ function updateStrategic(dt) {
     }
   }
 
-  // Keyboard shortcuts
-  if (keyPressed('e') || keyPressed('E')) {
-    endTurn();
-  }
+  if (keyPressed('e') || keyPressed('E')) endTurn();
   if (keyPressed('r') || keyPressed('R')) {
     if (gold[currentPlayer] >= 5) {
       reinforceMode = !reinforceMode;
@@ -705,63 +833,111 @@ function updateStrategic(dt) {
 function updateBattle(dt) {
   battle.battleTimer += dt;
 
-  // Player controls
-  const keys = TAS.input.keys;
-  const touch = TAS.input.touch;
+  var keys = TAS.input.keys;
+  var touch = TAS.input.touch;
 
   if (battle.units.length > 0) {
-    const active = battle.units[battle.activeUnit % battle.units.length];
+    var active = battle.units[battle.activeUnit % battle.units.length];
 
     if (active) {
+      var moveSpeed = 80 * dexScale(); // DEX -> speed
       if (active.type === 'infantry') {
-        if (keys['ArrowLeft'] || keys['a'] || touch.left) active.x -= 80 * dt;
-        if (keys['ArrowRight'] || keys['d'] || touch.right) active.x += 80 * dt;
+        if (keys['ArrowLeft'] || keys['a'] || touch.left) active.x -= moveSpeed * dt;
+        if (keys['ArrowRight'] || keys['d'] || touch.right) active.x += moveSpeed * dt;
         if ((keys[' '] || keys['z'] || touch.a) && active.atkCd <= 0) {
           active.attacking = true;
-          active.atkCd = 0.5;
+          active.atkCd = 0.5 * wisScale(); // WIS -> faster cooldown
           TAS.audio.playTone(200, 0.08, 'sawtooth', 0.06);
         }
+      } else if (active.type === 'shaman') {
+        // Shaman: move and heal nearby allies
+        if (keys['ArrowLeft'] || keys['a'] || touch.left) active.x -= moveSpeed * 0.7 * dt;
+        if (keys['ArrowRight'] || keys['d'] || touch.right) active.x += moveSpeed * 0.7 * dt;
+        if (active.healCd <= 0) {
+          // Auto-heal nearby allies
+          for (var hi = 0; hi < battle.units.length; hi++) {
+            var hu = battle.units[hi];
+            if (hu !== active && Math.abs(hu.x - active.x) < active.healRadius && hu.hp < hu.maxHp) {
+              hu.hp = Math.min(hu.maxHp, hu.hp + 1);
+              TAS.particles.spawn(hu.x, hu.y - 10, '#44ffaa', 5, 2);
+              addScorePopup(hu.x, hu.y - 30, '+1HP', '#44ffaa');
+            }
+          }
+          active.healCd = 3 * wisScale();
+          TAS.audio.playTone(550, 0.1, 'sine', 0.06);
+        }
+        active.healCd -= dt;
       } else if (active.type === 'cannon') {
         if (keys['ArrowUp'] || keys['w'] || touch.up) battle.cannonAngle = Math.max(20, battle.cannonAngle - 60 * dt);
         if (keys['ArrowDown'] || keys['s'] || touch.down) battle.cannonAngle = Math.min(70, battle.cannonAngle + 60 * dt);
         if ((keys[' '] || keys['z'] || touch.a) && active.shells.length < 3) {
-          const rad = battle.cannonAngle * Math.PI / 180;
+          var rad = battle.cannonAngle * Math.PI / 180;
           active.shells.push({ x: active.x + 10, y: active.y - 10, vx: Math.cos(rad) * 200, vy: -Math.sin(rad) * 200 });
           TAS.audio.playNoise(0.2, 0.1, 800);
         }
       }
-      // Cavalry auto-charges
       if (active.type === 'cavalry') {
         if (active.chargeCd > 0) active.chargeCd -= dt * 60;
         if (!active.charging && active.chargeCd <= 0) {
           active.charging = true;
-          active.vx = 150;
+          active.vx = 150 * dexScale(); // DEX -> charge speed
         }
       }
     }
 
-    // Switch unit
     if (keyPressed('b') || keyPressed('x') || TAS.input.touch.b) {
       battle.activeUnit = (battle.activeUnit + 1) % battle.units.length;
       TAS.audio.playTone(550, 0.05, 'square', 0.04);
     }
   }
 
+  // Hazard terrain damage
+  for (var ht = 0; ht < battle.terrain.length; ht++) {
+    var hazTerr = battle.terrain[ht];
+    if (hazTerr.type === 'lava_pool') {
+      // Damage units standing in lava
+      for (var lu = battle.units.length - 1; lu >= 0; lu--) {
+        if (battle.units[lu].x > hazTerr.x && battle.units[lu].x < hazTerr.x + hazTerr.w && frame % 60 === 0) {
+          battle.units[lu].hp -= 1;
+          addScorePopup(battle.units[lu].x, battle.units[lu].y - 20, 'BURN!', '#ff4400');
+          TAS.particles.spawn(battle.units[lu].x, battle.units[lu].y, '#ff6600', 4, 1);
+        }
+      }
+      for (var le = battle.enemyUnits.length - 1; le >= 0; le--) {
+        if (battle.enemyUnits[le].x > hazTerr.x && battle.enemyUnits[le].x < hazTerr.x + hazTerr.w && frame % 60 === 0) {
+          battle.enemyUnits[le].hp -= 1;
+        }
+      }
+    }
+    if (hazTerr.type === 'spore_cloud' && weatherEvent === 'spore_bloom') {
+      // Heal Spore units in cloud
+      for (var su = 0; su < battle.units.length; su++) {
+        if (battle.attacker === 0 && battle.units[su].x > hazTerr.x && battle.units[su].x < hazTerr.x + hazTerr.w && frame % 90 === 0) {
+          battle.units[su].hp = Math.min(battle.units[su].maxHp, battle.units[su].hp + 1);
+          TAS.particles.spawn(battle.units[su].x, battle.units[su].y - 10, '#44ff88', 3, 1);
+        }
+      }
+    }
+  }
+
   // Update player units
-  for (let i = battle.units.length - 1; i >= 0; i--) {
-    const u = battle.units[i];
+  var atkDmg = Math.ceil(1 * strScale()); // STR -> attack damage
+  for (var i = battle.units.length - 1; i >= 0; i--) {
+    var u = battle.units[i];
     u.x = TAS.math.clamp(u.x, 5, GW - 5);
     if (u.atkCd > 0) u.atkCd -= dt;
     if (u.type === 'cavalry' && u.charging) {
       u.x += u.vx * dt;
-      if (u.x > GW - 20) { u.charging = false; u.chargeCd = 90; u.x = 10; }
-      // Hit enemies
-      for (let j = battle.enemyUnits.length - 1; j >= 0; j--) {
+      if (u.x > GW - 20) { u.charging = false; u.chargeCd = Math.floor(90 * wisScale()); u.x = 10; }
+      for (var j = battle.enemyUnits.length - 1; j >= 0; j--) {
         if (Math.abs(u.x - battle.enemyUnits[j].x) < 15 && Math.abs(u.y - battle.enemyUnits[j].y) < 20) {
-          battle.enemyUnits[j].hp -= 2;
+          battle.enemyUnits[j].hp -= Math.ceil(2 * strScale()); // STR
           TAS.fx.shake(3);
           TAS.audio.playTone(150, 0.1, 'sawtooth', 0.08);
           if (battle.enemyUnits[j].hp <= 0) {
+            var killScore = Math.floor(15 * statScoreMult());
+            totalScore += killScore;
+            addScorePopup(battle.enemyUnits[j].x, battle.enemyUnits[j].y - 20, '+' + killScore, '#ffdd44');
             TAS.particles.spawn(battle.enemyUnits[j].x, battle.enemyUnits[j].y, FACTION_COLORS[battle.defender], 10, 3);
             battle.enemyUnits.splice(j, 1);
           }
@@ -769,43 +945,51 @@ function updateBattle(dt) {
       }
     }
     if (u.type === 'cannon' && u.shells) {
-      for (let s = u.shells.length - 1; s >= 0; s--) {
-        const sh = u.shells[s];
+      for (var s = u.shells.length - 1; s >= 0; s--) {
+        var sh = u.shells[s];
         sh.x += sh.vx * dt;
-        sh.vy += 300 * dt; // gravity
+        sh.vy += 300 * dt;
         sh.y += sh.vy * dt;
         if (sh.y > 260 || sh.x > GW || sh.x < 0) {
           TAS.particles.spawn(sh.x, Math.min(sh.y, 255), '#ff8800', 6, 2);
           u.shells.splice(s, 1);
           continue;
         }
-        // Hit enemy
-        for (let j = battle.enemyUnits.length - 1; j >= 0; j--) {
-          if (TAS.math.dist(sh.x, sh.y, battle.enemyUnits[j].x, battle.enemyUnits[j].y) < 20) {
-            battle.enemyUnits[j].hp -= 3;
+        for (var j2 = battle.enemyUnits.length - 1; j2 >= 0; j2--) {
+          if (TAS.math.dist(sh.x, sh.y, battle.enemyUnits[j2].x, battle.enemyUnits[j2].y) < 20) {
+            battle.enemyUnits[j2].hp -= Math.ceil(3 * strScale()); // STR -> cannon damage
             TAS.fx.shake(4);
             TAS.audio.playNoise(0.15, 0.08, 400);
             TAS.particles.spawn(sh.x, sh.y, '#ffaa00', 12, 4);
             u.shells.splice(s, 1);
-            if (battle.enemyUnits[j].hp <= 0) {
-              TAS.particles.spawn(battle.enemyUnits[j].x, battle.enemyUnits[j].y, FACTION_COLORS[battle.defender], 10, 3);
-              battle.enemyUnits.splice(j, 1);
+            if (battle.enemyUnits[j2].hp <= 0) {
+              var cscore = Math.floor(20 * statScoreMult());
+              totalScore += cscore;
+              addScorePopup(battle.enemyUnits[j2].x, battle.enemyUnits[j2].y - 20, '+' + cscore, '#ffdd44');
+              TAS.particles.spawn(battle.enemyUnits[j2].x, battle.enemyUnits[j2].y, FACTION_COLORS[battle.defender], 10, 3);
+              battle.enemyUnits.splice(j2, 1);
             }
             break;
           }
         }
       }
     }
-    // Infantry attack hits
     if (u.type === 'infantry' && u.attacking) {
       u.attacking = false;
-      for (let j = battle.enemyUnits.length - 1; j >= 0; j--) {
-        if (Math.abs(u.x - battle.enemyUnits[j].x) < 25 && Math.abs(u.y - battle.enemyUnits[j].y) < 20) {
-          battle.enemyUnits[j].hp -= 1;
-          TAS.fx.shake(2);
-          if (battle.enemyUnits[j].hp <= 0) {
-            TAS.particles.spawn(battle.enemyUnits[j].x, battle.enemyUnits[j].y, FACTION_COLORS[battle.defender], 10, 3);
-            battle.enemyUnits.splice(j, 1);
+      // Crit chance from luck/CHA
+      var crit = Math.random() < statLuckBonus();
+      var dmg = crit ? atkDmg * 2 : atkDmg;
+      for (var j3 = battle.enemyUnits.length - 1; j3 >= 0; j3--) {
+        if (Math.abs(u.x - battle.enemyUnits[j3].x) < 25 && Math.abs(u.y - battle.enemyUnits[j3].y) < 20) {
+          battle.enemyUnits[j3].hp -= dmg;
+          TAS.fx.shake(crit ? 4 : 2);
+          if (crit) addScorePopup(battle.enemyUnits[j3].x, battle.enemyUnits[j3].y - 25, 'CRIT!', '#ff44ff');
+          if (battle.enemyUnits[j3].hp <= 0) {
+            var iscore = Math.floor(10 * statScoreMult());
+            totalScore += iscore;
+            addScorePopup(battle.enemyUnits[j3].x, battle.enemyUnits[j3].y - 20, '+' + iscore, '#ffdd44');
+            TAS.particles.spawn(battle.enemyUnits[j3].x, battle.enemyUnits[j3].y, FACTION_COLORS[battle.defender], 10, 3);
+            battle.enemyUnits.splice(j3, 1);
           }
           break;
         }
@@ -819,30 +1003,58 @@ function updateBattle(dt) {
   }
 
   // Update enemy AI units
-  for (let i = battle.enemyUnits.length - 1; i >= 0; i--) {
-    const e = battle.enemyUnits[i];
+  for (var ie = battle.enemyUnits.length - 1; ie >= 0; ie--) {
+    var e = battle.enemyUnits[ie];
     if (e.atkCd > 0) e.atkCd -= dt;
 
     if (e.type === 'infantry') {
-      // Move toward nearest player unit
-      let nearest = null, minD = 9999;
-      for (const u of battle.units) {
-        const d = Math.abs(u.x - e.x);
-        if (d < minD) { minD = d; nearest = u; }
+      var nearest = null, minD = 9999;
+      for (var pu = 0; pu < battle.units.length; pu++) {
+        var d = Math.abs(battle.units[pu].x - e.x);
+        if (d < minD) { minD = d; nearest = battle.units[pu]; }
       }
       if (nearest) {
-        const speed = (40 + difficulty * 15) * dt;
+        var speed = (40 + difficulty * 15) * dt;
         if (e.x > nearest.x + 20) e.x -= speed;
         else if (e.x < nearest.x - 20) e.x += speed;
         else if (e.atkCd <= 0) {
-          // Attack
           e.atkCd = 0.8 - difficulty * 0.15;
           nearest.hp -= 1;
           TAS.audio.playTone(180, 0.06, 'sawtooth', 0.04);
           if (nearest.hp <= 0) {
             TAS.particles.spawn(nearest.x, nearest.y, FACTION_COLORS[battle.attacker], 8, 2);
-            const idx = battle.units.indexOf(nearest);
+            var idx = battle.units.indexOf(nearest);
             if (idx >= 0) battle.units.splice(idx, 1);
+            if (battle.activeUnit >= battle.units.length) battle.activeUnit = 0;
+          }
+        }
+      }
+    } else if (e.type === 'flame_knight') {
+      // Flame Knight: heavy melee, enrages at low HP
+      if (e.hp <= e.maxHp * 0.4 && !e.enraged) {
+        e.enraged = true;
+        TAS.particles.spawn(e.x, e.y, '#ff4400', 12, 3);
+        addScorePopup(e.x, e.y - 30, 'ENRAGED!', '#ff4400');
+      }
+      var fkNearest = null, fkMinD = 9999;
+      for (var fk = 0; fk < battle.units.length; fk++) {
+        var fkd = Math.abs(battle.units[fk].x - e.x);
+        if (fkd < fkMinD) { fkMinD = fkd; fkNearest = battle.units[fk]; }
+      }
+      if (fkNearest) {
+        var fkSpeed = (e.enraged ? 65 : 35) * dt + difficulty * 8 * dt;
+        if (e.x > fkNearest.x + 15) e.x -= fkSpeed;
+        else if (e.x < fkNearest.x - 15) e.x += fkSpeed;
+        else if (e.atkCd <= 0) {
+          e.atkCd = e.enraged ? 0.4 : 0.7;
+          var fkDmg = e.enraged ? 3 : 2;
+          fkNearest.hp -= fkDmg;
+          TAS.fx.shake(3);
+          TAS.audio.playTone(140, 0.1, 'sawtooth', 0.08);
+          if (fkNearest.hp <= 0) {
+            TAS.particles.spawn(fkNearest.x, fkNearest.y, FACTION_COLORS[battle.attacker], 10, 3);
+            var fkIdx = battle.units.indexOf(fkNearest);
+            if (fkIdx >= 0) battle.units.splice(fkIdx, 1);
             if (battle.activeUnit >= battle.units.length) battle.activeUnit = 0;
           }
         }
@@ -856,13 +1068,13 @@ function updateBattle(dt) {
       if (e.charging) {
         e.x += e.vx * dt;
         if (e.x < 20) { e.charging = false; e.chargeCd = 80; e.x = 460; }
-        for (let j = battle.units.length - 1; j >= 0; j--) {
-          if (Math.abs(e.x - battle.units[j].x) < 15 && Math.abs(e.y - battle.units[j].y) < 20) {
-            battle.units[j].hp -= 2;
+        for (var ce = battle.units.length - 1; ce >= 0; ce--) {
+          if (Math.abs(e.x - battle.units[ce].x) < 15 && Math.abs(e.y - battle.units[ce].y) < 20) {
+            battle.units[ce].hp -= 2;
             TAS.fx.shake(3);
-            if (battle.units[j].hp <= 0) {
-              TAS.particles.spawn(battle.units[j].x, battle.units[j].y, FACTION_COLORS[battle.attacker], 10, 3);
-              battle.units.splice(j, 1);
+            if (battle.units[ce].hp <= 0) {
+              TAS.particles.spawn(battle.units[ce].x, battle.units[ce].y, FACTION_COLORS[battle.attacker], 10, 3);
+              battle.units.splice(ce, 1);
               if (battle.activeUnit >= battle.units.length) battle.activeUnit = 0;
             }
           }
@@ -871,33 +1083,33 @@ function updateBattle(dt) {
     } else if (e.type === 'cannon') {
       if (!e.shells) e.shells = [];
       if (e.atkCd <= 0 && battle.units.length > 0) {
-        const target = battle.units[TAS.math.randInt(0, battle.units.length - 1)];
-        const dx = target.x - e.x;
-        const dy = target.y - e.y;
-        const ang = Math.atan2(-dy, -dx); // reversed - shooting left
-        e.shells.push({ x: e.x - 10, y: e.y - 10, vx: Math.cos(ang) * 180, vy: Math.sin(ang) * 180 - 80 });
+        var ctarget = battle.units[TAS.math.randInt(0, battle.units.length - 1)];
+        var cdx = ctarget.x - e.x;
+        var cdy = ctarget.y - e.y;
+        var cang = Math.atan2(-cdy, -cdx);
+        e.shells.push({ x: e.x - 10, y: e.y - 10, vx: Math.cos(cang) * 180, vy: Math.sin(cang) * 180 - 80 });
         e.atkCd = 2 - difficulty * 0.3;
         TAS.audio.playNoise(0.15, 0.05, 600);
       }
-      for (let s = e.shells.length - 1; s >= 0; s--) {
-        const sh = e.shells[s];
-        sh.x += sh.vx * dt;
-        sh.vy += 300 * dt;
-        sh.y += sh.vy * dt;
-        if (sh.y > 260 || sh.x < 0 || sh.x > GW) {
-          TAS.particles.spawn(sh.x, Math.min(sh.y, 255), '#ff8800', 5, 2);
-          e.shells.splice(s, 1);
+      for (var cs = e.shells.length - 1; cs >= 0; cs--) {
+        var csh = e.shells[cs];
+        csh.x += csh.vx * dt;
+        csh.vy += 300 * dt;
+        csh.y += csh.vy * dt;
+        if (csh.y > 260 || csh.x < 0 || csh.x > GW) {
+          TAS.particles.spawn(csh.x, Math.min(csh.y, 255), '#ff8800', 5, 2);
+          e.shells.splice(cs, 1);
           continue;
         }
-        for (let j = battle.units.length - 1; j >= 0; j--) {
-          if (TAS.math.dist(sh.x, sh.y, battle.units[j].x, battle.units[j].y) < 20) {
-            battle.units[j].hp -= 2;
+        for (var cj = battle.units.length - 1; cj >= 0; cj--) {
+          if (TAS.math.dist(csh.x, csh.y, battle.units[cj].x, battle.units[cj].y) < 20) {
+            battle.units[cj].hp -= 2;
             TAS.fx.shake(4);
-            TAS.particles.spawn(sh.x, sh.y, '#ffaa00', 10, 3);
-            e.shells.splice(s, 1);
-            if (battle.units[j].hp <= 0) {
-              TAS.particles.spawn(battle.units[j].x, battle.units[j].y, FACTION_COLORS[battle.attacker], 8, 2);
-              battle.units.splice(j, 1);
+            TAS.particles.spawn(csh.x, csh.y, '#ffaa00', 10, 3);
+            e.shells.splice(cs, 1);
+            if (battle.units[cj].hp <= 0) {
+              TAS.particles.spawn(battle.units[cj].x, battle.units[cj].y, FACTION_COLORS[battle.attacker], 8, 2);
+              battle.units.splice(cj, 1);
               if (battle.activeUnit >= battle.units.length) battle.activeUnit = 0;
             }
             break;
@@ -905,22 +1117,142 @@ function updateBattle(dt) {
         }
       }
     }
+
+    if (e.hp <= 0) {
+      TAS.particles.spawn(e.x, e.y, FACTION_COLORS[battle.defender], 10, 3);
+      battle.enemyUnits.splice(ie, 1);
+    }
+  }
+
+  // === BOSS UPDATE ===
+  if (battle.bossActive && battle.boss && battle.boss.hp > 0) {
+    var boss = battle.boss;
+    boss.atkCd -= dt;
+    boss.moveTimer += dt;
+
+    // Boss movement: slow drift toward nearest unit
+    var bNearest = null, bMinD = 9999;
+    for (var bi = 0; bi < battle.units.length; bi++) {
+      var bd = Math.abs(battle.units[bi].x - boss.x);
+      if (bd < bMinD) { bMinD = bd; bNearest = battle.units[bi]; }
+    }
+    if (bNearest) {
+      var bSpeed = (20 + difficulty * 5) * dt;
+      if (boss.x > bNearest.x + 30) boss.x -= bSpeed;
+      else if (boss.x < bNearest.x - 30) boss.x += bSpeed;
+    }
+
+    // Enrage at half HP
+    if (boss.hp <= boss.maxHp * 0.5 && !boss.enraged) {
+      boss.enraged = true;
+      boss.phase = 1;
+      TAS.fx.shake(6);
+      TAS.particles.spawn(boss.x, boss.y, '#ff2200', 20, 5);
+      addScorePopup(boss.x, boss.y - 40, 'ENRAGED!', '#ff0000');
+      TAS.audio.playTone(100, 0.3, 'sawtooth', 0.1);
+    }
+
+    // Boss attacks
+    if (boss.atkCd <= 0 && battle.units.length > 0) {
+      if (boss.type === 'molten_golem') {
+        // Ground slam: damage all units within range
+        for (var gs = battle.units.length - 1; gs >= 0; gs--) {
+          if (Math.abs(battle.units[gs].x - boss.x) < 80) {
+            var bDmg = boss.enraged ? 3 : 2;
+            battle.units[gs].hp -= bDmg;
+            TAS.fx.shake(5);
+            if (battle.units[gs].hp <= 0) {
+              TAS.particles.spawn(battle.units[gs].x, battle.units[gs].y, FACTION_COLORS[battle.attacker], 10, 3);
+              battle.units.splice(gs, 1);
+              if (battle.activeUnit >= battle.units.length) battle.activeUnit = 0;
+            }
+          }
+        }
+        TAS.particles.spawn(boss.x, boss.y + 20, '#ff4400', 15, 4);
+        TAS.audio.playNoise(0.3, 0.15, 200);
+        boss.atkCd = boss.enraged ? 1.5 : 2.5;
+      } else {
+        // Spore titan: ranged spore burst
+        for (var st = battle.units.length - 1; st >= 0; st--) {
+          if (Math.abs(battle.units[st].x - boss.x) < 120) {
+            battle.units[st].hp -= (boss.enraged ? 2 : 1);
+            TAS.particles.spawn(battle.units[st].x, battle.units[st].y, '#884488', 6, 2);
+            if (battle.units[st].hp <= 0) {
+              TAS.particles.spawn(battle.units[st].x, battle.units[st].y, FACTION_COLORS[battle.attacker], 8, 2);
+              battle.units.splice(st, 1);
+              if (battle.activeUnit >= battle.units.length) battle.activeUnit = 0;
+            }
+          }
+        }
+        TAS.audio.playTone(160, 0.2, 'sawtooth', 0.08);
+        boss.atkCd = boss.enraged ? 1.2 : 2;
+      }
+    }
+
+    // Check boss hit by player attacks (infantry proximity)
+    for (var bh = 0; bh < battle.units.length; bh++) {
+      var bu = battle.units[bh];
+      if (bu.type === 'infantry' && bu.attacking && Math.abs(bu.x - boss.x) < 35 && Math.abs(bu.y - boss.y) < 40) {
+        boss.hp -= atkDmg;
+        TAS.fx.shake(2);
+        addScorePopup(boss.x, boss.y - 30, '-' + atkDmg, '#ff4444');
+      }
+    }
+    // Cannon hits on boss
+    for (var bc = 0; bc < battle.units.length; bc++) {
+      if (battle.units[bc].type === 'cannon' && battle.units[bc].shells) {
+        for (var bs = battle.units[bc].shells.length - 1; bs >= 0; bs--) {
+          var bsh = battle.units[bc].shells[bs];
+          if (TAS.math.dist(bsh.x, bsh.y, boss.x, boss.y) < 30) {
+            boss.hp -= Math.ceil(3 * strScale());
+            TAS.fx.shake(4);
+            TAS.particles.spawn(bsh.x, bsh.y, '#ffaa00', 10, 3);
+            addScorePopup(boss.x, boss.y - 30, '-' + Math.ceil(3 * strScale()), '#ff4444');
+            battle.units[bc].shells.splice(bs, 1);
+            break;
+          }
+        }
+      }
+    }
+    // Cavalry charge hits boss
+    for (var bcc = 0; bcc < battle.units.length; bcc++) {
+      if (battle.units[bcc].type === 'cavalry' && battle.units[bcc].charging) {
+        if (Math.abs(battle.units[bcc].x - boss.x) < 25 && Math.abs(battle.units[bcc].y - boss.y) < 40) {
+          boss.hp -= Math.ceil(2 * strScale());
+          TAS.fx.shake(3);
+          addScorePopup(boss.x, boss.y - 30, '-' + Math.ceil(2 * strScale()), '#ff4444');
+        }
+      }
+    }
+
+    // Boss death
+    if (boss.hp <= 0) {
+      battle.bossActive = false;
+      var bossScore = Math.floor(100 * statScoreMult());
+      totalScore += bossScore;
+      addScorePopup(boss.x, boss.y - 40, 'BOSS +' + bossScore, '#ff44ff');
+      TAS.particles.spawn(boss.x, boss.y, '#ffaa00', 30, 6);
+      TAS.fx.shake(8);
+      TAS.audio.playMelody([[440, 0.1], [550, 0.1], [660, 0.1], [880, 0.2]], 140);
+    }
   }
 
   // Check battle end
+  var allEnemiesDead = battle.enemyUnits.length === 0 && (!battle.bossActive || !battle.boss || battle.boss.hp <= 0);
   if (battle.units.length === 0 && battle.battleTimer > 1) {
-    // Attacker loses
     battle.result = 'lose';
     territories[battle.defenderTerr].army = Math.max(1, Math.floor(battle.defenderArmy * 0.5));
     showMessage('Battle lost!', 2);
     TAS.audio.playTone(150, 0.4, 'sawtooth', 0.08);
     setTimeout(function() { state = 'strategic'; endTurn(); }, 1500);
-  } else if (battle.enemyUnits.length === 0 && battle.battleTimer > 1) {
-    // Attacker wins
+  } else if (allEnemiesDead && battle.battleTimer > 1) {
     battle.result = 'win';
     territories[battle.defenderTerr].owner = battle.attacker;
     territories[battle.defenderTerr].army = Math.max(1, battle.units.length);
+    var victScore = Math.floor(50 * statScoreMult());
+    totalScore += victScore;
     showMessage('Victory! ' + territories[battle.defenderTerr].name + ' captured!', 2);
+    addScorePopup(GW / 2, GH / 2 - 40, '+' + victScore, '#ffdd44');
     TAS.audio.playTone(440, 0.3, 'square', 0.1);
     TAS.particles.spawn(GW / 2, GH / 2, '#ffdd44', 20, 4);
     setTimeout(function() { state = 'strategic'; endTurn(); }, 1500);
@@ -929,33 +1261,30 @@ function updateBattle(dt) {
 
 function updateSiege(dt) {
   siege.timer -= dt;
-  const keys = TAS.input.keys;
-  const touch = TAS.input.touch;
-  const p = siege.player;
+  var keys = TAS.input.keys;
+  var touch = TAS.input.touch;
+  var p = siege.player;
 
-  // Player movement
+  var siegeSpeed = 120 * dexScale(); // DEX -> siege move speed
   if (keys['ArrowLeft'] || keys['a'] || touch.left) {
-    p.x -= 120 * dt;
+    p.x -= siegeSpeed * dt;
     p.facing = -1;
   }
   if (keys['ArrowRight'] || keys['d'] || touch.right) {
-    p.x += 120 * dt;
+    p.x += siegeSpeed * dt;
     p.facing = 1;
   }
-  // Jump
   if ((keys['ArrowUp'] || keys['w'] || touch.up) && p.grounded) {
     p.vy = -250;
     p.grounded = false;
     TAS.audio.playTone(400, 0.08, 'square', 0.04);
   }
-  // Attack
   if ((keys[' '] || keys['z'] || touch.a) && p.atkTimer <= 0) {
     p.attacking = true;
-    p.atkTimer = 0.3;
+    p.atkTimer = 0.3 * wisScale(); // WIS -> faster attacks
     TAS.audio.playTone(250, 0.06, 'sawtooth', 0.06);
   }
 
-  // Gravity
   p.vy += 600 * dt;
   p.y += p.vy * dt;
   if (p.y >= 240) { p.y = 240; p.vy = 0; p.grounded = true; }
@@ -964,14 +1293,18 @@ function updateSiege(dt) {
   if (p.atkTimer > 0) p.atkTimer -= dt;
   if (p.atkTimer <= 0) p.attacking = false;
 
-  // Attack hit check
-  if (p.attacking && p.atkTimer > 0.2) {
-    for (let i = siege.enemies.length - 1; i >= 0; i--) {
-      const e = siege.enemies[i];
+  // Attack hit check -- STR -> damage
+  var siegeDmg = Math.ceil(1 * strScale());
+  if (p.attacking && p.atkTimer > 0.15) {
+    for (var i = siege.enemies.length - 1; i >= 0; i--) {
+      var e = siege.enemies[i];
       if (Math.abs(p.x + p.facing * 15 - e.x) < 20 && Math.abs(p.y - e.y) < 25) {
-        e.hp -= 1;
+        e.hp -= siegeDmg;
         TAS.fx.shake(2);
         if (e.hp <= 0) {
+          var eScore = Math.floor((e.type === 'heavy' ? 25 : 10) * statScoreMult());
+          totalScore += eScore;
+          addScorePopup(e.x, e.y - 20, '+' + eScore, '#ffdd44');
           TAS.particles.spawn(e.x, e.y, FACTION_COLORS[battle.defender], 8, 3);
           siege.enemies.splice(i, 1);
           TAS.audio.playTone(200, 0.1, 'sawtooth', 0.06);
@@ -981,34 +1314,35 @@ function updateSiege(dt) {
   }
 
   // Enemy AI
-  for (const e of siege.enemies) {
-    // Move toward player
-    if (e.x < p.x - 10) e.x += e.speed * 60 * dt;
-    else if (e.x > p.x + 10) e.x -= e.speed * 60 * dt;
-    // Attack player
-    if (Math.abs(e.x - p.x) < 18 && Math.abs(e.y - p.y) < 20 && e.atkCd <= 0) {
-      p.hp -= 1;
-      e.atkCd = 1.2;
+  for (var ei = 0; ei < siege.enemies.length; ei++) {
+    var en = siege.enemies[ei];
+    var enSpeed = en.speed * (en.type === 'heavy' ? 0.6 : 1);
+    if (en.x < p.x - 10) en.x += enSpeed * 60 * dt;
+    else if (en.x > p.x + 10) en.x -= enSpeed * 60 * dt;
+    if (Math.abs(en.x - p.x) < 18 && Math.abs(en.y - p.y) < 20 && en.atkCd <= 0) {
+      var enDmg = en.type === 'heavy' ? 2 : 1;
+      p.hp -= enDmg;
+      en.atkCd = en.type === 'heavy' ? 1.5 : 1.2;
       TAS.fx.flash('#ff0000', 0.3);
       TAS.audio.playTone(120, 0.12, 'sawtooth', 0.08);
     }
-    if (e.atkCd > 0) e.atkCd -= dt;
+    if (en.atkCd > 0) en.atkCd -= dt;
   }
 
   // Traps
-  for (const trap of siege.traps) {
+  for (var ti = 0; ti < siege.traps.length; ti++) {
+    var trap = siege.traps[ti];
     if (!trap.active) continue;
     trap.timer -= dt * 60;
     if (trap.timer <= 0) {
       trap.timer = TAS.math.randInt(90, 200);
-      // Check hit
       if (trap.type === 'spikes') {
         if (Math.abs(p.x - trap.x) < 15 && p.y >= 235) {
           p.hp -= 1;
           TAS.fx.flash('#ff4400', 0.2);
           TAS.audio.playTone(100, 0.15, 'sawtooth', 0.06);
         }
-      } else { // rocks
+      } else {
         if (Math.abs(p.x - trap.x) < 20) {
           p.hp -= 1;
           TAS.fx.flash('#ff4400', 0.2);
@@ -1022,11 +1356,13 @@ function updateSiege(dt) {
   if (p.x >= GW - 10 && siege.enemies.length === 0) {
     siege.screen++;
     if (siege.screen >= 3) {
-      // Fort captured!
       siege.result = 'win';
       territories[battle.defenderTerr].owner = battle.attacker;
       territories[battle.defenderTerr].army = Math.max(1, battle.attackerArmy - 1);
+      var siegeScore = Math.floor(80 * statScoreMult());
+      totalScore += siegeScore;
       showMessage('Fort captured! ' + territories[battle.defenderTerr].name + ' is yours!', 3);
+      addScorePopup(GW / 2, GH / 2 - 30, '+' + siegeScore, '#ffdd44');
       TAS.audio.playMelody([[440, 0.1], [550, 0.1], [660, 0.2]], 120);
       TAS.particles.spawn(GW / 2, GH / 2, '#ffdd44', 25, 5);
       setTimeout(function() { state = 'strategic'; endTurn(); }, 2000);
@@ -1037,7 +1373,6 @@ function updateSiege(dt) {
     TAS.audio.playTone(550, 0.08, 'square', 0.05);
   }
 
-  // Death / timer
   if (p.hp <= 0 || siege.timer <= 0) {
     siege.result = 'lose';
     territories[battle.defenderTerr].army = Math.max(1, Math.floor(battle.defenderArmy * 0.6));
@@ -1054,6 +1389,8 @@ function draw(dt) {
 
   if (state === 'title') {
     drawTitle();
+  } else if (state === 'tutorial') {
+    drawTutorial();
   } else if (state === 'strategic') {
     drawStrategic();
   } else if (state === 'battle') {
@@ -1064,6 +1401,18 @@ function draw(dt) {
     drawVictoryScreen();
   } else if (state === 'gameover') {
     drawGameOverScreen();
+  }
+
+  // Score popups
+  for (var sp = 0; sp < scorePopups.length; sp++) {
+    var pop = scorePopups[sp];
+    ctx.save();
+    ctx.globalAlpha = Math.min(1, pop.life);
+    ctx.fillStyle = pop.color;
+    ctx.font = 'bold 11px monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText(pop.text, pop.x, pop.y);
+    ctx.restore();
   }
 
   // Message overlay
@@ -1084,65 +1433,83 @@ function draw(dt) {
   TAS.input.drawTouchControls(GW, GH);
 }
 
+// === TITLE SCREEN (Pass 3: animated, with stat display) ===
 function drawTitle() {
-  // Background - continent silhouette
-  ctx.fillStyle = '#1a2a1a';
+  // Dark background with animated parallax stars
+  ctx.fillStyle = '#0a1510';
   ctx.fillRect(0, 0, GW, GH);
 
-  // Decorative map bg
+  // Parallax star field
+  for (var si = 0; si < bgStars.length; si++) {
+    var star = bgStars[si];
+    var sx = (star.x + frame * star.sp) % GW;
+    ctx.fillStyle = 'rgba(255,220,120,' + (0.3 + star.s * 0.3) + ')';
+    ctx.fillRect(sx, star.y, star.s, star.s);
+  }
+
+  // Continent silhouette
   ctx.fillStyle = '#0d1a2a';
   ctx.beginPath();
-  ctx.ellipse(GW / 2, GH / 2 + 20, 180, 120, 0, 0, Math.PI * 2);
+  ctx.ellipse(GW / 2, GH / 2 + 10, 180, 120, 0, 0, Math.PI * 2);
   ctx.fill();
   ctx.fillStyle = '#1a3322';
   ctx.beginPath();
-  ctx.ellipse(GW / 2, GH / 2 + 20, 160, 100, 0, 0, Math.PI * 2);
+  ctx.ellipse(GW / 2, GH / 2 + 10, 160, 100, 0, 0, Math.PI * 2);
   ctx.fill();
 
-  // Title
+  // Animated title with shadow
+  var titleBob = Math.sin(frame * 0.03) * 3;
   ctx.textAlign = 'center';
   ctx.fillStyle = '#000';
-  ctx.font = 'bold 26px monospace';
-  ctx.fillText('NORTH & SOUTH WAR', GW / 2 + 2, 52);
+  ctx.font = 'bold 24px monospace';
+  ctx.fillText('NORTH & SOUTH WAR', GW / 2 + 2, 42 + titleBob + 2);
   ctx.fillStyle = '#ffcc33';
-  ctx.fillText('NORTH & SOUTH WAR', GW / 2, 50);
+  ctx.fillText('NORTH & SOUTH WAR', GW / 2, 42 + titleBob);
 
+  // Subtitle
   ctx.fillStyle = '#88aa88';
-  ctx.font = '11px monospace';
-  ctx.fillText('Forest vs Volcano - The Battle for Tasern', GW / 2, 75);
+  ctx.font = '10px monospace';
+  ctx.fillText('Spore vs Reactor -- The Battle for Tasern', GW / 2, 62);
 
-  // Faction icons
-  // Forest baseling (left)
-  drawBaseling(130, 110, 0, 1.5);
-  // Volcano baseling (right)
-  drawBaseling(350, 110, 1, 1.5);
+  // Faction icons with breathing animation
+  var breathe = 1 + Math.sin(frame * 0.04) * 0.08;
+  drawBaseling(120, 100, 0, 1.4 * breathe);
+  drawBaseling(360, 100, 1, 1.4 * breathe);
 
-  // VS
+  // VS with glow
   ctx.fillStyle = '#ff6633';
-  ctx.font = 'bold 20px monospace';
-  ctx.fillText('VS', GW / 2, 118);
+  ctx.font = 'bold 18px monospace';
+  ctx.fillText('VS', GW / 2, 108);
+
+  // Baseling stat indicator (Pass 1: NES controls on title)
+  if (statB.level > 0) {
+    ctx.fillStyle = statB.color;
+    ctx.font = '9px monospace';
+    ctx.fillText(statB.name + ' Lv.' + statB.level + ' | STR:' + statB.str + ' DEX:' + statB.dex + ' CON:' + statB.con, GW / 2, 128);
+    ctx.fillText('INT:' + statB.int + ' WIS:' + statB.wis + ' CHA:' + statB.cha, GW / 2, 139);
+  }
 
   // Menu options
-  const opts = ['Campaign: Easy', 'Campaign: Medium', 'Campaign: Hard', '2-Player Hot Seat'];
-  for (let i = 0; i < opts.length; i++) {
-    const y = 150 + i * 28;
-    const sel = i === menuChoice;
+  var opts = ['Campaign: Easy', 'Campaign: Medium', 'Campaign: Hard', '2-Player Hot Seat', 'How to Play'];
+  for (var i = 0; i < opts.length; i++) {
+    var y = 155 + i * 22;
+    var sel = i === menuChoice;
     ctx.fillStyle = sel ? '#ffdd44' : '#889988';
-    ctx.font = (sel ? 'bold ' : '') + '13px monospace';
+    ctx.font = (sel ? 'bold ' : '') + '12px monospace';
     ctx.fillText((sel ? '> ' : '  ') + opts[i] + (sel ? ' <' : ''), GW / 2, y);
   }
 
-  // Controls hint
+  // NES-style controls hint
   ctx.fillStyle = '#556655';
-  ctx.font = '10px monospace';
-  ctx.fillText('Arrows/WASD: Navigate | SPACE/Z: Action | B/X: Swap Unit', GW / 2, 290);
-  ctx.fillText('Click territories to move armies. Capture all forts to win!', GW / 2, 305);
+  ctx.font = '9px monospace';
+  ctx.fillText('[WASD/Arrows] Move  [Z/Space] Action  [B/X] Swap Unit', GW / 2, 280);
+  ctx.fillText('[R] Reinforce  [E] End Turn  [Click] Select Territory', GW / 2, 293);
+  ctx.fillText('Capture all forts to win the war!', GW / 2, 306);
 }
 
 function drawBaseling(x, y, faction, scale) {
-  const s = scale || 1;
-  const c = FACTION_COLORS[faction];
-  const cl = FACTION_LIGHT[faction];
+  var s = scale || 1;
+  var c = FACTION_COLORS[faction];
 
   ctx.save();
   ctx.translate(x, y);
@@ -1168,13 +1535,18 @@ function drawBaseling(x, y, faction, scale) {
 
   // Faction feature
   if (faction === 0) {
-    // Forest: leaf on head
+    // Spore: mushroom cap on head
     ctx.fillStyle = '#44bb44';
     ctx.beginPath();
-    ctx.ellipse(0, -16, 5, 3, -0.3, 0, Math.PI * 2);
+    ctx.ellipse(0, -16, 7, 4, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = '#88dd88';
+    ctx.beginPath();
+    ctx.arc(-2, -17, 2, 0, Math.PI * 2);
+    ctx.arc(3, -16, 1.5, 0, Math.PI * 2);
     ctx.fill();
   } else {
-    // Volcano: flame on head
+    // Reactor: flame on head
     ctx.fillStyle = '#ff6622';
     ctx.beginPath();
     ctx.moveTo(-3, -14);
@@ -1192,14 +1564,97 @@ function drawBaseling(x, y, faction, scale) {
   ctx.restore();
 }
 
+// === TUTORIAL SCREEN (Pass 3) ===
+function drawTutorial() {
+  ctx.fillStyle = '#0a1510';
+  ctx.fillRect(0, 0, GW, GH);
+
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#ffcc33';
+  ctx.font = 'bold 16px monospace';
+  ctx.fillText('HOW TO PLAY', GW / 2, 30);
+
+  ctx.fillStyle = '#aaddaa';
+  ctx.font = '11px monospace';
+
+  var pages = [
+    [
+      'STRATEGIC MAP',
+      '',
+      'Click your territories to select armies.',
+      'Click adjacent territories to move or attack.',
+      'Green = Spore (you)  Red = Reactor (enemy)',
+      'Capture ALL enemy forts to win!',
+      '',
+      'Gold buys reinforcements (5g each).',
+      'Income depends on territories held.'
+    ],
+    [
+      'BATTLE MODE',
+      '',
+      'When armies clash, a real-time battle begins.',
+      'Control units: WASD to move, Z/Space to attack.',
+      'B/X to swap between your active unit.',
+      '',
+      'Unit types: Infantry, Cavalry, Cannon, Shaman',
+      'Shaman heals nearby allies (WIS boosted).',
+      'Watch out for Flame Knights and Bosses!'
+    ],
+    [
+      'SIEGE MODE',
+      '',
+      'Attacking a fort triggers a platformer siege.',
+      'Run through 3 rooms, defeat all guards.',
+      'Reach the flag to capture the fort!',
+      '',
+      'Traps: spikes on ground, rocks from above.',
+      'Timer counts down -- move fast!',
+      'Heavy enemies (red glow) take extra hits.'
+    ],
+    [
+      'BASELING STATS',
+      '',
+      'Your Baseling NFT boosts your army:',
+      'STR = attack damage   DEX = movement speed',
+      'CON = unit health     INT = score & income',
+      'WIS = cooldown speed  CHA = recruit bonus',
+      '',
+      'Higher stats = stronger armies!',
+      'Luck and CHA give critical hit chance.'
+    ]
+  ];
+
+  var page = pages[tutorialPage] || pages[0];
+  for (var li = 0; li < page.length; li++) {
+    ctx.fillStyle = li === 0 ? '#ffdd44' : '#aaddaa';
+    ctx.font = li === 0 ? 'bold 13px monospace' : '11px monospace';
+    ctx.fillText(page[li], GW / 2, 60 + li * 22);
+  }
+
+  // Navigation
+  ctx.fillStyle = '#556655';
+  ctx.font = '10px monospace';
+  ctx.fillText('Page ' + (tutorialPage + 1) + '/4  --  [Space/Click] Next  [Esc] Back', GW / 2, GH - 20);
+
+  // Page dots
+  for (var di = 0; di < 4; di++) {
+    ctx.fillStyle = di === tutorialPage ? '#ffdd44' : '#444';
+    ctx.beginPath();
+    ctx.arc(GW / 2 - 24 + di * 16, GH - 40, 4, 0, Math.PI * 2);
+    ctx.fill();
+  }
+}
+
+// === STRATEGIC MAP (Pass 3: enhanced) ===
 function drawStrategic() {
-  // Background - parchment style
+  // Background with terrain tint
   ctx.fillStyle = '#2a3328';
   ctx.fillRect(0, 0, GW, GH);
 
-  // Water around edges
+  // Water around edges with slight wave
+  var waveOff = Math.sin(frame * 0.03) * 2;
   ctx.fillStyle = '#1a3355';
-  ctx.fillRect(0, 0, GW, 15);
+  ctx.fillRect(0, 0, GW, 15 + waveOff);
   ctx.fillRect(0, 0, 15, GH);
   ctx.fillRect(GW - 15, 0, 15, GH);
   ctx.fillRect(0, GH - 30, GW, 30);
@@ -1207,9 +1662,10 @@ function drawStrategic() {
   // Draw connections between territories
   ctx.strokeStyle = '#444';
   ctx.lineWidth = 1;
-  for (let i = 0; i < 12; i++) {
-    const t = territories[i];
-    for (const adj of t.adjacent) {
+  for (var i = 0; i < 12; i++) {
+    var t = territories[i];
+    for (var a = 0; a < t.adjacent.length; a++) {
+      var adj = t.adjacent[a];
       if (adj > i) {
         ctx.beginPath();
         ctx.moveTo(t.cx, t.cy);
@@ -1220,18 +1676,25 @@ function drawStrategic() {
   }
 
   // Draw territories
-  for (let i = 0; i < 12; i++) {
-    const t = territories[i];
-    const selected = i === selectedTerritory;
-    const hovered = getTerrAtPos(mouseX, mouseY) === i;
-    const isAdj = selectedTerritory >= 0 && territories[selectedTerritory].adjacent.includes(i);
+  for (var ti = 0; ti < 12; ti++) {
+    var terr = territories[ti];
+    var selected = ti === selectedTerritory;
+    var hovered = getTerrAtPos(mouseX, mouseY) === ti;
+    var isAdj = selectedTerritory >= 0 && territories[selectedTerritory].adjacent.indexOf(ti) !== -1;
 
-    // Territory circle
+    // Terrain-colored background circle
+    var terrColor = TERRAIN_COLORS[terr.terrain] || '#334433';
     ctx.beginPath();
-    ctx.arc(t.cx, t.cy, TERR_RADIUS - 5, 0, Math.PI * 2);
-    if (t.owner >= 0) {
-      ctx.fillStyle = selected ? FACTION_LIGHT[t.owner] :
-                      (hovered ? FACTION_LIGHT[t.owner] + '88' : FACTION_COLORS[t.owner] + 'aa');
+    ctx.arc(terr.cx, terr.cy, TERR_RADIUS - 2, 0, Math.PI * 2);
+    ctx.fillStyle = terrColor;
+    ctx.fill();
+
+    // Owner overlay
+    ctx.beginPath();
+    ctx.arc(terr.cx, terr.cy, TERR_RADIUS - 5, 0, Math.PI * 2);
+    if (terr.owner >= 0) {
+      ctx.fillStyle = selected ? FACTION_LIGHT[terr.owner] :
+                      (hovered ? FACTION_LIGHT[terr.owner] + '88' : FACTION_COLORS[terr.owner] + 'aa');
     } else {
       ctx.fillStyle = hovered ? '#555' : '#3a3a3a';
     }
@@ -1246,84 +1709,104 @@ function drawStrategic() {
       ctx.stroke();
     }
 
+    // Hazard terrain indicator
+    if (terr.terrain === 'hazard') {
+      ctx.fillStyle = '#ffaa2233';
+      ctx.beginPath();
+      ctx.arc(terr.cx, terr.cy, TERR_RADIUS - 8, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
     // Fort icon
-    if (t.hasFort) {
+    if (terr.hasFort) {
       ctx.fillStyle = '#886633';
-      ctx.fillRect(t.cx - 10, t.cy - 20, 20, 15);
-      ctx.fillRect(t.cx - 12, t.cy - 23, 5, 5);
-      ctx.fillRect(t.cx + 7, t.cy - 23, 5, 5);
+      ctx.fillRect(terr.cx - 10, terr.cy - 20, 20, 15);
+      ctx.fillRect(terr.cx - 12, terr.cy - 23, 5, 5);
+      ctx.fillRect(terr.cx + 7, terr.cy - 23, 5, 5);
       ctx.fillStyle = '#444';
-      ctx.fillRect(t.cx - 3, t.cy - 12, 6, 7);
+      ctx.fillRect(terr.cx - 3, terr.cy - 12, 6, 7);
     }
 
     // Army count
-    if (t.army > 0) {
+    if (terr.army > 0) {
       ctx.fillStyle = '#fff';
       ctx.font = 'bold 14px monospace';
       ctx.textAlign = 'center';
-      ctx.fillText(t.army, t.cx, t.cy + 5);
+      ctx.fillText(terr.army, terr.cx, terr.cy + 5);
     }
 
-    // Territory name (small)
+    // Territory name
     ctx.fillStyle = '#ccc';
-    ctx.font = '8px monospace';
+    ctx.font = '7px monospace';
     ctx.textAlign = 'center';
-    ctx.fillText(t.name, t.cx, t.cy + 22);
+    ctx.fillText(terr.name, terr.cx, terr.cy + 22);
   }
 
-  // Draw train
+  // Draw train (supply caravan)
   if (train.active) {
-    const fromT = territories[train.from];
-    const toT = territories[train.to];
-    const tx = TAS.math.lerp(fromT.cx, toT.cx, train.progress);
-    const ty = TAS.math.lerp(fromT.cy, toT.cy, train.progress);
+    var fromTr = territories[train.from];
+    var toTr = territories[train.to];
+    var trx = TAS.math.lerp(fromTr.cx, toTr.cx, train.progress);
+    var trY = TAS.math.lerp(fromTr.cy, toTr.cy, train.progress);
+    // Cart body
     ctx.fillStyle = '#aa8833';
-    ctx.fillRect(tx - 8, ty - 5, 16, 10);
+    ctx.fillRect(trx - 8, trY - 5, 16, 10);
     ctx.fillStyle = '#ffdd44';
-    ctx.fillRect(tx - 5, ty - 8, 10, 4);
+    ctx.fillRect(trx - 5, trY - 8, 10, 4);
+    // Wheels
+    ctx.fillStyle = '#664422';
+    ctx.beginPath();
+    ctx.arc(trx - 5, trY + 5, 3, 0, Math.PI * 2);
+    ctx.arc(trx + 5, trY + 5, 3, 0, Math.PI * 2);
+    ctx.fill();
     ctx.fillStyle = '#fff';
     ctx.font = '8px monospace';
     ctx.textAlign = 'center';
-    ctx.fillText('$' + train.gold, tx, ty - 12);
+    ctx.fillText('$' + train.gold, trx, trY - 12);
   }
 
-  // Weather indicator
+  // Weather indicator with icon
   if (weatherEvent) {
-    ctx.fillStyle = weatherEvent === 'storm' ? '#4466aa' : '#aa6633';
+    var wColor = '#4466aa';
+    var wText = 'STORM (no moves)';
+    if (weatherEvent === 'drought') { wColor = '#aa6633'; wText = 'DROUGHT (-income)'; }
+    else if (weatherEvent === 'spore_bloom') { wColor = '#44aa66'; wText = 'SPORE BLOOM (heal)'; }
+    else if (weatherEvent === 'meltdown') { wColor = '#cc4422'; wText = 'MELTDOWN (hazard dmg)'; }
+    ctx.fillStyle = wColor;
     ctx.font = 'bold 10px monospace';
     ctx.textAlign = 'left';
-    ctx.fillText(weatherEvent === 'storm' ? 'STORM (no moves)' : 'DROUGHT (-income)', 20, GH - 35);
+    ctx.fillText(wText, 20, GH - 35);
   }
 
   // HUD bar at bottom
   ctx.fillStyle = 'rgba(0,0,0,0.8)';
   ctx.fillRect(0, GH - 28, GW, 28);
 
-  // Current player info
   ctx.fillStyle = FACTION_COLORS[currentPlayer];
   ctx.font = 'bold 11px monospace';
   ctx.textAlign = 'left';
-  ctx.fillText(FACTION_NAMES[currentPlayer] + ' Turn ' + turnNumber, 8, GH - 12);
+  ctx.fillText(FACTION_NAMES[currentPlayer] + ' T' + turnNumber, 8, GH - 12);
 
-  // Gold
   ctx.fillStyle = '#ffdd44';
-  ctx.textAlign = 'left';
-  ctx.fillText('Gold: ' + gold[currentPlayer], 130, GH - 12);
+  ctx.fillText('Gold:' + gold[currentPlayer], 110, GH - 12);
 
-  // Income
   ctx.fillStyle = '#aaddaa';
-  let inc = calcIncome(currentPlayer);
+  var inc = calcIncome(currentPlayer);
   if (weatherEvent === 'drought') inc = Math.floor(inc * 0.5);
-  ctx.fillText('+' + inc + '/turn', 210, GH - 12);
+  ctx.fillText('+' + inc + '/t', 195, GH - 12);
+
+  // Score display
+  ctx.fillStyle = '#ddaaff';
+  ctx.fillText('Score:' + totalScore, 240, GH - 12);
 
   // Buy button
-  const canBuy = gold[currentPlayer] >= 5;
+  var canBuy = gold[currentPlayer] >= 5;
   ctx.fillStyle = canBuy ? (reinforceMode ? '#44aa44' : '#336633') : '#333';
-  ctx.fillRect(300, GH - 24, 80, 20);
+  ctx.fillRect(310, GH - 24, 70, 20);
   ctx.fillStyle = canBuy ? '#fff' : '#666';
-  ctx.font = '10px monospace';
+  ctx.font = '9px monospace';
   ctx.textAlign = 'center';
-  ctx.fillText(reinforceMode ? 'PLACING...' : 'BUY (5g)', 340, GH - 11);
+  ctx.fillText(reinforceMode ? 'PLACING' : 'BUY(5g)', 345, GH - 11);
 
   // End turn button
   ctx.fillStyle = '#553333';
@@ -1339,70 +1822,132 @@ function drawStrategic() {
   ctx.font = '10px monospace';
   ctx.textAlign = 'left';
   ctx.fillStyle = FACTION_COLORS[0];
-  ctx.fillText('Forest: ' + countTerritories(0) + ' terr, ' + countForts(0) + ' forts', 8, 12);
+  ctx.fillText('Spore: ' + countTerritories(0) + 't ' + countForts(0) + 'f', 8, 12);
   ctx.textAlign = 'right';
   ctx.fillStyle = FACTION_COLORS[1];
-  ctx.fillText('Volcano: ' + countTerritories(1) + ' terr, ' + countForts(1) + ' forts', GW - 8, 12);
+  ctx.fillText('Reactor: ' + countTerritories(1) + 't ' + countForts(1) + 'f', GW - 8, 12);
 }
 
+// === BATTLE DRAW (Pass 3: themed battlefields) ===
 function drawBattle() {
-  // Sky gradient
-  const grad = ctx.createLinearGradient(0, 0, 0, 200);
-  grad.addColorStop(0, '#2244aa');
-  grad.addColorStop(1, '#446688');
+  // Themed sky gradient
+  var skyTop = '#2244aa', skyBot = '#446688';
+  if (battle.battlefieldType === 'volcanic' || battle.battlefieldType === 'scorched') {
+    skyTop = '#441100'; skyBot = '#663322';
+  } else if (battle.battlefieldType === 'fungal' || battle.battlefieldType === 'swamp') {
+    skyTop = '#112211'; skyBot = '#224433';
+  } else if (battle.battlefieldType === 'industrial') {
+    skyTop = '#1a1a2a'; skyBot = '#2a3344';
+  }
+  var grad = ctx.createLinearGradient(0, 0, 0, 200);
+  grad.addColorStop(0, skyTop);
+  grad.addColorStop(1, skyBot);
   ctx.fillStyle = grad;
   ctx.fillRect(0, 0, GW, 200);
 
+  // Parallax clouds/smoke
+  for (var ci = 0; ci < 5; ci++) {
+    var cx = ((ci * 97 + frame * 0.3) % (GW + 60)) - 30;
+    var cy = 20 + ci * 25;
+    ctx.fillStyle = battle.battlefieldType === 'volcanic' ? 'rgba(80,30,10,0.3)' : 'rgba(100,120,140,0.2)';
+    ctx.beginPath();
+    ctx.ellipse(cx, cy, 25 + ci * 5, 8 + ci * 2, 0, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
   // Ground
-  ctx.fillStyle = '#3a5533';
+  var groundColor = '#3a5533';
+  if (battle.battlefieldType === 'volcanic') groundColor = '#3a2a1a';
+  else if (battle.battlefieldType === 'scorched') groundColor = '#4a3a2a';
+  else if (battle.battlefieldType === 'fungal') groundColor = '#2a3a2a';
+  else if (battle.battlefieldType === 'swamp') groundColor = '#2a3322';
+  else if (battle.battlefieldType === 'industrial') groundColor = '#3a3a3a';
+  ctx.fillStyle = groundColor;
   ctx.fillRect(0, 250, GW, 70);
   ctx.fillStyle = '#4a6644';
   ctx.fillRect(0, 245, GW, 8);
 
-  // Terrain features
-  for (const t of battle.terrain) {
-    if (t.type === 'hill') {
+  // Terrain features (Pass 2: hazard terrain)
+  for (var tf = 0; tf < battle.terrain.length; tf++) {
+    var feat = battle.terrain[tf];
+    if (feat.type === 'hill') {
       ctx.fillStyle = '#556644';
       ctx.beginPath();
-      ctx.moveTo(t.x, 250);
-      ctx.lineTo(t.x + t.w / 2, 250 - t.h);
-      ctx.lineTo(t.x + t.w, 250);
+      ctx.moveTo(feat.x, 250);
+      ctx.lineTo(feat.x + feat.w / 2, 250 - feat.h);
+      ctx.lineTo(feat.x + feat.w, 250);
       ctx.fill();
-    } else if (t.type === 'river') {
+    } else if (feat.type === 'river') {
       ctx.fillStyle = '#3355aa77';
-      ctx.fillRect(t.x, 245, t.w, 25);
+      ctx.fillRect(feat.x, 245, feat.w, 25);
+    } else if (feat.type === 'lava_pool') {
+      // Animated lava
+      var lavaGlow = 0.6 + Math.sin(frame * 0.08) * 0.2;
+      ctx.fillStyle = 'rgba(255,68,0,' + lavaGlow + ')';
+      ctx.fillRect(feat.x, 248, feat.w, 15);
+      ctx.fillStyle = '#ffaa0044';
+      ctx.fillRect(feat.x + 3, 250, feat.w - 6, 8);
+      // Lava bubbles
+      if (frame % 30 < 5) {
+        ctx.fillStyle = '#ffcc00';
+        ctx.beginPath();
+        ctx.arc(feat.x + (frame * 3) % feat.w, 252, 2, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    } else if (feat.type === 'spore_cloud') {
+      var sporeAlpha = 0.15 + Math.sin(frame * 0.04) * 0.08;
+      ctx.fillStyle = 'rgba(68,255,136,' + sporeAlpha + ')';
+      ctx.beginPath();
+      ctx.ellipse(feat.x + feat.w / 2, 235, feat.w / 2, 20, 0, 0, Math.PI * 2);
+      ctx.fill();
+    } else if (feat.type === 'barricade') {
+      ctx.fillStyle = '#666';
+      ctx.fillRect(feat.x, 245 - feat.h, feat.w, feat.h);
+      ctx.fillStyle = '#555';
+      ctx.fillRect(feat.x + 2, 245 - feat.h + 2, feat.w - 4, 4);
     }
   }
 
   // Draw player units
-  for (let i = 0; i < battle.units.length; i++) {
-    const u = battle.units[i];
-    const isActive = i === (battle.activeUnit % battle.units.length);
-    drawBattleUnit(u, battle.attacker, isActive);
+  for (var pu = 0; pu < battle.units.length; pu++) {
+    var isActive = pu === (battle.activeUnit % battle.units.length);
+    drawBattleUnit(battle.units[pu], battle.attacker, isActive);
   }
 
   // Draw enemy units
-  for (const u of battle.enemyUnits) {
-    drawBattleUnit(u, battle.defender, false);
+  for (var eu = 0; eu < battle.enemyUnits.length; eu++) {
+    drawBattleUnit(battle.enemyUnits[eu], battle.defender, false);
+  }
+
+  // Draw boss
+  if (battle.bossActive && battle.boss && battle.boss.hp > 0) {
+    drawBoss(battle.boss);
   }
 
   // Draw shells
-  for (const u of battle.units) {
-    if (u.shells) {
-      for (const s of u.shells) {
+  for (var su = 0; su < battle.units.length; su++) {
+    if (battle.units[su].shells) {
+      for (var ss = 0; ss < battle.units[su].shells.length; ss++) {
+        var shell = battle.units[su].shells[ss];
         ctx.fillStyle = '#ffaa00';
         ctx.beginPath();
-        ctx.arc(s.x, s.y, 3, 0, Math.PI * 2);
+        ctx.arc(shell.x, shell.y, 3, 0, Math.PI * 2);
+        ctx.fill();
+        // Trail
+        ctx.fillStyle = '#ff880066';
+        ctx.beginPath();
+        ctx.arc(shell.x - shell.vx * 0.02, shell.y - shell.vy * 0.02, 2, 0, Math.PI * 2);
         ctx.fill();
       }
     }
   }
-  for (const u of battle.enemyUnits) {
-    if (u.shells) {
-      for (const s of u.shells) {
+  for (var seu = 0; seu < battle.enemyUnits.length; seu++) {
+    if (battle.enemyUnits[seu].shells) {
+      for (var ses = 0; ses < battle.enemyUnits[seu].shells.length; ses++) {
+        var eshell = battle.enemyUnits[seu].shells[ses];
         ctx.fillStyle = '#ff6600';
         ctx.beginPath();
-        ctx.arc(s.x, s.y, 3, 0, Math.PI * 2);
+        ctx.arc(eshell.x, eshell.y, 3, 0, Math.PI * 2);
         ctx.fill();
       }
     }
@@ -1410,15 +1955,15 @@ function drawBattle() {
 
   // Cannon angle indicator
   if (battle.units.length > 0) {
-    const active = battle.units[battle.activeUnit % battle.units.length];
-    if (active && active.type === 'cannon') {
-      const rad = battle.cannonAngle * Math.PI / 180;
+    var aUnit = battle.units[battle.activeUnit % battle.units.length];
+    if (aUnit && aUnit.type === 'cannon') {
+      var aRad = battle.cannonAngle * Math.PI / 180;
       ctx.strokeStyle = '#ffdd4488';
       ctx.lineWidth = 1;
       ctx.setLineDash([3, 3]);
       ctx.beginPath();
-      ctx.moveTo(active.x + 10, active.y - 10);
-      ctx.lineTo(active.x + 10 + Math.cos(rad) * 50, active.y - 10 - Math.sin(rad) * 50);
+      ctx.moveTo(aUnit.x + 10, aUnit.y - 10);
+      ctx.lineTo(aUnit.x + 10 + Math.cos(aRad) * 50, aUnit.y - 10 - Math.sin(aRad) * 50);
       ctx.stroke();
       ctx.setLineDash([]);
     }
@@ -1430,21 +1975,29 @@ function drawBattle() {
   ctx.font = 'bold 11px monospace';
   ctx.textAlign = 'left';
   ctx.fillStyle = FACTION_COLORS[battle.attacker];
-  ctx.fillText('ATK: ' + battle.units.length + ' units', 8, 16);
+  ctx.fillText('ATK:' + battle.units.length, 8, 16);
   ctx.textAlign = 'right';
   ctx.fillStyle = FACTION_COLORS[battle.defender];
-  ctx.fillText('DEF: ' + battle.enemyUnits.length + ' units', GW - 8, 16);
+  var defText = 'DEF:' + battle.enemyUnits.length;
+  if (battle.bossActive && battle.boss && battle.boss.hp > 0) defText += ' BOSS:' + battle.boss.hp;
+  ctx.fillText(defText, GW - 8, 16);
 
   // Active unit indicator
   if (battle.units.length > 0) {
-    const active = battle.units[battle.activeUnit % battle.units.length];
-    if (active) {
+    var actUnit = battle.units[battle.activeUnit % battle.units.length];
+    if (actUnit) {
       ctx.textAlign = 'center';
       ctx.fillStyle = '#ffdd44';
       ctx.font = '10px monospace';
-      ctx.fillText('[' + active.type.toUpperCase() + '] B=swap', GW / 2, 16);
+      ctx.fillText('[' + actUnit.type.toUpperCase() + '] B=swap', GW / 2, 16);
     }
   }
+
+  // Score in battle
+  ctx.textAlign = 'left';
+  ctx.fillStyle = '#ddaaff';
+  ctx.font = '9px monospace';
+  ctx.fillText('Score:' + totalScore, 8, GH - 8);
 
   // Battle result overlay
   if (battle.result) {
@@ -1458,40 +2011,73 @@ function drawBattle() {
 }
 
 function drawBattleUnit(u, faction, isActive) {
-  const c = FACTION_COLORS[faction];
-  const cl = FACTION_LIGHT[faction];
+  var c = FACTION_COLORS[faction];
+  var cl = FACTION_LIGHT[faction];
 
   if (u.type === 'infantry') {
-    // Body
     ctx.fillStyle = c;
     ctx.fillRect(u.x - 5, u.y - 16, 10, 16);
-    // Head
     ctx.fillStyle = cl;
     ctx.beginPath();
     ctx.arc(u.x, u.y - 20, 5, 0, Math.PI * 2);
     ctx.fill();
-    // Sword
     ctx.fillStyle = '#aaa';
     ctx.fillRect(u.x + 5, u.y - 14, 8, 2);
-    // HP bar
-    drawMiniHP(u.x, u.y - 28, u.hp, 3);
+    drawMiniHP(u.x, u.y - 28, u.hp, u.maxHp);
+  } else if (u.type === 'shaman') {
+    // Spore Shaman: robed figure with staff
+    ctx.fillStyle = '#226644';
+    ctx.fillRect(u.x - 6, u.y - 18, 12, 18);
+    ctx.fillStyle = cl;
+    ctx.beginPath();
+    ctx.arc(u.x, u.y - 22, 5, 0, Math.PI * 2);
+    ctx.fill();
+    // Staff with glow
+    ctx.fillStyle = '#886633';
+    ctx.fillRect(u.x + 6, u.y - 22, 2, 24);
+    var healGlow = 0.4 + Math.sin(frame * 0.1) * 0.3;
+    ctx.fillStyle = 'rgba(68,255,170,' + healGlow + ')';
+    ctx.beginPath();
+    ctx.arc(u.x + 7, u.y - 24, 4, 0, Math.PI * 2);
+    ctx.fill();
+    drawMiniHP(u.x, u.y - 30, u.hp, u.maxHp);
+  } else if (u.type === 'flame_knight') {
+    // Reactor Flame Knight: armored heavy
+    var fkColor = u.enraged ? '#ff4400' : c;
+    ctx.fillStyle = '#555';
+    ctx.fillRect(u.x - 7, u.y - 20, 14, 20);
+    ctx.fillStyle = fkColor;
+    ctx.fillRect(u.x - 6, u.y - 18, 12, 16);
+    ctx.fillStyle = cl;
+    ctx.beginPath();
+    ctx.arc(u.x, u.y - 24, 6, 0, Math.PI * 2);
+    ctx.fill();
+    // Helm
+    ctx.fillStyle = '#444';
+    ctx.fillRect(u.x - 6, u.y - 28, 12, 4);
+    // Flame sword
+    ctx.fillStyle = u.enraged ? '#ff8800' : '#aa6622';
+    ctx.fillRect(u.x - 12, u.y - 16, 10, 3);
+    if (u.enraged) {
+      // Fire particles around
+      ctx.fillStyle = '#ff440088';
+      ctx.beginPath();
+      ctx.arc(u.x + Math.sin(frame * 0.2) * 8, u.y - 15, 3, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    drawMiniHP(u.x, u.y - 34, u.hp, u.maxHp);
   } else if (u.type === 'cavalry') {
-    // Horse body
     ctx.fillStyle = '#664422';
     ctx.fillRect(u.x - 10, u.y - 10, 20, 10);
-    // Rider
     ctx.fillStyle = c;
     ctx.fillRect(u.x - 4, u.y - 20, 8, 12);
     ctx.fillStyle = cl;
     ctx.beginPath();
     ctx.arc(u.x, u.y - 24, 4, 0, Math.PI * 2);
     ctx.fill();
-    // Lance
     ctx.fillStyle = '#ccc';
     ctx.fillRect(u.x + 8, u.y - 18, 14, 2);
-    // HP bar
-    drawMiniHP(u.x, u.y - 30, u.hp, 2);
-    // Charge indicator
+    drawMiniHP(u.x, u.y - 30, u.hp, u.maxHp);
     if (u.charging) {
       ctx.fillStyle = '#ffdd4488';
       ctx.font = '8px monospace';
@@ -1499,22 +2085,19 @@ function drawBattleUnit(u, faction, isActive) {
       ctx.fillText('CHARGE!', u.x, u.y - 34);
     }
   } else if (u.type === 'cannon') {
-    // Wheels
     ctx.fillStyle = '#553311';
     ctx.beginPath();
     ctx.arc(u.x - 5, u.y, 5, 0, Math.PI * 2);
     ctx.arc(u.x + 5, u.y, 5, 0, Math.PI * 2);
     ctx.fill();
-    // Barrel
     ctx.fillStyle = '#555';
     ctx.save();
     ctx.translate(u.x, u.y - 5);
-    const ang = faction === battle.attacker ? -battle.cannonAngle * Math.PI / 180 : -(180 - battle.cannonAngle) * Math.PI / 180;
-    ctx.rotate(ang);
+    var cAng = faction === battle.attacker ? -battle.cannonAngle * Math.PI / 180 : -(180 - battle.cannonAngle) * Math.PI / 180;
+    ctx.rotate(cAng);
     ctx.fillRect(0, -2, 18, 4);
     ctx.restore();
-    // HP bar
-    drawMiniHP(u.x, u.y - 18, u.hp, 2);
+    drawMiniHP(u.x, u.y - 18, u.hp, u.maxHp);
   }
 
   // Active indicator
@@ -1525,28 +2108,128 @@ function drawBattleUnit(u, faction, isActive) {
   }
 }
 
-function drawMiniHP(x, y, hp, maxHp) {
-  const w = 16;
+// === BOSS DRAWING (Pass 2) ===
+function drawBoss(boss) {
+  ctx.save();
+  ctx.translate(boss.x, boss.y);
+
+  if (boss.type === 'molten_golem') {
+    // Huge lava creature
+    var shake = boss.enraged ? Math.sin(frame * 0.3) * 2 : 0;
+    ctx.fillStyle = boss.enraged ? '#ff3300' : '#884422';
+    ctx.beginPath();
+    ctx.ellipse(shake, -10, 25, 35, 0, 0, Math.PI * 2);
+    ctx.fill();
+    // Cracks of lava
+    ctx.strokeStyle = '#ff6600';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(-10 + shake, -30); ctx.lineTo(-5, -5); ctx.lineTo(-15, 15);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(10 + shake, -25); ctx.lineTo(8, 0); ctx.lineTo(12, 20);
+    ctx.stroke();
+    // Eyes
+    ctx.fillStyle = '#ffaa00';
+    ctx.beginPath();
+    ctx.arc(-8 + shake, -20, 4, 0, Math.PI * 2);
+    ctx.arc(8 + shake, -20, 4, 0, Math.PI * 2);
+    ctx.fill();
+    // Arms
+    ctx.fillStyle = boss.enraged ? '#cc2200' : '#663311';
+    ctx.fillRect(-35 + shake, -15, 12, 25);
+    ctx.fillRect(23 + shake, -15, 12, 25);
+  } else {
+    // Spore Titan: giant mushroom beast
+    var sway = Math.sin(frame * 0.02) * 3;
+    ctx.fillStyle = '#553388';
+    ctx.beginPath();
+    ctx.ellipse(sway, -5, 22, 32, 0, 0, Math.PI * 2);
+    ctx.fill();
+    // Mushroom cap
+    ctx.fillStyle = boss.enraged ? '#aa2288' : '#774488';
+    ctx.beginPath();
+    ctx.ellipse(sway, -35, 30, 12, 0, 0, Math.PI * 2);
+    ctx.fill();
+    // Spots
+    ctx.fillStyle = '#aa88cc';
+    ctx.beginPath();
+    ctx.arc(-8 + sway, -38, 3, 0, Math.PI * 2);
+    ctx.arc(6 + sway, -36, 2.5, 0, Math.PI * 2);
+    ctx.arc(12 + sway, -32, 2, 0, Math.PI * 2);
+    ctx.fill();
+    // Eyes
+    ctx.fillStyle = '#44ff88';
+    ctx.beginPath();
+    ctx.arc(-7 + sway, -15, 3.5, 0, Math.PI * 2);
+    ctx.arc(7 + sway, -15, 3.5, 0, Math.PI * 2);
+    ctx.fill();
+    // Tendrils
+    ctx.strokeStyle = '#664488';
+    ctx.lineWidth = 2;
+    for (var ti = 0; ti < 3; ti++) {
+      ctx.beginPath();
+      ctx.moveTo(-15 + ti * 15 + sway, 20);
+      ctx.lineTo(-18 + ti * 15 + Math.sin(frame * 0.05 + ti) * 5, 40);
+      ctx.stroke();
+    }
+  }
+
+  // Boss HP bar (wide)
+  ctx.restore();
+  var bossBarW = 60;
   ctx.fillStyle = '#300';
-  ctx.fillRect(x - w / 2, y, w, 3);
-  ctx.fillStyle = hp > maxHp * 0.5 ? '#0a0' : '#aa0';
-  ctx.fillRect(x - w / 2, y, w * (hp / maxHp), 3);
+  ctx.fillRect(boss.x - bossBarW / 2, boss.y - 55, bossBarW, 5);
+  var hpPct = boss.hp / boss.maxHp;
+  ctx.fillStyle = hpPct > 0.5 ? '#cc2222' : (hpPct > 0.25 ? '#cc8800' : '#ff0000');
+  ctx.fillRect(boss.x - bossBarW / 2, boss.y - 55, bossBarW * hpPct, 5);
+  ctx.fillStyle = '#fff';
+  ctx.font = '8px monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText(boss.type === 'molten_golem' ? 'MOLTEN GOLEM' : 'SPORE TITAN', boss.x, boss.y - 60);
 }
 
+function drawMiniHP(x, y, hp, maxHp) {
+  var w = 16;
+  ctx.fillStyle = '#300';
+  ctx.fillRect(x - w / 2, y, w, 3);
+  ctx.fillStyle = hp > maxHp * 0.5 ? '#0a0' : (hp > maxHp * 0.25 ? '#aa0' : '#a00');
+  ctx.fillRect(x - w / 2, y, w * Math.max(0, hp / maxHp), 3);
+}
+
+// === SIEGE DRAW (Pass 3: enhanced visuals) ===
 function drawSiege() {
-  // Fort interior bg
-  ctx.fillStyle = '#3a2a1a';
+  // Fort interior bg with faction tint
+  var fortBg = battle.defender === 1 ? '#3a2218' : '#1a3a22';
+  ctx.fillStyle = fortBg;
   ctx.fillRect(0, 0, GW, GH);
 
-  // Walls
+  // Walls with detail
   ctx.fillStyle = '#5a4433';
   ctx.fillRect(0, 0, GW, 40);
   ctx.fillRect(0, 260, GW, 60);
   // Stone pattern
   ctx.fillStyle = '#4a3a28';
-  for (let x = 0; x < GW; x += 30) {
-    ctx.fillRect(x, 260, 28, 1);
-    ctx.fillRect(x + 15, 270, 28, 1);
+  for (var sx = 0; sx < GW; sx += 30) {
+    ctx.fillRect(sx, 260, 28, 1);
+    ctx.fillRect(sx + 15, 270, 28, 1);
+    ctx.fillRect(sx, 30, 28, 1);
+  }
+
+  // Torches on walls
+  for (var torch = 0; torch < 4; torch++) {
+    var torchX = 60 + torch * 120;
+    ctx.fillStyle = '#886633';
+    ctx.fillRect(torchX, 35, 3, 8);
+    var flicker = 0.7 + Math.sin(frame * 0.15 + torch) * 0.3;
+    ctx.fillStyle = 'rgba(255,170,34,' + flicker + ')';
+    ctx.beginPath();
+    ctx.arc(torchX + 1.5, 33, 5, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = 'rgba(255,220,100,' + (flicker * 0.5) + ')';
+    ctx.beginPath();
+    ctx.arc(torchX + 1.5, 33, 10, 0, Math.PI * 2);
+    ctx.fill();
   }
 
   // Floor
@@ -1575,11 +2258,19 @@ function drawSiege() {
     ctx.lineTo(siege.flagX + 20, 218);
     ctx.lineTo(siege.flagX + 3, 226);
     ctx.fill();
+    // Flag wave
+    var wave = Math.sin(frame * 0.1) * 2;
+    ctx.fillStyle = '#ffcc22';
+    ctx.beginPath();
+    ctx.moveTo(siege.flagX + 3, 212);
+    ctx.lineTo(siege.flagX + 18, 218 + wave);
+    ctx.lineTo(siege.flagX + 3, 224);
+    ctx.fill();
   }
 
-  // Exit arrow if cleared
+  // Exit arrow
   if (siege.enemies.length === 0 && siege.screen < 2) {
-    const pulse = Math.sin(frame * 0.1) * 0.3 + 0.7;
+    var pulse = Math.sin(frame * 0.1) * 0.3 + 0.7;
     ctx.globalAlpha = pulse;
     ctx.fillStyle = '#44dd88';
     ctx.font = 'bold 16px monospace';
@@ -1589,25 +2280,25 @@ function drawSiege() {
   }
 
   // Traps
-  for (const trap of siege.traps) {
+  for (var tp = 0; tp < siege.traps.length; tp++) {
+    var trap = siege.traps[tp];
     if (!trap.active) continue;
     if (trap.type === 'spikes') {
       ctx.fillStyle = '#888';
-      for (let i = 0; i < 3; i++) {
+      for (var sp = 0; sp < 3; sp++) {
         ctx.beginPath();
-        ctx.moveTo(trap.x - 8 + i * 8, 252);
-        ctx.lineTo(trap.x - 4 + i * 8, 240);
-        ctx.lineTo(trap.x + i * 8, 252);
+        ctx.moveTo(trap.x - 8 + sp * 8, 252);
+        ctx.lineTo(trap.x - 4 + sp * 8, 240);
+        ctx.lineTo(trap.x + sp * 8, 252);
         ctx.fill();
       }
     } else {
-      // Falling rocks indicator
-      const flash = Math.floor(trap.timer / 10) % 2;
+      var flash = Math.floor(trap.timer / 10) % 2;
       if (trap.timer < 30) {
         ctx.fillStyle = flash ? '#aa4444' : '#664433';
         ctx.fillRect(trap.x - 8, 42, 16, 12);
-        ctx.fillStyle = '#aaa';
-        ctx.font = '8px monospace';
+        ctx.fillStyle = '#ff4444';
+        ctx.font = 'bold 10px monospace';
         ctx.textAlign = 'center';
         ctx.fillText('!', trap.x, 52);
       } else {
@@ -1618,24 +2309,30 @@ function drawSiege() {
   }
 
   // Enemies
-  for (const e of siege.enemies) {
-    drawSiegeEnemy(e);
+  for (var ei = 0; ei < siege.enemies.length; ei++) {
+    drawSiegeEnemy(siege.enemies[ei]);
   }
 
   // Player
   drawSiegePlayer();
 
-  // HP display
+  // HP display with hearts
   ctx.fillStyle = '#222';
-  ctx.fillRect(8, GH - 24, 80, 14);
-  for (let i = 0; i < siege.player.hp; i++) {
-    ctx.fillStyle = '#ff3333';
+  ctx.fillRect(8, GH - 24, 100, 14);
+  for (var hi = 0; hi < siege.player.maxHp; hi++) {
+    ctx.fillStyle = hi < siege.player.hp ? '#ff3333' : '#442222';
     ctx.beginPath();
-    ctx.arc(20 + i * 20, GH - 17, 5, 0, Math.PI * 2);
+    ctx.arc(20 + hi * 16, GH - 17, 5, 0, Math.PI * 2);
     ctx.fill();
   }
 
-  // Siege result overlay
+  // Score
+  ctx.fillStyle = '#ddaaff';
+  ctx.font = '9px monospace';
+  ctx.textAlign = 'right';
+  ctx.fillText('Score:' + totalScore, GW - 8, GH - 14);
+
+  // Result overlay
   if (siege.result) {
     ctx.fillStyle = 'rgba(0,0,0,0.6)';
     ctx.fillRect(0, GH / 2 - 30, GW, 60);
@@ -1647,9 +2344,9 @@ function drawSiege() {
 }
 
 function drawSiegePlayer() {
-  const p = siege.player;
-  const c = FACTION_COLORS[battle.attacker];
-  const cl = FACTION_LIGHT[battle.attacker];
+  var p = siege.player;
+  var c = FACTION_COLORS[battle.attacker];
+  var cl = FACTION_LIGHT[battle.attacker];
 
   ctx.save();
   ctx.translate(p.x, p.y);
@@ -1657,49 +2354,72 @@ function drawSiegePlayer() {
   // Body
   ctx.fillStyle = c;
   ctx.fillRect(-5, -20, 10, 20);
-
   // Head
   ctx.fillStyle = cl;
   ctx.beginPath();
   ctx.arc(0, -24, 5, 0, Math.PI * 2);
   ctx.fill();
-
-  // Legs
+  // Legs (animated)
   ctx.fillStyle = FACTION_DARK[battle.attacker];
-  ctx.fillRect(-5, 0, 4, 8);
-  ctx.fillRect(1, 0, 4, 8);
+  var legOff = p.grounded ? Math.sin(frame * 0.15) * 2 : 0;
+  ctx.fillRect(-5, 0, 4, 8 + legOff);
+  ctx.fillRect(1, 0, 4, 8 - legOff);
 
-  // Attack arm
+  // Attack arm with glow
   if (p.attacking) {
     ctx.fillStyle = '#ccc';
     ctx.fillRect(p.facing * 6, -16, p.facing * 14, 3);
+    // Weapon glow
+    ctx.fillStyle = 'rgba(255,255,200,0.4)';
+    ctx.beginPath();
+    ctx.arc(p.facing * 18, -15, 5, 0, Math.PI * 2);
+    ctx.fill();
   }
 
   ctx.restore();
 }
 
 function drawSiegeEnemy(e) {
-  const c = FACTION_COLORS[battle.defender];
+  var c = FACTION_COLORS[battle.defender];
   ctx.save();
   ctx.translate(e.x, e.y);
 
-  // Body
-  ctx.fillStyle = c;
-  ctx.fillRect(-5, -18, 10, 18);
+  if (e.type === 'heavy') {
+    // Heavy enemy: bigger, armored
+    ctx.fillStyle = '#555';
+    ctx.fillRect(-7, -22, 14, 22);
+    ctx.fillStyle = c;
+    ctx.fillRect(-6, -20, 12, 18);
+    ctx.fillStyle = FACTION_LIGHT[battle.defender];
+    ctx.beginPath();
+    ctx.arc(0, -26, 5, 0, Math.PI * 2);
+    ctx.fill();
+    // Helm
+    ctx.fillStyle = '#444';
+    ctx.fillRect(-5, -30, 10, 4);
+    // Weapon
+    ctx.fillStyle = '#aaa';
+    ctx.fillRect(-e.dir * 3, -16, -e.dir * 12, 3);
+    // Red glow
+    ctx.fillStyle = 'rgba(255,50,50,0.15)';
+    ctx.beginPath();
+    ctx.arc(0, -10, 15, 0, Math.PI * 2);
+    ctx.fill();
+  } else {
+    // Normal enemy
+    ctx.fillStyle = c;
+    ctx.fillRect(-5, -18, 10, 18);
+    ctx.fillStyle = FACTION_LIGHT[battle.defender];
+    ctx.beginPath();
+    ctx.arc(0, -22, 4, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = '#888';
+    ctx.fillRect(-e.dir * 3, -14, -e.dir * 10, 2);
+  }
 
-  // Head
-  ctx.fillStyle = FACTION_LIGHT[battle.defender];
-  ctx.beginPath();
-  ctx.arc(0, -22, 4, 0, Math.PI * 2);
-  ctx.fill();
-
-  // Weapon
-  ctx.fillStyle = '#888';
-  ctx.fillRect(-e.dir * 3, -14, -e.dir * 10, 2);
-
-  // HP
+  // HP bar
   if (e.hp > 1) {
-    drawMiniHP(0, -30, e.hp, 2 + Math.floor(siege.screen / 2));
+    drawMiniHP(0, -34, e.hp, e.maxHp);
   }
 
   ctx.restore();
@@ -1709,28 +2429,36 @@ function drawVictoryScreen() {
   ctx.fillStyle = '#0a1a0a';
   ctx.fillRect(0, 0, GW, GH);
 
-  // Stars
-  for (let i = 0; i < 30; i++) {
-    const sx = ((i * 73 + frame) % GW);
-    const sy = ((i * 47) % GH);
-    ctx.fillStyle = '#ffdd44';
-    ctx.fillRect(sx, sy, 2, 2);
+  // Stars with twinkle
+  for (var i = 0; i < 40; i++) {
+    var stx = ((i * 73 + frame) % GW);
+    var sty = ((i * 47) % GH);
+    var twinkle = 0.3 + Math.sin(frame * 0.08 + i) * 0.5;
+    ctx.fillStyle = 'rgba(255,220,68,' + Math.max(0, twinkle) + ')';
+    ctx.fillRect(stx, sty, 2, 2);
   }
 
-  drawBaseling(GW / 2, 100, 0, 2.5);
+  drawBaseling(GW / 2, 90, 0, 2.5);
 
   ctx.textAlign = 'center';
   ctx.fillStyle = '#44dd88';
   ctx.font = 'bold 24px monospace';
-  ctx.fillText('VICTORY!', GW / 2, 170);
+  ctx.fillText('VICTORY!', GW / 2, 155);
 
   ctx.fillStyle = '#aaddaa';
   ctx.font = '13px monospace';
-  ctx.fillText('The Forest faction conquers Tasern!', GW / 2, 200);
-  ctx.fillText('Turns: ' + turnNumber, GW / 2, 225);
+  ctx.fillText('The Spore faction conquers Tasern!', GW / 2, 185);
+  ctx.fillText('Turns: ' + turnNumber + '  |  Score: ' + totalScore, GW / 2, 210);
 
-  const pulse = Math.sin(frame * 0.05) * 0.3 + 0.7;
-  ctx.globalAlpha = pulse;
+  // Stat contribution summary
+  if (statB.level > 0) {
+    ctx.fillStyle = statB.color;
+    ctx.font = '10px monospace';
+    ctx.fillText(statB.name + ' Lv.' + statB.level + ' boosted your campaign!', GW / 2, 235);
+  }
+
+  var vpulse = Math.sin(frame * 0.05) * 0.3 + 0.7;
+  ctx.globalAlpha = vpulse;
   ctx.fillStyle = '#ffdd44';
   ctx.font = '11px monospace';
   ctx.fillText('Press any key to return', GW / 2, 280);
@@ -1741,20 +2469,20 @@ function drawGameOverScreen() {
   ctx.fillStyle = '#1a0a0a';
   ctx.fillRect(0, 0, GW, GH);
 
-  drawBaseling(GW / 2, 100, 1, 2.5);
+  drawBaseling(GW / 2, 90, 1, 2.5);
 
   ctx.textAlign = 'center';
   ctx.fillStyle = '#ff4444';
   ctx.font = 'bold 24px monospace';
-  ctx.fillText('DEFEAT', GW / 2, 170);
+  ctx.fillText('DEFEAT', GW / 2, 155);
 
   ctx.fillStyle = '#ddaaaa';
   ctx.font = '13px monospace';
-  ctx.fillText('The Volcano faction overwhelms your forces!', GW / 2, 200);
-  ctx.fillText('Turns survived: ' + turnNumber, GW / 2, 225);
+  ctx.fillText('The Reactor faction overwhelms your forces!', GW / 2, 185);
+  ctx.fillText('Turns survived: ' + turnNumber + '  |  Score: ' + totalScore, GW / 2, 210);
 
-  const pulse = Math.sin(frame * 0.05) * 0.3 + 0.7;
-  ctx.globalAlpha = pulse;
+  var gpulse = Math.sin(frame * 0.05) * 0.3 + 0.7;
+  ctx.globalAlpha = gpulse;
   ctx.fillStyle = '#ffdd44';
   ctx.font = '11px monospace';
   ctx.fillText('Press any key to return', GW / 2, 280);

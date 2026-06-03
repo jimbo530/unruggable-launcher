@@ -6,15 +6,17 @@ Permanently locked Uniswap V3 liquidity across the Unrugable Launcher reactor ne
 
 When a token is launched via any Unrugable factory contract, the factory atomically:
 1. Deploys the token
-2. Creates 8 Uniswap V3 LP positions (floor pools + MfT sell walls + CHAR carbon pools)
-3. Locks all positions inside 2 reactor contracts (primary reactor + CHAR reactor)
+2. Creates 2 Uniswap V3 LP positions (TOKEN/Money 70% + TOKEN/Meme 30%)
+3. Locks all positions inside 1 SporeReactor contract (50% fee burn + 50% to launcher)
 
 Reactor contracts have **no withdraw, transfer, or remove function**. The liquidity is locked forever by the absence of withdrawal code — not by a timelock or multisig.
 
+Note: Earlier factory versions (V4–V5) created 8 LP positions across 2 reactors. V7 simplifies to 2 pools + 1 reactor.
+
 ## How TVL Is Calculated
 
-1. Enumerate all launches from all 8 factory contracts (V4.2 through V5.5) using `launchCount()` and `launches(i)` view functions
-2. Collect every reactor and charReactor address
+1. Enumerate all launches from factory contracts (V4.2 through V7) using `launchCount()` and `launches(i)` view functions
+2. Collect every reactor address
 3. Use DeFiLlama SDK's `sumTokens2` with `resolveUniV3: true` to value all Uniswap V3 NFT positions held by those reactors
 
 This counts the underlying token amounts in each V3 position at current prices.

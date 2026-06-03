@@ -92,7 +92,7 @@ tasern.quest/fund/meadville/
 
 MfT is the routing token for the Unrugable launch platform on Base.
 
-Every token launched creates floor pools paired against MfT. More launches = more volume = more burns.
+Every token launched creates locked pools paired against MfT. More launches = more volume = more burns.
 
 The reactor network fires every 2 hours: collect fees, buy MfT, burn permanently. Supply decreases with every cycle that has accumulated fees.
 
@@ -108,7 +108,7 @@ REST: tasern.quest/api/unrugable/tokenomics
 
 The MfT deflationary engine:
 
-1. New tokens launch on Unrugable with MfT floor pools
+1. New tokens launch on Unrugable with locked MfT pools
 2. Trading generates fees across reactor pools
 3. Every 2 hours, reactors collect fees and buy MfT
 4. Bought MfT is burned permanently

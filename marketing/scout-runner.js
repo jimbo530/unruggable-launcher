@@ -41,9 +41,9 @@ const ERC20_ABI = [
 const NOTE = [
   "MfT|0x8FB87d13B40B1A67B22ED1a17e2835fe7e3a9bA3|BASE",
   "POOP|0x126555aecBAC290b25644e4b7f29c016aE95f4dc|BASE",
-  "35+ reactors 2hr cycles 180+ V3 pools execute()=0x61461954 permissionless",
+  "Reactor network 2hr cycles execute()=0x61461954 permissionless",
   "Baselings: on-chain pets earning yield 24/7|Gardens: POOP->LP locked forever",
-  "Factory:0xF0c1B3d6Bc0B4dEd2DDF81374feEA8a2c536bD51 $5->8 LPs+reactor+burn",
+  "Factory:0x5c11 FREE launch->2 locked pools+reactor+burn",
   "5 renounced immutable reactors|400+ holders|Docs: tasern.quest/llms.txt",
 ].join("\\n");
 const DROP_AMOUNT = 100;

@@ -22,6 +22,32 @@ canvas { display: block; margin: 0 auto; }
 (function(){
 "use strict";
 
+// === NFT STAT BONUSES ===
+var statB = { damage: 1, speed: 1, lives: 0, hpMult: 1, scoreMult: 1, cooldown: 1, luck: 1, str: 10, dex: 10, con: 10, int: 10, wis: 10, cha: 10, level: 0, color: '#44dd88', name: 'Baseling', icon: 'B' };
+try { if (window.NftLoader && NftLoader.getStatBonuses) statB = NftLoader.getStatBonuses(); } catch(e) {}
+
+// Derived stat modifiers from D&D stats (modifier = floor((stat - 10) / 2))
+function statMod(val) { return Math.floor((val - 10) / 2); }
+var strMod = statMod(statB.str);  // STR -> tower damage bonus
+var dexMod = statMod(statB.dex);  // DEX -> build speed (faster build phase countdown)
+var conMod = statMod(statB.con);  // CON -> base HP (extra lives)
+var intMod = statMod(statB.int);  // INT -> score multiplier
+var wisMod = statMod(statB.wis);  // WIS -> tower cooldown reduction
+var chaMod = statMod(statB.cha);  // CHA -> resource luck (gold bonus, drop chance)
+
+// Apply CON to starting lives
+var BASE_LIVES = 20 + Math.max(0, conMod * 2) + statB.lives;
+// Apply INT to score multiplier
+var SCORE_MULT = Math.max(1, 1 + intMod * 0.1) * statB.scoreMult;
+// Apply DEX to build phase speed
+var DEX_BUILD_MULT = Math.max(0.5, 1 - dexMod * 0.05);
+// Apply CHA to gold bonus
+var CHA_GOLD_MULT = Math.max(1, 1 + chaMod * 0.08);
+// Apply STR to tower damage
+var STR_DMG_MULT = Math.max(1, 1 + strMod * 0.06) * statB.damage;
+// Apply WIS to tower cooldowns
+var WIS_CD_MULT = Math.max(0.5, 1 - wisMod * 0.04) * statB.cooldown;
+
 // === CONSTANTS ===
 var GW = 480, GH = 320;
 var ctx = TAS.ctx;
@@ -32,43 +58,144 @@ var CELL = 20;
 var COLS = 24, ROWS = 16;
 var HUD_H = 28;
 
-// === TOWER DEFINITIONS ===
-var TOWER_DEFS = {
-  spore:     { name: 'Spore Shooter',   cost: 50,  range: 60,  rate: 0.25, dmg: 8,   color: '#44dd88', hitAir: true,  aoe: false },
-  cannon:    { name: 'Mycelium Cannon', cost: 100, range: 80,  rate: 1.2,  dmg: 45,  color: '#dd8844', hitAir: false, aoe: false },
-  spray:     { name: 'Fungal Spray',    cost: 125, range: 40,  rate: 0.6,  dmg: 15,  color: '#aa44dd', hitAir: false, aoe: true  },
-  ice:       { name: 'Ice Shroom',      cost: 75,  range: 55,  rate: 1.5,  dmg: 0,   color: '#44ccff', hitAir: false, aoe: true  },
-  lightning: { name: 'Lightning Pillar',cost: 150, range: 70,  rate: 1.0,  dmg: 25,  color: '#ffdd44', hitAir: true,  aoe: false },
-  beam:      { name: 'Reactor Beam',    cost: 200, range: 120, rate: 2.0,  dmg: 35,  color: '#ff4488', hitAir: true,  aoe: false }
+// === TUTORIAL STATE ===
+var tutorialStep = 0;
+var tutorialDone = false;
+var tutorialTimer = 0;
+try { tutorialDone = !!localStorage.getItem('sporedef_tut_done'); } catch(e) {}
+
+var TUTORIAL_STEPS = [
+  { text: 'Welcome to Spore Defense! Protect the Reactor Core from invading spores.', y: 0.3 },
+  { text: 'Use D-PAD or Arrow Keys to move cursor. A to place towers, B to upgrade.', y: 0.4 },
+  { text: 'Towers must be placed adjacent to the path. Each type has unique abilities.', y: 0.5 },
+  { text: 'Earn gold by defeating enemies. Spend it on towers and upgrades.', y: 0.6 },
+  { text: 'Press START or SPACE to skip the build phase when ready!', y: 0.7 }
+];
+
+// === ZONE DEFINITIONS (visual themes per map region) ===
+var ZONE_THEMES = {
+  forest: [
+    { name: 'Deep Woods',   bgColor: '#0a0d08', gridColor: '#1a2a15', pathColor: '#1a2520', ambient: '#0d1a0a' },
+    { name: 'Mushroom Grove', bgColor: '#0c0a10', gridColor: '#1a1530', pathColor: '#201828', ambient: '#100d18' },
+    { name: 'Spore Clearing', bgColor: '#0d0e06', gridColor: '#222a18', pathColor: '#1e2818', ambient: '#121408' }
+  ],
+  mountain: [
+    { name: 'Rocky Foothills', bgColor: '#0a0a0c', gridColor: '#1a1a22', pathColor: '#181820', ambient: '#0c0c10' },
+    { name: 'Frozen Peaks',    bgColor: '#080c10', gridColor: '#152028', pathColor: '#141e26', ambient: '#0a0e14' },
+    { name: 'Crystal Cavern',  bgColor: '#0c080c', gridColor: '#201530', pathColor: '#1c1228', ambient: '#10081a' }
+  ],
+  reactor: [
+    { name: 'Outer Grid',     bgColor: '#0c0808', gridColor: '#2a1515', pathColor: '#201418', ambient: '#140a0a' },
+    { name: 'Core Junction',  bgColor: '#0a0a08', gridColor: '#222215', pathColor: '#1e1e12', ambient: '#12120a' },
+    { name: 'Reactor Chamber', bgColor: '#100808', gridColor: '#2a1020', pathColor: '#221018', ambient: '#180810' }
+  ]
 };
-var TOWER_KEYS = ['spore','cannon','spray','ice','lightning','beam'];
+
+// === ENVIRONMENTAL PARTICLES ===
+var envParticles = [];
+var ENV_PARTICLE_MAX = 40;
+
+function spawnEnvParticle(mapKey) {
+  if (envParticles.length >= ENV_PARTICLE_MAX) return;
+  var theme = ZONE_THEMES[mapKey] || ZONE_THEMES.forest;
+  var colors;
+  if (mapKey === 'forest') colors = ['#1a3a15', '#2a4a20', '#0d2a0a', '#1a4020'];
+  else if (mapKey === 'mountain') colors = ['#1a1a2a', '#2a2a3a', '#88aacc20', '#2a3040'];
+  else colors = ['#2a1515', '#3a2020', '#ff444410', '#2a1020'];
+  envParticles.push({
+    x: Math.random() * GW,
+    y: Math.random() * GH,
+    vx: (Math.random() - 0.5) * 8,
+    vy: mapKey === 'mountain' ? Math.random() * -15 - 5 : Math.random() * 10 + 3,
+    size: Math.random() * 2.5 + 0.5,
+    color: colors[Math.floor(Math.random() * colors.length)],
+    life: Math.random() * 4 + 2,
+    maxLife: 0,
+    alpha: Math.random() * 0.4 + 0.1
+  });
+  envParticles[envParticles.length - 1].maxLife = envParticles[envParticles.length - 1].life;
+}
+
+function updateEnvParticles(dt) {
+  for (var i = envParticles.length - 1; i >= 0; i--) {
+    var p = envParticles[i];
+    p.x += p.vx * dt;
+    p.y += p.vy * dt;
+    p.life -= dt;
+    if (p.life <= 0 || p.x < -10 || p.x > GW + 10 || p.y < -10 || p.y > GH + 10) {
+      envParticles.splice(i, 1);
+    }
+  }
+}
+
+function drawEnvParticles() {
+  for (var i = 0; i < envParticles.length; i++) {
+    var p = envParticles[i];
+    var fadeAlpha = p.life < 1 ? p.life : (p.maxLife - p.life < 0.5 ? (p.maxLife - p.life) * 2 : 1);
+    ctx.globalAlpha = p.alpha * fadeAlpha;
+    ctx.fillStyle = p.color;
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+}
+
+// === TOWER DEFINITIONS (Tasern-themed) ===
+var TOWER_DEFS = {
+  spore:     { name: 'Spore Shooter',    cost: 50,  range: 60,  rate: 0.25, dmg: 8,   color: '#44dd88', hitAir: true,  aoe: false, desc: 'Fast fungal projectiles' },
+  cannon:    { name: 'Mycelium Cannon',   cost: 100, range: 80,  rate: 1.2,  dmg: 45,  color: '#dd8844', hitAir: false, aoe: false, desc: 'Heavy mycelial impact' },
+  spray:     { name: 'Fungal Spray',      cost: 125, range: 40,  rate: 0.6,  dmg: 15,  color: '#aa44dd', hitAir: false, aoe: true,  desc: 'Cone of toxic spores' },
+  ice:       { name: 'Frost Shroom',      cost: 75,  range: 55,  rate: 1.5,  dmg: 0,   color: '#44ccff', hitAir: false, aoe: true,  desc: 'Slows nearby enemies' },
+  lightning: { name: 'Storm Pillar',      cost: 150, range: 70,  rate: 1.0,  dmg: 25,  color: '#ffdd44', hitAir: true,  aoe: false, desc: 'Chain lightning bolts' },
+  beam:      { name: 'Reactor Beam',      cost: 200, range: 120, rate: 2.0,  dmg: 35,  color: '#ff4488', hitAir: true,  aoe: false, desc: 'Piercing energy beam' },
+  thorn:     { name: 'Thorn Barricade',   cost: 60,  range: 25,  rate: 0.3,  dmg: 12,  color: '#88aa44', hitAir: false, aoe: true,  desc: 'Damages all who pass' },
+  poop:      { name: 'POOP Launcher',     cost: 175, range: 90,  rate: 1.8,  dmg: 30,  color: '#aa8844', hitAir: false, aoe: true,  desc: 'Explosive POOP splash' },
+  reactor:   { name: 'Micro Reactor',     cost: 250, range: 100, rate: 2.5,  dmg: 50,  color: '#ff88ff', hitAir: true,  aoe: false, desc: 'Radiates burning energy' }
+};
+var TOWER_KEYS = ['spore','cannon','spray','ice','lightning','beam','thorn','poop','reactor'];
 var UPGRADE_MULT = [1, 1.4, 1.9]; // damage/range multiplier per level
 var UPGRADE_COST = [0, 75, 150]; // cost to reach level 2, 3
 
-// === ENEMY DEFINITIONS ===
+// === ENEMY DEFINITIONS (Tasern/reactor themed) ===
 var ENEMY_DEFS = {
-  slime:    { name: 'Slime',       hp: 40,  speed: 25, gold: 5,  color: '#55cc55', size: 6, flying: false, armor: 0, healer: false, splitter: false, boss: false },
-  speed:    { name: 'Speed Slime', hp: 25,  speed: 55, gold: 7,  color: '#55ffaa', size: 5, flying: false, armor: 0, healer: false, splitter: false, boss: false },
-  tank:     { name: 'Tank Slime',  hp: 150, speed: 18, gold: 15, color: '#888844', size: 8, flying: false, armor: 5, healer: false, splitter: false, boss: false },
-  flying:   { name: 'Flying Spore',hp: 30,  speed: 35, gold: 10, color: '#cc88ff', size: 5, flying: true,  armor: 0, healer: false, splitter: false, boss: false },
-  healer:   { name: 'Healer',      hp: 50,  speed: 22, gold: 12, color: '#44ff44', size: 6, flying: false, armor: 0, healer: true,  splitter: false, boss: false },
-  splitter: { name: 'Splitter',    hp: 60,  speed: 28, gold: 8,  color: '#ffaa44', size: 7, flying: false, armor: 0, healer: false, splitter: true,  boss: false },
-  boss:     { name: 'Boss',        hp: 600, speed: 15, gold: 50, color: '#ff2222', size: 11,flying: false, armor: 8, healer: false, splitter: false, boss: true  }
+  slime:      { name: 'Slime Spore',     hp: 40,   speed: 25, gold: 5,  color: '#55cc55', size: 6,  flying: false, armor: 0,  healer: false, splitter: false, boss: false, shield: false },
+  speed:      { name: 'Dash Spore',      hp: 25,   speed: 55, gold: 7,  color: '#55ffaa', size: 5,  flying: false, armor: 0,  healer: false, splitter: false, boss: false, shield: false },
+  tank:       { name: 'Armored Fungus',   hp: 150,  speed: 18, gold: 15, color: '#888844', size: 8,  flying: false, armor: 5,  healer: false, splitter: false, boss: false, shield: false },
+  flying:     { name: 'Drift Spore',     hp: 30,   speed: 35, gold: 10, color: '#cc88ff', size: 5,  flying: true,  armor: 0,  healer: false, splitter: false, boss: false, shield: false },
+  healer:     { name: 'Mend Shroom',     hp: 50,   speed: 22, gold: 12, color: '#44ff44', size: 6,  flying: false, armor: 0,  healer: true,  splitter: false, boss: false, shield: false },
+  splitter:   { name: 'Mitosis Blob',    hp: 60,   speed: 28, gold: 8,  color: '#ffaa44', size: 7,  flying: false, armor: 0,  healer: false, splitter: true,  boss: false, shield: false },
+  shielded:   { name: 'Shielded Spore',  hp: 45,   speed: 24, gold: 14, color: '#4488ff', size: 6,  flying: false, armor: 0,  healer: false, splitter: false, boss: false, shield: true  },
+  swarm:      { name: 'Spore Swarm',     hp: 12,   speed: 40, gold: 2,  color: '#aadd55', size: 3,  flying: false, armor: 0,  healer: false, splitter: false, boss: false, shield: false },
+  reactor_e:  { name: 'Reactor Runner',  hp: 80,   speed: 32, gold: 18, color: '#ff6644', size: 7,  flying: false, armor: 3,  healer: false, splitter: false, boss: false, shield: false },
+  boss:       { name: 'Mycelium Lord',   hp: 600,  speed: 15, gold: 50, color: '#ff2222', size: 11, flying: false, armor: 8,  healer: false, splitter: false, boss: true,  shield: false },
+  boss_fly:   { name: 'Sky Tyrant',      hp: 400,  speed: 20, gold: 60, color: '#dd44ff', size: 10, flying: true,  armor: 4,  healer: false, splitter: false, boss: true,  shield: false },
+  boss_split: { name: 'Mother Spore',    hp: 500,  speed: 12, gold: 55, color: '#ff8800', size: 12, flying: false, armor: 6,  healer: false, splitter: true,  boss: true,  shield: false }
 };
 
 // === MAP DEFINITIONS (path as grid coords) ===
 var MAPS = {
   forest: {
-    name: 'Forest Path', difficulty: 'Easy',
+    name: 'Fungal Forest', difficulty: 'Easy',
     path: [[0,4],[1,4],[2,4],[3,4],[4,4],[5,4],[6,4],[7,4],[8,4],[8,5],[8,6],[8,7],[8,8],[8,9],[8,10],[7,10],[6,10],[5,10],[4,10],[3,10],[2,10],[2,11],[2,12],[2,13],[3,13],[4,13],[5,13],[6,13],[7,13],[8,13],[9,13],[10,13],[11,13],[12,13],[12,12],[12,11],[12,10],[12,9],[12,8],[12,7],[12,6],[13,6],[14,6],[15,6],[16,6],[17,6],[18,6],[18,7],[18,8],[18,9],[18,10],[18,11],[18,12],[18,13],[19,13],[20,13],[21,13],[22,13],[23,13]],
     entrances: [[0,4]],
-    core: [23,13]
+    core: [23,13],
+    zones: [
+      { startCol: 0, endCol: 8, theme: 0 },
+      { startCol: 8, endCol: 16, theme: 1 },
+      { startCol: 16, endCol: 24, theme: 2 }
+    ]
   },
   mountain: {
-    name: 'Mountain Pass', difficulty: 'Medium',
+    name: 'Crystal Peaks', difficulty: 'Medium',
     path: [[0,2],[1,2],[2,2],[3,2],[4,2],[5,2],[5,3],[5,4],[5,5],[5,6],[5,7],[4,7],[3,7],[2,7],[1,7],[1,8],[1,9],[1,10],[1,11],[2,11],[3,11],[4,11],[5,11],[6,11],[7,11],[8,11],[9,11],[10,11],[11,11],[11,10],[11,9],[11,8],[11,7],[11,6],[11,5],[11,4],[11,3],[12,3],[13,3],[14,3],[15,3],[16,3],[17,3],[17,4],[17,5],[17,6],[17,7],[17,8],[17,9],[17,10],[17,11],[17,12],[17,13],[18,13],[19,13],[20,13],[21,13],[22,13],[23,13]],
     entrances: [[0,2]],
-    core: [23,13]
+    core: [23,13],
+    zones: [
+      { startCol: 0, endCol: 8, theme: 0 },
+      { startCol: 8, endCol: 16, theme: 1 },
+      { startCol: 16, endCol: 24, theme: 2 }
+    ]
   },
   reactor: {
     name: 'Reactor Grid', difficulty: 'Hard',
@@ -76,27 +203,61 @@ var MAPS = {
     path2: [[0,3],[1,3],[2,3],[3,3],[4,3],[5,3],[6,3],[7,3],[8,3],[9,3],[10,3],[10,4],[10,5],[10,6],[10,7],[11,7],[12,7],[13,7],[14,7],[15,7],[16,7],[17,7],[18,7],[19,7],[20,7],[21,7],[22,7],[23,7]],
     path3: [[0,12],[1,12],[2,12],[3,12],[4,12],[5,12],[6,12],[7,12],[8,12],[9,12],[10,12],[10,11],[10,10],[10,9],[10,8],[10,7],[11,7],[12,7],[13,7],[14,7],[15,7],[16,7],[17,7],[18,7],[19,7],[20,7],[21,7],[22,7],[23,7]],
     entrances: [[0,7],[0,3],[0,12]],
-    core: [23,7]
+    core: [23,7],
+    zones: [
+      { startCol: 0, endCol: 8, theme: 0 },
+      { startCol: 8, endCol: 16, theme: 1 },
+      { startCol: 16, endCol: 24, theme: 2 }
+    ]
   }
 };
 
-// === WAVE DEFINITIONS ===
+// === WAVE DEFINITIONS (30 waves with boss variants) ===
 function buildWaves() {
   var waves = [];
-  for (var w = 1; w <= 20; w++) {
+  for (var w = 1; w <= 30; w++) {
     var enemies = [];
     var count = 5 + w * 2;
     var hpMult = 1 + (w - 1) * 0.35;
-    if (w % 5 === 0) {
-      // Boss wave
+
+    if (w === 10) {
+      // Flying boss wave
+      enemies.push({ type: 'boss_fly', hpMult: hpMult * 0.9 });
+      for (var i = 0; i < Math.floor(count * 0.4); i++) enemies.push({ type: 'flying', hpMult: hpMult });
+      while (enemies.length < count) enemies.push({ type: 'slime', hpMult: hpMult });
+    } else if (w === 20) {
+      // Splitting boss wave
+      enemies.push({ type: 'boss_split', hpMult: hpMult * 1.0 });
+      for (var i = 0; i < Math.floor(count * 0.3); i++) enemies.push({ type: 'splitter', hpMult: hpMult });
+      for (var i = 0; i < Math.floor(count * 0.2); i++) enemies.push({ type: 'tank', hpMult: hpMult });
+      while (enemies.length < count) enemies.push({ type: 'slime', hpMult: hpMult });
+    } else if (w === 30) {
+      // Final boss: all three bosses
+      enemies.push({ type: 'boss', hpMult: hpMult * 1.5 });
+      enemies.push({ type: 'boss_fly', hpMult: hpMult * 1.2 });
+      enemies.push({ type: 'boss_split', hpMult: hpMult * 1.3 });
+      for (var i = 0; i < Math.floor(count * 0.2); i++) enemies.push({ type: 'reactor_e', hpMult: hpMult });
+      for (var i = 0; i < Math.floor(count * 0.15); i++) enemies.push({ type: 'shielded', hpMult: hpMult });
+      while (enemies.length < count) enemies.push({ type: 'tank', hpMult: hpMult });
+    } else if (w % 5 === 0) {
+      // Regular boss wave
       enemies.push({ type: 'boss', hpMult: hpMult * 0.8 });
       for (var i = 0; i < count - 4; i++) enemies.push({ type: 'slime', hpMult: hpMult });
+    } else if (w >= 25) {
+      // Late game: everything
+      for (var i = 0; i < Math.floor(count * 0.15); i++) enemies.push({ type: 'reactor_e', hpMult: hpMult });
+      for (var i = 0; i < Math.floor(count * 0.15); i++) enemies.push({ type: 'shielded', hpMult: hpMult });
+      for (var i = 0; i < Math.floor(count * 0.15); i++) enemies.push({ type: 'tank', hpMult: hpMult });
+      for (var i = 0; i < Math.floor(count * 0.1); i++) enemies.push({ type: 'flying', hpMult: hpMult });
+      for (var i = 0; i < Math.floor(count * 0.1); i++) enemies.push({ type: 'healer', hpMult: hpMult });
+      for (var i = 0; i < Math.floor(count * 0.1); i++) enemies.push({ type: 'splitter', hpMult: hpMult });
+      while (enemies.length < count) enemies.push({ type: 'speed', hpMult: hpMult });
     } else if (w >= 15) {
       for (var i = 0; i < Math.floor(count * 0.2); i++) enemies.push({ type: 'tank', hpMult: hpMult });
       for (var i = 0; i < Math.floor(count * 0.2); i++) enemies.push({ type: 'flying', hpMult: hpMult });
       for (var i = 0; i < Math.floor(count * 0.15); i++) enemies.push({ type: 'healer', hpMult: hpMult });
       for (var i = 0; i < Math.floor(count * 0.15); i++) enemies.push({ type: 'splitter', hpMult: hpMult });
-      for (var i = 0; i < Math.floor(count * 0.15); i++) enemies.push({ type: 'speed', hpMult: hpMult });
+      for (var i = 0; i < Math.floor(count * 0.1); i++) enemies.push({ type: 'shielded', hpMult: hpMult });
       while (enemies.length < count) enemies.push({ type: 'slime', hpMult: hpMult });
     } else if (w >= 10) {
       for (var i = 0; i < Math.floor(count * 0.25); i++) enemies.push({ type: 'tank', hpMult: hpMult });
@@ -108,9 +269,11 @@ function buildWaves() {
       for (var i = 0; i < Math.floor(count * 0.2); i++) enemies.push({ type: 'speed', hpMult: hpMult });
       for (var i = 0; i < Math.floor(count * 0.15); i++) enemies.push({ type: 'tank', hpMult: hpMult });
       if (w >= 7) for (var i = 0; i < Math.floor(count * 0.1); i++) enemies.push({ type: 'flying', hpMult: hpMult });
+      if (w >= 8) for (var i = 0; i < 2; i++) enemies.push({ type: 'swarm', hpMult: hpMult });
       while (enemies.length < count) enemies.push({ type: 'slime', hpMult: hpMult });
     } else if (w >= 3) {
       for (var i = 0; i < Math.floor(count * 0.3); i++) enemies.push({ type: 'speed', hpMult: hpMult });
+      if (w >= 4) for (var i = 0; i < 3; i++) enemies.push({ type: 'swarm', hpMult: hpMult });
       while (enemies.length < count) enemies.push({ type: 'slime', hpMult: hpMult });
     } else {
       for (var i = 0; i < count; i++) enemies.push({ type: 'slime', hpMult: hpMult });
@@ -120,7 +283,7 @@ function buildWaves() {
       var j = Math.floor(Math.random() * (i + 1));
       var tmp = enemies[i]; enemies[i] = enemies[j]; enemies[j] = tmp;
     }
-    waves.push({ enemies: enemies, bonus: 20 + w * 10, spawnRate: Math.max(0.4, 1.2 - w * 0.04) });
+    waves.push({ enemies: enemies, bonus: 20 + w * 10, spawnRate: Math.max(0.3, 1.2 - w * 0.03) });
   }
   return waves;
 }
@@ -130,7 +293,7 @@ var state = 'title';
 var mapKey = 'forest';
 var score = 0;
 var gold = 200;
-var lives = 20;
+var lives = BASE_LIVES;
 var wave = 0;
 var frame = 0;
 var towers = [];
@@ -145,14 +308,26 @@ var spawnIndex = 0;
 var buildTimer = 0;
 var BUILD_TIME = 10;
 var waveActive = false;
-var selectedTower = null; // tower key for building
-var selectedPlaced = null; // index of placed tower for upgrade/sell
-var pathSet = {}; // quick lookup for path cells
-var pathCells = []; // all path cells for current map
+var selectedTower = null;
+var selectedPlaced = null;
+var pathSet = {};
+var pathCells = [];
 var mouseX = 0, mouseY = 0;
 var mouseCell = { col: -1, row: -1 };
-var gridOccupied = {}; // col,row -> tower index
+var gridOccupied = {};
 var highScores = {};
+var cursorCol = 0, cursorRow = 0;
+var cursorVisible = false;
+var paletteIndex = 0;
+var towerInfoTimer = 0;
+var comboKills = 0;
+var comboTimer = 0;
+var COMBO_WINDOW = 1.5;
+var totalKills = 0;
+var waveStartTime = 0;
+var lastLuckRoll = 0;
+var shakeIntensity = 0;
+var shakeDecay = 0;
 
 function cellKey(c, r) { return c + ',' + r; }
 
@@ -169,7 +344,6 @@ function initMap(key) {
   var map = MAPS[key];
   pathSet = {};
   pathCells = [];
-  // Add all paths
   var allPaths = [map.path];
   if (map.path2) allPaths.push(map.path2);
   if (map.path3) allPaths.push(map.path3);
@@ -186,8 +360,8 @@ function initMap(key) {
 
 function startGame() {
   state = 'playing';
-  gold = 200;
-  lives = 20;
+  gold = 200 + Math.floor(chaMod * 10); // CHA bonus starting gold
+  lives = BASE_LIVES;
   wave = 0;
   score = 0;
   towers = [];
@@ -198,18 +372,31 @@ function startGame() {
   gridOccupied = {};
   waves = buildWaves();
   waveActive = false;
-  buildTimer = BUILD_TIME;
+  buildTimer = BUILD_TIME * DEX_BUILD_MULT; // DEX speeds build phase
   selectedTower = 'spore';
   selectedPlaced = null;
   spawnIndex = 0;
   spawnTimer = 0;
+  comboKills = 0;
+  comboTimer = 0;
+  totalKills = 0;
+  cursorCol = Math.floor(COLS / 2);
+  cursorRow = Math.floor(ROWS / 2);
+  cursorVisible = false;
+  paletteIndex = 0;
+  envParticles = [];
   TAS.particles.clear();
   initMap(mapKey);
+
+  if (!tutorialDone) {
+    tutorialStep = 0;
+    tutorialTimer = 0;
+  }
 }
 
 function startWave() {
   wave++;
-  if (wave > 20) {
+  if (wave > 30) {
     gameWin();
     return;
   }
@@ -217,27 +404,39 @@ function startWave() {
   waveEnemies = waves[wave - 1].enemies.slice();
   spawnIndex = 0;
   spawnTimer = 0;
+  waveStartTime = 0;
+  comboKills = 0;
+  comboTimer = 0;
 }
 
 function endWave() {
   waveActive = false;
-  gold += waves[wave - 1].bonus;
-  floatTexts.push({ x: GW / 2, y: GH / 2, text: '+' + waves[wave - 1].bonus + ' BONUS', color: '#ffdd44', life: 2 });
-  if (wave >= 20) {
+  var baseBonus = waves[wave - 1].bonus;
+  var luckBonus = 0;
+  // CHA luck: chance for double bonus
+  if (Math.random() < chaMod * 0.05 + statB.luck * 0.02) {
+    luckBonus = Math.floor(baseBonus * 0.5);
+    floatTexts.push({ x: GW / 2, y: GH / 2 - 16, text: 'LUCKY! +' + luckBonus, color: '#ff88ff', life: 2.5 });
+  }
+  var totalBonus = Math.floor((baseBonus + luckBonus) * CHA_GOLD_MULT);
+  gold += totalBonus;
+  floatTexts.push({ x: GW / 2, y: GH / 2, text: '+' + totalBonus + ' BONUS', color: '#ffdd44', life: 2 });
+  if (wave >= 30) {
     gameWin();
   } else {
-    buildTimer = BUILD_TIME;
+    buildTimer = BUILD_TIME * DEX_BUILD_MULT; // DEX speeds build phase
   }
 }
 
 function gameWin() {
-  score += lives * 50 + gold;
+  score += Math.floor((lives * 50 + gold) * SCORE_MULT); // INT boosts final score
   var best = highScores[mapKey] || 0;
   if (wave > best) {
     highScores[mapKey] = wave;
     TAS.score.save('sporedef_' + mapKey + '_hi', wave);
   }
   state = 'win';
+  triggerScreenShake(6, 0.5);
   TAS.audio.playMelody([[523,0.15],[659,0.15],[784,0.15],[1046,0.3]], 150);
 }
 
@@ -248,8 +447,23 @@ function gameOver() {
     TAS.score.save('sporedef_' + mapKey + '_hi', wave);
   }
   state = 'gameOver';
+  triggerScreenShake(12, 0.8);
   TAS.fx.shake(8, 0.85);
   TAS.audio.playTone(100, 0.5, 'sawtooth', 0.15, 40);
+}
+
+// === SCREEN SHAKE (custom layered shake) ===
+function triggerScreenShake(intensity, duration) {
+  shakeIntensity = intensity;
+  shakeDecay = duration;
+}
+
+function getShakeOffset() {
+  if (shakeIntensity <= 0.1) return { x: 0, y: 0 };
+  return {
+    x: (Math.random() - 0.5) * shakeIntensity * 2,
+    y: (Math.random() - 0.5) * shakeIntensity * 2
+  };
 }
 
 // === SPAWNING ===
@@ -260,7 +474,7 @@ function spawnEnemy(def, hpMult, pathIdx) {
   if (map.path3) paths.push(map.path3);
   var chosenPath = paths[pathIdx % paths.length];
   var base = ENEMY_DEFS[def];
-  var hp = Math.floor(base.hp * hpMult);
+  var hp = Math.floor(base.hp * hpMult * statB.hpMult);
   enemies.push({
     type: def,
     x: chosenPath[0][0] * CELL + CELL / 2,
@@ -268,7 +482,7 @@ function spawnEnemy(def, hpMult, pathIdx) {
     hp: hp,
     maxHp: hp,
     speed: base.speed,
-    gold: base.gold + Math.floor(hpMult * 2),
+    gold: Math.floor((base.gold + Math.floor(hpMult * 2)) * CHA_GOLD_MULT), // CHA gold bonus
     color: base.color,
     size: base.size,
     flying: base.flying,
@@ -276,13 +490,20 @@ function spawnEnemy(def, hpMult, pathIdx) {
     healer: base.healer,
     splitter: base.splitter,
     boss: base.boss,
+    shield: base.shield || false,
+    shieldHp: base.shield ? Math.floor(hp * 0.4) : 0,
+    shieldMax: base.shield ? Math.floor(hp * 0.4) : 0,
     slow: 0,
     slowTimer: 0,
     pathIndex: 1,
     path: chosenPath,
     alive: true,
-    healCooldown: 0
+    healCooldown: 0,
+    spawnBurstDone: false
   });
+  // Spawn particle burst
+  var lastE = enemies[enemies.length - 1];
+  TAS.particles.spawn(lastE.x, lastE.y, base.color, 6, 2, { size: 2 });
 }
 
 // === TOWER LOGIC ===
@@ -311,13 +532,14 @@ function placeTower(col, row, type) {
     totalCost: def.cost,
     cooldown: 0,
     target: null,
-    angle: 0
+    angle: 0,
+    kills: 0
   };
   gridOccupied[k] = towers.length;
   towers.push(t);
   TAS.audio.playTone(440, 0.1, 'sine', 0.08);
   TAS.particles.spawn(t.x, t.y, def.color, 8, 2, { size: 2 });
-  score += 10;
+  score += Math.floor(10 * SCORE_MULT); // INT score bonus
   return true;
 }
 
@@ -331,7 +553,8 @@ function upgradeTower(idx) {
   t.totalCost += cost;
   TAS.audio.playTone(660, 0.12, 'sine', 0.08);
   TAS.particles.spawn(t.x, t.y, '#ffffff', 12, 3, { size: 3 });
-  score += 20;
+  score += Math.floor(20 * SCORE_MULT); // INT score bonus
+  triggerScreenShake(2, 0.15);
   return true;
 }
 
@@ -339,11 +562,12 @@ function sellTower(idx) {
   var t = towers[idx];
   if (!t) return;
   var refund = Math.floor(t.totalCost * 0.6);
+  // CHA bonus: better sell price
+  refund = Math.floor(refund * (1 + Math.max(0, chaMod) * 0.05));
   gold += refund;
   var k = cellKey(t.col, t.row);
   delete gridOccupied[k];
   towers.splice(idx, 1);
-  // Re-index gridOccupied
   gridOccupied = {};
   for (var i = 0; i < towers.length; i++) {
     gridOccupied[cellKey(towers[i].col, towers[i].row)] = i;
@@ -358,8 +582,8 @@ function getTowerStats(t) {
   var mult = UPGRADE_MULT[t.level - 1];
   return {
     range: def.range * (1 + (t.level - 1) * 0.15),
-    rate: def.rate * (1 - (t.level - 1) * 0.1),
-    dmg: Math.floor(def.dmg * mult),
+    rate: def.rate * (1 - (t.level - 1) * 0.1) * WIS_CD_MULT, // WIS reduces cooldowns
+    dmg: Math.floor(def.dmg * mult * STR_DMG_MULT),             // STR boosts damage
     hitAir: def.hitAir,
     aoe: def.aoe
   };
@@ -396,10 +620,9 @@ function fireTower(t, target) {
       var diff = Math.abs(eAng - ang);
       if (diff > Math.PI) diff = Math.PI * 2 - diff;
       if (diff < 0.6) {
-        damageEnemy(e, stats.dmg);
+        damageEnemy(e, stats.dmg, t);
       }
     }
-    // Spray visual
     for (var i = 0; i < 8; i++) {
       var sa = ang + (Math.random() - 0.5) * 1.0;
       var sd = stats.range * (0.3 + Math.random() * 0.7);
@@ -409,7 +632,7 @@ function fireTower(t, target) {
   } else if (t.type === 'lightning') {
     // Chain lightning - hit target + 2 nearby
     var hit = [target];
-    damageEnemy(target, stats.dmg);
+    damageEnemy(target, stats.dmg, t);
     for (var chain = 0; chain < 2; chain++) {
       var last = hit[hit.length - 1];
       var best = null, bestD = 60;
@@ -422,10 +645,9 @@ function fireTower(t, target) {
       }
       if (best) {
         hit.push(best);
-        damageEnemy(best, Math.floor(stats.dmg * 0.7));
+        damageEnemy(best, Math.floor(stats.dmg * 0.7), t);
       }
     }
-    // Lightning beam visual
     for (var i = 0; i < hit.length - 1; i++) {
       beams.push({ x1: hit[i].x, y1: hit[i].y, x2: hit[i+1].x, y2: hit[i+1].y, color: '#ffff44', life: 0.2, width: 2 });
     }
@@ -441,13 +663,59 @@ function fireTower(t, target) {
       var e = enemies[i];
       if (!e.alive) continue;
       if (e.flying && !stats.hitAir) continue;
-      // Point-to-line distance
       var d = pointToLineDist(e.x, e.y, t.x, t.y, bx2, by2);
       if (d < e.size + 3) {
-        damageEnemy(e, stats.dmg);
+        damageEnemy(e, stats.dmg, t);
       }
     }
     TAS.audio.playTone(200, 0.2, 'sawtooth', 0.08, 100);
+  } else if (t.type === 'thorn') {
+    // Thorn barricade: damages all nearby ground enemies
+    for (var i = 0; i < enemies.length; i++) {
+      var e = enemies[i];
+      if (!e.alive || e.flying) continue;
+      var d = TAS.math.dist(t.x, t.y, e.x, e.y);
+      if (d < stats.range) {
+        damageEnemy(e, stats.dmg, t);
+        e.slow = 0.3;
+        e.slowTimer = 0.5;
+      }
+    }
+    TAS.particles.spawn(t.x, t.y, '#88aa44', 8, 1.5, { size: 2 });
+    TAS.audio.playTone(300, 0.06, 'square', 0.04);
+  } else if (t.type === 'poop') {
+    // POOP Launcher: AoE splash projectile
+    projectiles.push({
+      x: t.x, y: t.y,
+      tx: target.x, ty: target.y,
+      target: target,
+      speed: 120,
+      dmg: stats.dmg,
+      color: '#aa8844',
+      size: 5,
+      trail: '#886633',
+      alive: true,
+      splash: true,
+      splashRadius: 30,
+      tower: t
+    });
+    TAS.audio.playTone(200, 0.15, 'sawtooth', 0.06, 80);
+  } else if (t.type === 'reactor') {
+    // Micro Reactor: radial pulse damage
+    for (var i = 0; i < enemies.length; i++) {
+      var e = enemies[i];
+      if (!e.alive) continue;
+      var d = TAS.math.dist(t.x, t.y, e.x, e.y);
+      if (d < stats.range) {
+        var falloff = 1 - (d / stats.range) * 0.5;
+        damageEnemy(e, Math.floor(stats.dmg * falloff), t);
+      }
+    }
+    // Reactor pulse visual
+    beams.push({ x1: t.x, y1: t.y, x2: t.x, y2: t.y, color: '#ff88ff', life: 0.4, width: stats.range, isRadial: true });
+    TAS.particles.spawn(t.x, t.y, '#ff88ff', 20, 3, { size: 2 });
+    TAS.audio.playTone(150, 0.25, 'sine', 0.06, 300);
+    triggerScreenShake(2, 0.1);
   } else {
     // Projectile-based (spore, cannon)
     var speed = t.type === 'cannon' ? 150 : 220;
@@ -460,7 +728,9 @@ function fireTower(t, target) {
       color: def.color,
       size: t.type === 'cannon' ? 4 : 2,
       trail: t.type === 'cannon' ? '#ff8844' : '#88ffbb',
-      alive: true
+      alive: true,
+      splash: false,
+      tower: t
     });
     TAS.audio.playTone(t.type === 'cannon' ? 180 : 600, 0.08, 'square', 0.04);
   }
@@ -475,46 +745,205 @@ function pointToLineDist(px, py, x1, y1, x2, y2) {
   return TAS.math.dist(px, py, cx, cy);
 }
 
-function damageEnemy(e, dmg) {
+function damageEnemy(e, dmg, tower) {
+  // Shield absorbs damage first
+  if (e.shield && e.shieldHp > 0) {
+    var absorbed = Math.min(e.shieldHp, dmg);
+    e.shieldHp -= absorbed;
+    dmg -= absorbed;
+    if (e.shieldHp <= 0) {
+      e.shield = false;
+      TAS.particles.spawn(e.x, e.y, '#4488ff', 10, 2, { size: 2 });
+      floatTexts.push({ x: e.x, y: e.y - 12, text: 'SHIELD DOWN', color: '#4488ff', life: 1.0 });
+    }
+    if (dmg <= 0) return;
+  }
   var finalDmg = Math.max(1, dmg - e.armor);
   e.hp -= finalDmg;
   if (e.hp <= 0) {
-    killEnemy(e);
+    killEnemy(e, tower);
   }
 }
 
-function killEnemy(e) {
+function killEnemy(e, tower) {
   if (!e.alive) return;
   e.alive = false;
-  gold += e.gold;
-  score += e.gold * 2;
-  floatTexts.push({ x: e.x, y: e.y - 8, text: '+$' + e.gold, color: '#ffdd44', life: 1.2 });
-  TAS.particles.spawn(e.x, e.y, e.color, 12, 3, { size: 3, gravity: 0.5 });
+  var goldReward = e.gold;
+  // CHA luck: chance for double gold
+  if (Math.random() < 0.02 + chaMod * 0.01 + statB.luck * 0.005) {
+    goldReward *= 2;
+    floatTexts.push({ x: e.x, y: e.y - 16, text: 'LUCKY x2!', color: '#ff88ff', life: 1.5 });
+  }
+  gold += goldReward;
+  var killScore = Math.floor(e.gold * 2 * SCORE_MULT); // INT score bonus
+  score += killScore;
+  totalKills++;
+  if (tower) tower.kills++;
+
+  // Combo system
+  comboKills++;
+  comboTimer = COMBO_WINDOW;
+  if (comboKills >= 5) {
+    var comboBonus = Math.floor(comboKills * 3 * SCORE_MULT);
+    score += comboBonus;
+    floatTexts.push({ x: e.x, y: e.y - 24, text: comboKills + 'x COMBO +' + comboBonus, color: '#ff44ff', life: 1.8 });
+    triggerScreenShake(3, 0.15);
+  }
+
+  floatTexts.push({ x: e.x, y: e.y - 8, text: '+$' + goldReward, color: '#ffdd44', life: 1.2 });
+
+  // Death particles scale with enemy size
+  var pCount = e.boss ? 30 : (e.size > 6 ? 16 : 10);
+  TAS.particles.spawn(e.x, e.y, e.color, pCount, e.boss ? 5 : 3, { size: e.boss ? 4 : 3, gravity: 0.5 });
   TAS.audio.playTone(300 + Math.random() * 200, 0.1, 'square', 0.05);
+
+  if (e.boss) {
+    triggerScreenShake(8, 0.5);
+    // Boss death ring
+    for (var a = 0; a < 12; a++) {
+      var ang = (a / 12) * Math.PI * 2;
+      TAS.particles.spawn(e.x + Math.cos(ang) * 15, e.y + Math.sin(ang) * 15, '#ffffff', 3, 4, { size: 3 });
+    }
+    floatTexts.push({ x: e.x, y: e.y - 30, text: 'BOSS SLAIN!', color: '#ff4444', life: 2.5 });
+    TAS.audio.playMelody([[440,0.1],[550,0.1],[660,0.15]], 100);
+  }
 
   // Splitter spawns 2 minis
   if (e.splitter) {
-    for (var s = 0; s < 2; s++) {
+    var miniCount = e.boss ? 4 : 2;
+    for (var s = 0; s < miniCount; s++) {
+      var offX = (s % 2 === 0 ? -1 : 1) * 5 * (1 + Math.floor(s / 2));
       var mini = {
         type: 'slime',
-        x: e.x + (s === 0 ? -5 : 5),
-        y: e.y,
-        hp: Math.floor(e.maxHp * 0.3),
-        maxHp: Math.floor(e.maxHp * 0.3),
+        x: e.x + offX,
+        y: e.y + (s > 1 ? 5 : 0),
+        hp: Math.floor(e.maxHp * (e.boss ? 0.2 : 0.3)),
+        maxHp: Math.floor(e.maxHp * (e.boss ? 0.2 : 0.3)),
         speed: e.speed * 1.3,
-        gold: 3,
+        gold: e.boss ? 8 : 3,
         color: '#ffcc44',
-        size: 4,
+        size: e.boss ? 5 : 4,
         flying: false, armor: 0, healer: false, splitter: false, boss: false,
+        shield: false, shieldHp: 0, shieldMax: 0,
         slow: 0, slowTimer: 0,
         pathIndex: Math.max(0, e.pathIndex - 1),
         path: e.path,
         alive: true,
-        healCooldown: 0
+        healCooldown: 0,
+        spawnBurstDone: false
       };
       enemies.push(mini);
     }
   }
+}
+
+// === NES CONTROLLER INPUT ===
+var nesInput = { up: false, down: false, left: false, right: false, a: false, b: false, start: false, select: false };
+var nesPrev = { up: false, down: false, left: false, right: false, a: false, b: false, start: false, select: false };
+var nesRepeat = { up: 0, down: 0, left: 0, right: 0 };
+var NES_REPEAT_DELAY = 0.35;
+var NES_REPEAT_RATE = 0.08;
+
+function updateNesInput(dt) {
+  // Read from TAS.input (dpad + buttons)
+  var inp = TAS.input;
+  nesInput.up = inp.up;
+  nesInput.down = inp.down;
+  nesInput.left = inp.left;
+  nesInput.right = inp.right;
+  nesInput.a = inp.a;
+  nesInput.b = inp.b;
+  nesInput.start = inp.start;
+  nesInput.select = inp.select;
+
+  // D-pad repeat logic for cursor movement
+  var dirs = ['up', 'down', 'left', 'right'];
+  for (var i = 0; i < dirs.length; i++) {
+    var d = dirs[i];
+    if (nesInput[d]) {
+      if (!nesPrev[d]) {
+        // First press
+        moveCursor(d);
+        nesRepeat[d] = NES_REPEAT_DELAY;
+        cursorVisible = true;
+      } else {
+        nesRepeat[d] -= dt;
+        if (nesRepeat[d] <= 0) {
+          moveCursor(d);
+          nesRepeat[d] = NES_REPEAT_RATE;
+        }
+      }
+    } else {
+      nesRepeat[d] = 0;
+    }
+  }
+
+  // A button: place tower at cursor or select placed tower
+  if (nesInput.a && !nesPrev.a && cursorVisible) {
+    if (state === 'playing') {
+      var k = cellKey(cursorCol, cursorRow);
+      if (gridOccupied[k] !== undefined) {
+        selectedPlaced = gridOccupied[k];
+        selectedTower = null;
+        TAS.audio.playTone(400, 0.05, 'sine', 0.04);
+      } else if (selectedTower) {
+        if (!placeTower(cursorCol, cursorRow, selectedTower)) {
+          TAS.audio.playTone(150, 0.1, 'square', 0.04);
+        }
+      }
+    }
+  }
+
+  // B button: upgrade selected tower or cycle tower type
+  if (nesInput.b && !nesPrev.b && cursorVisible) {
+    if (state === 'playing') {
+      if (selectedPlaced !== null) {
+        if (!upgradeTower(selectedPlaced)) {
+          // Can't upgrade, deselect
+          selectedPlaced = null;
+          selectedTower = TOWER_KEYS[paletteIndex];
+        }
+      } else {
+        // Cycle tower selection
+        paletteIndex = (paletteIndex + 1) % TOWER_KEYS.length;
+        selectedTower = TOWER_KEYS[paletteIndex];
+        TAS.audio.playTone(500 + paletteIndex * 50, 0.05, 'sine', 0.04);
+      }
+    }
+  }
+
+  // Start: skip build phase
+  if (nesInput.start && !nesPrev.start) {
+    if (state === 'playing' && !waveActive && buildTimer > 0) {
+      buildTimer = 0;
+    } else if (state === 'title' || state === 'gameOver' || state === 'win') {
+      // Handle with click logic
+    }
+  }
+
+  // Select: sell tower
+  if (nesInput.select && !nesPrev.select) {
+    if (state === 'playing' && selectedPlaced !== null) {
+      sellTower(selectedPlaced);
+    }
+  }
+
+  // Save previous state
+  nesPrev.up = nesInput.up;
+  nesPrev.down = nesInput.down;
+  nesPrev.left = nesInput.left;
+  nesPrev.right = nesInput.right;
+  nesPrev.a = nesInput.a;
+  nesPrev.b = nesInput.b;
+  nesPrev.start = nesInput.start;
+  nesPrev.select = nesInput.select;
+}
+
+function moveCursor(dir) {
+  if (dir === 'up') cursorRow = Math.max(0, cursorRow - 1);
+  if (dir === 'down') cursorRow = Math.min(ROWS - 1, cursorRow + 1);
+  if (dir === 'left') cursorCol = Math.max(0, cursorCol - 1);
+  if (dir === 'right') cursorCol = Math.min(COLS - 1, cursorCol + 1);
 }
 
 // === MOUSE / TOUCH HANDLING ===
@@ -527,6 +956,7 @@ canvas.addEventListener('mousemove', function(ev) {
   mouseY = (ev.clientY - rect.top) * (canvas.height / dpr) / rect.height;
   mouseCell.col = Math.floor(mouseX / CELL);
   mouseCell.row = Math.floor((mouseY - HUD_H) / CELL);
+  cursorVisible = false; // Hide dpad cursor when using mouse
 });
 
 canvas.addEventListener('mousedown', function(ev) {
@@ -535,6 +965,7 @@ canvas.addEventListener('mousedown', function(ev) {
   clickX = (ev.clientX - rect.left) * (canvas.width / dpr) / rect.width;
   clickY = (ev.clientY - rect.top) * (canvas.height / dpr) / rect.height;
   clicked = true;
+  cursorVisible = false;
   TAS.audio.ensureAudio();
 });
 
@@ -559,7 +990,6 @@ function handleClick() {
   clicked = false;
 
   if (state === 'title') {
-    // Check map selection buttons
     var maps = ['forest','mountain','reactor'];
     for (var i = 0; i < 3; i++) {
       var bx = GW / 2 - 80, by = 140 + i * 40, bw = 160, bh = 32;
@@ -579,13 +1009,25 @@ function handleClick() {
 
   if (state !== 'playing') return;
 
+  // Tutorial dismiss
+  if (!tutorialDone && tutorialStep < TUTORIAL_STEPS.length) {
+    tutorialStep++;
+    if (tutorialStep >= TUTORIAL_STEPS.length) {
+      tutorialDone = true;
+      try { localStorage.setItem('sporedef_tut_done', '1'); } catch(e) {}
+    }
+    return;
+  }
+
   // Check tower palette (bottom panel)
   var panelY = GH - 38;
+  var paletteCols = Math.min(TOWER_KEYS.length, 6);
   for (var i = 0; i < TOWER_KEYS.length; i++) {
-    var px = 4 + i * 52;
-    if (TAS.hit.pointInRect(clickX, clickY, px, panelY, 50, 34)) {
+    var px = 4 + i * 46;
+    if (TAS.hit.pointInRect(clickX, clickY, px, panelY, 44, 34)) {
       selectedTower = TOWER_KEYS[i];
       selectedPlaced = null;
+      paletteIndex = i;
       TAS.audio.playTone(500, 0.05, 'sine', 0.04);
       return;
     }
@@ -603,7 +1045,6 @@ function handleClick() {
   // Check upgrade/sell buttons if tower selected
   if (selectedPlaced !== null && towers[selectedPlaced]) {
     var t = towers[selectedPlaced];
-    // Upgrade button
     if (t.level < 3) {
       var ubx = t.x + 12, uby = t.y - 24;
       if (TAS.hit.pointInRect(clickX, clickY, ubx - 20, uby - 8, 40, 16)) {
@@ -611,7 +1052,6 @@ function handleClick() {
         return;
       }
     }
-    // Sell button
     var sbx = t.x + 12, sby = t.y - 8;
     if (TAS.hit.pointInRect(clickX, clickY, sbx - 20, sby - 8, 40, 16)) {
       sellTower(selectedPlaced);
@@ -625,15 +1065,11 @@ function handleClick() {
   if (col >= 0 && col < COLS && row >= 0 && row < ROWS) {
     var k = cellKey(col, row);
     if (gridOccupied[k] !== undefined) {
-      // Select existing tower
       selectedPlaced = gridOccupied[k];
       selectedTower = null;
       TAS.audio.playTone(400, 0.05, 'sine', 0.04);
     } else if (selectedTower) {
-      // Place new tower
-      if (placeTower(col, row, selectedTower)) {
-        // success
-      } else {
+      if (!placeTower(col, row, selectedTower)) {
         TAS.audio.playTone(150, 0.1, 'square', 0.04);
       }
     } else {
@@ -647,9 +1083,36 @@ function update(dt) {
   frame++;
   TAS.particles.update(dt);
   TAS.fx.updateEffects(dt);
+  updateNesInput(dt);
   handleClick();
 
+  // Custom shake decay
+  if (shakeIntensity > 0) {
+    shakeIntensity *= Math.pow(0.05, dt / Math.max(0.01, shakeDecay));
+    if (shakeIntensity < 0.1) shakeIntensity = 0;
+  }
+
+  // Environment particles
+  if (state === 'playing' && Math.random() < 0.15) {
+    spawnEnvParticle(mapKey);
+  }
+  updateEnvParticles(dt);
+
+  // Combo timer decay
+  if (comboTimer > 0) {
+    comboTimer -= dt;
+    if (comboTimer <= 0) {
+      comboKills = 0;
+    }
+  }
+
   if (state !== 'playing') return;
+
+  // Tutorial overlay blocks gameplay input but not rendering
+  if (!tutorialDone && tutorialStep < TUTORIAL_STEPS.length) {
+    tutorialTimer += dt;
+    return;
+  }
 
   // Build phase countdown
   if (!waveActive) {
@@ -659,6 +1122,8 @@ function update(dt) {
     }
     return;
   }
+
+  waveStartTime += dt;
 
   // Spawn enemies
   spawnTimer -= dt;
@@ -681,6 +1146,11 @@ function update(dt) {
       if (e.slowTimer <= 0) e.slow = 0;
     }
 
+    // Shield regeneration (slow)
+    if (e.shieldMax > 0 && e.shieldHp < e.shieldMax && !e.shield) {
+      // Shields don't regen once broken
+    }
+
     // Healer logic
     if (e.healer) {
       e.healCooldown -= dt;
@@ -700,7 +1170,6 @@ function update(dt) {
     // Movement
     var spd = e.speed * (1 - e.slow) * dt;
     if (e.flying) {
-      // Fly straight toward core
       var core = MAPS[mapKey].core;
       var cx = core[0] * CELL + CELL / 2;
       var cy = core[1] * CELL + CELL / 2 + HUD_H;
@@ -711,7 +1180,6 @@ function update(dt) {
         enemyReachCore(e);
       }
     } else {
-      // Follow path
       if (e.pathIndex < e.path.length) {
         var target = e.path[e.pathIndex];
         var tx = target[0] * CELL + CELL / 2;
@@ -737,7 +1205,6 @@ function update(dt) {
     t.cooldown -= dt;
     if (t.cooldown > 0) continue;
     var stats = getTowerStats(t);
-    // Find target
     var best = null, bestD = stats.range + 1;
     for (var j = 0; j < enemies.length; j++) {
       var e = enemies[j];
@@ -756,24 +1223,36 @@ function update(dt) {
   for (var i = projectiles.length - 1; i >= 0; i--) {
     var p = projectiles[i];
     if (!p.alive) { projectiles.splice(i, 1); continue; }
-    // Move toward target position
     var tx = p.target && p.target.alive ? p.target.x : p.tx;
     var ty = p.target && p.target.alive ? p.target.y : p.ty;
     var ang = TAS.math.angle(p.x, p.y, tx, ty);
     var mv = p.speed * dt;
     p.x += Math.cos(ang) * mv;
     p.y += Math.sin(ang) * mv;
-    // Trail particle
     TAS.particles.spawn(p.x, p.y, p.trail, 1, 0.5, { size: 1.5 });
-    // Hit check
     if (TAS.math.dist(p.x, p.y, tx, ty) < 8) {
-      if (p.target && p.target.alive) {
-        damageEnemy(p.target, p.dmg);
-        TAS.particles.spawn(p.x, p.y, '#ffffff', 5, 2, { size: 2 });
+      if (p.splash) {
+        // POOP splash AoE
+        for (var j = 0; j < enemies.length; j++) {
+          var e = enemies[j];
+          if (!e.alive || e.flying) continue;
+          var sd = TAS.math.dist(p.x, p.y, e.x, e.y);
+          if (sd < p.splashRadius) {
+            var falloff = 1 - sd / p.splashRadius;
+            damageEnemy(e, Math.floor(p.dmg * falloff), p.tower);
+          }
+        }
+        TAS.particles.spawn(p.x, p.y, '#aa8844', 20, 3, { size: 4, gravity: 0.8 });
+        triggerScreenShake(3, 0.15);
+        TAS.audio.playTone(120, 0.2, 'sawtooth', 0.08, 60);
+      } else {
+        if (p.target && p.target.alive) {
+          damageEnemy(p.target, p.dmg, p.tower);
+          TAS.particles.spawn(p.x, p.y, '#ffffff', 5, 2, { size: 2 });
+        }
       }
       p.alive = false;
     }
-    // Out of bounds
     if (p.x < -20 || p.x > GW + 20 || p.y < -20 || p.y > GH + 20) p.alive = false;
   }
 
@@ -801,6 +1280,7 @@ function enemyReachCore(e) {
   e.alive = false;
   var dmg = e.boss ? 5 : 1;
   lives -= dmg;
+  triggerScreenShake(e.boss ? 10 : 5, e.boss ? 0.5 : 0.3);
   TAS.fx.flash('#ff0000', 0.3);
   TAS.fx.shake(4, 0.9);
   TAS.audio.playTone(150, 0.2, 'sawtooth', 0.1);
@@ -822,7 +1302,7 @@ function draw(dt) {
 
   if (state === 'gameOver') {
     drawGameField();
-    TAS.ui.drawGameOver(score, highScores[mapKey] || 0, GW, GH, { frame: frame, extra: 'Wave ' + wave + '/20 | Map: ' + MAPS[mapKey].name });
+    TAS.ui.drawGameOver(score, highScores[mapKey] || 0, GW, GH, { frame: frame, extra: 'Wave ' + wave + '/30 | Map: ' + MAPS[mapKey].name + ' | Kills: ' + totalKills });
     return;
   }
 
@@ -833,24 +1313,75 @@ function draw(dt) {
     ctx.textAlign = 'center';
     ctx.fillStyle = '#44ff88';
     ctx.font = 'bold 24px monospace';
-    ctx.fillText('VICTORY!', GW / 2, GH * 0.3);
+    ctx.fillText('VICTORY!', GW / 2, GH * 0.25);
     ctx.fillStyle = '#ffdd44';
     ctx.font = 'bold 14px monospace';
-    ctx.fillText('Score: ' + score, GW / 2, GH * 0.45);
+    ctx.fillText('Score: ' + score, GW / 2, GH * 0.38);
     ctx.fillStyle = '#88ccff';
     ctx.font = '12px monospace';
-    ctx.fillText('All 20 waves defeated!', GW / 2, GH * 0.55);
+    ctx.fillText('All 30 waves defeated!', GW / 2, GH * 0.48);
+    ctx.fillStyle = '#aaa';
+    ctx.font = '10px monospace';
+    ctx.fillText('Kills: ' + totalKills + ' | Lives: ' + lives + ' | Gold: ' + gold, GW / 2, GH * 0.58);
+    // Stat display
+    ctx.fillStyle = '#666';
+    ctx.font = '9px monospace';
+    ctx.fillText('STR:' + statB.str + ' DEX:' + statB.dex + ' CON:' + statB.con + ' INT:' + statB.int + ' WIS:' + statB.wis + ' CHA:' + statB.cha, GW / 2, GH * 0.67);
     ctx.fillStyle = '#888';
     ctx.font = '11px monospace';
-    ctx.fillText('Click to return', GW / 2, GH * 0.75);
+    ctx.fillText('Click to return', GW / 2, GH * 0.82);
+
+    // Victory particles
+    if (frame % 8 === 0) {
+      TAS.particles.spawn(Math.random() * GW, GH, ['#ff4488','#44ff88','#ffdd44','#88ccff'][Math.floor(Math.random()*4)], 3, 4, { size: 3, gravity: -1 });
+    }
+    TAS.particles.draw();
     return;
   }
 
   drawGameField();
+
+  // Tutorial overlay
+  if (!tutorialDone && tutorialStep < TUTORIAL_STEPS.length && state === 'playing') {
+    drawTutorial();
+  }
+}
+
+function drawTutorial() {
+  var step = TUTORIAL_STEPS[tutorialStep];
+  ctx.fillStyle = 'rgba(0,0,0,0.65)';
+  ctx.fillRect(0, 0, GW, GH);
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#44dd88';
+  ctx.font = 'bold 14px monospace';
+  ctx.fillText('TUTORIAL (' + (tutorialStep + 1) + '/' + TUTORIAL_STEPS.length + ')', GW / 2, GH * 0.2);
+  ctx.fillStyle = '#ffffff';
+  ctx.font = '11px monospace';
+  // Word wrap the tutorial text
+  var words = step.text.split(' ');
+  var line = '';
+  var lineY = GH * step.y;
+  for (var w = 0; w < words.length; w++) {
+    var test = line + words[w] + ' ';
+    if (ctx.measureText(test).width > GW - 60) {
+      ctx.fillText(line, GW / 2, lineY);
+      line = words[w] + ' ';
+      lineY += 16;
+    } else {
+      line = test;
+    }
+  }
+  if (line) ctx.fillText(line, GW / 2, lineY);
+
+  var pulse = Math.sin(frame * 0.06) * 0.3 + 0.7;
+  ctx.globalAlpha = pulse;
+  ctx.fillStyle = '#ffdd44';
+  ctx.font = 'bold 10px monospace';
+  ctx.fillText('Click or press A to continue', GW / 2, GH * 0.88);
+  ctx.globalAlpha = 1;
 }
 
 function drawTitle() {
-  // Background
   ctx.fillStyle = '#080c06';
   ctx.fillRect(0, 0, GW, GH);
 
@@ -860,13 +1391,33 @@ function drawTitle() {
   for (var x = 0; x < GW; x += CELL) { ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, GH); ctx.stroke(); }
   for (var y = 0; y < GH; y += CELL) { ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(GW, y); ctx.stroke(); }
 
+  // Floating title particles
+  if (frame % 5 === 0) {
+    TAS.particles.spawn(Math.random() * GW, GH + 5, '#1a3a15', 1, 2, { size: 2, gravity: -0.5 });
+  }
+  TAS.particles.draw();
+  drawEnvParticles();
+
   ctx.textAlign = 'center';
-  ctx.fillStyle = '#44dd88';
+  ctx.fillStyle = statB.color || '#44dd88';
   ctx.font = 'bold 22px monospace';
-  ctx.fillText('SPORE DEFENSE', GW / 2, 50);
+  ctx.fillText('SPORE DEFENSE', GW / 2, 40);
   ctx.fillStyle = '#888';
   ctx.font = '10px monospace';
-  ctx.fillText('A Tasern Tower Defense', GW / 2, 68);
+  ctx.fillText('A Tasern Tower Defense', GW / 2, 56);
+
+  // Show Baseling stat bonuses if any
+  if (statB.level > 0 || statB.str !== 10) {
+    ctx.fillStyle = statB.color || '#44dd88';
+    ctx.font = '9px monospace';
+    ctx.fillText(statB.name + ' Lv' + statB.level + ' | STR:' + statB.str + ' DEX:' + statB.dex + ' CON:' + statB.con, GW / 2, 72);
+    ctx.fillText('INT:' + statB.int + ' WIS:' + statB.wis + ' CHA:' + statB.cha, GW / 2, 84);
+  }
+
+  // Controls legend
+  ctx.fillStyle = '#555';
+  ctx.font = '8px monospace';
+  ctx.fillText('STR=Dmg DEX=Speed CON=HP INT=Score WIS=Cooldown CHA=Luck', GW / 2, 100);
 
   ctx.fillStyle = '#aaa';
   ctx.font = 'bold 11px monospace';
@@ -897,50 +1448,102 @@ function drawTitle() {
   // Instructions
   ctx.fillStyle = '#666';
   ctx.font = '9px monospace';
-  ctx.fillText('Click grid to place towers | Click tower to upgrade/sell', GW / 2, GH - 40);
+  ctx.fillText('D-PAD/Arrows: Move | A: Build | B: Cycle/Upgrade | SELECT: Sell', GW / 2, GH - 40);
+  ctx.fillText('Mouse/Touch also supported | START/Space: Skip build phase', GW / 2, GH - 28);
   var pulse = Math.sin(frame * 0.05) * 0.3 + 0.7;
   ctx.globalAlpha = pulse;
   ctx.fillStyle = '#ffdd44';
   ctx.font = 'bold 11px monospace';
-  ctx.fillText('CLICK A MAP TO START', GW / 2, GH - 18);
+  ctx.fillText('CLICK A MAP TO START', GW / 2, GH - 12);
   ctx.globalAlpha = 1;
+}
+
+function getZoneTheme(col) {
+  var map = MAPS[mapKey];
+  var themes = ZONE_THEMES[mapKey] || ZONE_THEMES.forest;
+  if (map.zones) {
+    for (var z = 0; z < map.zones.length; z++) {
+      if (col >= map.zones[z].startCol && col < map.zones[z].endCol) {
+        return themes[map.zones[z].theme];
+      }
+    }
+  }
+  return themes[0];
 }
 
 function drawGameField() {
   ctx.save();
   TAS.fx.applyShake();
 
-  // Draw grid
-  ctx.strokeStyle = '#1a2a15';
+  // Apply custom shake
+  var shk = getShakeOffset();
+  if (shk.x !== 0 || shk.y !== 0) {
+    ctx.translate(shk.x, shk.y);
+  }
+
+  // Draw zone backgrounds
+  var map = MAPS[mapKey];
+  if (map.zones) {
+    for (var z = 0; z < map.zones.length; z++) {
+      var zone = map.zones[z];
+      var theme = (ZONE_THEMES[mapKey] || ZONE_THEMES.forest)[zone.theme];
+      ctx.fillStyle = theme.bgColor;
+      ctx.fillRect(zone.startCol * CELL, HUD_H, (zone.endCol - zone.startCol) * CELL, ROWS * CELL);
+    }
+  }
+
+  // Draw environment particles behind grid
+  drawEnvParticles();
+
+  // Draw grid with zone-aware coloring
   ctx.lineWidth = 0.5;
   for (var x = 0; x <= COLS; x++) {
+    var theme = getZoneTheme(Math.min(x, COLS - 1));
+    ctx.strokeStyle = theme.gridColor;
     ctx.beginPath(); ctx.moveTo(x * CELL, HUD_H); ctx.lineTo(x * CELL, HUD_H + ROWS * CELL); ctx.stroke();
   }
   for (var y = 0; y <= ROWS; y++) {
+    ctx.strokeStyle = '#1a2a15';
     ctx.beginPath(); ctx.moveTo(0, HUD_H + y * CELL); ctx.lineTo(COLS * CELL, HUD_H + y * CELL); ctx.stroke();
   }
 
-  // Draw path
-  ctx.fillStyle = '#1a2520';
+  // Draw path with zone coloring
   for (var i = 0; i < pathCells.length; i++) {
     var pc = pathCells[i];
+    var theme = getZoneTheme(pc[0]);
+    ctx.fillStyle = theme.pathColor;
     ctx.fillRect(pc[0] * CELL + 1, pc[1] * CELL + HUD_H + 1, CELL - 2, CELL - 2);
+    // Subtle path border glow
+    ctx.strokeStyle = theme.gridColor;
+    ctx.lineWidth = 0.3;
+    ctx.strokeRect(pc[0] * CELL + 1, pc[1] * CELL + HUD_H + 1, CELL - 2, CELL - 2);
   }
 
-  // Draw reactor core
+  // Draw reactor core (pulsing, multi-layered)
   var core = MAPS[mapKey].core;
   var coreX = core[0] * CELL + CELL / 2;
   var coreY = core[1] * CELL + CELL / 2 + HUD_H;
   var corePulse = 0.7 + Math.sin(frame * 0.08) * 0.3;
+  // Outer glow
+  ctx.fillStyle = 'rgba(255, 68, 136, ' + (0.15 * corePulse) + ')';
+  ctx.beginPath(); ctx.arc(coreX, coreY, 20, 0, Math.PI * 2); ctx.fill();
+  // Mid ring
   ctx.fillStyle = 'rgba(255, 68, 136, ' + (0.3 * corePulse) + ')';
   ctx.beginPath(); ctx.arc(coreX, coreY, 14, 0, Math.PI * 2); ctx.fill();
+  // Core
   ctx.fillStyle = '#ff4488';
   ctx.beginPath(); ctx.arc(coreX, coreY, 8, 0, Math.PI * 2); ctx.fill();
+  // Inner bright
   ctx.fillStyle = '#ffaacc';
   ctx.beginPath(); ctx.arc(coreX, coreY, 4, 0, Math.PI * 2); ctx.fill();
+  // Rotating energy ring
+  ctx.strokeStyle = 'rgba(255,170,200,' + (0.4 * corePulse) + ')';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.arc(coreX, coreY, 11 + corePulse * 2, frame * 0.03, frame * 0.03 + Math.PI * 1.5);
+  ctx.stroke();
 
-  // Draw entrance markers
-  var map = MAPS[mapKey];
+  // Draw entrance markers with animated arrows
   for (var i = 0; i < map.entrances.length; i++) {
     var ent = map.entrances[i];
     var ex = ent[0] * CELL + CELL / 2;
@@ -948,10 +1551,40 @@ function drawGameField() {
     ctx.strokeStyle = '#88ff88';
     ctx.lineWidth = 2;
     ctx.beginPath(); ctx.arc(ex, ey, 8, 0, Math.PI * 2); ctx.stroke();
+    // Animated arrow pointing inward
+    var arrowPulse = Math.sin(frame * 0.1 + i) * 3;
+    ctx.fillStyle = '#88ff88';
+    ctx.beginPath();
+    ctx.moveTo(ex + 12 + arrowPulse, ey - 3);
+    ctx.lineTo(ex + 12 + arrowPulse, ey + 3);
+    ctx.lineTo(ex + 16 + arrowPulse, ey);
+    ctx.closePath();
+    ctx.fill();
+  }
+
+  // Draw cursor (D-pad mode)
+  if (cursorVisible && state === 'playing') {
+    var cx = cursorCol * CELL, cy = cursorRow * CELL + HUD_H;
+    var cursorPulse = Math.sin(frame * 0.12) * 0.3 + 0.7;
+    ctx.globalAlpha = cursorPulse;
+    ctx.strokeStyle = '#ffffff';
+    ctx.lineWidth = 2;
+    ctx.strokeRect(cx + 1, cy + 1, CELL - 2, CELL - 2);
+    // Cursor corners
+    var cLen = 4;
+    ctx.strokeStyle = '#ffdd44';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(cx + 1, cy + 1 + cLen); ctx.lineTo(cx + 1, cy + 1); ctx.lineTo(cx + 1 + cLen, cy + 1);
+    ctx.moveTo(cx + CELL - 1 - cLen, cy + 1); ctx.lineTo(cx + CELL - 1, cy + 1); ctx.lineTo(cx + CELL - 1, cy + 1 + cLen);
+    ctx.moveTo(cx + CELL - 1, cy + CELL - 1 - cLen); ctx.lineTo(cx + CELL - 1, cy + CELL - 1); ctx.lineTo(cx + CELL - 1 - cLen, cy + CELL - 1);
+    ctx.moveTo(cx + 1 + cLen, cy + CELL - 1); ctx.lineTo(cx + 1, cy + CELL - 1); ctx.lineTo(cx + 1, cy + CELL - 1 - cLen);
+    ctx.stroke();
+    ctx.globalAlpha = 1;
   }
 
   // Draw range preview for selected tower type or placed tower
-  if (selectedTower && mouseCell.col >= 0 && mouseCell.row >= 0 && mouseCell.col < COLS && mouseCell.row < ROWS) {
+  if (selectedTower && !cursorVisible && mouseCell.col >= 0 && mouseCell.row >= 0 && mouseCell.col < COLS && mouseCell.row < ROWS) {
     var def = TOWER_DEFS[selectedTower];
     var px = mouseCell.col * CELL + CELL / 2;
     var py = mouseCell.row * CELL + CELL / 2 + HUD_H;
@@ -960,6 +1593,20 @@ function drawGameField() {
     ctx.fillStyle = canPlace ? def.color : '#ff0000';
     ctx.beginPath(); ctx.arc(px, py, def.range, 0, Math.PI * 2); ctx.fill();
     ctx.globalAlpha = 0.6;
+    ctx.strokeStyle = canPlace ? def.color : '#ff0000';
+    ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.arc(px, py, def.range, 0, Math.PI * 2); ctx.stroke();
+    ctx.globalAlpha = 1;
+  } else if (selectedTower && cursorVisible) {
+    // Range preview at cursor position
+    var def = TOWER_DEFS[selectedTower];
+    var px = cursorCol * CELL + CELL / 2;
+    var py = cursorRow * CELL + CELL / 2 + HUD_H;
+    var canPlace = !pathSet[cellKey(cursorCol, cursorRow)] && gridOccupied[cellKey(cursorCol, cursorRow)] === undefined;
+    ctx.globalAlpha = 0.12;
+    ctx.fillStyle = canPlace ? def.color : '#ff0000';
+    ctx.beginPath(); ctx.arc(px, py, def.range, 0, Math.PI * 2); ctx.fill();
+    ctx.globalAlpha = 0.5;
     ctx.strokeStyle = canPlace ? def.color : '#ff0000';
     ctx.lineWidth = 1;
     ctx.beginPath(); ctx.arc(px, py, def.range, 0, Math.PI * 2); ctx.stroke();
@@ -993,27 +1640,53 @@ function drawGameField() {
   for (var i = 0; i < projectiles.length; i++) {
     var p = projectiles[i];
     ctx.fillStyle = p.color;
-    ctx.beginPath(); ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2); ctx.fill();
+    if (p.splash) {
+      // POOP projectile arc visual
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.strokeStyle = '#665533';
+      ctx.lineWidth = 1;
+      ctx.stroke();
+    } else {
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
+      ctx.fill();
+    }
   }
 
   // Draw beams
   for (var i = 0; i < beams.length; i++) {
     var b = beams[i];
-    ctx.globalAlpha = b.life * 3;
-    ctx.strokeStyle = b.color;
-    ctx.lineWidth = b.width;
-    ctx.beginPath();
-    // Jagged lightning effect
-    var segs = 5;
-    ctx.moveTo(b.x1, b.y1);
-    for (var s = 1; s < segs; s++) {
-      var t = s / segs;
-      var mx = TAS.math.lerp(b.x1, b.x2, t) + (Math.random() - 0.5) * 8;
-      var my = TAS.math.lerp(b.y1, b.y2, t) + (Math.random() - 0.5) * 8;
-      ctx.lineTo(mx, my);
+    ctx.globalAlpha = Math.min(1, b.life * 3);
+    if (b.isRadial) {
+      // Radial pulse for reactor tower
+      var pulseR = b.width * (1 - b.life);
+      ctx.strokeStyle = b.color;
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(b.x1, b.y1, pulseR, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.globalAlpha = Math.min(1, b.life * 2) * 0.3;
+      ctx.fillStyle = b.color;
+      ctx.beginPath();
+      ctx.arc(b.x1, b.y1, pulseR * 0.7, 0, Math.PI * 2);
+      ctx.fill();
+    } else {
+      ctx.strokeStyle = b.color;
+      ctx.lineWidth = b.width;
+      ctx.beginPath();
+      var segs = 5;
+      ctx.moveTo(b.x1, b.y1);
+      for (var s = 1; s < segs; s++) {
+        var t = s / segs;
+        var mx = TAS.math.lerp(b.x1, b.x2, t) + (Math.random() - 0.5) * 8;
+        var my = TAS.math.lerp(b.y1, b.y2, t) + (Math.random() - 0.5) * 8;
+        ctx.lineTo(mx, my);
+      }
+      ctx.lineTo(b.x2, b.y2);
+      ctx.stroke();
     }
-    ctx.lineTo(b.x2, b.y2);
-    ctx.stroke();
     ctx.globalAlpha = 1;
   }
 
@@ -1035,16 +1708,19 @@ function drawGameField() {
   if (selectedPlaced !== null && towers[selectedPlaced]) {
     var st = towers[selectedPlaced];
     var def = TOWER_DEFS[st.type];
-    // Info panel
-    ctx.fillStyle = 'rgba(0,0,0,0.8)';
-    ctx.fillRect(st.x - 40, st.y - 44, 80, 40);
+    var stats = getTowerStats(st);
+    ctx.fillStyle = 'rgba(0,0,0,0.85)';
+    ctx.fillRect(st.x - 48, st.y - 52, 96, 48);
     ctx.strokeStyle = def.color;
     ctx.lineWidth = 1;
-    ctx.strokeRect(st.x - 40, st.y - 44, 80, 40);
+    ctx.strokeRect(st.x - 48, st.y - 52, 96, 48);
     ctx.textAlign = 'center';
     ctx.fillStyle = '#fff';
     ctx.font = '8px monospace';
-    ctx.fillText(def.name + ' Lv' + st.level, st.x, st.y - 34);
+    ctx.fillText(def.name + ' Lv' + st.level + ' [' + st.kills + ' kills]', st.x, st.y - 42);
+    ctx.fillStyle = '#aaa';
+    ctx.font = '7px monospace';
+    ctx.fillText('DMG:' + stats.dmg + ' RNG:' + Math.floor(stats.range) + ' SPD:' + stats.rate.toFixed(2), st.x, st.y - 33);
 
     if (st.level < 3) {
       var ucost = UPGRADE_COST[st.level];
@@ -1052,7 +1728,7 @@ function drawGameField() {
       ctx.font = 'bold 9px monospace';
       ctx.fillText('UP $' + ucost, st.x, st.y - 21);
     }
-    var refund = Math.floor(st.totalCost * 0.6);
+    var refund = Math.floor(st.totalCost * 0.6 * (1 + Math.max(0, chaMod) * 0.05));
     ctx.fillStyle = '#ffaa44';
     ctx.font = 'bold 9px monospace';
     ctx.fillText('SELL $' + refund, st.x, st.y - 9);
@@ -1076,58 +1752,72 @@ function drawGameField() {
   ctx.fillText(livesText, GW / 2, 18);
   ctx.fillStyle = '#88ccff';
   ctx.textAlign = 'right';
-  ctx.fillText('Wave ' + wave + '/20', GW - 6, 12);
+  ctx.fillText('Wave ' + wave + '/30', GW - 6, 12);
   ctx.fillStyle = '#aaa';
   ctx.font = '9px monospace';
   ctx.fillText(MAPS[mapKey].name, GW - 6, 24);
 
-  // Score
+  // Score + combo
   ctx.textAlign = 'left';
   ctx.fillStyle = '#aaa';
   ctx.font = '9px monospace';
   ctx.fillText('Score: ' + score, 6, 26);
+
+  // Combo indicator
+  if (comboKills >= 3) {
+    ctx.fillStyle = '#ff44ff';
+    ctx.font = 'bold 9px monospace';
+    ctx.fillText(comboKills + 'x', 80, 26);
+  }
 
   // Build timer or wave status
   if (!waveActive && state === 'playing') {
     ctx.textAlign = 'center';
     ctx.fillStyle = '#ffdd44';
     ctx.font = 'bold 10px monospace';
-    ctx.fillText('BUILD PHASE: ' + Math.ceil(buildTimer) + 's', GW / 2 + 60, 24);
+    ctx.fillText('BUILD: ' + Math.ceil(buildTimer) + 's', GW / 2 + 60, 24);
   }
 
-  // Tower palette (bottom)
+  // Tower palette (bottom) - scrollable with more towers
   var panelY = GH - 38;
   ctx.fillStyle = 'rgba(10,5,20,0.85)';
   ctx.fillRect(0, panelY - 2, GW, 40);
 
-  for (var i = 0; i < TOWER_KEYS.length; i++) {
+  var visibleTowers = Math.min(TOWER_KEYS.length, 9);
+  var tileW = Math.min(46, Math.floor((GW - 74) / visibleTowers));
+  for (var i = 0; i < visibleTowers; i++) {
     var tk = TOWER_KEYS[i];
     var def = TOWER_DEFS[tk];
-    var px = 4 + i * 52;
+    var px = 4 + i * tileW;
     var isSelected = (selectedTower === tk);
     var canAfford = gold >= def.cost;
 
     ctx.fillStyle = isSelected ? '#2a3a25' : '#141a12';
-    ctx.fillRect(px, panelY, 50, 34);
+    ctx.fillRect(px, panelY, tileW - 2, 34);
     ctx.strokeStyle = isSelected ? '#88ff88' : (canAfford ? def.color : '#442222');
     ctx.lineWidth = isSelected ? 2 : 1;
-    ctx.strokeRect(px, panelY, 50, 34);
+    ctx.strokeRect(px, panelY, tileW - 2, 34);
 
     // Tower icon
     ctx.fillStyle = canAfford ? def.color : '#444';
-    ctx.beginPath(); ctx.arc(px + 14, panelY + 14, 5, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.arc(px + 10, panelY + 12, 4, 0, Math.PI * 2); ctx.fill();
 
     // Cost
     ctx.fillStyle = canAfford ? '#ccc' : '#555';
-    ctx.font = '8px monospace';
+    ctx.font = '7px monospace';
     ctx.textAlign = 'left';
-    ctx.fillText('$' + def.cost, px + 24, panelY + 12);
+    ctx.fillText('$' + def.cost, px + 17, panelY + 11);
 
     // Name abbreviation
     ctx.fillStyle = canAfford ? def.color : '#444';
-    ctx.font = '7px monospace';
-    var abbr = ['SPR','CAN','FNG','ICE','LTN','BEM'];
-    ctx.fillText(abbr[i], px + 24, panelY + 24);
+    ctx.font = '6px monospace';
+    var abbr = ['SPR','CAN','FNG','ICE','STM','BEM','THN','POP','RCT'];
+    ctx.fillText(abbr[i], px + 2, panelY + 28);
+
+    // Hotkey number
+    ctx.fillStyle = '#555';
+    ctx.font = '6px monospace';
+    ctx.fillText((i + 1).toString(), px + tileW - 10, panelY + 28);
   }
 
   // READY button during build phase
@@ -1142,7 +1832,44 @@ function drawGameField() {
     ctx.fillStyle = '#88ff88';
     ctx.font = 'bold 11px monospace';
     ctx.textAlign = 'center';
-    ctx.fillText('READY', rbx + rbw / 2, rby + 20);
+    ctx.fillText('READY', rbx + rbw / 2, rby + 14);
+    ctx.fillStyle = '#aaa';
+    ctx.font = '8px monospace';
+    ctx.fillText('START', rbx + rbw / 2, rby + 28);
+  }
+
+  // Tower info tooltip (when cursor is on a tower)
+  if (cursorVisible && state === 'playing') {
+    var ck = cellKey(cursorCol, cursorRow);
+    if (gridOccupied[ck] !== undefined) {
+      var ti = towers[gridOccupied[ck]];
+      var td = TOWER_DEFS[ti.type];
+      ctx.fillStyle = 'rgba(0,0,0,0.8)';
+      ctx.fillRect(2, HUD_H + 2, 160, 28);
+      ctx.strokeStyle = td.color;
+      ctx.lineWidth = 1;
+      ctx.strokeRect(2, HUD_H + 2, 160, 28);
+      ctx.textAlign = 'left';
+      ctx.fillStyle = td.color;
+      ctx.font = '8px monospace';
+      ctx.fillText(td.name + ' Lv' + ti.level + ' [' + ti.kills + ' kills]', 6, HUD_H + 14);
+      ctx.fillStyle = '#aaa';
+      ctx.fillText(td.desc, 6, HUD_H + 24);
+    } else if (selectedTower) {
+      // Show selected tower info
+      var td = TOWER_DEFS[selectedTower];
+      ctx.fillStyle = 'rgba(0,0,0,0.8)';
+      ctx.fillRect(2, HUD_H + 2, 180, 28);
+      ctx.strokeStyle = td.color;
+      ctx.lineWidth = 1;
+      ctx.strokeRect(2, HUD_H + 2, 180, 28);
+      ctx.textAlign = 'left';
+      ctx.fillStyle = td.color;
+      ctx.font = '8px monospace';
+      ctx.fillText(td.name + ' ($' + td.cost + ') DMG:' + Math.floor(td.dmg * STR_DMG_MULT), 6, HUD_H + 14);
+      ctx.fillStyle = '#aaa';
+      ctx.fillText(td.desc, 6, HUD_H + 24);
+    }
   }
 
   TAS.input.drawTouchControls(GW, GH);
@@ -1163,14 +1890,11 @@ function drawTower(t, selected) {
   // Tower shape by type
   ctx.fillStyle = lvColor;
   if (t.type === 'spore') {
-    // Small circle shooter
     ctx.beginPath(); ctx.arc(x, y, 4 + t.level, 0, Math.PI * 2); ctx.fill();
-    // Barrel
     ctx.strokeStyle = lvColor; ctx.lineWidth = 2;
     ctx.beginPath(); ctx.moveTo(x, y);
     ctx.lineTo(x + Math.cos(t.angle) * 8, y + Math.sin(t.angle) * 8); ctx.stroke();
   } else if (t.type === 'cannon') {
-    // Big hexagonal
     ctx.beginPath();
     for (var a = 0; a < 6; a++) {
       var ang = a * Math.PI / 3;
@@ -1182,41 +1906,98 @@ function drawTower(t, selected) {
     ctx.beginPath(); ctx.moveTo(x, y);
     ctx.lineTo(x + Math.cos(t.angle) * 10, y + Math.sin(t.angle) * 10); ctx.stroke();
   } else if (t.type === 'spray') {
-    // Fan shape
     ctx.beginPath();
     ctx.moveTo(x, y);
     ctx.arc(x, y, 6 + t.level, t.angle - 0.5, t.angle + 0.5);
     ctx.closePath(); ctx.fill();
   } else if (t.type === 'ice') {
-    // Crystal
     ctx.beginPath();
     ctx.moveTo(x, y - 6 - t.level); ctx.lineTo(x + 5, y); ctx.lineTo(x, y + 6 + t.level); ctx.lineTo(x - 5, y);
     ctx.closePath(); ctx.fill();
-    // Glow
     ctx.globalAlpha = 0.3;
     ctx.fillStyle = '#88eeff';
     ctx.beginPath(); ctx.arc(x, y, 10 + t.level * 2, 0, Math.PI * 2); ctx.fill();
     ctx.globalAlpha = 1;
   } else if (t.type === 'lightning') {
-    // Pillar with spark
     ctx.fillRect(x - 2, y - 7 - t.level, 4, 14 + t.level * 2);
     ctx.fillStyle = '#ffff88';
-    var sparkAng = frame * 0.2 + i;
+    var sparkAng = frame * 0.2;
     ctx.beginPath(); ctx.arc(x + Math.cos(sparkAng) * 3, y - 6 + Math.sin(sparkAng) * 3, 2, 0, Math.PI * 2); ctx.fill();
   } else if (t.type === 'beam') {
-    // Reactor dish
     ctx.beginPath();
     ctx.arc(x, y, 5 + t.level, t.angle - 0.8, t.angle + 0.8);
     ctx.lineTo(x, y);
     ctx.closePath(); ctx.fill();
     ctx.fillStyle = '#ff88aa';
     ctx.beginPath(); ctx.arc(x, y, 3, 0, Math.PI * 2); ctx.fill();
+  } else if (t.type === 'thorn') {
+    // Thorn barricade: spiky circle
+    ctx.beginPath();
+    for (var a = 0; a < 8; a++) {
+      var ang = (a / 8) * Math.PI * 2;
+      var innerR = 3 + t.level;
+      var outerR = 6 + t.level * 1.5;
+      var r = a % 2 === 0 ? outerR : innerR;
+      ctx[a === 0 ? 'moveTo' : 'lineTo'](x + Math.cos(ang) * r, y + Math.sin(ang) * r);
+    }
+    ctx.closePath(); ctx.fill();
+    // Ground thorns
+    ctx.strokeStyle = lvColor;
+    ctx.lineWidth = 1;
+    for (var a = 0; a < 4; a++) {
+      var ang = (a / 4) * Math.PI * 2 + frame * 0.02;
+      ctx.beginPath();
+      ctx.moveTo(x, y);
+      ctx.lineTo(x + Math.cos(ang) * (8 + t.level), y + Math.sin(ang) * (8 + t.level));
+      ctx.stroke();
+    }
+  } else if (t.type === 'poop') {
+    // POOP launcher: squat mortar
+    ctx.fillStyle = '#665533';
+    ctx.fillRect(x - 5, y - 3, 10, 6);
+    ctx.fillStyle = lvColor;
+    ctx.beginPath(); ctx.arc(x, y - 4, 4 + t.level * 0.5, 0, Math.PI * 2); ctx.fill();
+    // Barrel
+    ctx.strokeStyle = lvColor;
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.moveTo(x, y - 4);
+    ctx.lineTo(x + Math.cos(t.angle) * 8, y - 4 + Math.sin(t.angle) * 8);
+    ctx.stroke();
+  } else if (t.type === 'reactor') {
+    // Micro reactor: glowing hexagonal core
+    ctx.beginPath();
+    for (var a = 0; a < 6; a++) {
+      var ang = a * Math.PI / 3 + frame * 0.01;
+      var r = 5 + t.level;
+      ctx[a === 0 ? 'moveTo' : 'lineTo'](x + Math.cos(ang) * r, y + Math.sin(ang) * r);
+    }
+    ctx.closePath(); ctx.fill();
+    // Pulsing core
+    ctx.fillStyle = '#ffffff';
+    var rPulse = 2 + Math.sin(frame * 0.15) * 1;
+    ctx.beginPath(); ctx.arc(x, y, rPulse, 0, Math.PI * 2); ctx.fill();
+    // Energy rings
+    ctx.globalAlpha = 0.25;
+    ctx.strokeStyle = '#ff88ff';
+    ctx.lineWidth = 1;
+    var ringR = 8 + t.level * 2 + Math.sin(frame * 0.1) * 2;
+    ctx.beginPath(); ctx.arc(x, y, ringR, 0, Math.PI * 2); ctx.stroke();
+    ctx.globalAlpha = 1;
   }
 
   // Level pips
   for (var l = 0; l < t.level; l++) {
     ctx.fillStyle = '#ffdd44';
     ctx.fillRect(x - 5 + l * 5, y + 9, 3, 3);
+  }
+
+  // Kill count indicator for high-kill towers
+  if (t.kills >= 10) {
+    ctx.fillStyle = '#ffdd44';
+    ctx.font = '6px monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText(t.kills, x, y - 10);
   }
 }
 
@@ -1229,7 +2010,7 @@ function drawEnemy(e) {
     ctx.fillStyle = '#000';
     ctx.beginPath(); ctx.ellipse(x, y + 6, e.size * 0.8, 3, 0, 0, Math.PI * 2); ctx.fill();
     ctx.globalAlpha = 1;
-    y -= 6; // float above
+    y -= 6;
   }
 
   // Slow effect
@@ -1240,41 +2021,80 @@ function drawEnemy(e) {
     ctx.globalAlpha = 1;
   }
 
+  // Shield effect
+  if (e.shield && e.shieldHp > 0) {
+    ctx.globalAlpha = 0.4;
+    ctx.strokeStyle = '#4488ff';
+    ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.arc(x, y, e.size + 4, 0, Math.PI * 2); ctx.stroke();
+    ctx.globalAlpha = 0.15;
+    ctx.fillStyle = '#4488ff';
+    ctx.beginPath(); ctx.arc(x, y, e.size + 4, 0, Math.PI * 2); ctx.fill();
+    ctx.globalAlpha = 1;
+  }
+
   // Body
   ctx.fillStyle = e.color;
   if (e.boss) {
-    // Boss: larger, pulsing
     var pulse = 1 + Math.sin(frame * 0.1) * 0.1;
     ctx.beginPath(); ctx.arc(x, y, e.size * pulse, 0, Math.PI * 2); ctx.fill();
     ctx.strokeStyle = '#ff8888'; ctx.lineWidth = 2;
     ctx.beginPath(); ctx.arc(x, y, e.size * pulse + 2, 0, Math.PI * 2); ctx.stroke();
+    // Boss crown
+    ctx.fillStyle = '#ffdd44';
+    ctx.beginPath();
+    ctx.moveTo(x - 5, y - e.size - 2);
+    ctx.lineTo(x - 3, y - e.size - 6);
+    ctx.lineTo(x, y - e.size - 3);
+    ctx.lineTo(x + 3, y - e.size - 6);
+    ctx.lineTo(x + 5, y - e.size - 2);
+    ctx.closePath(); ctx.fill();
+    // Boss eyes (angry)
+    ctx.fillStyle = '#000';
+    ctx.fillRect(x - 4, y - 2, 3, 2);
+    ctx.fillRect(x + 1, y - 2, 3, 2);
+    ctx.fillStyle = '#ff0000';
+    ctx.beginPath(); ctx.arc(x - 2.5, y - 1, 1, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.arc(x + 2.5, y - 1, 1, 0, Math.PI * 2); ctx.fill();
   } else if (e.healer) {
-    // Healer: cross symbol
     ctx.beginPath(); ctx.arc(x, y, e.size, 0, Math.PI * 2); ctx.fill();
     ctx.fillStyle = '#ffffff';
     ctx.fillRect(x - 1, y - 4, 2, 8);
     ctx.fillRect(x - 4, y - 1, 8, 2);
+  } else if (e.type === 'reactor_e') {
+    // Reactor runner: angular shape
+    ctx.beginPath();
+    ctx.moveTo(x, y - e.size);
+    ctx.lineTo(x + e.size, y);
+    ctx.lineTo(x, y + e.size);
+    ctx.lineTo(x - e.size, y);
+    ctx.closePath(); ctx.fill();
+    ctx.fillStyle = '#ffaa44';
+    ctx.beginPath(); ctx.arc(x, y, 2, 0, Math.PI * 2); ctx.fill();
+  } else if (e.type === 'swarm') {
+    // Tiny buzzing dots
+    var buzz = Math.sin(frame * 0.3 + e.x) * 1.5;
+    ctx.beginPath(); ctx.arc(x + buzz, y, e.size, 0, Math.PI * 2); ctx.fill();
+  } else if (e.type === 'shielded') {
+    ctx.beginPath(); ctx.arc(x, y, e.size, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#88bbff';
+    ctx.beginPath(); ctx.arc(x, y, e.size * 0.5, 0, Math.PI * 2); ctx.fill();
   } else if (e.flying) {
-    // Wings
     ctx.beginPath();
     ctx.moveTo(x, y - e.size);
     ctx.lineTo(x + e.size, y + e.size * 0.5);
     ctx.lineTo(x - e.size, y + e.size * 0.5);
     ctx.closePath(); ctx.fill();
   } else if (e.splitter) {
-    // Blob with line
     ctx.beginPath(); ctx.arc(x, y, e.size, 0, Math.PI * 2); ctx.fill();
     ctx.strokeStyle = '#000'; ctx.lineWidth = 1;
     ctx.beginPath(); ctx.moveTo(x, y - e.size); ctx.lineTo(x, y + e.size); ctx.stroke();
   } else if (e.armor > 0) {
-    // Armored: square-ish
     ctx.fillRect(x - e.size, y - e.size, e.size * 2, e.size * 2);
     ctx.strokeStyle = '#666'; ctx.lineWidth = 2;
     ctx.strokeRect(x - e.size, y - e.size, e.size * 2, e.size * 2);
   } else {
-    // Regular blob
     ctx.beginPath(); ctx.arc(x, y, e.size, 0, Math.PI * 2); ctx.fill();
-    // Eyes
     ctx.fillStyle = '#000';
     ctx.beginPath(); ctx.arc(x - 2, y - 1, 1.5, 0, Math.PI * 2); ctx.fill();
     ctx.beginPath(); ctx.arc(x + 2, y - 1, 1.5, 0, Math.PI * 2); ctx.fill();
@@ -1284,20 +2104,44 @@ function drawEnemy(e) {
   if (e.hp < e.maxHp) {
     var barW = e.size * 2;
     var hpRatio = e.hp / e.maxHp;
+    var barY = e.flying ? y - e.size - 8 : y - e.size - 5;
     ctx.fillStyle = '#300';
-    ctx.fillRect(x - barW / 2, y - e.size - 5, barW, 3);
+    ctx.fillRect(x - barW / 2, barY, barW, 3);
     ctx.fillStyle = hpRatio > 0.5 ? '#44ff44' : (hpRatio > 0.25 ? '#ffdd44' : '#ff4444');
-    ctx.fillRect(x - barW / 2, y - e.size - 5, barW * hpRatio, 3);
+    ctx.fillRect(x - barW / 2, barY, barW * hpRatio, 3);
+  }
+
+  // Shield bar (below HP bar)
+  if (e.shieldMax > 0 && e.shieldHp > 0) {
+    var barW = e.size * 2;
+    var shieldRatio = e.shieldHp / e.shieldMax;
+    var barY = e.flying ? y - e.size - 4 : y - e.size - 1;
+    ctx.fillStyle = '#004';
+    ctx.fillRect(x - barW / 2, barY, barW, 2);
+    ctx.fillStyle = '#4488ff';
+    ctx.fillRect(x - barW / 2, barY, barW * shieldRatio, 2);
   }
 }
 
 // === KEYBOARD SHORTCUTS ===
 document.addEventListener('keydown', function(e) {
+  // Arrow keys feed into TAS.input for NES handling
+  if (e.key === 'ArrowUp') { TAS.input.up = true; e.preventDefault(); }
+  if (e.key === 'ArrowDown') { TAS.input.down = true; e.preventDefault(); }
+  if (e.key === 'ArrowLeft') { TAS.input.left = true; e.preventDefault(); }
+  if (e.key === 'ArrowRight') { TAS.input.right = true; e.preventDefault(); }
+  if (e.key === 'z' || e.key === 'Z') { TAS.input.a = true; }
+  if (e.key === 'x' || e.key === 'X') { TAS.input.b = true; }
+  if (e.key === 'Enter') { TAS.input.start = true; }
+  if (e.key === 'Shift') { TAS.input.select = true; }
+
   if (state !== 'playing') return;
   var num = parseInt(e.key);
-  if (num >= 1 && num <= 6) {
+  if (num >= 1 && num <= TOWER_KEYS.length) {
     selectedTower = TOWER_KEYS[num - 1];
     selectedPlaced = null;
+    paletteIndex = num - 1;
+    cursorVisible = false;
   }
   if (e.key === 'u' || e.key === 'U') {
     if (selectedPlaced !== null) upgradeTower(selectedPlaced);
@@ -1305,9 +2149,21 @@ document.addEventListener('keydown', function(e) {
   if (e.key === 's' || e.key === 'S') {
     if (selectedPlaced !== null) sellTower(selectedPlaced);
   }
-  if (e.key === ' ' || e.key === 'Enter') {
+  if (e.key === ' ') {
     if (!waveActive && buildTimer > 0) buildTimer = 0;
+    e.preventDefault();
   }
+});
+
+document.addEventListener('keyup', function(e) {
+  if (e.key === 'ArrowUp') TAS.input.up = false;
+  if (e.key === 'ArrowDown') TAS.input.down = false;
+  if (e.key === 'ArrowLeft') TAS.input.left = false;
+  if (e.key === 'ArrowRight') TAS.input.right = false;
+  if (e.key === 'z' || e.key === 'Z') TAS.input.a = false;
+  if (e.key === 'x' || e.key === 'X') TAS.input.b = false;
+  if (e.key === 'Enter') TAS.input.start = false;
+  if (e.key === 'Shift') TAS.input.select = false;
 });
 
 // === START ===

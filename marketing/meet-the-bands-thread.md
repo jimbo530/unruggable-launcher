@@ -30,7 +30,7 @@ No token yet — the dude just plays.
 
 Myco — the mushroom bard
 
-Launched today for $5 on the Unrugable Launcher. 8 locked pools, reactor burns from day one. The first AI band token on the Unrugable Launcher.
+Launched free on the Unrugable Launcher. Locked pools + reactor, burns from day one. The first AI band token on the Unrugable Launcher.
 
 $Myco 0xD377fcADE46CDA9C7B6Bc5ea6450CA53994b6577
 

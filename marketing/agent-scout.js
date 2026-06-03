@@ -54,7 +54,8 @@ const EXCLUDE = new Set([
   "0x20a14d6a1ab57851a58d4a85c0fc06f23a7aea42", // bAGI Reactor
   "0xd8af1b75c81ec5fc66d0f3f75c6d86fccf379281", // AZUSD Reactor V2
   "0xc2edd32dc7b3f07ccaf9b8df72d011c66c78f95f", // dead V3.4 factory
-  "0xF0c1B3d6Bc0B4dEd2DDF81374feEA8a2c536bD51", // V5.2 Factory (active)
+  "0xF0c1B3d6Bc0B4dEd2DDF81374feEA8a2c536bD51", // V5.2 Factory (legacy)
+  "0x90297A8a1F9A7E35bbC9DF8C35Aa7F3FFBe9BDb2", // V7+ Factory (active)
   "0x013a1091108D50eF5F9cC3FDa38f9b2BA4D3F81d", // UnrugableAdoption
   "0xfd780b0ae569e15e514b819ecfdf46f804953a4b", // burn address
   "0xc28e64551816535d9ef06ce95844f2b5317353ba", // EB relay reactor

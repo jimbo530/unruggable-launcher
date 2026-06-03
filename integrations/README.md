@@ -6,25 +6,23 @@ that retires carbon credits from every trade.
 
 ## Infrastructure Tokens
 
-Every launch creates floor pools paired against these tokens. More launches = more volume = higher floors.
+Every launch connects to the reactor network. More launches = more volume = more burns.
 
 | Token | Address | Role |
 |-------|---------|------|
-| MfT | `0x8FB87d13B40B1A67B22ED1a17e2835fe7e3a9bA3` | Network heartbeat — 3 sell walls per launch paired against MfT |
-| BB | `0xf967bf3dccF8b6826F82de1781C98E61Bda3b106` | BTC-correlated floor — 30% of every launch seed |
-| EB | `0x17a176Ab2379b86F1E65D79b03bD8c75981244D8` | ETH-correlated floor — 30% of every launch seed |
-| AZUSD | `0x3595ca37596D5895B70EFAB592ac315D5B9809B2` | Green stablecoin floor — 40% of every launch seed. Environmentally positive asset. |
-| CHAR | `0x20b048fA035D5763685D695e66aDF62c5D9F5055` | Carbon retirement — 6% of seed, burns forever |
+| Money (MfTusd) | `0xe3dd20728c2b601655e5bc5e58930db218c3f44e` | 70% of launch supply — TOKEN/Money pool |
+| Meme (MfT) | `0x8FB87d13B40B1A67B22ED1a17e2835fe7e3a9bA3` | 30% of launch supply — TOKEN/Meme pool |
+| CHAR | `0x20b048fA035D5763685D695e66aDF62c5D9F5055` | Carbon retirement — burns forever from reactor fees |
 
 ## How It Works
 
-1. User seeds USDC to launch a token
-2. 94% creates 3 floor pools (AZUSD/BB/EB) + 3 MfT sell walls — ALL supply locked
-3. 6% creates CHAR carbon reactor (3 pools: CHAR/BB, CHAR/EB, CHAR/MfT)
-4. 8 LP positions lock in 2 reactors. No withdraw function exists.
-5. Reactors burn tokens + compound liquidity from trade fees. Floor liquidity deepens with every burn cycle.
-6. 5% of fees cascade upstream through CHAR to Reactor Prime, which buys back MfT
-7. MfT buy-back activates every TOKEN/MfT sell wall in the network
+1. Free to launch — just gas, no seed required
+2. Creates 2 locked pools: TOKEN/Money (70% supply) + TOKEN/Meme (30% supply)
+3. Creates 1 SporeReactor: 50% of token fees burned permanently, 50% sent to launcher wallet
+4. All liquidity locked in reactor. No withdraw function exists.
+5. Reactor burns tokens from trade fees. Locked liquidity deepens with every burn cycle.
+6. Fees cascade upstream through the network to Reactor Prime, which buys back MfT
+7. Per-token leaderboards track which community funds the most trees
 
 ## The Heartbeat
 
@@ -69,7 +67,7 @@ Base URL: `https://tasern.quest/api/unrugable`
 |----------|---------|
 | Factory (V5.2) | `0xF0c1B3d6Bc0B4dEd2DDF81374feEA8a2c536bD51` |
 | Reactor Prime | `0xed3aE91b2bb22307c07438EEebA2500C18EABcFE` |
-| MycoPad Hub Reactor | `0xF5B9Fc40080aAcC262f078eCE374A2268dcdb045` |
+| Unrugable Hub Reactor | `0xF5B9Fc40080aAcC262f078eCE374A2268dcdb045` |
 | SporeReactorV4 impl | `0xb9630280dc93c503aee06d1eca8e125fc19ab3c5` |
 
 All contracts verified on BaseScan.

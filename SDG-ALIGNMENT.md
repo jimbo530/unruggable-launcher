@@ -42,10 +42,10 @@ MfT is not core to any single SDG but contributes measurably to several through 
 
 ### SDG 7 — Affordable and Clean Energy
 **Partners:** AZUSD / Azos Finance (azos.finance), JLT-F24/JLT-B23 (Renewable Energy Credits), LANTERN (Solar)
-**How:** AZUSD stablecoin is backed partly by Helios (solar/clean energy investment tokens). JLT tokens represent renewable energy credits (MWh equivalent). LANTERN supports solar energy initiatives. All in active LP pairs.
+**How:** AZUSD deposit receipt is backed partly by Helios (solar/clean energy investment tokens). JLT tokens represent renewable energy credits (MWh equivalent). LANTERN supports solar energy initiatives. All in active LP pairs.
 **Measurable:**
 - AZUSD locked in LP across ecosystem (on-chain, Base)
-- AZUSD in Unrugable floor pools (on-chain)
+- AZUSD in locked launch liquidity (on-chain)
 - JLT/LANTERN in Polygon LP pairs (on-chain)
 
 ### SDG 9 — Industry, Innovation, and Infrastructure

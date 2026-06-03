@@ -7,7 +7,7 @@
 const NAV_CATEGORIES = {
   'DeFi Tools': [
     { href: 'generator.html', label: 'Impact Generator' },
-    { href: 'money-for-trees.html', label: 'Charity Funds' },
+    { href: '/fund/', label: 'Charity Funds' },
     { href: 'adopt.html', label: 'Adopt a Token' },
     { href: 'card-shop.html', label: 'Card Shop' },
   ],

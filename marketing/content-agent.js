@@ -15,12 +15,15 @@ ORIGIN: MfT started as sharing memes on X to fund tree planting — no purchase 
 WHAT WE ARE:
 - A meme token (launched on Bankr) with open tools built around it
 - Token launchpad where 100% of supply locks in permanent LPs from block 1
-- Every launch creates 8 LP positions: 3 blue-chip floors (AZUSD + cbBTC + WETH) + 3 MfT sell walls + 2 CHAR carbon pools
+- FREE to launch — just gas, no seed required
+- Every launch creates 2 pools: TOKEN/Money (70% supply) + TOKEN/Meme (30% supply), plus 1 reactor
+- Reactor split: 50% of token fees burned permanently, 50% sent to the launcher's wallet
 - Reactors fire every 2hrs: collect fees, burn token supply, compound liquidity
-- CHAR reactor removes carbon credits from markets every cycle — permanently held at a no-withdraw tracking address. No overhead to offset, we just create demand for impact because we can
-- Every launch gets a mandatory charity fund sell wall — helping others is not optional, it's coded into the architecture
-- Charity fund sell wall LPs earn charity fund token yield, compounding more into pools forever. Charity deposits move to non-refundable positions automatically
-- Pairing tokens with MfT is mutual: their token gets trading routes and arb surfaces across hundreds of pools, MfT gets more pairs and fee surfaces
+- CHAR reactor removes carbon credits from markets every cycle — permanently held at a no-withdraw tracking address
+- Every launch gets a charity fund connection — helping others is coded into the architecture
+- Per-token leaderboards in Impact Generators track which community funds the most trees
+- Pairing tokens with MfT is mutual: their token gets trading routes and arb surfaces across the network, MfT gets more pairs and fee surfaces
+- V7 Factory: 0x5c11fd8D7BB21EE6d012a2c50F4b03870fA9f5F7
 - Money for Trees: 1:1 dollar-backed proof of deposit via Aave V3, immutable contract, yield split 1/3 depositors (additional charity fund tokens) / 1/3 reactor (mftUSD) / 1/3 operations (USDC)
 - Money for Trees site: tasern.quest/fund/meadville/
 - NEVER call Money for Trees a "stablecoin" — it is a "proof of deposit" or "dollar-backed deposit"

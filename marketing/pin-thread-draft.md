@@ -6,7 +6,7 @@ Meme For Trees
 
 Sharing memes, planting trees. Every trade funds carbon collection.
 
-A network of reactors. Hundreds of pools. 5 immutable. Renounced or add-only admin keys. No kill switch.
+A network of reactors. 5 immutable. Renounced or add-only admin keys. No kill switch.
 
 The heartbeat runs until the chain stops.
 
@@ -28,7 +28,7 @@ Direction doesn't matter. Only volume.
 
 Launch an unrugable token in 2 transactions:
 
-- $5 seed creates 8 permanently locked LP positions
+- Free to launch (just gas) — 2 locked pools + 1 reactor
 - Reactor integration from day 1
 - CHAR carbon collection from trading fees
 - Perpetual buy+burn — forever
@@ -64,7 +64,7 @@ Music funds trees. Memes fund trees. Every trade funds trees.
 ---
 
 ## Notes for Guardian
-- All claims verifiable on-chain (reactor network, hundreds of pools, 5 renounced)
+- All claims verifiable on-chain (reactor network, 5 renounced)
 - No price claims or performance stats
 - No "pump" language
 - Links to tasern.quest only (our domain)

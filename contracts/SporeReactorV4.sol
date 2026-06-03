@@ -1,28 +1,27 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
 
-/// @title SporeReactorV4 — Clone reactor with permissionless deposits
+/// @title SporeReactorV4 — Reactor with 50/50 launcher split
 ///
-/// Deployed as EIP-1167 minimal proxy by TokenLaunchFactory.
-/// Burns native token, buys back with X-side fees, deepens LP,
-/// and sends 5% of X-token to upstream reactor via fuel().
+/// Clone of V3 with one key change: when the reactor fires, collected
+/// core-token fees are split 50/50 — half burned, half sent to the
+/// launcher's wallet. Everything else is identical to V3.
 ///
-/// V4 improvements over V3:
-///   1. FUEL_BPS stays 1000 (10% of X-token ≈ 5% of total fees)
-///   2. depositSingle() — permissionless single-sided deposit, swaps half, deepens LP
+/// V4 changes over V3:
+///   1. `launcher` address stored at initialize
+///   2. processPool step 2: 50% burn / 50% to launcher (was 100% burn)
+///   3. LauncherPaid event
 ///
 /// Retained from V3:
-///   - depositLiquidity() — permissionless two-sided deposit
-///   - MIN_PROCESS threshold, global pause, FuelFailed event
 ///   - EIP-1167 clone pattern, reentrancy guard, two-step admin
+///   - 10% fuel to upstream reactor (1000 BPS of X-token fees)
 ///   - Slippage protection via slot0-derived sqrtPriceLimitX96 (3% cap)
 ///   - Pool cap (20), safe approve, dust recycling, disable/enable pools
 ///   - Positions locked forever — no withdraw function exists
 ///   - Anyone can call execute() after 2-hour cooldown
+///   - MIN_PROCESS threshold, global pause, FuelFailed event
 
-// ═══════════════════════════════════════════════════════════════════════════
-//  Interfaces
-// ═══════════════════════════════════════════════════════════════════════════
+// Interfaces
 
 interface IERC20 {
     function approve(address spender, uint256 amount) external returns (bool);
@@ -55,7 +54,6 @@ interface INonfungiblePositionManager {
     function ownerOf(uint256 tokenId) external view returns (address);
 }
 
-/// @dev SwapRouter02 on Base — no deadline field
 interface ISwapRouter02 {
     struct ExactInputSingleParams {
         address tokenIn;
@@ -75,13 +73,9 @@ interface IUniswapV3Factory {
 
 interface IUniswapV3Pool {
     function slot0() external view returns (
-        uint160 sqrtPriceX96,
-        int24 tick,
-        uint16 observationIndex,
-        uint16 observationCardinality,
-        uint16 observationCardinalityNext,
-        uint8 feeProtocol,
-        bool unlocked
+        uint160 sqrtPriceX96, int24 tick, uint16 observationIndex,
+        uint16 observationCardinality, uint16 observationCardinalityNext,
+        uint8 feeProtocol, bool unlocked
     );
 }
 
@@ -90,32 +84,27 @@ interface IUpstreamReactor {
     function canFuel(address xToken) external view returns (bool);
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
-//  Contract
-// ═══════════════════════════════════════════════════════════════════════════
-
 contract SporeReactorV4 {
 
-    // ── Constants ────────────────────────────────────────────────────────────
     address private constant BURN = 0xfd780B0aE569e15e514B819ecFDF46f804953a4B;
     uint256 public  constant COOLDOWN  = 2 hours;
     uint256 public  constant MAX_POOLS = 20;
     uint256 public  constant MIN_FUEL  = 1000;
     uint256 public  constant MIN_PROCESS = 1000;
-    uint256 private constant FUEL_BPS  = 1000;    // 10% of X-token (≈5% of total fees) to upstream reactor
-    uint256 public  constant MAX_PRICE_IMPACT_BPS = 300; // 3% max slippage per swap
+    uint256 private constant FUEL_BPS  = 1000;    // 10% of X-token to upstream
+    uint256 private constant LAUNCHER_BPS = 5000; // 50% of core-token fees to launcher
+    uint256 public  constant MAX_PRICE_IMPACT_BPS = 300;
 
-    // UniswapV3 TickMath bounds
     uint160 private constant MIN_SQRT_RATIO = 4295128739;
     uint160 private constant MAX_SQRT_RATIO = 1461446703485210103287273052203988822378723970342;
 
-    // ── State (set once via initialize, not constructor) ─────────────────────
     address public token;
     address public mft;
     INonfungiblePositionManager public pm;
     ISwapRouter02 public router;
     IUniswapV3Factory public factory;
     IUpstreamReactor public upstreamReactor;
+    address public launcher;
     bool public initialized;
 
     uint256 public lastExecute;
@@ -133,11 +122,9 @@ contract SporeReactorV4 {
     mapping(uint256 => bool) public registeredTokenId;
     mapping(address => bool) public hasXToken;
 
-    // Two-step admin transfer
     address public admin;
     address public pendingAdmin;
 
-    // Reentrancy guard
     uint256 private _locked = 1;
     modifier nonReentrant() {
         require(_locked == 1, "reentrant");
@@ -146,8 +133,8 @@ contract SporeReactorV4 {
         _locked = 1;
     }
 
-    // ── Events ──────────────────────────────────────────────────────────────
-    event Executed(uint256 burned, uint256 deposited, uint256 fueled, uint256 timestamp, address caller);
+    event Executed(uint256 burned, uint256 paid, uint256 deposited, uint256 fueled, uint256 timestamp, address caller);
+    event LauncherPaid(address indexed launcher, uint256 amount);
     event PoolAdded(uint256 indexed tokenId, address xToken, address poolAddr, uint24 fee);
     event PoolDisabled(uint256 indexed poolIndex, uint256 tokenId);
     event PoolEnabled(uint256 indexed poolIndex, uint256 tokenId);
@@ -155,27 +142,14 @@ contract SporeReactorV4 {
     event FuelSent(address indexed xToken, uint256 amount);
     event FuelFailed(address indexed xToken, uint256 amount);
     event LiquidityDeposited(uint256 indexed poolIndex, uint256 amount0, uint256 amount1);
-    event SingleDeposit(uint256 indexed poolIndex, address inputToken, uint256 inputAmount, uint256 token0Deposited, uint256 token1Deposited);
     event Fueled(uint256 indexed poolIndex, address xToken, uint256 xIn, uint256 tokenDeposited, uint256 xDeposited);
     event DustBurned(uint256 amount);
     event AdminTransferStarted(address indexed current, address indexed pending);
     event AdminTransferred(address indexed previous, address indexed newAdmin);
     event Paused(bool status);
 
-    // ── Modifiers ───────────────────────────────────────────────────────────
-    modifier onlyAdmin() {
-        require(msg.sender == admin, "not admin");
-        _;
-    }
-
-    modifier onlySelf() {
-        require(msg.sender == address(this), "internal only");
-        _;
-    }
-
-    // ═══════════════════════════════════════════════════════════════════════════
-    //  Initialize (called once by factory, replaces constructor for clones)
-    // ═══════════════════════════════════════════════════════════════════════════
+    modifier onlyAdmin() { require(msg.sender == admin, "not admin"); _; }
+    modifier onlySelf() { require(msg.sender == address(this), "internal only"); _; }
 
     function initialize(
         address _token,
@@ -183,7 +157,8 @@ contract SporeReactorV4 {
         address _pm,
         address _router,
         address _factory,
-        address _upstreamReactor
+        address _upstreamReactor,
+        address _launcher
     ) external {
         require(!initialized, "already initialized");
         initialized = true;
@@ -194,6 +169,7 @@ contract SporeReactorV4 {
         require(_router  != address(0), "zero router");
         require(_factory != address(0), "zero factory");
         require(_upstreamReactor != address(0), "zero upstream");
+        require(_launcher != address(0), "zero launcher");
         require(_token != _mft, "token cannot be mft");
 
         token            = _token;
@@ -202,13 +178,12 @@ contract SporeReactorV4 {
         router           = ISwapRouter02(_router);
         factory          = IUniswapV3Factory(_factory);
         upstreamReactor  = IUpstreamReactor(_upstreamReactor);
+        launcher         = _launcher;
         admin            = msg.sender;
         _locked          = 1;
     }
 
-    // ═══════════════════════════════════════════════════════════════════════════
-    //  Pool Management (admin only)
-    // ═══════════════════════════════════════════════════════════════════════════
+    // ── Pool Management ─────────────────────────────────────────────────────
 
     function addPool(uint256 tokenId) external onlyAdmin {
         require(pools.length < MAX_POOLS, "max pools reached");
@@ -255,8 +230,6 @@ contract SporeReactorV4 {
         emit PoolEnabled(poolIndex, pools[poolIndex].tokenId);
     }
 
-    // ── Two-step admin transfer ─────────────────────────────────────────────
-
     function transferAdmin(address newAdmin) external onlyAdmin {
         require(newAdmin != address(0), "zero address");
         pendingAdmin = newAdmin;
@@ -276,18 +249,13 @@ contract SporeReactorV4 {
         pendingAdmin = address(0);
     }
 
-    // ── Emergency pause ─────────────────────────────────────────────────
-
     function setPaused(bool _paused) external onlyAdmin {
         paused = _paused;
         emit Paused(_paused);
     }
 
-    // ═══════════════════════════════════════════════════════════════════════════
-    //  Permissionless Deposits
-    // ═══════════════════════════════════════════════════════════════════════════
+    // ── Fuel Intake ─────────────────────────────────────────────────────────
 
-    /// @notice Deepen an existing pool with both tokens. Caller must approve both.
     function depositLiquidity(uint256 poolIndex, uint256 tokenAmount, uint256 xAmount) external nonReentrant {
         require(poolIndex < pools.length, "invalid index");
         require(!pools[poolIndex].disabled, "pool disabled");
@@ -319,73 +287,6 @@ contract SporeReactorV4 {
         emit LiquidityDeposited(poolIndex, a0d, a1d);
     }
 
-    /// @notice V4: Single-sided deposit. Send one token, swaps half, deposits both sides.
-    ///         Set isNativeToken=true if sending the launched token, false if sending xToken.
-    ///         Caller must approve the input token to this reactor.
-    function depositSingle(uint256 poolIndex, uint256 amount, bool isNativeToken) external nonReentrant {
-        require(poolIndex < pools.length, "invalid index");
-        require(!pools[poolIndex].disabled, "pool disabled");
-        require(amount > 0, "zero amount");
-
-        _depositSingleInternal(poolIndex, amount, isNativeToken);
-    }
-
-    function _depositSingleInternal(uint256 poolIndex, uint256 amount, bool isNativeToken) internal {
-        Pool memory pool = pools[poolIndex];
-        address inputToken = isNativeToken ? token : pool.xToken;
-        address outputToken = isNativeToken ? pool.xToken : token;
-
-        _safeTransferFrom(inputToken, msg.sender, address(this), amount);
-
-        uint256 halfIn = amount / 2;
-
-        // Swap half to the other side
-        uint160 limit = _getSqrtPriceLimitForDeposit(pool.poolAddress, pool.tokenIsToken0, isNativeToken);
-        _safeApprove(inputToken, address(router), halfIn);
-        uint256 swapped = router.exactInputSingle(
-            ISwapRouter02.ExactInputSingleParams({
-                tokenIn:           inputToken,
-                tokenOut:          outputToken,
-                fee:               pool.fee,
-                recipient:         address(this),
-                amountIn:          halfIn,
-                amountOutMinimum:  0,
-                sqrtPriceLimitX96: limit
-            })
-        );
-
-        // Deposit both sides
-        uint256 tokenAmt = isNativeToken ? (amount - halfIn) : swapped;
-        uint256 xAmt     = isNativeToken ? swapped : (amount - halfIn);
-
-        _safeApprove(token, address(pm), tokenAmt);
-        _safeApprove(pool.xToken, address(pm), xAmt);
-
-        pm.increaseLiquidity(
-            INonfungiblePositionManager.IncreaseLiquidityParams({
-                tokenId:        pool.tokenId,
-                amount0Desired: pool.tokenIsToken0 ? tokenAmt : xAmt,
-                amount1Desired: pool.tokenIsToken0 ? xAmt : tokenAmt,
-                amount0Min:     0,
-                amount1Min:     0,
-                deadline:       block.timestamp
-            })
-        );
-
-        // Return any dust to caller instead of trapping it
-        _returnDust(pool.xToken);
-
-        emit SingleDeposit(poolIndex, inputToken, amount, tokenAmt, xAmt);
-    }
-
-    function _returnDust(address xToken) internal {
-        uint256 d0 = IERC20(token).balanceOf(address(this));
-        uint256 d1 = IERC20(xToken).balanceOf(address(this));
-        if (d0 > 0) _safeTransfer(token, msg.sender, d0);
-        if (d1 > 0) _safeTransfer(xToken, msg.sender, d1);
-    }
-
-    /// @notice One-way fuel from other reactors. Swaps half to native token, deposits both as LP.
     function fuel(address xToken, uint256 amount) external nonReentrant {
         require(amount >= MIN_FUEL, "below minimum fuel");
 
@@ -437,9 +338,7 @@ contract SporeReactorV4 {
         emit Fueled(poolIndex, xToken, amount, tokenAmount, xForLP);
     }
 
-    // ═══════════════════════════════════════════════════════════════════════════
-    //  Execute — anyone can call after cooldown (unless paused)
-    // ═══════════════════════════════════════════════════════════════════════════
+    // ── Execute ─────────────────────────────────────────────────────────────
 
     function execute() external nonReentrant {
         require(!paused, "paused");
@@ -447,6 +346,7 @@ contract SporeReactorV4 {
         lastExecute = block.timestamp;
 
         uint256 totalBurned;
+        uint256 totalPaid;
         uint256 totalDeposited;
         uint256 totalFueled;
         uint256 len = pools.length;
@@ -456,8 +356,9 @@ contract SporeReactorV4 {
                 emit PoolSkipped(i, pools[i].tokenId);
                 continue;
             }
-            try this.processPool(i) returns (uint256 burned, uint256 bought, uint256 fueled) {
+            try this.processPool(i) returns (uint256 burned, uint256 paid, uint256 bought, uint256 fueled) {
                 totalBurned += burned;
+                totalPaid += paid;
                 totalDeposited += bought;
                 totalFueled += fueled;
             } catch {
@@ -465,10 +366,10 @@ contract SporeReactorV4 {
             }
         }
 
-        emit Executed(totalBurned, totalDeposited, totalFueled, block.timestamp, msg.sender);
+        emit Executed(totalBurned, totalPaid, totalDeposited, totalFueled, block.timestamp, msg.sender);
     }
 
-    function processPool(uint256 poolIndex) external onlySelf returns (uint256 burned, uint256 bought, uint256 fueled) {
+    function processPool(uint256 poolIndex) external onlySelf returns (uint256 burned, uint256 paid, uint256 bought, uint256 fueled) {
         Pool memory pool = pools[poolIndex];
 
         // 1. Collect fees
@@ -481,18 +382,27 @@ contract SporeReactorV4 {
             })
         );
 
-        // 2. Burn ALL native token in contract (fees + accumulated dust)
+        // 2. V4: Split core-token fees — 50% burn, 50% to launcher
         uint256 tokenBal = IERC20(token).balanceOf(address(this));
         if (tokenBal > 0) {
-            _safeTransfer(token, BURN, tokenBal);
-            burned = tokenBal;
+            uint256 toLauncher = tokenBal * LAUNCHER_BPS / 10000;
+            uint256 toBurn = tokenBal - toLauncher;
+            if (toBurn > 0) {
+                _safeTransfer(token, BURN, toBurn);
+                burned = toBurn;
+            }
+            if (toLauncher > 0) {
+                _safeTransfer(token, launcher, toLauncher);
+                paid = toLauncher;
+                emit LauncherPaid(launcher, toLauncher);
+            }
         }
 
         // 3. Get total X-token balance
         uint256 xBal = IERC20(pool.xToken).balanceOf(address(this));
-        if (xBal < MIN_PROCESS) return (burned, 0, 0);
+        if (xBal < MIN_PROCESS) return (burned, paid, 0, 0);
 
-        // 4. Divert 10% of X-token to upstream reactor (≈5% of total fees)
+        // 4. Divert 10% of X-token to upstream reactor
         uint256 fuelAmount = xBal * FUEL_BPS / 10000;
         if (fuelAmount >= MIN_FUEL) {
             _safeApprove(pool.xToken, address(upstreamReactor), fuelAmount);
@@ -508,14 +418,14 @@ contract SporeReactorV4 {
             fuelAmount = 0;
         }
 
-        // 5. Remaining: split half buy / half LP
+        // 5. Remaining X: split half buy / half LP
         uint256 xRemaining = xBal - fuelAmount;
-        if (xRemaining < MIN_PROCESS) return (burned, 0, fueled);
+        if (xRemaining < MIN_PROCESS) return (burned, paid, 0, fueled);
 
         uint256 xForBuy = xRemaining / 2;
         uint256 xForLP  = xRemaining - xForBuy;
 
-        // 6. Slippage-protected swap: half-X for native token (buyback)
+        // 6. Slippage-protected swap: buy core token with half-X
         uint160 limit = _getSqrtPriceLimitSafe(pool.poolAddress, pool.tokenIsToken0);
 
         _safeApprove(pool.xToken, address(router), xForBuy);
@@ -551,7 +461,7 @@ contract SporeReactorV4 {
             );
         }
 
-        // 8. Burn any native token dust from ratio mismatch
+        // 8. Burn any dust from ratio mismatch
         uint256 dust = IERC20(token).balanceOf(address(this));
         if (dust > 0) {
             _safeTransfer(token, BURN, dust);
@@ -559,39 +469,21 @@ contract SporeReactorV4 {
         }
     }
 
-    // ═══════════════════════════════════════════════════════════════════════════
-    //  Internal — Slippage Protection
-    // ═══════════════════════════════════════════════════════════════════════════
+    // ── Slippage Protection ─────────────────────────────────────────────────
 
-    /// @dev Read slot0, verify pool isn't being reentered, then cap price movement at 3%.
     function _getSqrtPriceLimitSafe(address poolAddr, bool tokenIsToken0) internal view returns (uint160) {
         (uint160 sqrtPriceX96,,,,,, bool unlocked) = IUniswapV3Pool(poolAddr).slot0();
         require(unlocked, "pool locked");
         return _calcPriceLimit(sqrtPriceX96, tokenIsToken0);
     }
 
-    /// @dev Price limit for depositSingle — direction depends on which token is being sold.
-    function _getSqrtPriceLimitForDeposit(address poolAddr, bool tokenIsToken0, bool sellingNative) internal view returns (uint160) {
-        (uint160 sqrtPriceX96,,,,,, bool unlocked) = IUniswapV3Pool(poolAddr).slot0();
-        require(unlocked, "pool locked");
-        // If selling native token: price moves opposite to the execute() buyback direction
-        if (sellingNative) {
-            return _calcPriceLimit(sqrtPriceX96, !tokenIsToken0);
-        }
-        // If selling xToken: same direction as buyback
-        return _calcPriceLimit(sqrtPriceX96, tokenIsToken0);
-    }
-
-    /// @dev Calculate sqrtPriceLimitX96 for a swap.
     function _calcPriceLimit(uint160 sqrtPriceX96, bool tokenIsToken0) internal pure returns (uint160) {
         if (tokenIsToken0) {
-            // selling token1 (xToken) for token0 → sqrtPrice rises
             uint256 limit = uint256(sqrtPriceX96) * (10000 + MAX_PRICE_IMPACT_BPS) / 10000;
             if (limit <= sqrtPriceX96) limit = uint256(sqrtPriceX96) + 1;
             if (limit >= MAX_SQRT_RATIO) limit = MAX_SQRT_RATIO - 1;
             return uint160(limit);
         } else {
-            // selling token0 (xToken) for token1 → sqrtPrice falls
             uint256 limit = uint256(sqrtPriceX96) * (10000 - MAX_PRICE_IMPACT_BPS) / 10000;
             if (limit >= sqrtPriceX96) limit = uint256(sqrtPriceX96) - 1;
             if (limit <= MIN_SQRT_RATIO) limit = MIN_SQRT_RATIO + 1;
@@ -599,9 +491,7 @@ contract SporeReactorV4 {
         }
     }
 
-    // ═══════════════════════════════════════════════════════════════════════════
-    //  Internal — Safe Token Operations
-    // ═══════════════════════════════════════════════════════════════════════════
+    // ── Safe Token Operations ───────────────────────────────────────────────
 
     function _safeTransfer(address _token, address to, uint256 amount) internal {
         (bool success, bytes memory data) = _token.call(
@@ -617,7 +507,6 @@ contract SporeReactorV4 {
         require(success && (data.length == 0 || abi.decode(data, (bool))), "transferFrom failed");
     }
 
-    /// @dev Reset approval to 0 before setting new value (handles USDT-style tokens)
     function _safeApprove(address _token, address spender, uint256 amount) internal {
         (bool success, bytes memory data) = _token.call(
             abi.encodeWithSelector(IERC20.approve.selector, spender, 0)
@@ -647,13 +536,9 @@ contract SporeReactorV4 {
         }
     }
 
-    // ═══════════════════════════════════════════════════════════════════════════
-    //  Views
-    // ═══════════════════════════════════════════════════════════════════════════
+    // ── Views ───────────────────────────────────────────────────────────────
 
-    function poolCount() external view returns (uint256) {
-        return pools.length;
-    }
+    function poolCount() external view returns (uint256) { return pools.length; }
 
     function activePoolCount() external view returns (uint256) {
         uint256 count;
@@ -676,10 +561,6 @@ contract SporeReactorV4 {
     function dustBalance(address _token) external view returns (uint256) {
         return IERC20(_token).balanceOf(address(this));
     }
-
-    // ═══════════════════════════════════════════════════════════════════════════
-    //  NFT receiver — only accept from admin
-    // ═══════════════════════════════════════════════════════════════════════════
 
     function onERC721Received(address, address from, uint256, bytes calldata) external view returns (bytes4) {
         require(from == admin, "only admin can send NFTs");

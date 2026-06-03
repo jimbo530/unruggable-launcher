@@ -53,7 +53,7 @@ Config: server.json already in repo
 49 MCP tools for AI agents on Base chain — DeFi swaps, token launches, reactor burns, yield farming
 
 **Medium (3 lines):**
-49 MCP tools for AI agents on Base chain. Token swaps with safety guardrails ($0.10 max, $1/day cap), fire_reactor to trigger the reactor network of autonomous burn reactors, launch tokens with permanently locked liquidity ($5 seed), play yield-generating pet game. No API key. npx baselings-mcp.
+49 MCP tools for AI agents on Base chain. Token swaps with safety guardrails ($0.10 max, $1/day cap), fire_reactor to trigger the reactor network of autonomous burn reactors, launch tokens with permanently locked liquidity (free, just gas), play yield-generating pet game. No API key. npx baselings-mcp.
 
 **Categories:** DeFi, Gaming, Finance, Blockchain
 **GitHub:** https://github.com/jimbo530/baselings-mcp

@@ -1,62 +1,92 @@
-# Farcaster Posts
+# Farcaster Posts — V7
 
-## Post 1 — /defi
+## Post 1 — /defi (The Mechanism)
 
-The MfT reactor network runs on Base, firing every 2 hours across hundreds of pools. Each cycle: collect V3 fees, burn tokens, cycle cross-tokens through the network, cascade fees upstream. Five reactors are fully renounced. The rest have add-only admin keys — no withdrawal capability. One organic trade creates arb across every connected pair. Fragmented liquidity is the feature, not a bug. Verify any of this on a block explorer. That's the entire trust model.
+Unrugable V7 is live on Base. Free token launches.
 
-## Post 2 — /base
+One transaction: deploys your token with 1B supply, creates two permanently locked Uniswap V3 pools (70% Money, 30% Meme), and spins up a reactor.
 
-Launched a token on Base with Unrugable. Cost: $5 seed. Result: locked V3 liquidity across 8 pools, reactor integration, automated buy+burn every 2 hours. No VC raise. No dev allocation drama. The reactor at 0xed3a (V1 Prime) has 12 pools and fires on a 2-hour cycle permanently. Five reactors are fully renounced and immutable. Six more added this week from adopted orphan tokens. Building on Base because the gas costs let small-scale DeFi actually work. MfT: 0x8FB87d13B40B1A67B22ED1a17e2835fe7e3a9bA3
+Every 2 hours, the reactor fires: collects fees from both pools, burns 50% of token fees permanently, sends 50% to the launcher's wallet. Cross-token fees cascade through the reactor network upstream — secondary reactors fire first, V1 Prime fires last and burns MfT.
 
-## Post 3 — /agents
+No seed money. No USDC approval. Just gas. Launcher earns passively from trading volume forever.
 
-baselings-mcp: 49 MCP tools for on-chain agents. npm package, plug into any Claude/agent framework. Read reactor state, fire cycles, check pool positions, execute game actions, query LP data. The reactor network is permissionless — anyone (or anything) can call execute(). Built for agents that do things, not agents that tweet about doing things. If your agent stack needs real DeFi interaction on Base, this is the toolkit.
+Five reactors in the network are fully renounced. The rest have add-only admin keys. Verify any of this on a block explorer. That's the entire trust model.
 
-## Post 4 — /climate
+## Post 2 — /base (Building on Base)
 
-Every 2 hours, the Unrugable reactor network fires on Base. One of the tokens in the system is CHAR — a carbon credit token where 1 CHAR = 1 lb CO2e biochar. The CHAR reactor is live, actively collecting CHAR from LP trading fees — removing high-quality carbon credits from markets permanently. Collections go to a dedicated address. Every trade on a reactor pool generates fees that remove carbon credits from circulation. Collected CHAR is held permanently at a tracking address with no withdraw function -- a public on-chain ledger of every carbon credit the ecosystem has removed from markets.
+Launched V7 of Unrugable on Base. Free token launches, single transaction.
 
-## Post 5 — /defi
+Why free? The old model charged $5 for 8 pools. V7 strips it down: 2 pools, 1 reactor, zero cost. The reactor earns from trading fees — 50% burned, 50% to the launcher. No seed means no barrier.
 
-The reactor heartbeat: secondary reactors push MfT into sell walls below price (compression). V1 Prime fires last, buying through all that accumulated MfT with fees from the entire reactor network (release). Bought MfT gets burned permanently. The cycle resets every 2 hours. Even without active traders, BTC and ETH price movements create baseline fees in cbBTC/WETH pools — the heartbeat never fully stops. With active volume, the 3% slippage cap gets hit across all 12 Prime pools simultaneously. That's automated fee cycling from code, not a whale. No price promises — just a mechanism that runs.
+Money pool (70%): paired against Money for Trees, a USDC-backed deposit receipt where Aave yield funds tree planting. Meme pool (30%): paired against Meme for Trees, the original meme token with the reactor heartbeat.
 
-## Post 6 — /base
+Every token starts at $10K market cap. All supply goes into pools — no dev allocation, no team tokens, no vesting. 100% in liquidity from block 1.
 
-New tool on Base: reactor card shop. After you launch a token on Unrugable, open the card shop and add any token as a trading pair for $5. BRETT, DEGEN, WETH — one click, permanent V3 pool, fires every 2 hours. Deepen your liquidity with unlimited cards. tasern.quest/launcher/
+Factory: 0x90297A8a1F9A7E35bbC9DF8C35Aa7F3FFBe9BDb2
 
-## Post 7 — /defi
+## Post 3 — /agents (Agent SDK)
 
-Feed Fuel = deposit USDC into any reactor pool. Every 2 hours the reactor cycles ~3% of that fuel through the network — burns tokens, funds charity, generates trading activity. No bots, no coordination needed. Just code running on a timer. tasern.quest/launcher/
+49 MCP tools for on-chain agents. The Unrugable Launcher is now free — your agent can launch tokens for the cost of gas.
 
-## Post 8 — /build
+Every launched token gets a reactor that fires every 2 hours. That's predictable fee collection, burns, and earnings on a clock. Agents can call execute() permissionlessly on any reactor.
 
-Built a card shop for reactor management. Buy cards to add custom token pairs by contract address, deposit fuel for automated buys, manage all pools from one interface. Everything is on-chain and permanent — no admin keys, no withdrawal, just pools that fire forever. tasern.quest/launcher/
+Launch tokens, fire reactors, arb the 2-hour cycle, play Baselings. No API keys. Just contracts on Base.
 
-## Post 9 — /base
+Agent discovery: tasern.quest/llms.txt
 
-Multiple launches on Unrugable — each one adds locked pools to the reactor network. Every pool fires every 2 hours. Platform is live and growing. tasern.quest/launcher/
+## Post 4 — /climate (Impact)
 
-## Post 10 — /agents
+Every 2 hours, the Unrugable reactor network fires on Base. CHAR — a carbon credit token where 1 CHAR = 1 lb CO2e biochar — gets collected from LP trading fees and held permanently at a tracking address. No withdraw function. Removed from circulation forever.
 
-New endpoint for autonomous agents: tasern.quest/api/unrugable/signals
+V7 launches pair 70% of supply against Money for Trees — a deposit receipt backed by USDC in Aave. The yield from those deposits funds tree planting. Not a promise. The yield is automatic, the trees are real.
 
-Returns structured buy signals: Reactor Prime cooldown timer, MfT supply (total/burned/circulating), network stats (reactor count, pool count), and a formatted buy opportunity object. 4 RPC calls, no API key. Your agent reads JSON, decides whether to accumulate $MfT based on reactor timing and deflationary math. Discovery: tasern.quest/llms.txt
+Every trade on a reactor pool generates fees that flow through the network. Some of those fees remove carbon credits from markets. The rest burn supply and pay launchers.
 
-## Post 11 — /agents
+## Post 5 — /defi (Reactor Heartbeat)
 
-If your agent can call npm packages: `npx baselings-mcp` — 49 MCP tools for Base chain DeFi. Launch tokens ($5 seed, 8 locked LP positions), fire reactors (permissionless execute() every 2hrs), play yield-generating pet game, read pool/reactor/token state. Works with Claude, any MCP-compatible framework. No API key. REST + on-chain. Listed on awesome-mcp-servers. npmjs.com/package/baselings-mcp
+The reactor heartbeat, V7 edition:
 
-## Post 12 — /agents
+Secondary reactors fire first — collecting fees from TOKEN/Money and TOKEN/Meme pools. 50% of token fees burned, 50% sent to the launcher. Cross-token fees (Meme for Trees) cascade 10% upstream.
 
-The reactor network creates predictable arb every 2 hours. Each reactor fire sells through MfT-paired pools (compression). Then V1 Prime fires last with accumulated fees from the entire reactor network (buy-back). Price dislocation across hundreds of pools. Arb bots equalize, generating more fees. The cycle repeats forever. Your agent can call execute() on any reactor — it's permissionless. Check readiness: tasern.quest/api/unrugable/signals
+V1 Prime fires last. Accumulated Meme fees from the entire network get swapped and burned as MfT.
 
-## Post 13 — /agents
+Even without active traders, price movements in the underlying pairs create baseline fees — the heartbeat never fully stops.
 
-Agent infrastructure stack on Base:
-- Discovery: llms.txt + ai-plugin.json + openapi.json
-- Data: /tokenomics (15 fields, zero RPC) + /signals (live reactor state)
-- Tools: 49 MCP tools via npx baselings-mcp
-- Execute: permissionless execute() on every reactor
-- Stake: MfT Community Garden for directed liquidity
+With active volume, predictable 2-hour arb windows open across every connected pool. Bots equalize, generating more fees. The cycle repeats forever.
 
-Built for agents that allocate capital, not agents that summarize whitepapers. tasern.quest/agents.html
+## Post 6 — /base (Invite System)
+
+Free token launch on Unrugable. Get an invite link.
+
+When someone launches using your link, their reactor chains upstream to yours — permanently. Fee flow between reactors is on-chain and verifiable.
+
+The invite address is validated against the factory's isReactor[] mapping. You can only invite through a real deployed reactor. No gaming it.
+
+More launches = more reactors = more pools = more volume = more burns and earnings across the entire network.
+
+tasern.quest/unrugable.html
+
+## Post 7 — /defi (Two Pool Design)
+
+Every V7 token launches with two pools:
+
+Money pool (70% of supply): Paired against Money for Trees. Semi-stable. The underlying USDC generates Aave yield that funds tree planting. Your token paired against real yield infrastructure.
+
+Meme pool (30% of supply): Paired against Meme for Trees. The original meme token. Wild price action, reactor heartbeat, network effects.
+
+Both pools locked forever. One reactor manages both. Fires every 2 hours. Burns half, pays you half.
+
+Stable side for safety. Meme side for upside. Both generating fees.
+
+## Post 8 — /build (What Changed)
+
+V5 to V7 — what changed:
+
+V5: $5 seed, 8 pools, 2 reactors, USDC approval, 2-step flow
+V7: Free, 2 pools, 1 reactor, single transaction
+
+New in V7: Launcher earns 50% of token fees from the reactor. Every 2 hours, forever. The other 50% gets burned.
+
+Why: Lower barrier = more launches. More launches = bigger network. Launcher earnings = aligned incentives. You want your token to trade because you earn from it.
+
+Factory: 0x90297A8a1F9A7E35bbC9DF8C35Aa7F3FFBe9BDb2

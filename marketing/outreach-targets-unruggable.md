@@ -6,7 +6,7 @@
 
 ## EXECUTIVE SUMMARY
 
-**Platform:** Unrugable — $5 per launch, 8 LP pools locked permanently, X promotion to 20K+ followers, invite system with permanent revenue share via reactor chaining.
+**Platform:** Unrugable — free to launch (just gas), 2 locked pools (TOKEN/Money + TOKEN/Meme) + 1 reactor, X promotion to 20K+ followers, invite system with permanent revenue share via reactor chaining.
 
 **Competitive Landscape:**
 - Clanker (owned by Farcaster): 500K+ tokens launched, $49.8M cumulative fees, zero-friction (one @-mention = token). LP locked 2100 years but NOT permanently by contract. Trading fee: 1% (40% creator, 60% Clanker).
@@ -15,9 +15,9 @@
 
 **Our Edge for Outreach:**
 1. PERMANENT LP lock (no withdraw function exists — verifiable on-chain)
-2. $5 flat fee vs ongoing 60% fee capture by Clanker
-3. 8 LP pools per launch (not just one)
-4. Reactor network creates trading routes and arb surfaces across hundreds of pools
+2. Free to launch vs ongoing 60% fee capture by Clanker
+3. 2 locked pools + 1 reactor per launch (not just one pool)
+4. Reactor network creates trading routes and arb surfaces across the network
 5. X promotion to 20K+ included (Clanker has no promo)
 6. Invite system = permanent rev share for referrers
 
@@ -35,8 +35,8 @@
 - **Platform:** Farcaster (Warpcast)
 - **Size:** Largest channel on Farcaster, DEGEN has 1M+ wallet holders
 - **Why they'd care:** Degen community members constantly experiment with token launches. DEGEN tipping culture means people have small Base balances ready to deploy. They've seen countless rugs and value trust signals. The "777 Degens" sub-community launched on a partnered platform (March 2026) — proving demand for exclusive launch venues.
-- **Contact approach:** Post in /degen channel as @jamesmagee. Frame it as "the anti-rug launch tool for $5." Lead with the permanent lock angle. Don't compete with Clanker's ease — compete on safety.
-- **Pitch angle:** "Tired of launches that die in 24 hours? $5 gets you 8 locked pools, reactor trading activity every 2 hours, and promotion to 20K followers. Your liquidity can never be pulled — there's no function for it."
+- **Contact approach:** Post in /degen channel as @jamesmagee. Frame it as "the anti-rug launch tool — free." Lead with the permanent lock angle. Don't compete with Clanker's ease — compete on safety.
+- **Pitch angle:** "Tired of launches that die in 24 hours? Free to launch — 2 locked pools + reactor, trading activity every 2 hours, and promotion to 20K followers. Your liquidity can never be pulled — there's no function for it."
 - **Priority:** HIGH — active daily, token-launch-native audience
 
 ### TARGET 2: HungryDegens (DEGEN Sub-Community)
@@ -59,8 +59,8 @@
 - **Platform:** Farcaster + nouns.build (Base)
 - **Size:** $230K+ treasury, active governance (Proposal #119 in Q1 2026), NFT auctions on Base
 - **Why they'd care:** They're a Nounish DAO on Base funding athletes. They already have NFT infrastructure but NO dedicated community token. They've discussed sub-DAO culture. A community token launched through Unrugable would give their athletes/community members something to rally around — with permanently locked liquidity.
-- **Contact approach:** Post in their Farcaster channel. Engage with governance proposals. DM core contributors. Frame it as "your community token, launched safely for $5, with permanent trading activity from your existing activity."
-- **Pitch angle:** "Gnars funds athletes with $230K+ treasury. What if you had a community token with permanent buy-back pressure from reactor fees? $5 to launch, 8 pools locked forever, reactor burns every 2 hours. Liquidity locked by code — no admin can withdraw."
+- **Contact approach:** Post in their Farcaster channel. Engage with governance proposals. DM core contributors. Frame it as "your community token, launched free, with permanent trading activity from your existing activity."
+- **Pitch angle:** "Gnars funds athletes with $230K+ treasury. What if you had a community token with permanent buy-back pressure from reactor fees? Free to launch, locked pools, reactor burns every 2 hours. Liquidity locked by code — no admin can withdraw."
 - **Priority:** MEDIUM-HIGH — established community, no token yet, Base-native
 
 ### TARGET 5: Purple DAO (Farcaster Ecosystem Fund)
@@ -68,7 +68,7 @@
 - **Size:** Active community DAO funding Farcaster public goods
 - **Why they'd care:** Purple funds Farcaster ecosystem projects. They could recommend Unrugable to their grantees as the safe token launch method. Their community members are exactly the kind of builder who would launch a project token. Getting Purple's endorsement = distribution to the entire Farcaster builder community.
 - **Contact approach:** Submit a proposal or engage community leads on Farcaster. Frame Unrugable as Farcaster ecosystem infrastructure worth funding/endorsing.
-- **Pitch angle:** "Purple funds Farcaster builders. Many of those builders want tokens. Give them the safest launch possible — permanent LP, $5, reactor network. We'd love Purple's endorsement as recommended infrastructure for grantees."
+- **Pitch angle:** "Purple funds Farcaster builders. Many of those builders want tokens. Give them the safest launch possible — permanent LP, free to launch, reactor network. We'd love Purple's endorsement as recommended infrastructure for grantees."
 - **Priority:** MEDIUM — longer sales cycle but massive distribution potential if converted
 
 ### TARGET 6: Based Token Community (BASED — 36% community allocation)
@@ -76,7 +76,7 @@
 - **Size:** Large — 1B token supply, claims began March 2026, includes PUP/BasedPal NFT holders
 - **Why they'd care:** BASED just distributed tokens to a massive community (March 2026, no vesting). These holders now have liquid tokens and crypto-native communities. Sub-groups and derivative projects are inevitable. They need a safe launch mechanism for community spinoffs.
 - **Contact approach:** Engage in Based community channels. Target PUP and BasedPal NFT holder communities specifically (they got BASED allocation and are likely to create derivative tokens).
-- **Pitch angle:** "Got your BASED airdrop? Thinking about launching a community token? $5 gets you permanent locked liquidity, 8 LP pools, and ongoing trading activity. Your community's liquidity can never be rugged."
+- **Pitch angle:** "Got your BASED airdrop? Thinking about launching a community token? Free to launch — permanent locked liquidity, reactor integration, and ongoing trading activity. Your community's liquidity can never be rugged."
 - **Priority:** MEDIUM-HIGH — massive active community, recently liquid, derivative launches likely
 
 ### TARGET 7: LinksDAO / Golf DAO Community
@@ -84,7 +84,7 @@
 - **Size:** Large NFT community, LINKS token launched Feb 2025 on Base, $30M golf course renovation
 - **Why they'd care:** They already launched LINKS on Base — proving they understand token mechanics. Their community includes Pudgy Penguin and BAYC holders (got allocation). These are crypto-native users who may want to launch their own projects. The invite system revenue share appeals to their "community enhancer" philosophy.
 - **Contact approach:** Engage in LinksDAO Discord. Frame Unrugable as the recommended tool for community members who want to create their own projects.
-- **Pitch angle:** "LINKS showed golf + crypto works. Your community members have ideas for their own tokens. Give them the safest launch tool on Base — $5, permanent LP lock, and you earn rev share for every referral. Forever."
+- **Pitch angle:** "LINKS showed golf + crypto works. Your community members have ideas for their own tokens. Give them the safest launch tool on Base — free, permanent LP lock, and you earn rev share for every referral. Forever."
 - **Priority:** MEDIUM — proven Base token interest, but golf-specific audience may not be token-launch-heavy
 
 ### TARGET 8: Farcaster /base-builders Channel
@@ -92,7 +92,7 @@
 - **Size:** Active channel of developers building on Base (subset of /base's 120K+ followers)
 - **Why they'd care:** Builders create projects that need tokens. They understand smart contracts and can verify our "no withdraw function" claim themselves. They value technical integrity over hype. The Agent SDK (49 MCP tools) is directly relevant.
 - **Contact approach:** Post technical content in /base-builders. Show contract code. Link to verified source. Let them verify the permanent lock claim themselves.
-- **Pitch angle:** "Building something on Base? Need a token? Verify yourself: our LP contracts have no withdraw function. Period. $5, 8 pools, permanent. Plus 49 MCP tools if your project uses AI agents. Read the code: [contract link]"
+- **Pitch angle:** "Building something on Base? Need a token? Verify yourself: our LP contracts have no withdraw function. Period. Free to launch, locked pools + reactor, permanent. Plus 49 MCP tools if your project uses AI agents. Read the code: [contract link]"
 - **Priority:** MEDIUM — high-quality leads but slower conversion (builders ship on their own timeline)
 
 ### TARGET 9: Base Discord Community (General)
@@ -100,7 +100,7 @@
 - **Size:** 586,134 members
 - **Why they'd care:** Largest Base community. Active discussion of new projects, token launches, and ecosystem tools. Members are constantly looking for the next thing to try. Many are new to launching tokens and would value safety guarantees.
 - **Contact approach:** Engage in relevant channels (not spam). Share educational content about permanent LP locking. Respond to people asking "how do I launch a token on Base?" with Unrugable as the answer.
-- **Pitch angle:** "Want to launch a token on Base? Forget complex setups. $5 gets you: deployed token, 8 LP pools locked FOREVER, promotion to 20K+ followers, and ongoing trading activity from the reactor network. No code needed."
+- **Pitch angle:** "Want to launch a token on Base? Forget complex setups. Free to launch: deployed token, locked pools + reactor, promotion to 20K+ followers, and ongoing trading activity from the reactor network. No code needed."
 - **Priority:** MEDIUM — massive audience but noisy; best for consistent presence, not one-shot outreach
 
 ### TARGET 10: Farcaster DAO NFT Community
@@ -108,7 +108,7 @@
 - **Size:** 2069 NFTs, potential 300K FDAO token airdrop
 - **Why they'd care:** Community governed, on Base, exploring token launches (FDAO airdrop planned). They may want sub-community tokens or complementary launches. Members are deeply Farcaster-native and understand social token mechanics.
 - **Contact approach:** Engage with Farcaster DAO NFT holders on Farcaster. Frame Unrugable as how FDAO sub-communities can safely launch.
-- **Pitch angle:** "Farcaster DAO is exploring FDAO tokens. Sub-communities within the DAO want their own? $5, permanently locked, reactor-powered. No admin keys, no rug risk. Perfect for community experiments."
+- **Pitch angle:** "Farcaster DAO is exploring FDAO tokens. Sub-communities within the DAO want their own? Free to launch, permanently locked, reactor-powered. No admin keys, no rug risk. Perfect for community experiments."
 - **Priority:** MEDIUM-LOW — speculative on FDAO timeline, but aligned audience
 
 ---
@@ -121,7 +121,7 @@ Use these for "Rug Report" social content that drives awareness to Unrugable:
 
 2. **5,000+ tokens launch daily** — "5,000 tokens launch every day. Most die. Many rug. Unrugable tokens have ONE difference: the liquidity physically cannot be removed. It's not locked for 2100 years. It's locked until the heat death of the universe. No function exists to withdraw it."
 
-3. **Clanker sniper bot problem** — "Sniper bots hit new Clanker tokens within seconds. MetaMask co-founder's CONSENT token hit $4M in ONE MINUTE from bots, then dumped. On Unrugable, 8 pools distribute across pairs — no single snipe point captures everything."
+3. **Clanker sniper bot problem** — "Sniper bots hit new Clanker tokens within seconds. MetaMask co-founder's CONSENT token hit $4M in ONE MINUTE from bots, then dumped. On Unrugable, locked pools + reactor distribute across pairs — no single snipe point captures everything."
 
 4. **Political meme coin scams on Base** — "Scammers are launching political meme coins on Base with hidden minting functions. Trugard Labs flagged tokens with hidden balance updates, reentrancy risks, and malicious checks. Unrugable tokens use a standard, verified contract. No hidden functions. Read it yourself."
 
@@ -162,8 +162,8 @@ Use these for "Rug Report" social content that drives awareness to Unrugable:
 1. **Post in /degen** — "Rug Report" content piece about lock extension rugs, end with "that's why we built this" + link
 2. **Engage HungryDegens** — reply to their TGE-related casts, mention invite system as community tool
 3. **Post in /base-builders** — technical breakdown of the no-withdraw-function architecture
-4. **Tag Gnars community leads** — offer a free launch ($5 waived) as proof-of-concept
-5. **Create a "First 10 Launches Free" campaign** — waive the $5 for the first 10 external users who use an invite link (makes invite system viral immediately)
+4. **Tag Gnars community leads** — offer a launch as proof-of-concept (free, just gas)
+5. **Create a "First 10 Launches" campaign** — first 10 external users get personal onboarding + invite link (makes invite system viral immediately)
 
 ---
 

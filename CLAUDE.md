@@ -2,7 +2,7 @@
 
 Token launch platform with permanently locked liquidity on Base.
 
-- **Factory**: Unrugable2 V5.2 at `0xF0c1B3d6Bc0B4dEd2DDF81374feEA8a2c536bD51`
+- **Factory**: V7+ at `0x90297A8a1F9A7E35bbC9DF8C35Aa7F3FFBe9BDb2` (free launch, 2 pools + 1 reactor)
 - **Site**: `site/` — mycopad.html (launcher), burns.html, reactor pages, legal docs
 - **Metadata API**: `metadata-api/server.js` — token metadata storage
 - **Agent SDK**: `agent-sdk/` — 49 MCP tools for agents (v1.2.0)

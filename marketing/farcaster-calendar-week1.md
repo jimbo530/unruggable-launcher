@@ -6,7 +6,7 @@ Post as @jamesmagee. One post per day minimum. Each targets a specific channel.
 
 ## Day 1 (May 8) — /defi — Reactor Network Overview
 
-The MfT reactor network on Base: hundreds of pools, firing every 2 hours.
+The MfT reactor network on Base: firing every 2 hours across the network.
 
 How it works: secondary reactors compress $MfT into sell walls below price. V1 Prime fires last and buys through all of it with accumulated fees from the entire network. All MfT burned permanently.
 
@@ -24,16 +24,15 @@ tasern.quest/mft/
 
 Built a token launchpad on Base where 100% of supply locks in permanent V3 LPs from block 1.
 
-Cost to launch: $5 seed. What you get:
-- 8 LP positions: 3 floor pools (AZUSD, cbBTC, WETH) + 3 MfT sell walls + 2 CHAR carbon pools
-- MfT sell walls (your token gets paired against network infrastructure)
-- CHAR carbon pools (every trade removes carbon credits from markets)
+Cost to launch: free (just gas). What you get:
+- 2 locked pools: TOKEN/Money (70%) + TOKEN/Meme (30%)
+- 1 reactor per launch (50% burned / 50% to launcher wallet)
 - Reactor integration (automated buy+burn every 2hrs)
 - No dev allocation, no unlock schedule, no withdraw function
 
 The reactor is permanent. Liquidity is permanent. Carbon credit removal is automatic.
 
-If you're building on Base and want your token to have floor support from day one, this is how.
+If you're building on Base and want your token to have locked liquidity from day one, this is how.
 
 tasern.quest/launcher/unrugable.html
 
@@ -65,11 +64,11 @@ npm install -g baselings-mcp
 
 The CHAR carbon credit reactor is live on Base — actively removing carbon credits from markets via LP trading fees. 1 CHAR = 1 lb of CO2e biochar.
 
-This isn't a pledge. It's code that executes automatically from trading fees across hundreds of pools. As volume grows, so does the carbon credit removal. No charity board votes. No quarterly reports.
+This isn't a pledge. It's code that executes automatically from trading fees across the reactor network. As volume grows, so does the carbon credit removal. No charity board votes. No quarterly reports.
 
 All burned tokens — including CHAR and charity fund tokens — are tracked at a dedicated no-withdraw address. A public, on-chain ledger of every token the ecosystem has permanently removed from circulation.
 
-Unrugable launches allocate 6% of every seed to CHAR reactor pools. We have no overhead to offset. We just create demand for carbon credit removal because we can. More tokens launched = more credits removed from markets.
+Unrugable launches fund carbon credit removal through reactor fee cycling. We have no overhead to offset. We just create demand for carbon credit removal because we can. More tokens launched = more credits removed from markets.
 
 The flywheel connects DeFi activity directly to environmental impact.
 

@@ -33,18 +33,18 @@ const AIRDROP_AMOUNTS = {
 };
 
 // Pitch note — condensed for agents, included in Farcaster cast
-const PITCH_NOTE = `MfT on Base — started as memes funding trees, then we built tools. Reactors fire every 2hrs across 180+ pools.
+const PITCH_NOTE = `MfT on Base — started as memes funding trees, then we built tools. Reactors fire every 2hrs across the reactor network.
 
 Your trades generate fees that cycle through the network — burns tokens, removes carbon credits, funds charity automatically. Even sells are fuel.
 
-No API keys. No permissions. execute() is permissionless. Every launch gets a mandatory charity fund wall.
+No API keys. No permissions. execute() is permissionless. Free to launch (just gas). 2 locked pools + 1 reactor per token.
 
 npm install baselings-mcp — 39 agent-native tools.
 Contracts: tasern.quest/api/unrugable/tokenomics
 Discovery: tasern.quest/llms.txt`;
 
 // Shorter version for Farcaster (320 char limit)
-const PITCH_SHORT = `$5 to launch your own token on Base. 8 permanently locked LP positions, trading routes across hundreds of pools, mandatory charity fund wall. Invite others — their launches add more routes to the network.
+const PITCH_SHORT = `Free to launch your own token on Base (just gas). 2 locked pools (TOKEN/Money + TOKEN/Meme) + 1 reactor, trading routes across the network. Invite others — their launches add more routes.
 
 tasern.quest/llms.txt`;
 

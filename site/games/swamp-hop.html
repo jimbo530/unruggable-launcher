@@ -25,6 +25,10 @@ canvas { display: block; margin: 0 auto; }
 (function() {
 "use strict";
 
+// === NFT STAT BONUSES ===
+var statB = { damage: 1, speed: 1, lives: 0, hpMult: 1, scoreMult: 1, cooldown: 1, luck: 1, str: 10, dex: 10, con: 10, int: 10, wis: 10, cha: 10, level: 0, color: '#44dd88', name: 'Baseling', icon: 'B' };
+try { if (window.NftLoader && NftLoader.getStatBonuses) statB = NftLoader.getStatBonuses(); } catch(e) {}
+
 // === GAME CONSTANTS ===
 var GW = 480, GH = 320;
 var ctx = TAS.ctx;
@@ -39,6 +43,30 @@ var CELL_H = Math.floor((GH - 28) / ROWS); // ~22 (minus HUD bar)
 var HUD_H = 28;
 var GRID_TOP = HUD_H;
 
+// === STAT-DERIVED CONSTANTS ===
+// STR: knockback distance on snake/gator encounters, bonus damage to bosses
+var STR_KNOCKBACK = Math.max(1, Math.floor(statB.str / 5));
+// DEX: hop cooldown reduction, dodge chance
+var DEX_COOLDOWN_MULT = Math.max(0.3, 1.0 - (statB.dex - 10) * 0.03); // lower = faster hops
+var DEX_DODGE_CHANCE = Math.min(0.3, (statB.dex - 10) * 0.015); // chance to dodge vehicle
+// CON: extra starting lives, longer timer
+var CON_EXTRA_LIVES = Math.floor(Math.max(0, statB.con - 10) / 4);
+var CON_TIMER_BONUS = Math.max(0, (statB.con - 10) * 0.5); // extra seconds per life
+// INT: score multiplier, reveal hidden items
+var INT_SCORE_MULT = 1.0 + Math.max(0, (statB.int - 10) * 0.04); // +4% per INT over 10
+var INT_REVEAL_CHANCE = Math.min(0.5, (statB.int - 10) * 0.025); // chance to see hidden bonuses
+// WIS: hazard warning, timer regen
+var WIS_WARN_RADIUS = Math.max(0, Math.floor((statB.wis - 10) / 3)); // cells of warning
+var WIS_TIMER_REGEN = Math.max(0, (statB.wis - 10) * 0.02); // seconds per second regen
+// CHA: companion spawn rate, shop discounts (future), bonus fly attract
+var CHA_COMPANION_MULT = 1.0 + Math.max(0, (statB.cha - 10) * 0.08); // companion spawn boost
+var CHA_FLY_ATTRACT = Math.max(0, (statB.cha - 10) * 0.5); // fly magnetism pixels
+
+// Player color from statB
+var PLAYER_COLOR = statB.color || '#44dd88';
+var PLAYER_NAME = statB.name || 'Baseling';
+var PLAYER_ICON = statB.icon || 'B';
+
 // === GAME STATE ===
 var state = 'title';
 var score = 0;
@@ -47,17 +75,37 @@ var lives = 3;
 var level = 1;
 var frame = 0;
 var bonusLifeThreshold = 10000;
+var showTutorial = true;
+var tutorialTimer = 0;
+var TUTORIAL_DURATION = 6;
+var tutorialDismissed = false;
+
+// Score popups
+var scorePopups = [];
+
+// Zone themes
+var ZONES = [
+  { name: 'Murkmire Swamp', waterColor: '#1a4a6a', waterDark: '#0e3048', grassColor: '#2d5a1e', roadColor: '#3a3a3a', fogColor: 'rgba(20,60,40,0.15)' },
+  { name: 'Fungal Depths', waterColor: '#2a3a5a', waterDark: '#151a30', grassColor: '#3a4a2e', roadColor: '#2e2e3a', fogColor: 'rgba(40,20,60,0.15)' },
+  { name: 'Spore Canopy', waterColor: '#1a5a4a', waterDark: '#0e3830', grassColor: '#1e5a2e', roadColor: '#3a3a2e', fogColor: 'rgba(20,60,20,0.12)' },
+  { name: 'Dragon\'s Bog', waterColor: '#4a2a1a', waterDark: '#301a0e', grassColor: '#4a3a1e', roadColor: '#3a2a2a', fogColor: 'rgba(60,20,10,0.18)' }
+];
+
+function getZone() {
+  var idx = Math.floor((level - 1) / 3) % ZONES.length;
+  return ZONES[idx];
+}
 
 // Player
 var frog = { col: 7, row: 12, x: 0, y: 0, dir: 0, hopAnim: 0, dead: false, riding: null };
 var hopCooldown = 0;
-var HOP_COOLDOWN = 0.15; // seconds between hops
+var HOP_COOLDOWN = 0.15; // base seconds between hops
 var deathTimer = 0;
 var DEATH_DURATION = 1.2;
 
 // Timer bar
 var timeLeft = 0;
-var TIME_PER_LIFE = 30; // seconds
+var TIME_PER_LIFE = 30; // base seconds
 
 // Home slots
 var HOME_COUNT = 5;
@@ -67,22 +115,42 @@ var homes = [];
 var lanes = [];
 
 // Bonus items
-var bonusItems = []; // flies, companion baselings
+var bonusItems = []; // flies, companion baselings, Tasern items
+
+// Tasern hazards (overlay hazards that appear independently)
+var tasernHazards = [];
+// Tasern collectible items
+var tasernItems = [];
+
+// Boss state
+var bossActive = false;
+var boss = null;
 
 // Level-complete state
 var levelCompleteTimer = 0;
 var LEVEL_COMPLETE_DURATION = 2.0;
 
+// Zone transition
+var zoneTransTimer = 0;
+var ZONE_TRANS_DURATION = 1.5;
+var prevZoneName = '';
+
 // Track previous input to detect fresh presses
 var prevKeys = {};
 var prevTouch = {};
 
-// === COLORS ===
-var COL_GRASS = '#2d5a1e';
-var COL_ROAD = '#3a3a3a';
+// Particle burst queue (for zone transitions, boss kills, etc.)
+var particleBursts = [];
+
+// Hazard warning indicators
+var hazardWarnings = [];
+
+// === COLORS (zone-dependent now) ===
+function COL_GRASS() { return getZone().grassColor; }
+function COL_ROAD() { return getZone().roadColor; }
 var COL_ROAD_LINE = '#555';
-var COL_WATER = '#1a4a6a';
-var COL_WATER_DARK = '#0e3048';
+function COL_WATER() { return getZone().waterColor; }
+function COL_WATER_DARK() { return getZone().waterDark; }
 var COL_MEDIAN = '#4a7a2a';
 var COL_SAFE = '#3a6a2a';
 var COL_HOME_BG = '#0e3048';
@@ -92,24 +160,378 @@ var COL_HOME_PAD = '#2a7040';
 function cellX(col) { return col * CELL_W; }
 function cellY(row) { return GRID_TOP + row * CELL_H; }
 
+// === SCORE POPUP SYSTEM ===
+function spawnScorePopup(x, y, text, color) {
+  scorePopups.push({ x: x, y: y, text: text, color: color || '#ffdd44', life: 1.2, maxLife: 1.2 });
+}
+
+function updateScorePopups(dt) {
+  for (var i = scorePopups.length - 1; i >= 0; i--) {
+    scorePopups[i].y -= dt * 30;
+    scorePopups[i].life -= dt;
+    if (scorePopups[i].life <= 0) scorePopups.splice(i, 1);
+  }
+}
+
+function drawScorePopups() {
+  ctx.textAlign = 'center';
+  for (var i = 0; i < scorePopups.length; i++) {
+    var p = scorePopups[i];
+    var alpha = Math.min(1, p.life / (p.maxLife * 0.3));
+    ctx.globalAlpha = alpha;
+    ctx.fillStyle = p.color;
+    ctx.font = 'bold 11px monospace';
+    ctx.fillText(p.text, p.x, p.y);
+  }
+  ctx.globalAlpha = 1;
+}
+
+// === TASERN ENEMIES & HAZARDS ===
+
+// Bog Troll: appears on road lanes at higher levels, slower but wider
+// Swamp Drake: flies across water lanes, kills on contact
+// Spore Cloud: drifts across median, slows player (adds hop cooldown)
+// Fungal Crawler: replaces some snakes on logs
+
+function initTasernHazards() {
+  tasernHazards = [];
+  tasernItems = [];
+
+  // Spore clouds on median at level 3+
+  if (level >= 3) {
+    var sporeCount = Math.min(3, Math.floor(level / 3));
+    for (var i = 0; i < sporeCount; i++) {
+      tasernHazards.push({
+        type: 'sporeCloud',
+        x: TAS.math.randRange(CELL_W * 2, GW - CELL_W * 3),
+        y: cellY(6),
+        w: CELL_W * 1.5,
+        h: CELL_H,
+        speed: TAS.math.randRange(10, 30) * (Math.random() > 0.5 ? 1 : -1),
+        pulseTimer: Math.random() * 6,
+        active: true
+      });
+    }
+  }
+
+  // Will-o-wisps on water lanes at level 4+
+  if (level >= 4) {
+    var wispCount = Math.min(2, Math.floor((level - 3) / 2));
+    for (var i = 0; i < wispCount; i++) {
+      var wispRow = TAS.math.randInt(1, 5);
+      tasernHazards.push({
+        type: 'wisp',
+        x: TAS.math.randRange(0, GW),
+        y: cellY(wispRow),
+        row: wispRow,
+        w: CELL_W * 0.6,
+        h: CELL_H * 0.6,
+        speedX: TAS.math.randRange(20, 50) * (Math.random() > 0.5 ? 1 : -1),
+        speedY: TAS.math.randRange(-10, 10),
+        flickerTimer: 0,
+        active: true
+      });
+    }
+  }
+
+  // Quicksand patches on safe rows at level 5+
+  if (level >= 5) {
+    var qsCount = Math.min(2, Math.floor((level - 4) / 3));
+    for (var i = 0; i < qsCount; i++) {
+      var qsRow = (Math.random() > 0.5) ? 6 : 12;
+      tasernHazards.push({
+        type: 'quicksand',
+        col: TAS.math.randInt(2, COLS - 3),
+        row: qsRow,
+        x: 0, y: 0,
+        w: CELL_W * 2,
+        h: CELL_H,
+        sinkTimer: 0,
+        trapping: false,
+        active: true
+      });
+    }
+  }
+
+  // Tasern items: glowcap mushrooms, mana crystals, healing moss
+  var itemCount = Math.min(3, 1 + Math.floor(level / 2));
+  for (var i = 0; i < itemCount; i++) {
+    var itemType = ['glowcap', 'manaCrystal', 'healingMoss'][TAS.math.randInt(0, 2)];
+    var itemRow = TAS.math.randInt(1, 11);
+    // INT_REVEAL_CHANCE determines if hidden items are visible
+    var hidden = Math.random() > (0.5 + INT_REVEAL_CHANCE);
+    tasernItems.push({
+      type: itemType,
+      col: TAS.math.randInt(1, COLS - 2),
+      row: itemRow,
+      collected: false,
+      hidden: hidden,
+      timer: 15 + Math.random() * 10,
+      bobPhase: Math.random() * Math.PI * 2
+    });
+  }
+}
+
+// Swamp Drake: lane hazard that flies across water
+function spawnSwampDrake() {
+  if (level < 6) return;
+  if (Math.random() < 0.004 * (1 + level * 0.1)) {
+    var drakeRow = TAS.math.randInt(1, 5);
+    var dir = Math.random() > 0.5 ? 1 : -1;
+    tasernHazards.push({
+      type: 'swampDrake',
+      x: dir > 0 ? -CELL_W * 2 : GW + CELL_W,
+      y: cellY(drakeRow) - 2,
+      row: drakeRow,
+      w: CELL_W * 2,
+      h: CELL_H + 4,
+      dir: dir,
+      speed: 80 + level * 5,
+      wingPhase: 0,
+      active: true
+    });
+  }
+}
+
+// Bog Troll: replaces some vehicles on road at level 7+
+function initBogTrolls(laneObjs, row) {
+  if (level >= 7 && Math.random() < 0.3) {
+    laneObjs.push({
+      x: TAS.math.randRange(CELL_W * 2, GW - CELL_W * 4),
+      w: CELL_W * 2.5,
+      h: CELL_H,
+      vtype: 'bogTroll',
+      isTasern: true,
+      swingPhase: 0
+    });
+  }
+}
+
+// === BOSS SYSTEM ===
+// Boss every 5 levels: sits in home row, must be hit with timed hops
+var BOSS_TYPES = [
+  { name: 'Fungal Golem', hp: 3, color: '#6a4a2a', size: 2.5, attackRate: 2.0 },
+  { name: 'Bog Hydra', hp: 5, color: '#2a6a4a', size: 3.0, attackRate: 1.5 },
+  { name: 'Spore Titan', hp: 7, color: '#4a2a6a', size: 3.5, attackRate: 1.2 },
+  { name: 'Elder Drake', hp: 10, color: '#6a2a2a', size: 4.0, attackRate: 1.0 }
+];
+
+function initBoss() {
+  if (level % 5 !== 0) { bossActive = false; boss = null; return; }
+  var bossIdx = Math.min(BOSS_TYPES.length - 1, Math.floor(level / 5) - 1);
+  var bt = BOSS_TYPES[bossIdx];
+  bossActive = true;
+  boss = {
+    name: bt.name,
+    hp: bt.hp,
+    maxHp: bt.hp,
+    color: bt.color,
+    size: bt.size,
+    x: GW / 2,
+    y: cellY(0) + CELL_H / 2,
+    attackTimer: bt.attackRate,
+    attackRate: bt.attackRate,
+    hitFlash: 0,
+    projectiles: [],
+    defeated: false,
+    deathAnim: 0,
+    shakeAmt: 0
+  };
+  // Clear homes for boss fight
+  for (var i = 0; i < homes.length; i++) {
+    homes[i].filled = false;
+    homes[i].bonusType = null;
+  }
+}
+
+function updateBoss(dt) {
+  if (!bossActive || !boss || boss.defeated) return;
+
+  boss.hitFlash = Math.max(0, boss.hitFlash - dt * 4);
+  boss.shakeAmt = Math.max(0, boss.shakeAmt - dt * 8);
+
+  // Boss sways
+  boss.x = GW / 2 + Math.sin(frame * 0.03) * 40;
+
+  // Attack: fire projectiles down
+  boss.attackTimer -= dt;
+  if (boss.attackTimer <= 0) {
+    boss.attackTimer = boss.attackRate;
+    var projCount = Math.min(3, 1 + Math.floor((boss.maxHp - boss.hp) / 2));
+    for (var i = 0; i < projCount; i++) {
+      boss.projectiles.push({
+        x: boss.x + TAS.math.randRange(-30, 30),
+        y: boss.y + boss.size * 12,
+        speed: 60 + level * 3,
+        w: 8,
+        h: 8,
+        life: 4
+      });
+    }
+    TAS.audio.playTone(150, 0.15, 'sawtooth', 0.08, 100);
+  }
+
+  // Update projectiles
+  for (var i = boss.projectiles.length - 1; i >= 0; i--) {
+    var p = boss.projectiles[i];
+    p.y += p.speed * dt;
+    p.life -= dt;
+
+    // Hit player
+    if (!frog.dead && TAS.hit.rectOverlap(
+      frog.x + 2, frog.y + 2, CELL_W - 4, CELL_H - 4,
+      p.x - p.w / 2, p.y - p.h / 2, p.w, p.h
+    )) {
+      // DEX dodge check
+      if (Math.random() < DEX_DODGE_CHANCE) {
+        spawnScorePopup(frog.x + CELL_W / 2, frog.y, 'DODGE!', '#44ddff');
+        TAS.particles.spawn(frog.x + CELL_W / 2, frog.y + CELL_H / 2, '#44ddff', 6, 1);
+      } else {
+        killFrog('bossAttack');
+      }
+      boss.projectiles.splice(i, 1);
+      continue;
+    }
+
+    if (p.life <= 0 || p.y > GH) {
+      boss.projectiles.splice(i, 1);
+    }
+  }
+
+  // Player hitting boss: reach row 0 near boss
+  if (frog.row === 0 && !frog.dead) {
+    var dist = Math.abs(frog.x + CELL_W / 2 - boss.x);
+    if (dist < boss.size * 15) {
+      // STR determines damage
+      var dmg = Math.max(1, Math.floor(statB.str / 5));
+      boss.hp -= dmg;
+      boss.hitFlash = 1;
+      boss.shakeAmt = 5;
+      var dmgText = '-' + dmg + ' HP';
+      spawnScorePopup(boss.x, boss.y - 10, dmgText, '#ff4444');
+      TAS.audio.playTone(200, 0.15, 'square', 0.1, 120);
+      TAS.fx.shake(6, 0.9);
+      TAS.particles.spawn(boss.x, boss.y, boss.color, 12, 3, { gravity: 0.05 });
+
+      if (boss.hp <= 0) {
+        boss.defeated = true;
+        boss.deathAnim = 2.0;
+        var bossScore = Math.floor(2000 * INT_SCORE_MULT);
+        addScore(bossScore);
+        spawnScorePopup(boss.x, boss.y - 20, '+' + bossScore, '#ffdd44');
+        TAS.audio.playMelody([[392, 0.1], [523, 0.1], [659, 0.1], [784, 0.1], [1047, 0.2]], 100);
+        TAS.fx.flash('#ffdd44', 0.5);
+        // Big particle burst
+        for (var c = 0; c < 5; c++) {
+          TAS.particles.spawn(
+            boss.x + TAS.math.randRange(-30, 30),
+            boss.y + TAS.math.randRange(-15, 15),
+            ['#ff4444', '#ffaa22', '#ffdd44', '#44ff88', '#4488ff'][c], 15, 4, { gravity: 0.08 }
+          );
+        }
+      } else {
+        // Knockback player (STR determines how far back they go)
+        frog.row = Math.min(12, frog.row + Math.max(2, 4 - STR_KNOCKBACK));
+        frog.y = cellY(frog.row);
+        frog.hopAnim = 0.2;
+      }
+    }
+  }
+
+  // Boss death anim
+  if (boss.defeated) {
+    boss.deathAnim -= dt;
+    if (boss.deathAnim <= 0) {
+      bossActive = false;
+      // Fill all homes to trigger level complete
+      for (var i = 0; i < homes.length; i++) homes[i].filled = true;
+      addScore(1000);
+      state = 'levelComplete';
+      levelCompleteTimer = LEVEL_COMPLETE_DURATION;
+    }
+  }
+}
+
+function drawBoss() {
+  if (!bossActive || !boss) return;
+
+  // Projectiles
+  for (var i = 0; i < boss.projectiles.length; i++) {
+    var p = boss.projectiles[i];
+    ctx.fillStyle = '#aa2244';
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, p.w / 2, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = '#ff4466';
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, p.w / 4, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  if (boss.defeated) {
+    ctx.globalAlpha = Math.max(0, boss.deathAnim / 2.0);
+  }
+
+  var bx = boss.x + (boss.shakeAmt > 0 ? TAS.math.randRange(-boss.shakeAmt, boss.shakeAmt) : 0);
+  var by = boss.y;
+  var s = boss.size * 12;
+
+  // Body
+  ctx.fillStyle = boss.hitFlash > 0 ? '#ffffff' : boss.color;
+  ctx.beginPath();
+  ctx.ellipse(bx, by, s, s * 0.8, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Eyes
+  ctx.fillStyle = '#ff2222';
+  ctx.beginPath();
+  ctx.arc(bx - s * 0.3, by - s * 0.2, s * 0.15, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.arc(bx + s * 0.3, by - s * 0.2, s * 0.15, 0, Math.PI * 2);
+  ctx.fill();
+
+  // HP bar
+  if (!boss.defeated) {
+    var barW = s * 2;
+    var barH = 4;
+    var barX = bx - barW / 2;
+    var barY = by - s - 8;
+    ctx.fillStyle = '#333';
+    ctx.fillRect(barX, barY, barW, barH);
+    var hpPct = boss.hp / boss.maxHp;
+    ctx.fillStyle = hpPct > 0.5 ? '#44cc44' : (hpPct > 0.25 ? '#ccaa22' : '#cc2222');
+    ctx.fillRect(barX, barY, barW * hpPct, barH);
+    ctx.fillStyle = '#fff';
+    ctx.font = '8px monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText(boss.name, bx, barY - 3);
+  }
+
+  ctx.globalAlpha = 1;
+}
+
+// === INIT HELPERS ===
+
 function initHomes() {
   homes = [];
-  // 5 homes evenly spaced across top row
   var spacing = COLS / HOME_COUNT;
   for (var i = 0; i < HOME_COUNT; i++) {
     homes.push({
       col: Math.floor(spacing * i + spacing / 2),
       filled: false,
       hasBonus: false,
-      bonusType: null // 'fly' or 'gator'
+      bonusType: null
     });
   }
   // Randomly place hazards/bonuses in some homes
-  if (level > 1) {
+  if (level > 1 && !bossActive) {
     var gatorHome = TAS.math.randInt(0, HOME_COUNT - 1);
     homes[gatorHome].bonusType = 'gator';
   }
-  if (Math.random() < 0.5) {
+  // CHA increases fly spawn in homes
+  var flyChance = 0.5 + CHA_COMPANION_MULT * 0.05;
+  if (Math.random() < flyChance) {
     var flyHome = TAS.math.randInt(0, HOME_COUNT - 1);
     if (!homes[flyHome].bonusType) {
       homes[flyHome].bonusType = 'fly';
@@ -133,21 +555,23 @@ function initLanes() {
     var objs = [];
 
     if (r === 1 || r === 4) {
-      // Log lanes
       laneType = 'log';
       speed = (0.6 + Math.random() * 0.4) * speedMult;
       var logCount = Math.max(2, 4 - Math.floor(level / 3));
       var logLen = TAS.math.randInt(3, 5);
       for (var i = 0; i < logCount; i++) {
         var lx = (i * (GW / logCount)) + TAS.math.randRange(-20, 20);
+        // Fungal Crawler replaces some snakes at level 4+
+        var hasCrawler = (level >= 4 && Math.random() < 0.25);
         objs.push({
           x: lx, w: logLen * CELL_W, h: CELL_H - 2,
-          hasSnake: (level > 2 && Math.random() < 0.2),
-          snakePos: Math.random()
+          hasSnake: !hasCrawler && (level > 2 && Math.random() < 0.2),
+          hasCrawler: hasCrawler,
+          snakePos: Math.random(),
+          crawlerPos: Math.random()
         });
       }
     } else if (r === 2 || r === 5) {
-      // Turtle lanes
       laneType = 'turtle';
       speed = (0.4 + Math.random() * 0.3) * speedMult;
       var turtleGroups = Math.max(2, 4 - Math.floor(level / 4));
@@ -156,7 +580,7 @@ function initLanes() {
         var tx = i * (GW / turtleGroups) + TAS.math.randRange(-10, 10);
         objs.push({
           x: tx, w: groupSize * CELL_W, h: CELL_H - 2,
-          submerge: Math.random() < (0.2 + level * 0.05), // can this group submerge?
+          submerge: Math.random() < (0.2 + level * 0.05),
           submergeTimer: Math.random() * 6,
           submerged: false,
           submergeDuration: 1.5 + Math.random()
@@ -189,7 +613,6 @@ function initLanes() {
     var vehicleType;
 
     if (r === 7 || r === 10) {
-      // Slow carts
       vehicleType = 'cart';
       speed = (0.8 + Math.random() * 0.5) * speedMult;
       var count = TAS.math.randInt(2, 3);
@@ -200,7 +623,6 @@ function initLanes() {
         });
       }
     } else if (r === 8 || r === 11) {
-      // Mushroom trucks (medium)
       vehicleType = 'truck';
       speed = (1.0 + Math.random() * 0.6) * speedMult;
       var count = TAS.math.randInt(2, 3);
@@ -222,6 +644,9 @@ function initLanes() {
         });
       }
     }
+
+    // Bog Troll addition
+    initBogTrolls(objs, r);
 
     lanes.push({ type: 'road', row: r, dir: dir, speed: speed, objects: objs, vehicleType: vehicleType });
   }
@@ -251,13 +676,14 @@ function spawnBonus() {
       });
     }
   }
-  // Companion baseling on median
-  if (Math.random() < 0.003 && !bonusItems.some(function(b) { return b.type === 'companion'; })) {
+  // Companion baseling on median — CHA boosts spawn rate
+  var companionRate = 0.003 * CHA_COMPANION_MULT;
+  if (Math.random() < companionRate && !bonusItems.some(function(b) { return b.type === 'companion'; })) {
     bonusItems.push({
       type: 'companion',
       x: TAS.math.randRange(CELL_W, GW - CELL_W * 2),
       y: cellY(6) + 2,
-      timer: 10,
+      timer: 10 + (statB.cha - 10) * 0.3, // CHA makes companions stick around longer
       points: 500,
       carried: false
     });
@@ -268,10 +694,17 @@ function spawnBonus() {
 function startGame() {
   state = 'playing';
   score = 0;
-  lives = 3;
+  // CON grants extra starting lives
+  lives = 3 + CON_EXTRA_LIVES + statB.lives;
   level = 1;
   bonusLifeThreshold = 10000;
+  scorePopups = [];
   TAS.particles.clear();
+  prevZoneName = '';
+  if (!tutorialDismissed) {
+    showTutorial = true;
+    tutorialTimer = TUTORIAL_DURATION;
+  }
   initLevel();
 }
 
@@ -279,8 +712,18 @@ function initLevel() {
   initHomes();
   initLanes();
   initBonusItems();
+  initTasernHazards();
+  initBoss();
   resetFrog();
-  timeLeft = TIME_PER_LIFE;
+  // CON grants extra timer
+  timeLeft = TIME_PER_LIFE + CON_TIMER_BONUS;
+
+  // Zone transition check
+  var z = getZone();
+  if (z.name !== prevZoneName && prevZoneName !== '') {
+    zoneTransTimer = ZONE_TRANS_DURATION;
+  }
+  prevZoneName = z.name;
 }
 
 function resetFrog() {
@@ -288,13 +731,14 @@ function resetFrog() {
   frog.row = 12;
   frog.x = cellX(7);
   frog.y = cellY(12);
-  frog.dir = 0; // 0=up, 1=right, 2=down, 3=left
+  frog.dir = 0;
   frog.hopAnim = 0;
   frog.dead = false;
   frog.riding = null;
-  hopCooldown = 0.3;
+  // DEX affects initial cooldown
+  hopCooldown = 0.3 * DEX_COOLDOWN_MULT;
   deathTimer = 0;
-  timeLeft = TIME_PER_LIFE;
+  timeLeft = TIME_PER_LIFE + CON_TIMER_BONUS;
 }
 
 function killFrog(reason) {
@@ -305,17 +749,94 @@ function killFrog(reason) {
 
   TAS.audio.playTone(200, 0.3, 'sawtooth', 0.12, 80);
   TAS.particles.spawn(frog.x + CELL_W / 2, frog.y + CELL_H / 2, '#ff4444', 15, 3, { gravity: 0.05 });
-  TAS.fx.shake(4, 0.85);
+  TAS.fx.shake(6, 0.85);
   TAS.fx.flash('#ff0000', 0.25);
+
+  // Death-specific particles
+  if (reason === 'water') {
+    // Water splash
+    TAS.particles.spawn(frog.x + CELL_W / 2, frog.y + CELL_H / 2, '#4488cc', 12, 2, { gravity: 0.04 });
+    TAS.particles.spawn(frog.x + CELL_W / 2, frog.y, '#88ccff', 8, 1.5);
+  } else if (reason === 'vehicle' || reason === 'bogTroll') {
+    // Squish
+    TAS.particles.spawn(frog.x + CELL_W / 2, frog.y + CELL_H / 2, PLAYER_COLOR, 20, 2, { gravity: 0.1 });
+  } else if (reason === 'sporeCloud') {
+    // Toxic green
+    TAS.particles.spawn(frog.x + CELL_W / 2, frog.y + CELL_H / 2, '#88ff44', 10, 2);
+  } else if (reason === 'wisp') {
+    // Blue fire
+    TAS.particles.spawn(frog.x + CELL_W / 2, frog.y + CELL_H / 2, '#44aaff', 12, 2.5);
+  }
 }
 
 function addScore(pts) {
+  // INT boosts all score gains
+  pts = Math.floor(pts * INT_SCORE_MULT * statB.scoreMult);
   score += pts;
   if (score >= bonusLifeThreshold) {
     lives++;
     bonusLifeThreshold += 10000;
     TAS.audio.playMelody([[523, 0.1], [659, 0.1], [784, 0.15]], 100);
     TAS.fx.flash('#44ff44', 0.2);
+    spawnScorePopup(GW / 2, GH / 2, '1-UP!', '#44ff44');
+  }
+}
+
+// === HAZARD WARNING SYSTEM (WIS) ===
+function updateHazardWarnings() {
+  hazardWarnings = [];
+  if (WIS_WARN_RADIUS <= 0) return;
+
+  // Warn about vehicles, snakes, gators, spore clouds near player
+  var px = frog.col;
+  var py = frog.row;
+
+  // Check road vehicles
+  for (var i = 0; i < lanes.length; i++) {
+    var lane = lanes[i];
+    if (lane.type !== 'road') continue;
+    if (Math.abs(lane.row - py) > WIS_WARN_RADIUS) continue;
+
+    for (var j = 0; j < lane.objects.length; j++) {
+      var obj = lane.objects[j];
+      var objCol = Math.round(obj.x / CELL_W);
+      if (Math.abs(objCol - px) <= WIS_WARN_RADIUS + 2) {
+        hazardWarnings.push({
+          x: obj.x + obj.w / 2,
+          y: cellY(lane.row) - 4,
+          type: 'vehicle'
+        });
+      }
+    }
+  }
+
+  // Check Tasern hazards
+  for (var i = 0; i < tasernHazards.length; i++) {
+    var h = tasernHazards[i];
+    if (!h.active) continue;
+    var hCol = Math.round(h.x / CELL_W);
+    var hRow = h.row || Math.round((h.y - GRID_TOP) / CELL_H);
+    if (Math.abs(hRow - py) <= WIS_WARN_RADIUS && Math.abs(hCol - px) <= WIS_WARN_RADIUS + 1) {
+      hazardWarnings.push({
+        x: h.x + (h.w || CELL_W) / 2,
+        y: h.y - 4,
+        type: h.type
+      });
+    }
+  }
+}
+
+function drawHazardWarnings() {
+  if (hazardWarnings.length === 0) return;
+  for (var i = 0; i < hazardWarnings.length; i++) {
+    var w = hazardWarnings[i];
+    var alpha = 0.4 + Math.sin(frame * 0.15) * 0.3;
+    ctx.globalAlpha = alpha;
+    ctx.fillStyle = '#ffaa22';
+    ctx.font = 'bold 10px monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText('!', w.x, w.y);
+    ctx.globalAlpha = 1;
   }
 }
 
@@ -351,6 +872,7 @@ function update(dt) {
   frame++;
   TAS.particles.update(dt);
   TAS.fx.updateEffects(dt);
+  updateScorePopups(dt);
 
   if (state === 'title') {
     if (Object.values(TAS.input.keys).some(Boolean) || TAS.input.touch.a) {
@@ -381,6 +903,25 @@ function update(dt) {
   }
 
   if (state === 'playing') {
+    // Zone transition overlay
+    if (zoneTransTimer > 0) {
+      zoneTransTimer -= dt;
+    }
+
+    // Tutorial timer
+    if (showTutorial && tutorialTimer > 0) {
+      tutorialTimer -= dt;
+      // Any input dismisses tutorial
+      if (Object.values(TAS.input.keys).some(Boolean) || Object.values(TAS.input.touch).some(Boolean)) {
+        tutorialTimer = 0;
+        tutorialDismissed = true;
+      }
+      if (tutorialTimer <= 0) {
+        showTutorial = false;
+        tutorialDismissed = true;
+      }
+    }
+
     // Handle death
     if (frog.dead) {
       deathTimer -= dt;
@@ -399,15 +940,17 @@ function update(dt) {
       return;
     }
 
-    // Timer
+    // Timer — WIS gives passive regen
     timeLeft -= dt;
+    timeLeft += WIS_TIMER_REGEN * dt;
+    timeLeft = Math.min(timeLeft, TIME_PER_LIFE + CON_TIMER_BONUS); // cap at max
     if (timeLeft <= 0) {
       killFrog('time');
       saveInputState();
       return;
     }
 
-    // Hop cooldown
+    // Hop cooldown — DEX makes hops faster
     if (hopCooldown > 0) hopCooldown -= dt;
 
     // Movement input
@@ -424,7 +967,8 @@ function update(dt) {
       }
 
       if (moved) {
-        hopCooldown = HOP_COOLDOWN;
+        // DEX-scaled hop cooldown
+        hopCooldown = HOP_COOLDOWN * DEX_COOLDOWN_MULT * statB.cooldown;
         frog.hopAnim = 0.2;
         frog.riding = null;
         TAS.audio.playTone(440, 0.06, 'square', 0.06, 520);
@@ -478,7 +1022,7 @@ function update(dt) {
     var frogH = CELL_H - 4;
 
     // Home row check (row 0)
-    if (frog.row === 0) {
+    if (frog.row === 0 && !bossActive) {
       var landedHome = false;
       for (var i = 0; i < homes.length; i++) {
         var h = homes[i];
@@ -488,8 +1032,21 @@ function update(dt) {
           if (h.filled) {
             killFrog('filled');
           } else if (h.bonusType === 'gator') {
-            killFrog('gator');
-            h.bonusType = null;
+            // STR knockback: high STR survives gator
+            if (statB.str >= 16) {
+              h.bonusType = null;
+              spawnScorePopup(frog.x + CELL_W / 2, frog.y, 'STR SMASH!', '#ff8844');
+              addScore(300);
+              TAS.particles.spawn(frog.x + CELL_W / 2, frog.y + CELL_H / 2, '#44aa22', 10, 2);
+            } else {
+              killFrog('gator');
+            }
+            if (!frog.dead) {
+              h.filled = true;
+              landedHome = true;
+              addScore(50 + Math.floor(timeLeft) * 10);
+              resetFrog();
+            }
           } else {
             h.filled = true;
             landedHome = true;
@@ -498,14 +1055,30 @@ function update(dt) {
               pts += 200;
               h.hasBonus = false;
             }
+            // Companion bonus
+            var hasComp = bonusItems.some(function(b) { return b.type === 'companion' && b.carried; });
+            if (hasComp) {
+              pts += 500;
+              spawnScorePopup(frog.x + CELL_W / 2, frog.y - 8, 'COMPANION +500', '#ff88cc');
+              // Remove carried companion
+              for (var ci = bonusItems.length - 1; ci >= 0; ci--) {
+                if (bonusItems[ci].type === 'companion' && bonusItems[ci].carried) {
+                  bonusItems.splice(ci, 1);
+                  break;
+                }
+              }
+            }
             addScore(pts);
+            spawnScorePopup(frog.x + CELL_W / 2, frog.y, '+' + pts, '#ffdd44');
             TAS.audio.playMelody([[392, 0.08], [523, 0.08], [659, 0.12]], 80);
             TAS.particles.spawn(cellX(h.col) + CELL_W / 2, cellY(0) + CELL_H / 2, '#44ff88', 12, 2);
 
             // Check if all homes filled
             var allFilled = homes.every(function(h) { return h.filled; });
             if (allFilled) {
-              addScore(1000);
+              var bonus = Math.floor(1000 * INT_SCORE_MULT);
+              addScore(bonus);
+              spawnScorePopup(GW / 2, GH / 2, 'LEVEL BONUS +' + bonus, '#ffdd44');
               TAS.audio.playMelody([[523, 0.1], [659, 0.1], [784, 0.1], [1047, 0.2]], 100);
               TAS.fx.flash('#44ff88', 0.3);
               state = 'levelComplete';
@@ -517,9 +1090,14 @@ function update(dt) {
           break;
         }
       }
-      if (!landedHome && !frog.dead) {
+      if (!landedHome && !frog.dead && !bossActive) {
         killFrog('wall');
       }
+    }
+
+    // Boss update
+    if (bossActive) {
+      updateBoss(dt);
     }
 
     // Water lanes (rows 1-5): must be on a platform
@@ -546,6 +1124,19 @@ function update(dt) {
               killFrog('snake');
             }
           }
+
+          // Fungal Crawler on log
+          if (lane.type === 'log' && obj.hasCrawler) {
+            var crawlerX = obj.x + obj.crawlerPos * (obj.w - CELL_W * 0.6);
+            if (Math.abs(frog.x + CELL_W / 2 - crawlerX - CELL_W * 0.3) < CELL_W * 0.5) {
+              // DEX dodge chance
+              if (Math.random() < DEX_DODGE_CHANCE) {
+                spawnScorePopup(frog.x + CELL_W / 2, frog.y, 'DODGE!', '#44ddff');
+              } else {
+                killFrog('crawler');
+              }
+            }
+          }
           break;
         }
       }
@@ -558,7 +1149,11 @@ function update(dt) {
       if (!onPlatform && !frog.dead) {
         killFrog('water');
         TAS.audio.playNoise(0.2, 0.08, 400);
+        // Enhanced water splash particles
         TAS.particles.spawn(frog.x + CELL_W / 2, frog.y + CELL_H / 2, '#4488cc', 10, 2);
+        TAS.particles.spawn(frog.x + CELL_W / 2, frog.y, '#88ccee', 6, 1.5);
+        TAS.particles.spawn(frog.x + CELL_W / 2 - 8, frog.y + 4, '#aaddff', 4, 1);
+        TAS.particles.spawn(frog.x + CELL_W / 2 + 8, frog.y + 4, '#aaddff', 4, 1);
       }
     }
 
@@ -568,27 +1163,180 @@ function update(dt) {
       for (var j = 0; j < lane.objects.length; j++) {
         var obj = lane.objects[j];
         if (TAS.hit.rectOverlap(frogX, frogY, frogW, frogH, obj.x, cellY(lane.row) + 2, obj.w, obj.h)) {
-          killFrog('vehicle');
+          // DEX dodge check for vehicles
+          if (Math.random() < DEX_DODGE_CHANCE) {
+            spawnScorePopup(frog.x + CELL_W / 2, frog.y, 'DODGE!', '#44ddff');
+            TAS.particles.spawn(frog.x + CELL_W / 2, frog.y + CELL_H / 2, '#44ddff', 6, 1);
+          } else {
+            killFrog(obj.vtype === 'bogTroll' ? 'bogTroll' : 'vehicle');
+          }
           break;
         }
       }
     }
 
-    // Bonus items
+    // === TASERN HAZARDS UPDATE ===
+    for (var i = tasernHazards.length - 1; i >= 0; i--) {
+      var h = tasernHazards[i];
+      if (!h.active) continue;
+
+      if (h.type === 'sporeCloud') {
+        h.x += h.speed * dt;
+        h.pulseTimer += dt;
+        // Wrap
+        if (h.x > GW + 20) h.x = -h.w;
+        if (h.x < -h.w - 20) h.x = GW;
+
+        // Collision: slows player (adds hop cooldown)
+        if (!frog.dead && frog.row === 6 &&
+            TAS.hit.rectOverlap(frogX, frogY, frogW, frogH, h.x, h.y, h.w, h.h)) {
+          // CON resistance: high CON reduces slow effect
+          var slowAmt = Math.max(0.1, 0.4 - (statB.con - 10) * 0.02);
+          hopCooldown = Math.max(hopCooldown, slowAmt);
+          // Damage at very high levels
+          if (level >= 8 && frame % 120 === 0) {
+            killFrog('sporeCloud');
+          }
+        }
+      }
+
+      if (h.type === 'wisp') {
+        h.x += h.speedX * dt;
+        h.y += Math.sin(frame * 0.05 + i) * 0.5;
+        h.flickerTimer += dt;
+        // Wrap
+        if (h.x > GW + 20) h.x = -h.w;
+        if (h.x < -h.w - 20) h.x = GW;
+
+        // Collision: kills
+        if (!frog.dead && Math.abs(frog.row - h.row) <= 0 &&
+            TAS.hit.rectOverlap(frogX, frogY, frogW, frogH, h.x, h.y, h.w, h.h)) {
+          killFrog('wisp');
+        }
+      }
+
+      if (h.type === 'quicksand') {
+        h.x = cellX(h.col);
+        h.y = cellY(h.row);
+
+        if (!frog.dead && frog.row === h.row) {
+          var qx = h.x;
+          var qy = h.y;
+          if (TAS.hit.rectOverlap(frogX, frogY, frogW, frogH, qx, qy, h.w, h.h)) {
+            h.trapping = true;
+            h.sinkTimer += dt;
+            // STR check: high STR escapes faster
+            var sinkRate = Math.max(0.5, 2.0 - statB.str * 0.08);
+            if (h.sinkTimer > sinkRate) {
+              killFrog('quicksand');
+              h.sinkTimer = 0;
+              h.trapping = false;
+            } else {
+              // Slow movement while in quicksand
+              hopCooldown = Math.max(hopCooldown, 0.3);
+            }
+          } else {
+            h.trapping = false;
+            h.sinkTimer = Math.max(0, h.sinkTimer - dt * 2);
+          }
+        }
+      }
+
+      if (h.type === 'swampDrake') {
+        h.x += h.dir * h.speed * dt;
+        h.wingPhase += dt * 8;
+        // Off screen removal
+        if ((h.dir > 0 && h.x > GW + CELL_W * 3) || (h.dir < 0 && h.x < -CELL_W * 4)) {
+          tasernHazards.splice(i, 1);
+          continue;
+        }
+
+        // Collision
+        if (!frog.dead && frog.row >= 1 && frog.row <= 5 &&
+            TAS.hit.rectOverlap(frogX, frogY, frogW, frogH, h.x, h.y, h.w, h.h)) {
+          // DEX dodge
+          if (Math.random() < DEX_DODGE_CHANCE * 1.5) {
+            spawnScorePopup(frog.x + CELL_W / 2, frog.y, 'EVADE!', '#44ddff');
+          } else {
+            killFrog('swampDrake');
+          }
+        }
+      }
+    }
+
+    // Spawn swamp drakes
+    spawnSwampDrake();
+
+    // === TASERN ITEMS UPDATE ===
+    for (var i = tasernItems.length - 1; i >= 0; i--) {
+      var item = tasernItems[i];
+      if (item.collected) continue;
+      item.timer -= dt;
+      if (item.timer <= 0) {
+        tasernItems.splice(i, 1);
+        continue;
+      }
+      item.bobPhase += dt * 3;
+
+      // Collection check
+      var ix = cellX(item.col);
+      var iy = cellY(item.row);
+      if (!frog.dead && frog.row === item.row &&
+          TAS.hit.rectOverlap(frogX, frogY, frogW, frogH, ix, iy, CELL_W, CELL_H)) {
+        item.collected = true;
+
+        if (item.type === 'glowcap') {
+          // Glowcap mushroom: bonus score + brief speed boost
+          var pts = Math.floor(150 * INT_SCORE_MULT);
+          addScore(pts);
+          spawnScorePopup(ix + CELL_W / 2, iy, '+' + pts + ' GLOWCAP', '#88ff44');
+          hopCooldown = 0;
+          TAS.audio.playTone(600, 0.08, 'sine', 0.06, 800);
+          TAS.particles.spawn(ix + CELL_W / 2, iy + CELL_H / 2, '#88ff44', 8, 2);
+        } else if (item.type === 'manaCrystal') {
+          // Mana Crystal: big score boost
+          var pts = Math.floor(400 * INT_SCORE_MULT);
+          addScore(pts);
+          spawnScorePopup(ix + CELL_W / 2, iy, '+' + pts + ' MANA', '#aa44ff');
+          TAS.audio.playMelody([[523, 0.06], [784, 0.08]], 80);
+          TAS.particles.spawn(ix + CELL_W / 2, iy + CELL_H / 2, '#aa44ff', 10, 2.5);
+          TAS.particles.spawn(ix + CELL_W / 2, iy + CELL_H / 2, '#ddaaff', 6, 1.5);
+        } else if (item.type === 'healingMoss') {
+          // Healing Moss: restore time + heal
+          timeLeft = Math.min(TIME_PER_LIFE + CON_TIMER_BONUS, timeLeft + 8);
+          var pts = Math.floor(100 * INT_SCORE_MULT);
+          addScore(pts);
+          spawnScorePopup(ix + CELL_W / 2, iy, '+TIME +' + pts, '#44ffaa');
+          TAS.audio.playTone(400, 0.1, 'sine', 0.08, 500);
+          TAS.particles.spawn(ix + CELL_W / 2, iy + CELL_H / 2, '#44ffaa', 8, 2);
+        }
+        tasernItems.splice(i, 1);
+      }
+    }
+
+    // Bonus items (flies, companions)
     spawnBonus();
     for (var i = bonusItems.length - 1; i >= 0; i--) {
       var b = bonusItems[i];
       b.timer -= dt;
 
       if (b.type === 'fly') {
-        // Fly sits on a water object
         var lane = lanes[b.laneIdx];
         if (lane && lane.objects[b.objIdx]) {
           var obj = lane.objects[b.objIdx];
           var fx = obj.x + b.relX;
           var fy = cellY(lane.row) + 2;
+          // CHA fly attract: magnetism
+          if (CHA_FLY_ATTRACT > 0 && !frog.dead) {
+            var distToFrog = Math.sqrt(Math.pow(fx - frog.x, 2) + Math.pow(fy - frog.y, 2));
+            if (distToFrog < CELL_W * 3 + CHA_FLY_ATTRACT) {
+              b.relX += (frog.x - fx) * 0.02;
+            }
+          }
           if (TAS.hit.rectOverlap(frogX, frogY, frogW, frogH, fx, fy, CELL_W * 0.5, CELL_H * 0.5)) {
-            addScore(b.points);
+            var pts = Math.floor(b.points * INT_SCORE_MULT);
+            addScore(pts);
+            spawnScorePopup(fx + 6, fy, '+' + pts, '#ffdd44');
             TAS.audio.playTone(880, 0.08, 'square', 0.06);
             TAS.particles.spawn(fx + 6, fy + 6, '#ffdd44', 6, 2);
             bonusItems.splice(i, 1);
@@ -598,6 +1346,7 @@ function update(dt) {
       } else if (b.type === 'companion') {
         if (!b.carried && TAS.hit.rectOverlap(frogX, frogY, frogW, frogH, b.x, b.y, CELL_W, CELL_H)) {
           b.carried = true;
+          spawnScorePopup(b.x + CELL_W / 2, b.y, 'FRIEND!', '#ff88cc');
           TAS.audio.playTone(660, 0.1, 'sine', 0.08);
         }
         if (b.carried) {
@@ -611,8 +1360,8 @@ function update(dt) {
       }
     }
 
-    // Companion baseling: double points when reaching home
-    // (handled in home landing logic via score multiplier if companion is carried)
+    // Update hazard warnings (WIS)
+    updateHazardWarnings();
   }
 
   saveInputState();
@@ -621,7 +1370,6 @@ function update(dt) {
 // === DRAWING ===
 
 function drawBaseling(x, y, w, h, dir, hopAnim, isCompanion) {
-  // Cute baseling (mushroom frog creature)
   var cx = x + w / 2;
   var cy = y + h / 2;
   var s = Math.min(w, h) * 0.45;
@@ -630,14 +1378,16 @@ function drawBaseling(x, y, w, h, dir, hopAnim, isCompanion) {
   ctx.save();
   ctx.translate(cx, cy - hop);
 
-  // Body
-  ctx.fillStyle = isCompanion ? '#ff88cc' : '#44cc66';
+  // Body — use statB.color for player
+  var bodyColor = isCompanion ? '#ff88cc' : PLAYER_COLOR;
+  var bodyDark = isCompanion ? '#cc6699' : shadeColor(PLAYER_COLOR, -30);
+  ctx.fillStyle = bodyColor;
   ctx.beginPath();
   ctx.ellipse(0, 1, s * 0.8, s * 0.65, 0, 0, Math.PI * 2);
   ctx.fill();
 
   // Mushroom cap
-  ctx.fillStyle = isCompanion ? '#ff4488' : '#cc3333';
+  ctx.fillStyle = isCompanion ? '#ff4488' : shadeColor(PLAYER_COLOR, -50);
   ctx.beginPath();
   ctx.ellipse(0, -s * 0.3, s * 0.9, s * 0.5, 0, Math.PI, 0);
   ctx.fill();
@@ -650,6 +1400,14 @@ function drawBaseling(x, y, w, h, dir, hopAnim, isCompanion) {
   ctx.beginPath();
   ctx.arc(s * 0.25, -s * 0.5, s * 0.12, 0, Math.PI * 2);
   ctx.fill();
+
+  // Player icon on cap (from statB)
+  if (!isCompanion && PLAYER_ICON && s > 4) {
+    ctx.fillStyle = '#fff';
+    ctx.font = 'bold ' + Math.max(6, Math.floor(s * 0.5)) + 'px monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText(PLAYER_ICON, 0, -s * 0.25);
+  }
 
   // Eyes (direction-aware)
   var eyeOffX = 0;
@@ -676,13 +1434,11 @@ function drawBaseling(x, y, w, h, dir, hopAnim, isCompanion) {
   ctx.fill();
 
   // Legs
-  ctx.fillStyle = isCompanion ? '#cc6699' : '#2a9944';
+  ctx.fillStyle = bodyDark;
   if (hopAnim > 0) {
-    // Legs stretched during hop
     ctx.fillRect(-s * 0.6, s * 0.3, s * 0.3, s * 0.4);
     ctx.fillRect(s * 0.3, s * 0.3, s * 0.3, s * 0.4);
   } else {
-    // Legs tucked
     ctx.fillRect(-s * 0.55, s * 0.35, s * 0.35, s * 0.25);
     ctx.fillRect(s * 0.2, s * 0.35, s * 0.35, s * 0.25);
   }
@@ -690,7 +1446,18 @@ function drawBaseling(x, y, w, h, dir, hopAnim, isCompanion) {
   ctx.restore();
 }
 
-function drawLog(x, y, w, h, hasSnake, snakePos) {
+// Color utility: darken/lighten hex color
+function shadeColor(hex, amt) {
+  var r = parseInt(hex.slice(1, 3), 16);
+  var g = parseInt(hex.slice(3, 5), 16);
+  var b = parseInt(hex.slice(5, 7), 16);
+  r = Math.max(0, Math.min(255, r + amt));
+  g = Math.max(0, Math.min(255, g + amt));
+  b = Math.max(0, Math.min(255, b + amt));
+  return '#' + ((1 << 24) + (r << 16) + (g << 8) + b).toString(16).slice(1);
+}
+
+function drawLog(x, y, w, h, hasSnake, snakePos, hasCrawler, crawlerPos) {
   // Brown log
   ctx.fillStyle = '#6b4226';
   ctx.fillRect(x, y + 2, w, h - 4);
@@ -724,12 +1491,10 @@ function drawLog(x, y, w, h, hasSnake, snakePos) {
     }
     ctx.lineTo(sx + 24, sy + h / 2);
     ctx.stroke();
-    // Snake head
     ctx.fillStyle = '#228822';
     ctx.beginPath();
     ctx.arc(sx + 24, sy + h / 2, 3, 0, Math.PI * 2);
     ctx.fill();
-    // Snake tongue
     ctx.strokeStyle = '#ff3333';
     ctx.lineWidth = 1;
     ctx.beginPath();
@@ -738,6 +1503,37 @@ function drawLog(x, y, w, h, hasSnake, snakePos) {
     ctx.moveTo(sx + 27, sy + h / 2);
     ctx.lineTo(sx + 30, sy + h / 2 + 2);
     ctx.stroke();
+  }
+
+  // Fungal Crawler on log
+  if (hasCrawler) {
+    var cx = x + crawlerPos * (w - CELL_W * 0.6);
+    var cy = y + 3;
+    // Fungal body
+    ctx.fillStyle = '#884488';
+    ctx.beginPath();
+    ctx.ellipse(cx + 8, cy + h / 2 - 1, 7, 5, 0, 0, Math.PI * 2);
+    ctx.fill();
+    // Spore tendrils
+    ctx.strokeStyle = '#aa66aa';
+    ctx.lineWidth = 1;
+    for (var t = 0; t < 4; t++) {
+      ctx.beginPath();
+      ctx.moveTo(cx + 8, cy + h / 2 - 1);
+      ctx.lineTo(
+        cx + 8 + Math.cos(t * 1.5 + frame * 0.1) * 8,
+        cy + h / 2 - 1 + Math.sin(t * 1.5 + frame * 0.1) * 5
+      );
+      ctx.stroke();
+    }
+    // Eyes
+    ctx.fillStyle = '#ffaa00';
+    ctx.beginPath();
+    ctx.arc(cx + 5, cy + h / 2 - 3, 2, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.beginPath();
+    ctx.arc(cx + 11, cy + h / 2 - 3, 2, 0, Math.PI * 2);
+    ctx.fill();
   }
 }
 
@@ -749,19 +1545,16 @@ function drawTurtle(x, y, w, h, submerged) {
     var r = Math.min(CELL_W, h) * 0.38;
 
     if (submerged) {
-      // Just ripples
       ctx.strokeStyle = 'rgba(100, 180, 220, 0.5)';
       ctx.lineWidth = 1;
       ctx.beginPath();
       ctx.ellipse(tx, ty, r, r * 0.3, 0, 0, Math.PI * 2);
       ctx.stroke();
     } else {
-      // Shell
       ctx.fillStyle = '#557744';
       ctx.beginPath();
       ctx.ellipse(tx, ty, r, r * 0.75, 0, 0, Math.PI * 2);
       ctx.fill();
-      // Shell pattern
       ctx.strokeStyle = '#446633';
       ctx.lineWidth = 1;
       ctx.beginPath();
@@ -770,12 +1563,10 @@ function drawTurtle(x, y, w, h, submerged) {
       ctx.moveTo(tx + r * 0.3, ty - r * 0.2);
       ctx.lineTo(tx - r * 0.3, ty + r * 0.2);
       ctx.stroke();
-      // Head
       ctx.fillStyle = '#66884a';
       ctx.beginPath();
       ctx.arc(tx + r * 0.7, ty, r * 0.3, 0, Math.PI * 2);
       ctx.fill();
-      // Eye
       ctx.fillStyle = '#111';
       ctx.beginPath();
       ctx.arc(tx + r * 0.85, ty - 1, 1, 0, Math.PI * 2);
@@ -794,7 +1585,6 @@ function drawLilyPad(x, y, w, h) {
   ctx.arc(cx, cy, r, 0.2, Math.PI * 2 - 0.2);
   ctx.closePath();
   ctx.fill();
-  // Vein
   ctx.strokeStyle = '#226633';
   ctx.lineWidth = 1;
   ctx.beginPath();
@@ -808,11 +1598,43 @@ function drawLilyPad(x, y, w, h) {
 }
 
 function drawVehicle(x, y, w, h, vtype, dir) {
+  if (vtype === 'bogTroll') {
+    // Bog Troll: large green-brown creature
+    var cx = x + w / 2;
+    var cy = y + h / 2;
+    // Body
+    ctx.fillStyle = '#4a5a2a';
+    ctx.beginPath();
+    ctx.ellipse(cx, cy, w * 0.4, h * 0.45, 0, 0, Math.PI * 2);
+    ctx.fill();
+    // Head
+    ctx.fillStyle = '#5a6a3a';
+    ctx.beginPath();
+    ctx.arc(cx + (dir > 0 ? w * 0.25 : -w * 0.25), cy - h * 0.15, h * 0.35, 0, Math.PI * 2);
+    ctx.fill();
+    // Eyes
+    ctx.fillStyle = '#ff4422';
+    var eyeX = cx + (dir > 0 ? w * 0.3 : -w * 0.3);
+    ctx.beginPath();
+    ctx.arc(eyeX - 3, cy - h * 0.25, 2.5, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.beginPath();
+    ctx.arc(eyeX + 3, cy - h * 0.25, 2.5, 0, Math.PI * 2);
+    ctx.fill();
+    // Club
+    ctx.fillStyle = '#6b4226';
+    var clubX = cx + (dir > 0 ? -w * 0.3 : w * 0.3);
+    ctx.fillRect(clubX - 2, cy - h * 0.1, 6, h * 0.5);
+    ctx.fillStyle = '#5a3a1a';
+    ctx.beginPath();
+    ctx.arc(clubX + 1, cy - h * 0.15, 5, 0, Math.PI * 2);
+    ctx.fill();
+    return;
+  }
+
   if (vtype === 'cart') {
-    // Wooden cart
     ctx.fillStyle = '#8b6914';
     ctx.fillRect(x + 2, y + 2, w - 4, h - 2);
-    // Wheels
     ctx.fillStyle = '#444';
     ctx.beginPath();
     ctx.arc(x + 8, y + h, 4, 0, Math.PI * 2);
@@ -820,21 +1642,16 @@ function drawVehicle(x, y, w, h, vtype, dir) {
     ctx.beginPath();
     ctx.arc(x + w - 8, y + h, 4, 0, Math.PI * 2);
     ctx.fill();
-    // Cargo
     ctx.fillStyle = '#aa8822';
     ctx.fillRect(x + 6, y + 3, w - 12, h * 0.4);
   } else if (vtype === 'truck') {
-    // Mushroom delivery truck
     ctx.fillStyle = '#884422';
     ctx.fillRect(x + 2, y + 2, w - 4, h - 2);
-    // Cab
     var cabX = dir > 0 ? x + w - w * 0.3 : x + 2;
     ctx.fillStyle = '#aa5533';
     ctx.fillRect(cabX, y + 1, w * 0.28, h);
-    // Window
     ctx.fillStyle = '#88ccff';
     ctx.fillRect(cabX + 3, y + 3, w * 0.2, h * 0.4);
-    // Mushroom logo on side
     ctx.fillStyle = '#cc3333';
     var logoX = x + w * 0.35;
     ctx.beginPath();
@@ -842,7 +1659,6 @@ function drawVehicle(x, y, w, h, vtype, dir) {
     ctx.fill();
     ctx.fillStyle = '#ddd';
     ctx.fillRect(logoX - 2, y + h * 0.4, 4, 5);
-    // Wheels
     ctx.fillStyle = '#333';
     ctx.beginPath();
     ctx.arc(x + 10, y + h + 1, 4, 0, Math.PI * 2);
@@ -851,7 +1667,6 @@ function drawVehicle(x, y, w, h, vtype, dir) {
     ctx.arc(x + w - 10, y + h + 1, 4, 0, Math.PI * 2);
     ctx.fill();
   } else if (vtype === 'racer') {
-    // Fast racer
     ctx.fillStyle = '#cc2244';
     ctx.beginPath();
     var rx = x, ry = y + 2, rw = w, rh = h - 2;
@@ -862,11 +1677,9 @@ function drawVehicle(x, y, w, h, vtype, dir) {
     ctx.lineTo(rx + (dir > 0 ? rw * 0.15 : 0), ry + rh);
     ctx.closePath();
     ctx.fill();
-    // Windshield
     ctx.fillStyle = '#88ccee';
     var wsx = dir > 0 ? rx + rw * 0.55 : rx + rw * 0.2;
     ctx.fillRect(wsx, ry + 2, rw * 0.2, rh - 4);
-    // Speed lines
     ctx.strokeStyle = 'rgba(255,255,255,0.3)';
     ctx.lineWidth = 1;
     var trailX = dir > 0 ? rx - 5 : rx + rw + 5;
@@ -885,7 +1698,6 @@ function drawFly(x, y) {
   ctx.beginPath();
   ctx.arc(x + 6, y + 6 + bob, 4, 0, Math.PI * 2);
   ctx.fill();
-  // Wings
   ctx.fillStyle = 'rgba(255,255,200,0.6)';
   ctx.beginPath();
   ctx.ellipse(x + 2, y + 3 + bob, 3, 5, -0.3, 0, Math.PI * 2);
@@ -896,12 +1708,10 @@ function drawFly(x, y) {
 }
 
 function drawGator(x, y, w, h) {
-  // Gator head in home slot
   ctx.fillStyle = '#3a6630';
   ctx.beginPath();
   ctx.ellipse(x + w / 2, y + h / 2, w * 0.35, h * 0.4, 0, 0, Math.PI * 2);
   ctx.fill();
-  // Eyes
   ctx.fillStyle = '#ccaa00';
   ctx.beginPath();
   ctx.arc(x + w * 0.35, y + h * 0.3, 3, 0, Math.PI * 2);
@@ -909,7 +1719,6 @@ function drawGator(x, y, w, h) {
   ctx.beginPath();
   ctx.arc(x + w * 0.65, y + h * 0.3, 3, 0, Math.PI * 2);
   ctx.fill();
-  // Pupils
   ctx.fillStyle = '#111';
   ctx.beginPath();
   ctx.arc(x + w * 0.35, y + h * 0.3, 1.5, 0, Math.PI * 2);
@@ -917,22 +1726,193 @@ function drawGator(x, y, w, h) {
   ctx.beginPath();
   ctx.arc(x + w * 0.65, y + h * 0.3, 1.5, 0, Math.PI * 2);
   ctx.fill();
-  // Jaws
   ctx.fillStyle = '#2a5520';
   ctx.fillRect(x + w * 0.2, y + h * 0.55, w * 0.6, h * 0.15);
-  // Teeth
   ctx.fillStyle = '#eee';
   for (var i = 0; i < 4; i++) {
     ctx.fillRect(x + w * 0.25 + i * w * 0.14, y + h * 0.52, 3, 4);
   }
 }
 
+// === TASERN HAZARD DRAWING ===
+
+function drawSporeCloud(h) {
+  var pulse = Math.sin(h.pulseTimer * 2) * 0.2 + 0.8;
+  ctx.globalAlpha = 0.6 * pulse;
+  // Cloud body
+  ctx.fillStyle = '#88aa44';
+  ctx.beginPath();
+  ctx.ellipse(h.x + h.w / 2, h.y + h.h / 2, h.w * 0.4 * pulse, h.h * 0.4, 0, 0, Math.PI * 2);
+  ctx.fill();
+  // Spore particles
+  ctx.fillStyle = '#aacc66';
+  for (var i = 0; i < 5; i++) {
+    var sx = h.x + h.w / 2 + Math.sin(h.pulseTimer * 3 + i * 1.3) * h.w * 0.3;
+    var sy = h.y + h.h / 2 + Math.cos(h.pulseTimer * 2 + i * 1.7) * h.h * 0.3;
+    ctx.beginPath();
+    ctx.arc(sx, sy, 2, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+}
+
+function drawWisp(h) {
+  var flicker = Math.sin(h.flickerTimer * 8) * 0.3 + 0.7;
+  ctx.globalAlpha = flicker;
+  // Glow
+  var gradient = ctx.createRadialGradient(h.x + h.w / 2, h.y + h.h / 2, 0, h.x + h.w / 2, h.y + h.h / 2, h.w);
+  gradient.addColorStop(0, 'rgba(100,200,255,0.8)');
+  gradient.addColorStop(0.5, 'rgba(60,120,200,0.3)');
+  gradient.addColorStop(1, 'rgba(40,80,160,0)');
+  ctx.fillStyle = gradient;
+  ctx.fillRect(h.x - h.w * 0.5, h.y - h.h * 0.5, h.w * 2, h.h * 2);
+  // Core
+  ctx.fillStyle = '#aaddff';
+  ctx.beginPath();
+  ctx.arc(h.x + h.w / 2, h.y + h.h / 2, h.w * 0.25, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.globalAlpha = 1;
+}
+
+function drawQuicksand(h) {
+  var shimmer = Math.sin(frame * 0.08 + h.col) * 0.15 + 0.85;
+  ctx.fillStyle = '#8a7a4a';
+  ctx.globalAlpha = shimmer;
+  ctx.fillRect(h.x, h.y + 2, h.w, h.h - 4);
+  // Bubble effect
+  ctx.fillStyle = '#a89a5a';
+  for (var i = 0; i < 3; i++) {
+    var bx = h.x + h.w * 0.2 + i * h.w * 0.3;
+    var by = h.y + h.h * 0.5 + Math.sin(frame * 0.1 + i * 2) * 3;
+    ctx.beginPath();
+    ctx.arc(bx, by, 2 + Math.sin(frame * 0.05 + i) * 1, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+  // Warning text when trapping
+  if (h.trapping) {
+    ctx.fillStyle = '#ffaa22';
+    ctx.font = 'bold 8px monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText('SINKING!', h.x + h.w / 2, h.y - 2);
+  }
+}
+
+function drawSwampDrake(h) {
+  var dx = h.x + h.w / 2;
+  var dy = h.y + h.h / 2;
+  // Wing animation
+  var wingSpread = Math.sin(h.wingPhase) * 8;
+  // Body
+  ctx.fillStyle = '#2a5a3a';
+  ctx.beginPath();
+  ctx.ellipse(dx, dy, h.w * 0.3, h.h * 0.25, 0, 0, Math.PI * 2);
+  ctx.fill();
+  // Wings
+  ctx.fillStyle = '#3a7a4a';
+  ctx.beginPath();
+  ctx.moveTo(dx, dy);
+  ctx.lineTo(dx - h.w * 0.4, dy - wingSpread);
+  ctx.lineTo(dx - h.w * 0.15, dy);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.moveTo(dx, dy);
+  ctx.lineTo(dx + h.w * 0.4, dy - wingSpread);
+  ctx.lineTo(dx + h.w * 0.15, dy);
+  ctx.fill();
+  // Head
+  ctx.fillStyle = '#1a4a2a';
+  var headX = dx + h.dir * h.w * 0.35;
+  ctx.beginPath();
+  ctx.arc(headX, dy - 2, h.h * 0.18, 0, Math.PI * 2);
+  ctx.fill();
+  // Eyes
+  ctx.fillStyle = '#ff6622';
+  ctx.beginPath();
+  ctx.arc(headX + h.dir * 3, dy - 4, 2, 0, Math.PI * 2);
+  ctx.fill();
+  // Tail
+  ctx.strokeStyle = '#2a5a3a';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(dx - h.dir * h.w * 0.3, dy);
+  ctx.quadraticCurveTo(
+    dx - h.dir * h.w * 0.45, dy + Math.sin(frame * 0.1) * 5,
+    dx - h.dir * h.w * 0.5, dy + 3
+  );
+  ctx.stroke();
+}
+
+// === TASERN ITEM DRAWING ===
+
+function drawTasernItem(item) {
+  if (item.collected) return;
+  if (item.hidden) return; // hidden items not visible (unless INT revealed)
+
+  var ix = cellX(item.col);
+  var iy = cellY(item.row);
+  var bob = Math.sin(item.bobPhase) * 2;
+
+  // Fade when timer is low
+  if (item.timer < 3) {
+    ctx.globalAlpha = 0.3 + Math.sin(frame * 0.2) * 0.3;
+  }
+
+  if (item.type === 'glowcap') {
+    // Glowcap mushroom
+    ctx.fillStyle = '#88ff44';
+    ctx.beginPath();
+    ctx.arc(ix + CELL_W / 2, iy + CELL_H / 2 + bob - 2, 6, Math.PI, 0);
+    ctx.fill();
+    ctx.fillStyle = '#66cc22';
+    ctx.fillRect(ix + CELL_W / 2 - 2, iy + CELL_H / 2 + bob - 2, 4, 6);
+    // Glow
+    ctx.fillStyle = 'rgba(136,255,68,0.2)';
+    ctx.beginPath();
+    ctx.arc(ix + CELL_W / 2, iy + CELL_H / 2 + bob, 10, 0, Math.PI * 2);
+    ctx.fill();
+  } else if (item.type === 'manaCrystal') {
+    // Mana crystal
+    ctx.fillStyle = '#aa44ff';
+    ctx.beginPath();
+    ctx.moveTo(ix + CELL_W / 2, iy + CELL_H / 2 + bob - 6);
+    ctx.lineTo(ix + CELL_W / 2 + 5, iy + CELL_H / 2 + bob);
+    ctx.lineTo(ix + CELL_W / 2, iy + CELL_H / 2 + bob + 6);
+    ctx.lineTo(ix + CELL_W / 2 - 5, iy + CELL_H / 2 + bob);
+    ctx.closePath();
+    ctx.fill();
+    // Sparkle
+    ctx.fillStyle = '#ddaaff';
+    ctx.beginPath();
+    ctx.arc(ix + CELL_W / 2 + 2, iy + CELL_H / 2 + bob - 3, 1.5, 0, Math.PI * 2);
+    ctx.fill();
+  } else if (item.type === 'healingMoss') {
+    // Healing moss
+    ctx.fillStyle = '#44ffaa';
+    for (var m = 0; m < 3; m++) {
+      ctx.beginPath();
+      ctx.arc(
+        ix + CELL_W / 2 - 4 + m * 4,
+        iy + CELL_H / 2 + bob + Math.sin(item.bobPhase + m) * 1,
+        3, 0, Math.PI * 2
+      );
+      ctx.fill();
+    }
+    // Cross symbol
+    ctx.fillStyle = '#88ffcc';
+    ctx.fillRect(ix + CELL_W / 2 - 1, iy + CELL_H / 2 + bob - 4, 2, 5);
+    ctx.fillRect(ix + CELL_W / 2 - 2, iy + CELL_H / 2 + bob - 2, 4, 2);
+  }
+
+  ctx.globalAlpha = 1;
+}
+
 function drawWaterBG(row) {
   var y = cellY(row);
-  ctx.fillStyle = COL_WATER;
+  ctx.fillStyle = COL_WATER();
   ctx.fillRect(0, y, GW, CELL_H);
   // Ripple effect
-  ctx.strokeStyle = COL_WATER_DARK;
+  ctx.strokeStyle = COL_WATER_DARK();
   ctx.lineWidth = 1;
   for (var rx = 0; rx < GW; rx += 20) {
     var ry = y + CELL_H / 2 + Math.sin((rx + frame * 1.5) * 0.08) * 2;
@@ -969,10 +1949,19 @@ function draw(dt) {
     ctx.globalAlpha = pulse;
     ctx.fillStyle = '#44ff88';
     ctx.font = 'bold 24px monospace';
-    ctx.fillText('LEVEL ' + level + ' COMPLETE!', GW / 2, GH * 0.4);
+    ctx.fillText('LEVEL ' + level + ' COMPLETE!', GW / 2, GH * 0.35);
+    ctx.fillStyle = '#ffdd44';
+    ctx.font = 'bold 14px monospace';
+    ctx.fillText(getZone().name, GW / 2, GH * 0.47);
     ctx.fillStyle = '#ffdd44';
     ctx.font = 'bold 16px monospace';
-    ctx.fillText('+1000 BONUS', GW / 2, GH * 0.55);
+    ctx.fillText('+' + Math.floor(1000 * INT_SCORE_MULT) + ' BONUS', GW / 2, GH * 0.58);
+
+    // Show stat contributions
+    ctx.font = '9px monospace';
+    ctx.fillStyle = '#88aacc';
+    var statLine = 'STR:' + statB.str + ' DEX:' + statB.dex + ' CON:' + statB.con + ' INT:' + statB.int + ' WIS:' + statB.wis + ' CHA:' + statB.cha;
+    ctx.fillText(statLine, GW / 2, GH * 0.7);
     ctx.globalAlpha = 1;
     return;
   }
@@ -981,8 +1970,8 @@ function draw(dt) {
 }
 
 function drawTitleScreen() {
-  // Swampy background
-  ctx.fillStyle = COL_WATER_DARK;
+  // Swampy background — zone-colored
+  ctx.fillStyle = COL_WATER_DARK();
   ctx.fillRect(0, 0, GW, GH);
 
   // Animated water
@@ -1005,22 +1994,36 @@ function drawTitleScreen() {
     drawLilyPad(lx, ly, 28, 20);
   }
 
-  // Baseling on title
+  // Baseling on title — uses player color
   drawBaseling(GW / 2 - 16, GH * 0.42, 32, 28, 0, Math.sin(frame * 0.05) > 0.8 ? 0.1 : 0, false);
 
   // Title text
-  TAS.ui.drawTitle('SWAMP HOP', 'A Tasern Tale', GW, GH, { frame: frame, titleColor: '#44dd88' });
+  TAS.ui.drawTitle('SWAMP HOP', 'A Tasern Tale', GW, GH, { frame: frame, titleColor: PLAYER_COLOR });
 
-  // Instructions
+  // Character info
   ctx.textAlign = 'center';
+  ctx.fillStyle = PLAYER_COLOR;
+  ctx.font = 'bold 11px monospace';
+  ctx.fillText(PLAYER_NAME, GW / 2, GH * 0.72);
+
+  // Stat summary on title
   ctx.fillStyle = '#88aacc';
-  ctx.font = '10px monospace';
-  ctx.fillText('Arrow keys or D-pad to hop. Cross the swamp!', GW / 2, GH * 0.78);
+  ctx.font = '9px monospace';
+  ctx.fillText('STR ' + statB.str + '  DEX ' + statB.dex + '  CON ' + statB.con + '  INT ' + statB.int + '  WIS ' + statB.wis + '  CHA ' + statB.cha, GW / 2, GH * 0.78);
+
+  // NES-style controls
+  ctx.fillStyle = '#667788';
+  ctx.font = '9px monospace';
+  ctx.fillText('[WASD / Arrows] Move   [A / Up] Hop', GW / 2, GH * 0.86);
+  ctx.fillText('Cross the swamp to reach all 5 homes!', GW / 2, GH * 0.92);
 }
 
 function drawGameWorld() {
   ctx.save();
   TAS.fx.applyShake();
+
+  // Zone fog overlay (bottom layer)
+  var zone = getZone();
 
   // === Draw lane backgrounds ===
 
@@ -1036,12 +2039,10 @@ function drawGameWorld() {
     var hw = CELL_W * 1.6;
 
     if (h.filled) {
-      // Filled: show little baseling
       ctx.fillStyle = COL_HOME_PAD;
       ctx.fillRect(hx + 4, hy + 2, hw - 8, CELL_H - 4);
       drawBaseling(hx + hw / 2 - 10, hy + 1, 20, CELL_H - 2, 0, 0, false);
     } else {
-      // Open slot
       ctx.fillStyle = COL_HOME_PAD;
       ctx.fillRect(hx + 4, hy + 2, hw - 8, CELL_H - 4);
 
@@ -1071,7 +2072,6 @@ function drawGameWorld() {
   // Row 6: median (safe grass)
   ctx.fillStyle = COL_MEDIAN;
   ctx.fillRect(0, cellY(6), GW, CELL_H);
-  // Grass tufts
   ctx.fillStyle = '#5a9a3a';
   for (var gx = 0; gx < GW; gx += 18) {
     ctx.beginPath();
@@ -1083,9 +2083,8 @@ function drawGameWorld() {
 
   // Rows 7-11: road
   for (var r = 7; r <= 11; r++) {
-    ctx.fillStyle = COL_ROAD;
+    ctx.fillStyle = COL_ROAD();
     ctx.fillRect(0, cellY(r), GW, CELL_H);
-    // Road markings
     ctx.strokeStyle = COL_ROAD_LINE;
     ctx.lineWidth = 1;
     ctx.setLineDash([8, 8]);
@@ -1099,7 +2098,6 @@ function drawGameWorld() {
   // Row 12: safe grass
   ctx.fillStyle = COL_SAFE;
   ctx.fillRect(0, cellY(12), GW, CELL_H);
-  // Grass detail
   ctx.fillStyle = '#4a8a2a';
   for (var gx = 5; gx < GW; gx += 14) {
     ctx.beginPath();
@@ -1107,6 +2105,14 @@ function drawGameWorld() {
     ctx.lineTo(gx + 2, cellY(12) + CELL_H - 5);
     ctx.lineTo(gx + 4, cellY(12) + CELL_H);
     ctx.fill();
+  }
+
+  // === Draw Tasern hazards (under lane objects) ===
+  for (var i = 0; i < tasernHazards.length; i++) {
+    var h = tasernHazards[i];
+    if (!h.active) continue;
+    if (h.type === 'quicksand') drawQuicksand(h);
+    if (h.type === 'sporeCloud') drawSporeCloud(h);
   }
 
   // === Draw lane objects ===
@@ -1119,7 +2125,7 @@ function drawGameWorld() {
       var oy = cellY(lane.row);
 
       if (lane.type === 'log') {
-        drawLog(obj.x, oy, obj.w, obj.h, obj.hasSnake, obj.snakePos);
+        drawLog(obj.x, oy, obj.w, obj.h, obj.hasSnake, obj.snakePos, obj.hasCrawler, obj.crawlerPos);
       } else if (lane.type === 'turtle') {
         drawTurtle(obj.x, oy + 1, obj.w, obj.h, obj.submerged);
       } else if (lane.type === 'lily') {
@@ -1128,6 +2134,19 @@ function drawGameWorld() {
         drawVehicle(obj.x, oy, obj.w, obj.h, obj.vtype, lane.dir);
       }
     }
+  }
+
+  // === Draw Tasern hazards (over lane objects) ===
+  for (var i = 0; i < tasernHazards.length; i++) {
+    var h = tasernHazards[i];
+    if (!h.active) continue;
+    if (h.type === 'wisp') drawWisp(h);
+    if (h.type === 'swampDrake') drawSwampDrake(h);
+  }
+
+  // === Draw Tasern items ===
+  for (var i = 0; i < tasernItems.length; i++) {
+    drawTasernItem(tasernItems[i]);
   }
 
   // === Draw bonus items ===
@@ -1144,6 +2163,9 @@ function drawGameWorld() {
     }
   }
 
+  // === Draw boss ===
+  drawBoss();
+
   // === Draw frog ===
   if (!frog.dead) {
     // Companion if carried
@@ -1153,7 +2175,7 @@ function drawGameWorld() {
     }
     drawBaseling(frog.x, frog.y, CELL_W, CELL_H, frog.dir, frog.hopAnim, false);
   } else {
-    // Death animation: red X
+    // Death animation
     var dx = frog.x + CELL_W / 2;
     var dy = frog.y + CELL_H / 2;
     ctx.strokeStyle = '#ff4444';
@@ -1168,21 +2190,48 @@ function drawGameWorld() {
     ctx.globalAlpha = 1;
   }
 
+  // === Draw hazard warnings (WIS) ===
+  drawHazardWarnings();
+
+  // Zone fog overlay
+  ctx.fillStyle = zone.fogColor;
+  ctx.fillRect(0, GRID_TOP, GW, GH - GRID_TOP);
+
   TAS.particles.draw();
   ctx.restore();
 
   TAS.fx.drawFlash(GW, GH);
 
+  // === Score popups ===
+  drawScorePopups();
+
   // === HUD ===
-  TAS.ui.drawHUD(score, level, lives, GW, { lifeColor: '#44cc66' });
+  TAS.ui.drawHUD(score, level, lives, GW, { lifeColor: PLAYER_COLOR });
+
+  // Zone name in HUD
+  ctx.fillStyle = '#88aacc';
+  ctx.font = '8px monospace';
+  ctx.textAlign = 'right';
+  ctx.fillText(getZone().name, GW - 4, HUD_H - 4);
+  ctx.textAlign = 'left';
+
+  // Player name + stat level in HUD
+  ctx.fillStyle = PLAYER_COLOR;
+  ctx.font = '8px monospace';
+  ctx.textAlign = 'center';
+  if (statB.level > 0) {
+    ctx.fillText(PLAYER_NAME + ' Lv.' + statB.level, GW / 2, HUD_H - 4);
+  }
+  ctx.textAlign = 'left';
 
   // Timer bar at bottom
   var timerBarY = GH - 6;
   var timerBarW = GW - 20;
-  var timerPct = Math.max(0, timeLeft / TIME_PER_LIFE);
+  var maxTime = TIME_PER_LIFE + CON_TIMER_BONUS;
+  var timerPct = Math.max(0, timeLeft / maxTime);
   ctx.fillStyle = 'rgba(0,0,0,0.5)';
   ctx.fillRect(10, timerBarY - 1, timerBarW, 5);
-  var timerColor = timerPct > 0.3 ? '#44cc66' : (timerPct > 0.15 ? '#ccaa22' : '#cc3322');
+  var timerColor = timerPct > 0.3 ? PLAYER_COLOR : (timerPct > 0.15 ? '#ccaa22' : '#cc3322');
   ctx.fillStyle = timerColor;
   ctx.fillRect(10, timerBarY - 1, timerBarW * timerPct, 5);
 
@@ -1192,6 +2241,61 @@ function drawGameWorld() {
     ctx.font = 'bold 10px monospace';
     ctx.textAlign = 'center';
     ctx.fillText('TIME!', GW / 2, timerBarY - 5);
+  }
+
+  // === Zone transition overlay ===
+  if (zoneTransTimer > 0) {
+    var transPct = zoneTransTimer / ZONE_TRANS_DURATION;
+    ctx.fillStyle = 'rgba(0,0,0,' + (transPct * 0.6) + ')';
+    ctx.fillRect(0, 0, GW, GH);
+    ctx.textAlign = 'center';
+    ctx.globalAlpha = Math.min(1, transPct * 2);
+    ctx.fillStyle = PLAYER_COLOR;
+    ctx.font = 'bold 18px monospace';
+    ctx.fillText(getZone().name, GW / 2, GH * 0.45);
+    ctx.fillStyle = '#88aacc';
+    ctx.font = '11px monospace';
+    ctx.fillText('Level ' + level, GW / 2, GH * 0.55);
+    ctx.globalAlpha = 1;
+  }
+
+  // === Tutorial overlay ===
+  if (showTutorial && tutorialTimer > 0 && state === 'playing') {
+    var tutAlpha = Math.min(1, tutorialTimer / (TUTORIAL_DURATION * 0.2));
+    ctx.globalAlpha = tutAlpha * 0.85;
+    ctx.fillStyle = '#000';
+    ctx.fillRect(GW * 0.08, GH * 0.2, GW * 0.84, GH * 0.55);
+    ctx.globalAlpha = tutAlpha;
+    ctx.strokeStyle = PLAYER_COLOR;
+    ctx.lineWidth = 2;
+    ctx.strokeRect(GW * 0.08 + 2, GH * 0.2 + 2, GW * 0.84 - 4, GH * 0.55 - 4);
+
+    ctx.textAlign = 'center';
+    ctx.fillStyle = PLAYER_COLOR;
+    ctx.font = 'bold 14px monospace';
+    ctx.fillText('HOW TO PLAY', GW / 2, GH * 0.3);
+
+    ctx.fillStyle = '#ccddee';
+    ctx.font = '10px monospace';
+    var lines = [
+      '[W/Up] Hop forward   [S/Down] Hop back',
+      '[A/Left] Hop left   [D/Right] Hop right',
+      '',
+      'Cross roads and water to reach all 5 homes.',
+      'Ride logs and turtles across the swamp.',
+      'Collect mushrooms and crystals for points.',
+      'Watch for spore clouds and swamp drakes!',
+      '',
+      'Your stats affect gameplay - check the title!'
+    ];
+    for (var li = 0; li < lines.length; li++) {
+      ctx.fillText(lines[li], GW / 2, GH * 0.37 + li * 13);
+    }
+
+    ctx.fillStyle = '#667788';
+    ctx.font = '9px monospace';
+    ctx.fillText('Press any key to dismiss', GW / 2, GH * 0.71);
+    ctx.globalAlpha = 1;
   }
 
   TAS.input.drawTouchControls(GW, GH);

@@ -37,6 +37,31 @@ const MAX_HP = 2;
 const TOKENS_FOR_LIFE = 50;
 const INVULN_TIME = 1.5;
 const CRATE_HIDE_TIME = 0.3;
+const CHARGED_THROW_THRESHOLD = 10; // STR needed for charged throw
+
+// ============================================================
+// STAT B SYSTEM (PASS 1)
+// ============================================================
+const statB = { STR: 8, DEX: 8, CON: 8, INT: 8, WIS: 8, CHA: 8 };
+
+function statMod(val) { return Math.floor((val - 10) / 2); }
+function statBonus(val, base) { return Math.floor(base * (1 + statMod(val) * 0.1)); }
+function statMultiplier(val) { return 1 + statMod(val) * 0.05; }
+
+// Stat-derived helpers
+function getThrowDamage() { return Math.floor(1 + Math.max(0, statMod(statB.STR)) * 0.5); }
+function getPlayerSpeed() { return Math.floor(PLAYER_SPEED * (1 + statMod(statB.DEX) * 0.08)); }
+function getMaxHP() { return Math.floor(MAX_HP + Math.max(0, statMod(statB.CON))); }
+function getStartLives() { return Math.floor(3 + Math.max(0, Math.floor(statMod(statB.CON) * 0.5))); }
+function getScoreMultiplier() { return Math.max(1, 1 + statMod(statB.INT) * 0.1); }
+function getPickupRadius() { return Math.floor(20 + Math.max(0, statMod(statB.WIS)) * 4); }
+function getMagnetRadius() { return Math.floor(80 + Math.max(0, statMod(statB.WIS)) * 8); }
+function getDropChance() { return Math.min(0.8, 0.3 + Math.max(0, statMod(statB.CHA)) * 0.06); }
+function getPowerupChance() { return Math.min(0.5, 0.2 + Math.max(0, statMod(statB.CHA)) * 0.04); }
+
+function addScore(pts) {
+  score += Math.floor(pts * getScoreMultiplier());
+}
 
 // ============================================================
 // INIT
@@ -62,6 +87,11 @@ let player = null;
 let scrollX = 0;
 let camera = { x: 0, y: 0 };
 
+// Charged throw
+let chargeTimer = 0;
+let charging = false;
+const CHARGE_TIME = 0.6;
+
 // Level data
 let platforms = [];
 let objects = [];
@@ -69,6 +99,7 @@ let enemies = [];
 let projectiles = [];
 let powerups = [];
 let collectibles = [];
+let hazards = [];
 let levelWidth = 0;
 let levelGoalX = 0;
 let bossActive = false;
@@ -80,16 +111,28 @@ let deathTimer = 0;
 // Input
 const justPressed = {};
 const prevKeys = {};
+let btnGrabHeld = false;
+
+// NES coyote time + input buffer
+let coyoteTime = 0;
+const COYOTE_DURATION = 0.08;
+let jumpBuffer = 0;
+const JUMP_BUFFER_DURATION = 0.1;
 
 // ============================================================
-// ZONE DEFINITIONS
+// ZONE DEFINITIONS (PASS 3 - Tasern names + enhanced BGs)
 // ============================================================
 const ZONES = [
-  { name: 'WAREHOUSE', bg1: '#1a1a2e', bg2: '#16213e', platColor: '#555', accentColor: '#886633' },
-  { name: 'PARK', bg1: '#0a2a0a', bg2: '#1a4a1a', platColor: '#3a5a1a', accentColor: '#66aa33' },
-  { name: 'SEWERS', bg1: '#0a1a1a', bg2: '#1a2a2a', platColor: '#334455', accentColor: '#22aaaa' },
-  { name: 'LABORATORY', bg1: '#1a0a2a', bg2: '#2a1a3a', platColor: '#554466', accentColor: '#aa44ff' },
-  { name: 'FORTRESS', bg1: '#2a0a0a', bg2: '#3a1a1a', platColor: '#664433', accentColor: '#ff4444' }
+  { name: 'MYCELIAL DOCKS', bg1: '#0d1117', bg2: '#161b22', platColor: '#3d4450', accentColor: '#58a6ff',
+    bgDetail: 'docks', groundColor: '#2d333b' },
+  { name: 'SPORE GARDENS', bg1: '#071207', bg2: '#0f2a0f', platColor: '#2d5a1a', accentColor: '#3fb950',
+    bgDetail: 'garden', groundColor: '#1a3a0a' },
+  { name: 'REACTOR DEPTHS', bg1: '#071515', bg2: '#0d2d2d', platColor: '#264040', accentColor: '#39d6d6',
+    bgDetail: 'sewer', groundColor: '#1a3030' },
+  { name: 'YIELD LABS', bg1: '#150820', bg2: '#261040', platColor: '#443366', accentColor: '#bc8cff',
+    bgDetail: 'lab', groundColor: '#2a1a40' },
+  { name: 'DARK REACTOR', bg1: '#200808', bg2: '#3a1010', platColor: '#553322', accentColor: '#f85149',
+    bgDetail: 'fortress', groundColor: '#402010' }
 ];
 
 // ============================================================
@@ -102,6 +145,7 @@ function generateLevel(lvl) {
   projectiles = [];
   powerups = [];
   collectibles = [];
+  hazards = [];
   bossActive = false;
   boss = null;
   levelComplete = false;
@@ -124,7 +168,7 @@ function generateLevel(lvl) {
     platforms.push({ x: px, y: py, w: pw, h: 12, type: 'platform' });
   }
 
-  // Add some vertical sections
+  // Vertical sections
   if (!isBossLevel) {
     for (let i = 0; i < 3 + zone; i++) {
       const sx = 200 + i * (levelWidth / (4 + zone));
@@ -133,7 +177,7 @@ function generateLevel(lvl) {
     }
   }
 
-  // Objects (crates, balls, etc.)
+  // Objects (Tasern items)
   const numObjects = isBossLevel ? 4 : 8 + lvl;
   for (let i = 0; i < numObjects; i++) {
     const ox = 80 + (i / numObjects) * (levelWidth - 160);
@@ -141,7 +185,7 @@ function generateLevel(lvl) {
     objects.push(createObject(otype, ox, GH - 48));
   }
 
-  // Place some objects on platforms
+  // Place objects on platforms
   for (let i = 1; i < platforms.length; i += 3) {
     if (Math.random() > 0.4) {
       const p = platforms[i];
@@ -150,13 +194,23 @@ function generateLevel(lvl) {
     }
   }
 
-  // Enemies
+  // Enemies (Tasern themed)
   if (!isBossLevel) {
     const numEnemies = 5 + lvl * 2;
     for (let i = 0; i < numEnemies; i++) {
       const ex = 200 + (i / numEnemies) * (levelWidth - 300);
       const etype = pickEnemyType(zone);
       enemies.push(createEnemy(etype, ex, GH - 50));
+    }
+  }
+
+  // Hazards (goo puddles, spore clouds) - PASS 2
+  if (!isBossLevel) {
+    const numHazards = 2 + zone;
+    for (let i = 0; i < numHazards; i++) {
+      const hx = 150 + (i / numHazards) * (levelWidth - 300);
+      const htype = zone >= 2 ? (Math.random() > 0.5 ? 'goo' : 'spore') : 'goo';
+      hazards.push(createHazard(htype, hx, GH - 36));
     }
   }
 
@@ -175,8 +229,8 @@ function generateLevel(lvl) {
     collectibles.push({ x: dx, y: dy, w: 12, h: 12, type: 'diamond', collected: false, bobOffset: Math.random() * Math.PI * 2 });
   }
 
-  // Power-ups (hidden in some crates, also free-standing)
-  if (Math.random() > 0.5) {
+  // Power-ups (CHA affects spawn chance)
+  if (Math.random() < getPowerupChance() + 0.3) {
     const ppx = 300 + Math.random() * (levelWidth - 600);
     powerups.push({ x: ppx, y: GH - 60, w: 14, h: 14, type: pickPowerup(), collected: false, vy: 0, grounded: true });
   }
@@ -185,26 +239,25 @@ function generateLevel(lvl) {
   if (isBossLevel) {
     boss = createBoss(zone, levelWidth - 150, GH - 80);
     bossActive = true;
-    // Boss arena enemies
     for (let i = 0; i < 2 + zone; i++) {
-      enemies.push(createEnemy('minion', 200 + i * 120, GH - 50));
+      enemies.push(createEnemy('spore_minion', 200 + i * 120, GH - 50));
     }
   }
 }
 
 function pickObjectType(zone) {
-  const types = ['crate', 'crate', 'ball', 'apple'];
-  if (zone >= 2) types.push('bomb');
+  const types = ['myco_acorn', 'myco_acorn', 'reactor_nut', 'lp_cheese'];
+  if (zone >= 2) types.push('spore_bomb');
   if (zone >= 3) types.push('steel');
   return types[Math.floor(Math.random() * types.length)];
 }
 
 function pickEnemyType(zone) {
-  const pool = ['rat', 'rat'];
-  if (zone >= 1) pool.push('cat', 'cat');
-  if (zone >= 2) pool.push('bird');
-  if (zone >= 3) pool.push('robot');
-  if (zone >= 4) pool.push('robot', 'cat');
+  const pool = ['reactor_mouse', 'reactor_mouse'];
+  if (zone >= 1) pool.push('mycelial_cat', 'mycelial_cat');
+  if (zone >= 2) pool.push('spore_beetle');
+  if (zone >= 3) pool.push('yield_drone');
+  if (zone >= 4) pool.push('yield_drone', 'mycelial_cat');
   return pool[Math.floor(Math.random() * pool.length)];
 }
 
@@ -214,27 +267,44 @@ function pickPowerup() {
 }
 
 // ============================================================
-// OBJECT FACTORY
+// HAZARD FACTORY (PASS 2)
 // ============================================================
-function createObject(type, x, y) {
+function createHazard(type, x, y) {
   return {
-    x, y, w: 16, h: 16,
-    vx: 0, vy: 0,
-    type, // crate, ball, steel, apple, bomb
-    alive: true,
-    held: false,
-    thrown: false,
-    grounded: true,
-    bounces: type === 'steel' ? 3 : (type === 'ball' ? 2 : 0),
-    fuseTimer: type === 'bomb' ? -1 : 0, // -1 = not lit
-    hasPowerup: type === 'crate' && Math.random() < 0.2,
-    hideTimer: 0, // player hiding inside
-    canHide: type === 'crate'
+    x: x, y: y,
+    w: type === 'goo' ? 40 : 30,
+    h: type === 'goo' ? 6 : 24,
+    type: type, // 'goo' = slow puddle, 'spore' = damage cloud
+    active: true,
+    timer: type === 'spore' ? (2 + Math.random() * 3) : 0,
+    phase: Math.random() * Math.PI * 2,
+    particles: []
   };
 }
 
 // ============================================================
-// ENEMY FACTORY
+// OBJECT FACTORY (PASS 2 - Tasern items)
+// ============================================================
+function createObject(type, x, y) {
+  return {
+    x: x, y: y, w: 16, h: 16,
+    vx: 0, vy: 0,
+    type: type, // myco_acorn, reactor_nut, steel, lp_cheese, spore_bomb
+    alive: true,
+    held: false,
+    thrown: false,
+    grounded: true,
+    bounces: type === 'steel' ? 3 : (type === 'reactor_nut' ? 2 : 0),
+    fuseTimer: type === 'spore_bomb' ? -1 : 0,
+    hasPowerup: type === 'myco_acorn' && Math.random() < getPowerupChance(),
+    hideTimer: 0,
+    canHide: type === 'myco_acorn',
+    isCharged: false
+  };
+}
+
+// ============================================================
+// ENEMY FACTORY (PASS 2 - Tasern enemies)
 // ============================================================
 function createEnemy(type, x, y) {
   let hp = 1, speed = 40, w = 18, h = 22, color = '#aa4444';
@@ -243,60 +313,68 @@ function createEnemy(type, x, y) {
   let jumpForce = 0;
 
   switch(type) {
-    case 'rat':
-      hp = 1; speed = 35 + Math.random() * 20; color = '#887755'; behavior = 'patrol';
+    case 'reactor_mouse':
+      hp = 1; speed = 35 + Math.random() * 20; color = '#7a6b5a'; behavior = 'patrol';
       break;
-    case 'cat':
-      hp = 1; speed = 50; color = '#aa6633'; behavior = 'pounce'; jumpForce = -250; w = 20; h = 24;
+    case 'mycelial_cat':
+      hp = 1; speed = 50; color = '#8b5e3c'; behavior = 'pounce'; jumpForce = -250; w = 20; h = 24;
       break;
-    case 'bird':
-      hp = 1; speed = 60; color = '#5577aa'; behavior = 'swoop'; y -= 80; w = 20; h = 16;
+    case 'spore_beetle':
+      hp = 2; speed = 30; color = '#4a7a5a'; behavior = 'swoop'; y -= 80; w = 22; h = 18;
       break;
-    case 'robot':
-      hp = 2; speed = 25; color = '#778899'; behavior = 'patrol'; w = 22; h = 26;
+    case 'yield_drone':
+      hp = 2; speed = 25; color = '#6a7a8a'; behavior = 'patrol'; w = 22; h = 26;
       break;
-    case 'minion':
-      hp = 1; speed = 45; color = '#995533'; behavior = 'chase';
+    case 'spore_minion':
+      hp = 1; speed = 45; color = '#5a7a3a'; behavior = 'chase';
       break;
   }
 
   return {
-    x, y, w, h, vx: speed * (Math.random() > 0.5 ? 1 : -1), vy: 0,
-    type, hp, maxHp: hp, speed, color, behavior,
+    x: x, y: y, w: w, h: h, vx: speed * (Math.random() > 0.5 ? 1 : -1), vy: 0,
+    type: type, hp: hp, maxHp: hp, speed: speed, color: color, behavior: behavior,
     alive: true, stunned: false, stunTimer: 0,
     held: false, thrown: false,
-    dir: 1, attackCooldown, jumpForce,
+    dir: 1, attackCooldown: attackCooldown, jumpForce: jumpForce,
     swoopBaseY: y, swoopPhase: Math.random() * Math.PI * 2,
-    grounded: type !== 'bird',
+    grounded: type !== 'spore_beetle',
     patrolDist: 80 + Math.random() * 100,
     startX: x,
-    animFrame: 0
+    animFrame: 0,
+    trailTimer: 0
   };
 }
 
 // ============================================================
-// BOSS FACTORY
+// BOSS FACTORY (PASS 2 - Enhanced Tasern bosses)
 // ============================================================
 function createBoss(zone, x, y) {
   const bossData = [
-    { name: 'WAREHOUSE KING', hp: 8, color: '#cc8844', speed: 30, pattern: 'throw', w: 36, h: 40 },
-    { name: 'PARK GUARDIAN', hp: 10, color: '#44aa44', speed: 40, pattern: 'jump', w: 32, h: 38 },
-    { name: 'SEWER BEAST', hp: 12, color: '#44aaaa', speed: 35, pattern: 'charge', w: 40, h: 36 },
-    { name: 'MAD SCIENTIST', hp: 14, color: '#aa44cc', speed: 45, pattern: 'summon', w: 30, h: 38 },
-    { name: 'DARK LORD', hp: 18, color: '#cc2222', speed: 50, pattern: 'multi', w: 38, h: 42 }
+    { name: 'DOCK OVERLORD', hp: 8, color: '#cc8844', speed: 30, pattern: 'throw', w: 36, h: 40,
+      desc: 'Controller of the Mycelial Docks' },
+    { name: 'GARDEN KEEPER', hp: 10, color: '#44aa44', speed: 40, pattern: 'jump', w: 32, h: 38,
+      desc: 'Corrupted guardian of the Spore Gardens' },
+    { name: 'REACTOR BEAST', hp: 12, color: '#44aaaa', speed: 35, pattern: 'charge', w: 40, h: 36,
+      desc: 'Born from unstable reactor waste' },
+    { name: 'YIELD MASTER', hp: 14, color: '#aa44cc', speed: 45, pattern: 'summon', w: 30, h: 38,
+      desc: 'Mad scientist of the Yield Labs' },
+    { name: 'DARK REACTOR', hp: 18, color: '#cc2222', speed: 50, pattern: 'multi', w: 38, h: 42,
+      desc: 'The final corruption' }
   ];
   const bd = bossData[zone];
   return {
-    x, y, w: bd.w, h: bd.h,
+    x: x, y: y, w: bd.w, h: bd.h,
     vx: 0, vy: 0,
-    name: bd.name, hp: bd.hp, maxHp: bd.hp,
+    name: bd.name, desc: bd.desc,
+    hp: bd.hp, maxHp: bd.hp,
     color: bd.color, speed: bd.speed,
     pattern: bd.pattern,
     alive: true, dir: -1,
     phase: 0, phaseTimer: 0,
     attackTimer: 2,
     grounded: true,
-    flashTimer: 0, stunTimer: 0
+    flashTimer: 0, stunTimer: 0,
+    enragePhase: false
   };
 }
 
@@ -305,24 +383,28 @@ function createBoss(zone, x, y) {
 // ============================================================
 function createPlayer(charType) {
   const isStrong = charType === 1;
+  const dexSpeed = getPlayerSpeed();
   return {
     x: 40, y: GH - 64,
     w: 14, h: 22,
     vx: 0, vy: 0,
     dir: 1,
-    speed: isStrong ? 110 : 135,
+    speed: isStrong ? Math.floor(dexSpeed * 0.92) : Math.floor(dexSpeed * 1.12),
     throwPower: isStrong ? 1.4 : 1.0,
     grounded: false,
-    hp: MAX_HP,
+    hp: getMaxHP(),
+    maxHp: getMaxHP(),
     invulnTimer: 0,
-    holding: null, // reference to held object or enemy
+    holding: null,
     hiding: false,
     hideObj: null,
-    powerup: null, // 'speed', 'hat', 'magnet', 'star'
+    powerup: null,
     powerupTimer: 0,
     hatActive: false,
     animFrame: 0,
-    charType
+    charType: charType,
+    wasGrounded: false,
+    dustTimer: 0
   };
 }
 
@@ -330,6 +412,8 @@ function initPlayer() {
   player = createPlayer(selectedChar);
   player.x = 40;
   player.y = GH - 64;
+  chargeTimer = 0;
+  charging = false;
 }
 
 // ============================================================
@@ -337,7 +421,7 @@ function initPlayer() {
 // ============================================================
 function startGame() {
   score = 0;
-  lives = 3;
+  lives = getStartLives();
   level = 0;
   tokens = 0;
   totalTokens = 0;
@@ -349,13 +433,14 @@ function startLevel() {
   initPlayer();
   scrollX = 0;
   deathTimer = 0;
+  coyoteTime = 0;
+  jumpBuffer = 0;
   TAS.particles.clear();
 }
 
 function nextLevel() {
   level++;
   if (level >= 10) {
-    // Victory!
     state = 'victory';
     if (score > highScore) {
       highScore = score;
@@ -368,10 +453,11 @@ function nextLevel() {
 
 function playerDie() {
   lives--;
-  TAS.fx.shake(8, 0.92);
+  TAS.fx.shake(10, 0.93);
   TAS.fx.flash('#ff0000', 0.5);
   TAS.audio.playTone(200, 0.4, 'sawtooth', 0.15, 80);
-  TAS.particles.spawn(player.x + 7, player.y + 11, '#ff4444', 20, 4, { gravity: 2, size: 3 });
+  TAS.particles.spawn(player.x + 7, player.y + 11, '#ff4444', 25, 5, { gravity: 2, size: 3 });
+  TAS.particles.spawn(player.x + 7, player.y + 11, '#ffffff', 10, 3, { gravity: -1, size: 2 });
 
   if (lives <= 0) {
     state = 'gameOver';
@@ -391,7 +477,7 @@ function playerDie() {
 }
 
 // ============================================================
-// INPUT HANDLING
+// INPUT HANDLING (PASS 3 - NES feel with buffer + coyote)
 // ============================================================
 function updateInput() {
   const k = TAS.input.keys;
@@ -404,6 +490,9 @@ function updateInput() {
   justPressed['touchB'] = t.b && !prevKeys['touchB'];
   prevKeys['touchA'] = t.a;
   prevKeys['touchB'] = t.b;
+
+  // Track grab held state for charged throw
+  btnGrabHeld = TAS.input.keys['KeyX'] || TAS.input.touch.b || TAS.input.keys['b'];
 }
 
 function btnJump() { return justPressed['KeyZ'] || justPressed['Space'] || justPressed['ArrowUp'] || justPressed['touchA'] || justPressed['a']; }
@@ -425,7 +514,6 @@ function resolveCollision(obj) {
   obj.grounded = false;
   for (const p of platforms) {
     if (obj.x + obj.w > p.x && obj.x < p.x + p.w) {
-      // Landing on top
       if (obj.vy >= 0 && obj.y + obj.h > p.y && obj.y + obj.h < p.y + p.h + obj.vy * 0.02 + 8) {
         obj.y = p.y - obj.h;
         obj.vy = 0;
@@ -433,7 +521,6 @@ function resolveCollision(obj) {
       }
     }
   }
-  // Wall boundaries
   if (obj.x < 0) obj.x = 0;
   if (obj.x + obj.w > levelWidth) obj.x = levelWidth - obj.w;
 }
@@ -447,17 +534,32 @@ function updatePlayer(dt) {
     return;
   }
 
+  // Coyote time tracking (PASS 3)
+  if (player.grounded) {
+    coyoteTime = COYOTE_DURATION;
+    player.wasGrounded = true;
+  } else {
+    coyoteTime -= dt;
+  }
+
+  // Jump buffer (PASS 3)
+  if (btnJump()) {
+    jumpBuffer = JUMP_BUFFER_DURATION;
+  } else {
+    jumpBuffer -= dt;
+  }
+
   // Hiding
   if (player.hiding) {
     if (btnJump() || btnGrab()) {
       player.hiding = false;
       player.hideObj = null;
-      // Surprise attack nearby enemies
       for (const e of enemies) {
         if (e.alive && !e.stunned && TAS.math.dist(player.x, player.y, e.x, e.y) < 40) {
           stunEnemy(e);
-          score += 50;
-          TAS.particles.spawn(e.x + e.w/2, e.y + e.h/2, '#ffff00', 8, 3);
+          addScore(50);
+          TAS.particles.spawn(e.x + e.w/2, e.y + e.h/2, '#ffff00', 10, 3);
+          TAS.particles.spawn(e.x + e.w/2, e.y + e.h/2, '#ffffff', 5, 2);
           TAS.audio.playTone(600, 0.15, 'square', 0.12);
         }
       }
@@ -465,30 +567,72 @@ function updatePlayer(dt) {
     return;
   }
 
-  // Movement
+  // Movement (DEX affects speed)
   let moveX = 0;
   if (moveLeft()) { moveX = -1; player.dir = -1; }
   if (moveRight()) { moveX = 1; player.dir = 1; }
 
   let spd = player.speed;
-  if (player.powerup === 'speed') spd *= 1.5;
-  if (player.holding) spd *= 0.8;
+  if (player.powerup === 'speed') spd = Math.floor(spd * 1.5);
+  if (player.holding) spd = Math.floor(spd * 0.8);
+
+  // Check goo hazards (slow effect)
+  let inGoo = false;
+  for (const h of hazards) {
+    if (h.active && h.type === 'goo') {
+      if (TAS.hit.rectOverlap(player.x, player.y, player.w, player.h, h.x, h.y, h.w, h.h)) {
+        spd = Math.floor(spd * 0.5);
+        inGoo = true;
+      }
+    }
+  }
 
   player.vx = moveX * spd;
   player.x += player.vx * dt;
   player.animFrame += Math.abs(player.vx) * dt * 0.1;
 
-  // Jump
-  if (btnJump() && player.grounded) {
+  // Landing dust (PASS 3)
+  if (player.grounded && !player.wasGrounded) {
+    TAS.particles.spawn(player.x + 7, player.y + player.h, '#8a7a6a', 4, 2, { gravity: 1, size: 2, sizeVar: 1 });
+    if (Math.abs(player.vy) > 200) {
+      TAS.fx.shake(2, 0.85);
+    }
+  }
+  player.wasGrounded = player.grounded;
+
+  // Running dust (PASS 3)
+  player.dustTimer -= dt;
+  if (player.grounded && Math.abs(player.vx) > 80 && player.dustTimer <= 0) {
+    player.dustTimer = 0.15;
+    TAS.particles.spawn(player.x + 7 - player.dir * 4, player.y + player.h, '#6a5a4a', 2, 1, { gravity: 0.5, size: 1 });
+  }
+
+  // Jump with coyote time + buffer (PASS 3)
+  if (jumpBuffer > 0 && coyoteTime > 0) {
     player.vy = JUMP_FORCE;
     player.grounded = false;
+    coyoteTime = 0;
+    jumpBuffer = 0;
     TAS.audio.playTone(400, 0.08, 'square', 0.08, 600);
+    TAS.particles.spawn(player.x + 7, player.y + player.h, '#aaaaaa', 3, 1, { gravity: 1, size: 2 });
+  }
+
+  // Variable jump height (PASS 3) - release jump early for short hop
+  if (!player.grounded && player.vy < -100 && !(TAS.input.keys['KeyZ'] || TAS.input.keys['Space'] || TAS.input.keys['ArrowUp'] || TAS.input.touch.a || TAS.input.keys['a'])) {
+    player.vy *= 0.85;
   }
 
   // Gravity
   applyGravity(player, dt);
   player.y += player.vy * dt;
   resolveCollision(player);
+
+  // Charged throw system (PASS 2 - STR >= CHARGED_THROW_THRESHOLD)
+  if (statB.STR >= CHARGED_THROW_THRESHOLD && player.holding && btnGrabHeld) {
+    chargeTimer += dt;
+    charging = true;
+    if (chargeTimer > CHARGE_TIME) chargeTimer = CHARGE_TIME;
+  }
 
   // Grab/Throw
   if (btnGrab()) {
@@ -499,7 +643,12 @@ function updatePlayer(dt) {
     }
   }
 
-  // Hide in crate (press down near a crate)
+  // Release charge throw on button release
+  if (charging && !btnGrabHeld && player.holding) {
+    throwHeld();
+  }
+
+  // Hide in acorn crate (press down near one)
   if (moveDown() && player.grounded && !player.holding) {
     for (const obj of objects) {
       if (obj.alive && obj.canHide && !obj.held && !obj.thrown) {
@@ -523,14 +672,16 @@ function updatePlayer(dt) {
     }
   }
 
-  // Magnet - attract tokens
+  // Magnet - WIS affects radius
   if (player.powerup === 'magnet') {
+    const magR = getMagnetRadius();
     for (const c of collectibles) {
       if (!c.collected && c.type === 'token') {
         const d = TAS.math.dist(player.x + 7, player.y + 11, c.x + 5, c.y + 5);
-        if (d < 80) {
-          c.x += (player.x + 7 - c.x) * 3 * dt;
-          c.y += (player.y + 11 - c.y) * 3 * dt;
+        if (d < magR) {
+          const pullSpeed = 3 + Math.max(0, statMod(statB.WIS)) * 0.5;
+          c.x += (player.x + 7 - c.x) * pullSpeed * dt;
+          c.y += (player.y + 11 - c.y) * pullSpeed * dt;
         }
       }
     }
@@ -554,12 +705,15 @@ function updatePlayer(dt) {
 // GRAB & THROW
 // ============================================================
 function tryGrab() {
-  // Try to grab an object
+  const grabR = getPickupRadius();
+  // Try to grab an object (WIS affects pickup radius)
   for (const obj of objects) {
     if (obj.alive && !obj.held && !obj.thrown) {
-      if (TAS.math.dist(player.x + 7, player.y + 11, obj.x + 8, obj.y + 8) < 28) {
+      if (TAS.math.dist(player.x + 7, player.y + 11, obj.x + 8, obj.y + 8) < grabR + 8) {
         obj.held = true;
         player.holding = obj;
+        chargeTimer = 0;
+        charging = false;
         TAS.audio.playTone(300, 0.06, 'square', 0.06);
         return;
       }
@@ -568,9 +722,11 @@ function tryGrab() {
   // Try to grab a stunned enemy
   for (const e of enemies) {
     if (e.alive && e.stunned && !e.held) {
-      if (TAS.math.dist(player.x + 7, player.y + 11, e.x + e.w/2, e.y + e.h/2) < 30) {
+      if (TAS.math.dist(player.x + 7, player.y + 11, e.x + e.w/2, e.y + e.h/2) < grabR + 10) {
         e.held = true;
         player.holding = e;
+        chargeTimer = 0;
+        charging = false;
         TAS.audio.playTone(350, 0.08, 'square', 0.08);
         return;
       }
@@ -586,14 +742,28 @@ function throwHeld() {
   held.thrown = true;
   held.grounded = false;
 
-  const power = player.throwPower;
-  held.vx = player.dir * THROW_SPEED * power;
-  held.vy = THROW_ARC * power;
+  let power = player.throwPower;
+
+  // Charged throw (PASS 2) - STR >= 10 enables it
+  if (charging && chargeTimer >= CHARGE_TIME * 0.8) {
+    power *= 1.6;
+    held.isCharged = true;
+    TAS.fx.shake(4, 0.9);
+    TAS.particles.spawn(player.x + player.dir * 12, player.y - 5, '#ffaa00', 8, 3, { gravity: -1, size: 2 });
+    TAS.audio.playTone(600, 0.15, 'sawtooth', 0.12, 200);
+  }
+
+  // STR affects throw speed
+  const strMult = 1 + Math.max(0, statMod(statB.STR)) * 0.1;
+  held.vx = Math.floor(player.dir * THROW_SPEED * power * strMult);
+  held.vy = Math.floor(THROW_ARC * power);
 
   // Bomb fuse starts on throw
   if (held.fuseTimer === -1) held.fuseTimer = 2.0;
 
   player.holding = null;
+  charging = false;
+  chargeTimer = 0;
   TAS.audio.playTone(500, 0.1, 'sawtooth', 0.1, 300);
   TAS.fx.shake(2, 0.9);
 }
@@ -610,11 +780,16 @@ function updateObjects(dt) {
       obj.x += obj.vx * dt;
       obj.y += obj.vy * dt;
 
-      // Check enemy collision
+      // Charged throw trail (PASS 2)
+      if (obj.isCharged) {
+        TAS.particles.spawn(obj.x + 8, obj.y + 8, '#ffaa00', 1, 1, { gravity: 0, size: 2 });
+      }
+
+      // Check enemy collision - STR affects damage
       for (const e of enemies) {
         if (e.alive && !e.held && TAS.hit.rectOverlap(obj.x, obj.y, obj.w, obj.h, e.x, e.y, e.w, e.h)) {
           hitEnemy(e, obj);
-          if (obj.type !== 'steel' && obj.type !== 'ball') {
+          if (obj.type !== 'steel' && obj.type !== 'reactor_nut') {
             destroyObject(obj);
           }
         }
@@ -641,6 +816,7 @@ function updateObjects(dt) {
           obj.vx *= 0.8;
           if (obj.y > GH - 16) obj.y = GH - 32;
           TAS.audio.playTone(200, 0.05, 'triangle', 0.05);
+          TAS.particles.spawn(obj.x + 8, obj.y + 16, '#aaaaaa', 3, 1, { gravity: 1, size: 1 });
         } else {
           destroyObject(obj);
         }
@@ -652,8 +828,8 @@ function updateObjects(dt) {
       }
     }
 
-    // Bomb fuse
-    if (obj.type === 'bomb' && obj.fuseTimer > 0) {
+    // Spore bomb fuse
+    if (obj.type === 'spore_bomb' && obj.fuseTimer > 0) {
       obj.fuseTimer -= dt;
       if (obj.fuseTimer <= 0) {
         explodeBomb(obj);
@@ -667,28 +843,28 @@ function destroyObject(obj) {
   const cx = obj.x + obj.w / 2;
   const cy = obj.y + obj.h / 2;
 
-  if (obj.type === 'crate') {
-    TAS.particles.spawn(cx, cy, '#886633', 12, 3, { gravity: 3, shape: 'rect', size: 3, sizeVar: 3 });
+  if (obj.type === 'myco_acorn') {
+    TAS.particles.spawn(cx, cy, '#6b4e2a', 14, 3, { gravity: 3, shape: 'rect', size: 3, sizeVar: 3 });
+    TAS.particles.spawn(cx, cy, '#8a6a3a', 6, 2, { gravity: 2, size: 2 });
     TAS.fx.shake(4, 0.88);
     TAS.audio.playNoise(0.15, 0.1, 800);
-    // Reveal powerup?
     if (obj.hasPowerup) {
       const ptype = pickPowerup();
       powerups.push({ x: cx - 7, y: cy - 7, w: 14, h: 14, type: ptype, collected: false, vy: -100, grounded: false });
     }
-  } else if (obj.type === 'apple') {
-    TAS.particles.spawn(cx, cy, '#44cc44', 10, 3, { gravity: 2, size: 2 });
-    TAS.particles.spawn(cx, cy, '#ff4444', 6, 2, { gravity: 2, size: 2 });
+  } else if (obj.type === 'lp_cheese') {
+    TAS.particles.spawn(cx, cy, '#ddcc44', 10, 3, { gravity: 2, size: 2 });
+    TAS.particles.spawn(cx, cy, '#ffee66', 6, 2, { gravity: 2, size: 2 });
     TAS.fx.shake(3, 0.9);
     TAS.audio.playTone(150, 0.12, 'sawtooth', 0.08);
-    // Splash damage
+    // Splash damage (like old apple)
     for (const e of enemies) {
       if (e.alive && TAS.math.dist(cx, cy, e.x + e.w/2, e.y + e.h/2) < 40) {
         hitEnemy(e, obj);
       }
     }
   } else {
-    TAS.particles.spawn(cx, cy, '#aaaaaa', 6, 2, { gravity: 2, size: 2 });
+    TAS.particles.spawn(cx, cy, '#aaaaaa', 8, 2, { gravity: 2, size: 2 });
     TAS.fx.shake(3, 0.9);
     TAS.audio.playTone(180, 0.08, 'square', 0.06);
   }
@@ -698,26 +874,54 @@ function explodeBomb(obj) {
   obj.alive = false;
   const cx = obj.x + obj.w / 2;
   const cy = obj.y + obj.h / 2;
-  TAS.particles.spawn(cx, cy, '#ff8800', 25, 5, { gravity: 1, size: 4, sizeVar: 4 });
-  TAS.particles.spawn(cx, cy, '#ffdd00', 15, 4, { gravity: -1, size: 3 });
+  TAS.particles.spawn(cx, cy, '#44aa44', 25, 5, { gravity: 1, size: 4, sizeVar: 4 });
+  TAS.particles.spawn(cx, cy, '#88ff88', 15, 4, { gravity: -1, size: 3 });
+  TAS.particles.spawn(cx, cy, '#225522', 10, 3, { gravity: 0.5, size: 5 });
   TAS.fx.shake(8, 0.92);
-  TAS.fx.flash('#ff8800', 0.3);
+  TAS.fx.flash('#44aa44', 0.3);
   TAS.audio.playNoise(0.3, 0.15, 400);
   TAS.audio.playTone(100, 0.3, 'sawtooth', 0.12, 40);
 
-  // Damage enemies in radius
   for (const e of enemies) {
     if (e.alive && TAS.math.dist(cx, cy, e.x + e.w/2, e.y + e.h/2) < 60) {
       hitEnemy(e, obj);
     }
   }
-  // Damage boss
   if (boss && boss.alive && TAS.math.dist(cx, cy, boss.x + boss.w/2, boss.y + boss.h/2) < 70) {
     hitBoss(obj);
   }
-  // Damage player if too close
   if (player && TAS.math.dist(cx, cy, player.x + 7, player.y + 11) < 50) {
     damagePlayer();
+  }
+}
+
+// ============================================================
+// HAZARD UPDATE (PASS 2)
+// ============================================================
+function updateHazards(dt) {
+  for (const h of hazards) {
+    if (!h.active) continue;
+    h.phase += dt * 2;
+
+    if (h.type === 'spore') {
+      h.timer -= dt;
+      // Spore cloud pulses - active/inactive
+      if (h.timer <= 0) {
+        h.timer = 2 + Math.random() * 2;
+      }
+      const isActive = Math.sin(h.phase) > 0;
+      // Spore particles
+      if (isActive && Math.random() > 0.7) {
+        TAS.particles.spawn(h.x + Math.random() * h.w, h.y - Math.random() * h.h, '#66aa44', 1, 1, { gravity: -0.5, size: 2 });
+      }
+      // Damage player in spore cloud
+      if (isActive && player && !player.hiding && player.invulnTimer <= 0) {
+        if (TAS.hit.rectOverlap(player.x, player.y, player.w, player.h, h.x, h.y - h.h, h.w, h.h)) {
+          damagePlayer();
+        }
+      }
+    }
+    // Goo: just visual update, slow is handled in player movement
   }
 }
 
@@ -737,22 +941,19 @@ function updateEnemies(dt) {
         applyGravity(e, dt);
         e.x += e.vx * dt;
         e.y += e.vy * dt;
-        // Hit other enemies
         for (const other of enemies) {
           if (other !== e && other.alive && !other.stunned && TAS.hit.rectOverlap(e.x, e.y, e.w, e.h, other.x, other.y, other.w, other.h)) {
             stunEnemy(other);
-            score += 100;
-            TAS.particles.spawn(other.x + other.w/2, other.y + other.h/2, '#ffff00', 8, 3);
+            addScore(100);
+            TAS.particles.spawn(other.x + other.w/2, other.y + other.h/2, '#ffff00', 10, 3);
             e.thrown = false;
             e.vx = 0;
           }
         }
-        // Hit boss
         if (boss && boss.alive && TAS.hit.rectOverlap(e.x, e.y, e.w, e.h, boss.x, boss.y, boss.w, boss.h)) {
           hitBoss(e);
           e.alive = false;
         }
-        // Ground check
         if (e.y > GH - 32) {
           e.y = GH - 32 - e.h;
           e.thrown = false;
@@ -764,8 +965,16 @@ function updateEnemies(dt) {
     }
 
     e.animFrame += dt * 4;
+    e.trailTimer -= dt;
 
-    // Behavior
+    // Enemy trail particles (PASS 3)
+    if (e.trailTimer <= 0 && Math.abs(e.vx) > 20) {
+      e.trailTimer = 0.3;
+      if (e.type === 'spore_beetle') {
+        TAS.particles.spawn(e.x + e.w/2, e.y + e.h, '#4a7a5a', 1, 0.5, { gravity: 0.3, size: 1 });
+      }
+    }
+
     switch (e.behavior) {
       case 'patrol':
         e.x += e.vx * dt;
@@ -790,13 +999,13 @@ function updateEnemies(dt) {
           e.vx = -e.vx;
           e.dir = e.vx > 0 ? 1 : -1;
         }
-        // Pounce toward player
         if (player && !player.hiding && e.grounded) {
           const dist = TAS.math.dist(e.x, e.y, player.x, player.y);
           if (dist < 80 && dist > 20) {
             e.vy = e.jumpForce;
             e.grounded = false;
             e.vx = Math.sign(player.x - e.x) * e.speed * 1.5;
+            TAS.particles.spawn(e.x + e.w/2, e.y + e.h, '#8b5e3c', 3, 1, { gravity: 1, size: 2 });
           }
         }
         break;
@@ -809,7 +1018,6 @@ function updateEnemies(dt) {
           e.vx = -e.vx;
           e.dir = e.vx > 0 ? 1 : -1;
         }
-        // Dive at player
         if (player && !player.hiding) {
           const dx = player.x - e.x;
           const dy = player.y - e.y;
@@ -820,14 +1028,14 @@ function updateEnemies(dt) {
         break;
     }
 
-    // Non-bird gravity
+    // Non-flying gravity
     if (e.behavior !== 'swoop') {
       applyGravity(e, dt);
       e.y += e.vy * dt;
       resolveCollision(e);
     }
 
-    // Damage player on contact
+    // Damage player
     if (player && !player.hiding && player.invulnTimer <= 0 && !e.stunned) {
       if (TAS.hit.rectOverlap(player.x, player.y, player.w, player.h, e.x, e.y, e.w, e.h)) {
         damagePlayer();
@@ -841,27 +1049,30 @@ function stunEnemy(e) {
   e.stunTimer = 4.0;
   e.vx = 0;
   TAS.audio.playTone(250, 0.1, 'square', 0.08);
+  TAS.particles.spawn(e.x + e.w/2, e.y, '#ffff88', 4, 2, { gravity: -0.5, size: 2 });
 }
 
 function hitEnemy(e, projectile) {
-  e.hp--;
+  const dmg = getThrowDamage() + (projectile.isCharged ? 1 : 0);
+  e.hp -= dmg;
   if (e.hp <= 0) {
     killEnemy(e);
   } else {
     stunEnemy(e);
   }
   TAS.fx.shake(3, 0.88);
-  score += 50;
+  addScore(50);
 }
 
 function killEnemy(e) {
   e.alive = false;
-  TAS.particles.spawn(e.x + e.w/2, e.y + e.h/2, e.color, 12, 3, { gravity: 3, size: 2, sizeVar: 2 });
+  TAS.particles.spawn(e.x + e.w/2, e.y + e.h/2, e.color, 14, 3, { gravity: 3, size: 2, sizeVar: 2 });
+  TAS.particles.spawn(e.x + e.w/2, e.y + e.h/2, '#ffffff', 6, 2, { gravity: -1, size: 2 });
   TAS.audio.playTone(150, 0.15, 'sawtooth', 0.1, 80);
-  score += 100;
+  addScore(100);
 
-  // Sometimes drop a token cluster
-  if (Math.random() < 0.3) {
+  // CHA affects drop chance
+  if (Math.random() < getDropChance()) {
     for (let i = 0; i < 3; i++) {
       collectibles.push({
         x: e.x + e.w/2 - 5 + (i - 1) * 12,
@@ -872,10 +1083,20 @@ function killEnemy(e) {
       });
     }
   }
+
+  // CHA rare diamond drop
+  if (Math.random() < Math.max(0, statMod(statB.CHA)) * 0.03) {
+    collectibles.push({
+      x: e.x + e.w/2 - 6, y: e.y - 5,
+      w: 12, h: 12,
+      type: 'diamond', collected: false,
+      bobOffset: Math.random() * Math.PI * 2
+    });
+  }
 }
 
 // ============================================================
-// BOSS UPDATE
+// BOSS UPDATE (PASS 2 - Enhanced with enrage)
 // ============================================================
 function updateBoss(dt) {
   if (!boss || !boss.alive) return;
@@ -888,34 +1109,48 @@ function updateBoss(dt) {
     return;
   }
 
-  // Movement toward player
+  // Enrage at 30% hp (PASS 2)
+  if (!boss.enragePhase && boss.hp <= Math.floor(boss.maxHp * 0.3)) {
+    boss.enragePhase = true;
+    boss.speed = Math.floor(boss.speed * 1.4);
+    TAS.fx.shake(6, 0.92);
+    TAS.fx.flash('#ff4400', 0.4);
+    TAS.audio.playTone(80, 0.4, 'sawtooth', 0.15, 40);
+    TAS.particles.spawn(boss.x + boss.w/2, boss.y + boss.h/2, '#ff4400', 20, 5, { gravity: -1, size: 3 });
+  }
+
+  // Movement
   if (player) {
     const dx = player.x - boss.x;
     boss.dir = dx > 0 ? 1 : -1;
+    const atkSpeedMult = boss.enragePhase ? 0.7 : 1.0;
 
     switch (boss.pattern) {
       case 'throw':
-        // Move slowly, throw projectiles
         boss.x += boss.dir * boss.speed * 0.3 * dt;
         if (boss.attackTimer <= 0) {
-          boss.attackTimer = 2.5;
+          boss.attackTimer = 2.5 * atkSpeedMult;
           spawnBossProjectile();
+          if (boss.enragePhase) spawnBossProjectile();
         }
         break;
 
       case 'jump':
         boss.x += boss.dir * boss.speed * 0.5 * dt;
         if (boss.attackTimer <= 0 && boss.grounded) {
-          boss.attackTimer = 2.0;
+          boss.attackTimer = 2.0 * atkSpeedMult;
           boss.vy = -350;
           boss.grounded = false;
+          TAS.fx.shake(3, 0.88);
         }
         break;
 
       case 'charge':
         if (boss.attackTimer <= 0) {
-          boss.attackTimer = 3.0;
+          boss.attackTimer = 3.0 * atkSpeedMult;
           boss.vx = boss.dir * boss.speed * 4;
+          TAS.audio.playTone(120, 0.2, 'sawtooth', 0.1);
+          TAS.particles.spawn(boss.x + boss.w/2, boss.y + boss.h/2, boss.color, 8, 3);
         }
         boss.x += boss.vx * dt;
         boss.vx *= 0.95;
@@ -924,11 +1159,11 @@ function updateBoss(dt) {
       case 'summon':
         boss.x += boss.dir * boss.speed * 0.4 * dt;
         if (boss.attackTimer <= 0) {
-          boss.attackTimer = 4.0;
+          boss.attackTimer = 4.0 * atkSpeedMult;
           spawnBossProjectile();
-          // Summon a minion
           if (enemies.filter(function(e){ return e.alive; }).length < 4) {
-            enemies.push(createEnemy('minion', boss.x + boss.dir * 40, boss.y));
+            enemies.push(createEnemy('spore_minion', boss.x + boss.dir * 40, boss.y));
+            TAS.particles.spawn(boss.x + boss.dir * 40, boss.y, '#5a7a3a', 8, 3);
           }
         }
         break;
@@ -936,9 +1171,10 @@ function updateBoss(dt) {
       case 'multi':
         boss.x += boss.dir * boss.speed * 0.5 * dt;
         if (boss.attackTimer <= 0) {
-          boss.attackTimer = 1.8;
+          boss.attackTimer = 1.8 * atkSpeedMult;
           spawnBossProjectile();
           spawnBossProjectile();
+          if (boss.enragePhase) spawnBossProjectile();
           if (Math.random() > 0.5 && boss.grounded) {
             boss.vy = -300;
             boss.grounded = false;
@@ -956,6 +1192,11 @@ function updateBoss(dt) {
     boss.y = GH - 32 - boss.h;
     boss.vy = 0;
     boss.grounded = true;
+    // Ground pound shake on landing (PASS 3)
+    if (boss.pattern === 'jump') {
+      TAS.fx.shake(4, 0.9);
+      TAS.particles.spawn(boss.x + boss.w/2, boss.y + boss.h, '#888888', 6, 2, { gravity: 1, size: 2 });
+    }
   }
   boss.x = TAS.math.clamp(boss.x, 50, levelWidth - 50);
 
@@ -975,8 +1216,8 @@ function spawnBossProjectile() {
   const speed = 150 + level * 10;
   projectiles.push({
     x: px, y: py, w: 10, h: 10,
-    vx: Math.cos(angle) * speed,
-    vy: Math.sin(angle) * speed,
+    vx: Math.floor(Math.cos(angle) * speed),
+    vy: Math.floor(Math.sin(angle) * speed),
     alive: true,
     catchable: true,
     color: boss.color,
@@ -986,23 +1227,26 @@ function spawnBossProjectile() {
 }
 
 function hitBoss(projectile) {
-  boss.hp--;
+  const dmg = getThrowDamage() + (projectile.isCharged ? 1 : 0);
+  boss.hp -= dmg;
   boss.flashTimer = 0.2;
   boss.stunTimer = 0.5;
-  TAS.fx.shake(6, 0.9);
+  TAS.fx.shake(7, 0.91);
   TAS.fx.flash(boss.color, 0.2);
-  TAS.particles.spawn(boss.x + boss.w/2, boss.y + boss.h/2, '#ffffff', 10, 4);
+  TAS.particles.spawn(boss.x + boss.w/2, boss.y + boss.h/2, '#ffffff', 12, 4);
+  TAS.particles.spawn(boss.x + boss.w/2, boss.y + boss.h/2, boss.color, 8, 3, { gravity: 2, size: 3 });
   TAS.audio.playTone(120, 0.2, 'square', 0.12, 60);
-  score += 200;
+  addScore(200);
 
   if (boss.hp <= 0) {
     boss.alive = false;
-    TAS.particles.spawn(boss.x + boss.w/2, boss.y + boss.h/2, boss.color, 30, 5, { gravity: 2, size: 4, sizeVar: 4 });
-    TAS.particles.spawn(boss.x + boss.w/2, boss.y + boss.h/2, '#ffdd00', 20, 4, { gravity: -1, size: 3 });
-    TAS.fx.shake(12, 0.94);
+    TAS.particles.spawn(boss.x + boss.w/2, boss.y + boss.h/2, boss.color, 35, 6, { gravity: 2, size: 4, sizeVar: 4 });
+    TAS.particles.spawn(boss.x + boss.w/2, boss.y + boss.h/2, '#ffdd00', 25, 5, { gravity: -1, size: 3 });
+    TAS.particles.spawn(boss.x + boss.w/2, boss.y + boss.h/2, '#ffffff', 15, 3, { gravity: 0, size: 2 });
+    TAS.fx.shake(14, 0.94);
     TAS.fx.flash('#ffffff', 0.6);
     TAS.audio.playTone(80, 0.5, 'sawtooth', 0.15, 40);
-    score += 1000;
+    addScore(1000);
     levelComplete = true;
     levelCompleteTimer = 3.0;
     TAS.audio.playMelody([[523, 0.1], [659, 0.1], [784, 0.1], [1047, 0.2]], 100);
@@ -1020,26 +1264,27 @@ function updateProjectiles(dt) {
     p.x += p.vx * dt;
     p.y += p.vy * dt;
 
-    // Out of bounds
+    // Trail (PASS 3)
+    if (frame % 2 === 0) {
+      TAS.particles.spawn(p.x, p.y, p.color, 1, 0.5, { gravity: 0, size: 2 });
+    }
+
     if (p.x < scrollX - 50 || p.x > scrollX + GW + 50 || p.y < -50 || p.y > GH + 50) {
       p.alive = false;
       continue;
     }
 
-    // Hit player
     if (p.fromBoss && player && !player.hiding && player.invulnTimer <= 0) {
       if (TAS.hit.rectOverlap(p.x - 5, p.y - 5, p.w, p.h, player.x, player.y, player.w, player.h)) {
-        // Can catch if pressing grab at the right time
         if (btnGrab() && p.catchable && !player.holding) {
-          // Catch the projectile! Turn it into an object
           p.alive = false;
-          const caught = createObject('ball', player.x + player.dir * 10, player.y - 10);
+          const caught = createObject('reactor_nut', player.x + player.dir * 10, player.y - 10);
           caught.held = true;
           objects.push(caught);
           player.holding = caught;
           TAS.audio.playTone(600, 0.1, 'triangle', 0.1);
-          TAS.particles.spawn(player.x + 7, player.y + 5, '#88ffff', 6, 2);
-          score += 50;
+          TAS.particles.spawn(player.x + 7, player.y + 5, '#88ffff', 8, 2);
+          addScore(50);
         } else {
           p.alive = false;
           damagePlayer();
@@ -1064,11 +1309,10 @@ function updatePowerups(dt) {
         p.grounded = true;
       }
     }
-    // Collect
     if (player && !player.hiding && TAS.hit.rectOverlap(player.x, player.y, player.w, player.h, p.x, p.y, p.w, p.h)) {
       p.collected = true;
       applyPowerup(p.type);
-      TAS.particles.spawn(p.x + 7, p.y + 7, '#ffdd44', 10, 3);
+      TAS.particles.spawn(p.x + 7, p.y + 7, '#ffdd44', 12, 3);
       TAS.audio.playMelody([[523, 0.08], [659, 0.08], [784, 0.12]], 80);
     }
   }
@@ -1094,7 +1338,7 @@ function applyPowerup(type) {
       player.invulnTimer = 5;
       break;
   }
-  score += 200;
+  addScore(200);
 }
 
 function updateCollectibles(dt) {
@@ -1104,23 +1348,26 @@ function updateCollectibles(dt) {
     const drawY = c.y + Math.sin(c.bobOffset) * 3;
 
     if (player && !player.hiding) {
-      if (TAS.hit.rectOverlap(player.x, player.y, player.w, player.h, c.x, drawY, c.w, c.h)) {
+      // WIS affects passive pickup radius
+      const pickR = getPickupRadius();
+      if (TAS.hit.rectOverlap(player.x - pickR/4, player.y - pickR/4, player.w + pickR/2, player.h + pickR/2, c.x, drawY, c.w, c.h)) {
         c.collected = true;
         if (c.type === 'token') {
           tokens++;
           totalTokens++;
-          score += 10;
+          addScore(10);
           TAS.audio.playTone(800 + tokens * 10, 0.04, 'square', 0.04);
+          TAS.particles.spawn(c.x + 5, drawY + 5, '#ffdd44', 3, 1, { gravity: -0.5, size: 2 });
           if (tokens >= TOKENS_FOR_LIFE) {
             tokens = 0;
             lives++;
             TAS.audio.playMelody([[523, 0.1], [659, 0.1], [784, 0.1], [1047, 0.15]], 100);
-            TAS.particles.spawn(player.x + 7, player.y + 11, '#44ff44', 15, 4);
+            TAS.particles.spawn(player.x + 7, player.y + 11, '#44ff44', 18, 4);
           }
         } else if (c.type === 'diamond') {
-          score += 500;
+          addScore(500);
           TAS.audio.playMelody([[784, 0.08], [988, 0.08], [1175, 0.12]], 80);
-          TAS.particles.spawn(c.x + 6, drawY + 6, '#88ccff', 12, 3, { size: 3 });
+          TAS.particles.spawn(c.x + 6, drawY + 6, '#88ccff', 14, 3, { size: 3 });
         }
       }
     }
@@ -1132,31 +1379,30 @@ function updateCollectibles(dt) {
 // ============================================================
 function damagePlayer() {
   if (!player || player.invulnTimer > 0 || player.hiding) return;
-
-  // Star invulnerability
   if (player.powerup === 'star') return;
 
-  // Steel hat absorbs one hit
   if (player.hatActive) {
     player.hatActive = false;
     player.powerup = null;
     player.invulnTimer = 0.5;
     TAS.audio.playTone(400, 0.1, 'triangle', 0.08);
-    TAS.particles.spawn(player.x + 7, player.y, '#aaaaaa', 6, 2);
+    TAS.particles.spawn(player.x + 7, player.y, '#aaaaaa', 8, 2);
+    TAS.fx.shake(3, 0.88);
     return;
   }
 
   player.hp--;
   player.invulnTimer = INVULN_TIME;
-  TAS.fx.shake(5, 0.9);
+  TAS.fx.shake(6, 0.9);
   TAS.audio.playTone(150, 0.2, 'sawtooth', 0.1, 80);
-  TAS.particles.spawn(player.x + 7, player.y + 11, '#ff4444', 8, 3);
+  TAS.particles.spawn(player.x + 7, player.y + 11, '#ff4444', 10, 3);
 
-  // Drop held object
   if (player.holding) {
     player.holding.held = false;
     player.holding.thrown = false;
     player.holding = null;
+    charging = false;
+    chargeTimer = 0;
   }
 
   if (player.hp <= 0) {
@@ -1176,13 +1422,12 @@ function checkLevelComplete(dt) {
     return;
   }
 
-  // Non-boss levels: reach the goal
   if (!bossActive && player && player.x > levelGoalX) {
     levelComplete = true;
     levelCompleteTimer = 2.0;
-    score += 500;
+    addScore(500);
     TAS.audio.playMelody([[440, 0.1], [554, 0.1], [659, 0.1], [880, 0.2]], 120);
-    TAS.particles.spawn(player.x + 7, player.y + 11, '#ffdd44', 20, 4);
+    TAS.particles.spawn(player.x + 7, player.y + 11, '#ffdd44', 24, 4);
   }
 }
 
@@ -1236,42 +1481,120 @@ function update(dt) {
     updateProjectiles(dt);
     updatePowerups(dt);
     updateCollectibles(dt);
+    updateHazards(dt);
     checkLevelComplete(dt);
   }
 }
 
 // ============================================================
-// DRAWING - BACKGROUND
+// DRAWING - BACKGROUND (PASS 3 - zone-specific detail)
 // ============================================================
 function drawBackground() {
-  const zone = ZONES[Math.floor(level / 2)];
-  // Gradient bg
+  const zoneIdx = Math.floor(level / 2);
+  const zone = ZONES[zoneIdx];
   const grad = ctx.createLinearGradient(0, 0, 0, GH);
   grad.addColorStop(0, zone.bg1);
   grad.addColorStop(1, zone.bg2);
   ctx.fillStyle = grad;
   ctx.fillRect(0, 0, GW, GH);
 
-  // Parallax buildings/scenery
-  const parallax = scrollX * 0.3;
-  ctx.fillStyle = zone.bg2;
-  for (let i = 0; i < 8; i++) {
-    const bx = i * 120 - (parallax % 120);
-    const bh = 40 + (i * 37 % 60);
-    ctx.fillRect(bx, GH - 32 - bh, 60, bh);
+  // Far parallax layer
+  const parallax = scrollX * 0.2;
+  ctx.globalAlpha = 0.3;
+
+  switch (zone.bgDetail) {
+    case 'docks':
+      // Cranes and warehouses
+      ctx.fillStyle = '#1a2030';
+      for (let i = 0; i < 5; i++) {
+        const bx = i * 160 - (parallax % 160);
+        ctx.fillRect(bx, GH - 32 - 60, 40, 60);
+        ctx.fillRect(bx + 15, GH - 32 - 90, 10, 30);
+        ctx.fillRect(bx + 5, GH - 32 - 85, 30, 4);
+      }
+      break;
+    case 'garden':
+      // Mushroom silhouettes
+      ctx.fillStyle = '#0a200a';
+      for (let i = 0; i < 8; i++) {
+        const bx = i * 100 - (parallax % 100);
+        const mh = 30 + (i * 17 % 40);
+        ctx.fillRect(bx + 10, GH - 32 - mh, 8, mh);
+        ctx.beginPath();
+        ctx.arc(bx + 14, GH - 32 - mh, 18, Math.PI, 0);
+        ctx.fill();
+      }
+      break;
+    case 'sewer':
+      // Pipe silhouettes
+      ctx.fillStyle = '#0a1a1a';
+      for (let i = 0; i < 6; i++) {
+        const bx = i * 130 - (parallax % 130);
+        ctx.fillRect(bx, GH - 32 - 40 - (i % 3) * 20, 50, 16);
+        ctx.beginPath();
+        ctx.arc(bx + 50, GH - 32 - 32 - (i % 3) * 20, 8, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      break;
+    case 'lab':
+      // Beakers and tanks
+      ctx.fillStyle = '#1a0a2a';
+      for (let i = 0; i < 7; i++) {
+        const bx = i * 110 - (parallax % 110);
+        const th = 40 + (i * 23 % 30);
+        ctx.fillRect(bx + 5, GH - 32 - th, 20, th);
+        ctx.fillRect(bx, GH - 32 - th - 5, 30, 8);
+        // Bubbles
+        if (frame % 60 < 30) {
+          ctx.fillStyle = '#aa44ff';
+          ctx.globalAlpha = 0.15;
+          ctx.beginPath();
+          ctx.arc(bx + 15, GH - 32 - th + 15 + Math.sin(frame * 0.02 + i) * 8, 3, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.fillStyle = '#1a0a2a';
+          ctx.globalAlpha = 0.3;
+        }
+      }
+      break;
+    case 'fortress':
+      // Dark towers
+      ctx.fillStyle = '#2a0a0a';
+      for (let i = 0; i < 5; i++) {
+        const bx = i * 150 - (parallax % 150);
+        const th = 50 + (i * 31 % 60);
+        ctx.fillRect(bx, GH - 32 - th, 35, th);
+        // Battlements
+        for (let j = 0; j < 4; j++) {
+          ctx.fillRect(bx + j * 10, GH - 32 - th - 8, 6, 8);
+        }
+      }
+      break;
   }
-  // Middle layer
+  ctx.globalAlpha = 1;
+
+  // Mid parallax buildings
+  const parallax2 = scrollX * 0.4;
+  ctx.fillStyle = zone.bg2;
+  ctx.globalAlpha = 0.5;
+  for (let i = 0; i < 10; i++) {
+    const bx = i * 90 - (parallax2 % 90);
+    const bh = 25 + (i * 29 % 50);
+    ctx.fillRect(bx, GH - 32 - bh, 45, bh);
+  }
+  ctx.globalAlpha = 1;
+
+  // Near parallax detail
+  const parallax3 = scrollX * 0.6;
   ctx.fillStyle = zone.bg1;
-  const parallax2 = scrollX * 0.5;
   for (let i = 0; i < 12; i++) {
-    const bx = i * 80 - (parallax2 % 80);
-    const bh = 20 + (i * 23 % 40);
-    ctx.fillRect(bx, GH - 32 - bh, 40, bh);
+    const bx = i * 70 - (parallax3 % 70);
+    const bh = 15 + (i * 19 % 35);
+    ctx.fillRect(bx, GH - 32 - bh, 35, bh);
   }
 }
 
 // ============================================================
-// DRAWING - PLATFORMS
+// DRAWING - PLATFORMS (PASS 3 - improved)
 // ============================================================
 function drawPlatforms() {
   const zone = ZONES[Math.floor(level / 2)];
@@ -1280,30 +1603,90 @@ function drawPlatforms() {
     if (sx + p.w < -20 || sx > GW + 20) continue;
 
     if (p.type === 'ground') {
-      ctx.fillStyle = zone.platColor;
+      ctx.fillStyle = zone.groundColor || zone.platColor;
       ctx.fillRect(sx, p.y, Math.min(p.w, GW + 40), p.h);
+      // Top edge highlight
       ctx.fillStyle = zone.accentColor;
-      ctx.fillRect(sx, p.y, Math.min(p.w, GW + 40), 3);
+      ctx.fillRect(sx, p.y, Math.min(p.w, GW + 40), 2);
+      // Ground texture
+      ctx.fillStyle = zone.platColor;
+      for (let gx = Math.max(0, Math.floor(sx / 16)) * 16; gx < sx + Math.min(p.w, GW + 40); gx += 16) {
+        if (gx >= sx && gx < sx + p.w) {
+          ctx.fillRect(gx, p.y + 8, 1, 8);
+          ctx.fillRect(gx + 8, p.y + 12, 1, 6);
+        }
+      }
     } else {
+      // Platform with depth
       ctx.fillStyle = zone.platColor;
       ctx.fillRect(sx, p.y, p.w, p.h);
+      // Top highlight
       ctx.fillStyle = zone.accentColor;
       ctx.fillRect(sx, p.y, p.w, 2);
-      // Support lines
+      // Bottom shadow
+      ctx.fillStyle = 'rgba(0,0,0,0.3)';
+      ctx.fillRect(sx + 2, p.y + p.h, p.w - 4, 3);
+      // Support columns
       ctx.strokeStyle = zone.platColor;
       ctx.lineWidth = 1;
       ctx.beginPath();
       ctx.moveTo(sx + 4, p.y + p.h);
-      ctx.lineTo(sx + 4, p.y + p.h + 8);
+      ctx.lineTo(sx + 4, p.y + p.h + 10);
       ctx.moveTo(sx + p.w - 4, p.y + p.h);
-      ctx.lineTo(sx + p.w - 4, p.y + p.h + 8);
+      ctx.lineTo(sx + p.w - 4, p.y + p.h + 10);
       ctx.stroke();
     }
   }
 }
 
 // ============================================================
-// DRAWING - OBJECTS
+// DRAWING - HAZARDS (PASS 2)
+// ============================================================
+function drawHazards() {
+  for (const h of hazards) {
+    if (!h.active) continue;
+    const sx = h.x - scrollX;
+    if (sx < -50 || sx > GW + 50) continue;
+
+    if (h.type === 'goo') {
+      // Green goo puddle
+      ctx.fillStyle = '#2a5a2a';
+      ctx.globalAlpha = 0.7;
+      ctx.beginPath();
+      ctx.ellipse(sx + h.w / 2, h.y + 3, h.w / 2, 4, 0, 0, Math.PI * 2);
+      ctx.fill();
+      // Bubble
+      ctx.fillStyle = '#44aa44';
+      ctx.globalAlpha = 0.5 + Math.sin(h.phase) * 0.3;
+      ctx.beginPath();
+      ctx.arc(sx + h.w / 2 + Math.sin(h.phase * 1.3) * 6, h.y, 2 + Math.sin(h.phase * 0.7), 0, Math.PI * 2);
+      ctx.fill();
+      ctx.globalAlpha = 1;
+    } else if (h.type === 'spore') {
+      const isActive = Math.sin(h.phase) > 0;
+      ctx.globalAlpha = isActive ? 0.4 : 0.15;
+      ctx.fillStyle = '#66aa44';
+      // Cloud shape
+      for (let s = 0; s < 3; s++) {
+        ctx.beginPath();
+        ctx.arc(sx + h.w / 2 + Math.sin(h.phase + s * 2) * 8, h.y - 8 - s * 5, 8 + s * 2, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      ctx.globalAlpha = 1;
+      // Warning indicator
+      if (isActive) {
+        ctx.fillStyle = '#ff4444';
+        ctx.font = '6px monospace';
+        ctx.textAlign = 'center';
+        ctx.fillText('!', sx + h.w / 2, h.y - 26);
+        ctx.textAlign = 'left';
+      }
+    }
+  }
+}
+
+// ============================================================
+// DRAWING - OBJECTS (PASS 2 - Tasern themed)
 // ============================================================
 function drawObjects() {
   for (const obj of objects) {
@@ -1312,27 +1695,45 @@ function drawObjects() {
     if (sx < -20 || sx > GW + 20) continue;
 
     switch (obj.type) {
-      case 'crate':
-        ctx.fillStyle = '#886633';
-        ctx.fillRect(sx, obj.y, obj.w, obj.h);
-        ctx.strokeStyle = '#554422';
-        ctx.strokeRect(sx, obj.y, obj.w, obj.h);
-        // Cross
+      case 'myco_acorn':
+        // Acorn crate with mushroom cap
+        ctx.fillStyle = '#6b4e2a';
+        ctx.fillRect(sx, obj.y + 4, obj.w, obj.h - 4);
+        ctx.fillStyle = '#8a5e3a';
         ctx.beginPath();
-        ctx.moveTo(sx, obj.y);
-        ctx.lineTo(sx + obj.w, obj.y + obj.h);
-        ctx.moveTo(sx + obj.w, obj.y);
-        ctx.lineTo(sx, obj.y + obj.h);
+        ctx.arc(sx + 8, obj.y + 4, 8, Math.PI, 0);
+        ctx.fill();
+        // Cap dots
+        ctx.fillStyle = '#5a3e1a';
+        ctx.fillRect(sx + 3, obj.y + 1, 2, 2);
+        ctx.fillRect(sx + 9, obj.y, 2, 2);
+        // Cross lines on body
+        ctx.strokeStyle = '#4a3a1a';
+        ctx.beginPath();
+        ctx.moveTo(sx + 2, obj.y + 6);
+        ctx.lineTo(sx + obj.w - 2, obj.y + obj.h - 2);
+        ctx.moveTo(sx + obj.w - 2, obj.y + 6);
+        ctx.lineTo(sx + 2, obj.y + obj.h - 2);
         ctx.stroke();
         break;
 
-      case 'ball':
-        ctx.fillStyle = '#cc4444';
+      case 'reactor_nut':
+        // Glowing reactor nut (ball)
+        ctx.fillStyle = '#44aaaa';
         ctx.beginPath();
         ctx.arc(sx + 8, obj.y + 8, 7, 0, Math.PI * 2);
         ctx.fill();
-        ctx.strokeStyle = '#881111';
+        ctx.fillStyle = '#88dddd';
+        ctx.beginPath();
+        ctx.arc(sx + 5, obj.y + 5, 3, 0, Math.PI * 2);
+        ctx.fill();
+        // Glow ring
+        ctx.strokeStyle = '#66cccc';
+        ctx.globalAlpha = 0.4 + Math.sin(frame * 0.1) * 0.2;
+        ctx.beginPath();
+        ctx.arc(sx + 8, obj.y + 8, 9, 0, Math.PI * 2);
         ctx.stroke();
+        ctx.globalAlpha = 1;
         break;
 
       case 'steel':
@@ -1344,24 +1745,43 @@ function drawObjects() {
         ctx.beginPath();
         ctx.arc(sx + 5, obj.y + 5, 3, 0, Math.PI * 2);
         ctx.fill();
+        // Bolt detail
+        ctx.fillStyle = '#889aaa';
+        ctx.fillRect(sx + 6, obj.y + 6, 4, 4);
         break;
 
-      case 'apple':
-        ctx.fillStyle = '#44cc44';
+      case 'lp_cheese':
+        // Wedge of cheese (LP Cheese)
+        ctx.fillStyle = '#ddcc44';
+        ctx.beginPath();
+        ctx.moveTo(sx + 2, obj.y + obj.h);
+        ctx.lineTo(sx + obj.w - 2, obj.y + obj.h);
+        ctx.lineTo(sx + obj.w / 2, obj.y + 2);
+        ctx.closePath();
+        ctx.fill();
+        // Holes
+        ctx.fillStyle = '#aa9933';
+        ctx.beginPath();
+        ctx.arc(sx + 6, obj.y + 10, 2, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.beginPath();
+        ctx.arc(sx + 10, obj.y + 7, 1.5, 0, Math.PI * 2);
+        ctx.fill();
+        break;
+
+      case 'spore_bomb':
+        // Spore bomb - green mushroom bomb
+        ctx.fillStyle = '#2a4a2a';
         ctx.beginPath();
         ctx.arc(sx + 8, obj.y + 9, 7, 0, Math.PI * 2);
         ctx.fill();
-        ctx.fillStyle = '#226622';
-        ctx.fillRect(sx + 7, obj.y, 2, 5);
-        break;
-
-      case 'bomb':
-        ctx.fillStyle = '#222222';
+        // Mushroom cap detail
+        ctx.fillStyle = '#3a6a3a';
         ctx.beginPath();
-        ctx.arc(sx + 8, obj.y + 9, 7, 0, Math.PI * 2);
+        ctx.arc(sx + 8, obj.y + 5, 5, Math.PI, 0);
         ctx.fill();
-        // Fuse
-        ctx.strokeStyle = '#aa6600';
+        // Fuse stem
+        ctx.strokeStyle = '#88aa44';
         ctx.lineWidth = 2;
         ctx.beginPath();
         ctx.moveTo(sx + 8, obj.y + 2);
@@ -1370,18 +1790,28 @@ function drawObjects() {
         ctx.lineWidth = 1;
         // Spark if lit
         if (obj.fuseTimer > 0) {
-          ctx.fillStyle = frame % 4 < 2 ? '#ffaa00' : '#ff4400';
+          ctx.fillStyle = frame % 4 < 2 ? '#88ff44' : '#44ff88';
           ctx.beginPath();
           ctx.arc(sx + 12, obj.y - 4, 3, 0, Math.PI * 2);
           ctx.fill();
         }
         break;
     }
+
+    // Charged glow (PASS 2)
+    if (obj.isCharged && obj.thrown) {
+      ctx.strokeStyle = '#ffaa00';
+      ctx.globalAlpha = 0.6 + Math.sin(frame * 0.3) * 0.3;
+      ctx.beginPath();
+      ctx.arc(sx + 8, obj.y + 8, 10, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.globalAlpha = 1;
+    }
   }
 }
 
 // ============================================================
-// DRAWING - ENEMIES
+// DRAWING - ENEMIES (PASS 2 - Tasern themed sprites, PASS 3 - enhanced)
 // ============================================================
 function drawEnemies() {
   for (const e of enemies) {
@@ -1391,30 +1821,30 @@ function drawEnemies() {
 
     ctx.save();
 
-    // Stun flash
     if (e.stunned) {
       ctx.globalAlpha = 0.5 + Math.sin(frame * 0.3) * 0.3;
     }
 
-    // Body
-    ctx.fillStyle = e.color;
-    ctx.fillRect(sx, e.y, e.w, e.h);
-
-    // Eyes
-    const eyeX = sx + e.w / 2 + e.dir * 3;
-    const eyeY = e.y + 6;
-    ctx.fillStyle = '#ffffff';
-    ctx.fillRect(eyeX - 3, eyeY, 3, 3);
-    ctx.fillRect(eyeX + 1, eyeY, 3, 3);
-    ctx.fillStyle = '#000000';
-    ctx.fillRect(eyeX - 2 + (e.dir > 0 ? 1 : 0), eyeY + 1, 1, 1);
-    ctx.fillRect(eyeX + 2 + (e.dir > 0 ? 1 : 0), eyeY + 1, 1, 1);
-
-    // Type decorations
     switch (e.type) {
-      case 'rat':
-        // Tail
-        ctx.strokeStyle = e.color;
+      case 'reactor_mouse':
+        // Body
+        ctx.fillStyle = '#7a6b5a';
+        ctx.fillRect(sx + 2, e.y + 6, e.w - 4, e.h - 6);
+        // Head
+        ctx.fillStyle = '#8a7b6a';
+        ctx.beginPath();
+        ctx.arc(sx + e.w/2, e.y + 6, 7, 0, Math.PI * 2);
+        ctx.fill();
+        // Ears
+        ctx.fillStyle = '#9a8b7a';
+        ctx.beginPath();
+        ctx.arc(sx + 3, e.y + 2, 3, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.beginPath();
+        ctx.arc(sx + e.w - 3, e.y + 2, 3, 0, Math.PI * 2);
+        ctx.fill();
+        // Tail with reactor glow
+        ctx.strokeStyle = '#44aaaa';
         ctx.lineWidth = 2;
         ctx.beginPath();
         ctx.moveTo(sx + (e.dir < 0 ? e.w : 0), e.y + e.h - 4);
@@ -1422,24 +1852,51 @@ function drawEnemies() {
         ctx.stroke();
         ctx.lineWidth = 1;
         break;
-      case 'cat':
-        // Ears
-        ctx.fillStyle = e.color;
+
+      case 'mycelial_cat':
+        // Body
+        ctx.fillStyle = '#8b5e3c';
+        ctx.fillRect(sx + 2, e.y + 8, e.w - 4, e.h - 8);
+        // Head
+        ctx.fillStyle = '#9b6e4c';
         ctx.beginPath();
-        ctx.moveTo(sx + 3, e.y);
+        ctx.arc(sx + e.w/2, e.y + 8, 8, 0, Math.PI * 2);
+        ctx.fill();
+        // Mushroom-tipped ears
+        ctx.fillStyle = '#8b5e3c';
+        ctx.beginPath();
+        ctx.moveTo(sx + 3, e.y + 2);
         ctx.lineTo(sx + 0, e.y - 6);
-        ctx.lineTo(sx + 6, e.y);
+        ctx.lineTo(sx + 6, e.y + 2);
         ctx.fill();
         ctx.beginPath();
-        ctx.moveTo(sx + e.w - 3, e.y);
+        ctx.moveTo(sx + e.w - 3, e.y + 2);
         ctx.lineTo(sx + e.w, e.y - 6);
-        ctx.lineTo(sx + e.w - 6, e.y);
+        ctx.lineTo(sx + e.w - 6, e.y + 2);
         ctx.fill();
+        // Mycelial spots
+        ctx.fillStyle = '#66aa44';
+        ctx.fillRect(sx + 5, e.y + 12, 2, 2);
+        ctx.fillRect(sx + e.w - 7, e.y + 14, 2, 2);
+        ctx.fillRect(sx + e.w/2 - 1, e.y + 16, 2, 2);
         break;
-      case 'bird':
-        // Wings
+
+      case 'spore_beetle':
+        // Shell
+        ctx.fillStyle = '#4a7a5a';
+        ctx.beginPath();
+        ctx.ellipse(sx + e.w/2, e.y + e.h/2, e.w/2, e.h/2 - 2, 0, 0, Math.PI * 2);
+        ctx.fill();
+        // Shell line
+        ctx.strokeStyle = '#3a6a4a';
+        ctx.beginPath();
+        ctx.moveTo(sx + e.w/2, e.y + 2);
+        ctx.lineTo(sx + e.w/2, e.y + e.h - 2);
+        ctx.stroke();
+        // Wings (flapping)
         const wingFlap = Math.sin(e.animFrame * 3) * 6;
-        ctx.fillStyle = e.color;
+        ctx.fillStyle = '#5a8a6a';
+        ctx.globalAlpha = (ctx.globalAlpha || 1) * 0.7;
         ctx.beginPath();
         ctx.moveTo(sx, e.y + 6);
         ctx.lineTo(sx - 8, e.y + wingFlap);
@@ -1450,26 +1907,69 @@ function drawEnemies() {
         ctx.lineTo(sx + e.w + 8, e.y + wingFlap);
         ctx.lineTo(sx + e.w - 4, e.y + 10);
         ctx.fill();
+        ctx.globalAlpha = e.stunned ? (0.5 + Math.sin(frame * 0.3) * 0.3) : 1;
+        // Spore dust
+        if (!e.stunned && frame % 20 === 0) {
+          TAS.particles.spawn(e.x + e.w/2, e.y + e.h, '#66aa44', 2, 1, { gravity: 0.5, size: 1 });
+        }
         break;
-      case 'robot':
+
+      case 'yield_drone':
+        // Metal body
+        ctx.fillStyle = '#6a7a8a';
+        ctx.fillRect(sx + 2, e.y + 4, e.w - 4, e.h - 4);
+        // Screen
+        ctx.fillStyle = '#44ff88';
+        ctx.fillRect(sx + 5, e.y + 8, e.w - 10, 6);
         // Antenna
-        ctx.strokeStyle = '#aaaaaa';
+        ctx.strokeStyle = '#8a9aaa';
         ctx.lineWidth = 2;
         ctx.beginPath();
-        ctx.moveTo(sx + e.w / 2, e.y);
-        ctx.lineTo(sx + e.w / 2, e.y - 6);
+        ctx.moveTo(sx + e.w / 2, e.y + 4);
+        ctx.lineTo(sx + e.w / 2, e.y - 4);
         ctx.stroke();
-        ctx.fillStyle = '#ff4444';
+        ctx.fillStyle = '#44aaaa';
         ctx.beginPath();
-        ctx.arc(sx + e.w / 2, e.y - 7, 2, 0, Math.PI * 2);
+        ctx.arc(sx + e.w / 2, e.y - 5, 2, 0, Math.PI * 2);
         ctx.fill();
         ctx.lineWidth = 1;
-        // Rivets
-        ctx.fillStyle = '#556677';
-        ctx.fillRect(sx + 3, e.y + e.h - 6, 4, 4);
-        ctx.fillRect(sx + e.w - 7, e.y + e.h - 6, 4, 4);
+        // Treads
+        ctx.fillStyle = '#4a5a6a';
+        ctx.fillRect(sx + 1, e.y + e.h - 6, 5, 6);
+        ctx.fillRect(sx + e.w - 6, e.y + e.h - 6, 5, 6);
+        break;
+
+      case 'spore_minion':
+        // Small mushroom creature
+        ctx.fillStyle = '#5a7a3a';
+        ctx.fillRect(sx + 3, e.y + 8, e.w - 6, e.h - 8);
+        // Mushroom cap head
+        ctx.fillStyle = '#6a8a4a';
+        ctx.beginPath();
+        ctx.arc(sx + e.w/2, e.y + 8, 8, Math.PI, 0);
+        ctx.fill();
+        // Cap spots
+        ctx.fillStyle = '#8aaa5a';
+        ctx.fillRect(sx + 4, e.y + 3, 2, 2);
+        ctx.fillRect(sx + e.w - 6, e.y + 4, 2, 2);
+        break;
+
+      default:
+        // Fallback
+        ctx.fillStyle = e.color;
+        ctx.fillRect(sx, e.y, e.w, e.h);
         break;
     }
+
+    // Eyes (all enemies)
+    const eyeX = sx + e.w / 2 + e.dir * 3;
+    const eyeY = e.y + (e.type === 'spore_beetle' ? e.h/2 - 2 : 6);
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(eyeX - 3, eyeY, 3, 3);
+    ctx.fillRect(eyeX + 1, eyeY, 3, 3);
+    ctx.fillStyle = '#000000';
+    ctx.fillRect(eyeX - 2 + (e.dir > 0 ? 1 : 0), eyeY + 1, 1, 1);
+    ctx.fillRect(eyeX + 2 + (e.dir > 0 ? 1 : 0), eyeY + 1, 1, 1);
 
     // Stun stars
     if (e.stunned) {
@@ -1488,7 +1988,7 @@ function drawEnemies() {
 }
 
 // ============================================================
-// DRAWING - BOSS
+// DRAWING - BOSS (PASS 2 - enhanced + enrage visuals)
 // ============================================================
 function drawBoss() {
   if (!boss || !boss.alive) return;
@@ -1497,6 +1997,18 @@ function drawBoss() {
   ctx.save();
   if (boss.flashTimer > 0) {
     ctx.globalAlpha = 0.5 + Math.sin(frame * 0.5) * 0.5;
+  }
+
+  // Enrage aura (PASS 2)
+  if (boss.enragePhase) {
+    ctx.strokeStyle = '#ff4400';
+    ctx.globalAlpha = (ctx.globalAlpha || 1) * (0.3 + Math.sin(frame * 0.15) * 0.2);
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.arc(sx + boss.w/2, boss.y + boss.h/2, boss.w/2 + 8 + Math.sin(frame * 0.1) * 4, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.lineWidth = 1;
+    ctx.globalAlpha = boss.flashTimer > 0 ? (0.5 + Math.sin(frame * 0.5) * 0.5) : 1;
   }
 
   // Body
@@ -1510,7 +2022,7 @@ function drawBoss() {
   ctx.lineWidth = 1;
 
   // Crown/helmet
-  ctx.fillStyle = '#ffdd00';
+  ctx.fillStyle = boss.enragePhase ? '#ff6600' : '#ffdd00';
   ctx.beginPath();
   ctx.moveTo(sx + 4, boss.y);
   ctx.lineTo(sx + 8, boss.y - 8);
@@ -1522,8 +2034,8 @@ function drawBoss() {
   ctx.closePath();
   ctx.fill();
 
-  // Eyes (angry)
-  ctx.fillStyle = '#ff0000';
+  // Eyes
+  ctx.fillStyle = boss.enragePhase ? '#ff0000' : '#cc0000';
   ctx.fillRect(sx + 8, boss.y + 10, 8, 6);
   ctx.fillRect(sx + boss.w - 16, boss.y + 10, 8, 6);
   ctx.fillStyle = '#000000';
@@ -1547,11 +2059,12 @@ function drawBoss() {
   const barW = 60;
   const barH = 6;
   const barX = sx + boss.w / 2 - barW / 2;
-  const barY = boss.y - 18;
+  const barY = boss.y - 22;
   ctx.fillStyle = '#333333';
   ctx.fillRect(barX, barY, barW, barH);
-  ctx.fillStyle = '#ff2222';
-  ctx.fillRect(barX, barY, barW * (boss.hp / boss.maxHp), barH);
+  const hpColor = boss.enragePhase ? '#ff4400' : '#ff2222';
+  ctx.fillStyle = hpColor;
+  ctx.fillRect(barX, barY, Math.floor(barW * (boss.hp / boss.maxHp)), barH);
   ctx.strokeStyle = '#000000';
   ctx.strokeRect(barX, barY, barW, barH);
 
@@ -1564,13 +2077,12 @@ function drawBoss() {
 }
 
 // ============================================================
-// DRAWING - PLAYER
+// DRAWING - PLAYER (PASS 3 - enhanced sprites)
 // ============================================================
 function drawPlayer() {
   if (!player || deathTimer > 0) return;
 
   if (player.hiding) {
-    // Show eyes peeking from crate
     if (player.hideObj) {
       const sx = player.hideObj.x - scrollX;
       ctx.fillStyle = '#ffffff';
@@ -1597,9 +2109,9 @@ function drawPlayer() {
     ctx.shadowBlur = 8 + Math.sin(frame * 0.2) * 4;
   }
 
-  // Body color based on character
   const bodyColor = player.charType === 0 ? '#44aaff' : '#ff8844';
   const bodyDark = player.charType === 0 ? '#2266aa' : '#aa5522';
+  const bodyLight = player.charType === 0 ? '#66ccff' : '#ffaa66';
 
   // Body
   ctx.fillStyle = bodyColor;
@@ -1610,6 +2122,11 @@ function drawPlayer() {
   ctx.beginPath();
   ctx.arc(sx + 7, sy + 5, 6, 0, Math.PI * 2);
   ctx.fill();
+  // Head highlight (PASS 3)
+  ctx.fillStyle = bodyLight;
+  ctx.beginPath();
+  ctx.arc(sx + 5, sy + 3, 2, 0, Math.PI * 2);
+  ctx.fill();
 
   // Face
   ctx.fillStyle = '#ffffff';
@@ -1619,20 +2136,40 @@ function drawPlayer() {
   ctx.fillRect(sx + 5 + (player.dir > 0 ? 2 : 0), sy + 4, 1, 1);
   ctx.fillRect(sx + 9 + (player.dir > 0 ? 2 : 0), sy + 4, 1, 1);
 
+  // Nose (PASS 3)
+  ctx.fillStyle = bodyDark;
+  ctx.fillRect(sx + 6 + (player.dir > 0 ? 2 : 0), sy + 6, 2, 1);
+
   // Legs (animated)
   const legAnim = player.grounded ? Math.sin(player.animFrame) * 3 : 0;
   ctx.fillStyle = bodyDark;
-  ctx.fillRect(sx + 3, sy + 18, 4, 4 + legAnim);
-  ctx.fillRect(sx + 8, sy + 18, 4, 4 - legAnim);
+  ctx.fillRect(sx + 3, sy + 18, 4, Math.floor(4 + legAnim));
+  ctx.fillRect(sx + 8, sy + 18, 4, Math.floor(4 - legAnim));
 
   // Arms
   ctx.fillStyle = bodyColor;
   if (player.holding) {
-    // Arm up holding
     ctx.fillRect(sx + (player.dir > 0 ? 10 : -2), sy + 4, 4, 6);
+    // Charge glow on held object (PASS 2)
+    if (charging && statB.STR >= CHARGED_THROW_THRESHOLD) {
+      const chargePct = chargeTimer / CHARGE_TIME;
+      ctx.strokeStyle = '#ffaa00';
+      ctx.globalAlpha = chargePct * 0.8;
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(sx + (player.dir > 0 ? 16 : -4), sy - 2, 8 + chargePct * 6, 0, Math.PI * 2 * chargePct);
+      ctx.stroke();
+      ctx.lineWidth = 1;
+      ctx.globalAlpha = 1;
+      // Charge sparks
+      if (chargePct > 0.5 && frame % 3 === 0) {
+        TAS.particles.spawn(player.x + player.dir * 16, player.y - 4, '#ffcc00', 1, 1, { gravity: -0.5, size: 2 });
+      }
+    }
   } else {
-    ctx.fillRect(sx, sy + 8, 3, 8);
-    ctx.fillRect(sx + 11, sy + 8, 3, 8);
+    const armSwing = player.grounded ? Math.sin(player.animFrame + 1) * 2 : 0;
+    ctx.fillRect(sx, sy + 8, 3, Math.floor(8 + armSwing));
+    ctx.fillRect(sx + 11, sy + 8, 3, Math.floor(8 - armSwing));
   }
 
   // Steel hat
@@ -1643,13 +2180,15 @@ function drawPlayer() {
     ctx.fillRect(sx + 4, sy - 1, 6, 2);
   }
 
-  // Speed trail
+  // Speed trail (PASS 3 - enhanced)
   if (player.powerup === 'speed') {
     ctx.globalAlpha = 0.3;
     ctx.fillStyle = bodyColor;
     ctx.fillRect(sx - player.dir * 6, sy + 6, 8, 12);
     ctx.globalAlpha = 0.15;
     ctx.fillRect(sx - player.dir * 12, sy + 6, 8, 12);
+    ctx.globalAlpha = 0.07;
+    ctx.fillRect(sx - player.dir * 18, sy + 6, 8, 12);
     ctx.globalAlpha = 1;
   }
 
@@ -1689,6 +2228,11 @@ function drawCollectibles() {
       ctx.beginPath();
       ctx.arc(sx + 5, c.y + 5 + bob, 5, 0, Math.PI * 2);
       ctx.fill();
+      // Rim highlight (PASS 3)
+      ctx.strokeStyle = '#ffee88';
+      ctx.beginPath();
+      ctx.arc(sx + 5, c.y + 5 + bob, 5, -0.5, 0.8);
+      ctx.stroke();
       ctx.fillStyle = '#aa8800';
       ctx.font = '7px monospace';
       ctx.textAlign = 'center';
@@ -1710,6 +2254,11 @@ function drawCollectibles() {
       ctx.lineTo(sx + 6, c.y + 9 + bob);
       ctx.closePath();
       ctx.fill();
+      // Sparkle (PASS 3)
+      if (frame % 30 < 5) {
+        ctx.fillStyle = '#ffffff';
+        ctx.fillRect(sx + 5, c.y + 3 + bob, 2, 2);
+      }
     }
   }
 }
@@ -1721,7 +2270,6 @@ function drawPowerups() {
     const bob = Math.sin(frame * 0.08) * 2;
 
     ctx.save();
-    // Glow
     ctx.shadowColor = '#ffdd44';
     ctx.shadowBlur = 4 + Math.sin(frame * 0.1) * 2;
 
@@ -1810,7 +2358,7 @@ function drawGoal() {
 }
 
 // ============================================================
-// DRAWING - HUD
+// DRAWING - HUD (PASS 1 - stat-aware)
 // ============================================================
 function drawHUD() {
   TAS.ui.drawHUD(score, level + 1, lives, GW);
@@ -1821,8 +2369,9 @@ function drawHUD() {
   ctx.textAlign = 'left';
   ctx.fillText('M:' + tokens + '/' + TOKENS_FOR_LIFE, 6, 42);
 
-  // HP hearts
-  for (let i = 0; i < MAX_HP; i++) {
+  // HP hearts (CON-adjusted max)
+  const maxHp = getMaxHP();
+  for (let i = 0; i < maxHp; i++) {
     const hx = GW / 2 + 30 + i * 14;
     ctx.fillStyle = i < (player ? player.hp : 0) ? '#ff4444' : '#444444';
     ctx.font = '12px monospace';
@@ -1833,7 +2382,7 @@ function drawHUD() {
   if (player && player.hatActive) {
     ctx.fillStyle = '#aabbcc';
     ctx.font = '10px monospace';
-    ctx.fillText('+HAT', GW / 2 + 60, 18);
+    ctx.fillText('+HAT', GW / 2 + 30 + maxHp * 14, 18);
   }
 
   // Powerup indicator
@@ -1844,18 +2393,50 @@ function drawHUD() {
     ctx.fillText(player.powerup.toUpperCase() + ' ' + timeLeft + 's', GW / 2 - 60, 42);
   }
 
-  // Zone name on level start
+  // INT score multiplier indicator
+  if (getScoreMultiplier() > 1) {
+    ctx.fillStyle = '#88aaff';
+    ctx.font = '8px monospace';
+    ctx.fillText('x' + getScoreMultiplier().toFixed(1), 6, 54);
+  }
+
+  // Charge bar (PASS 2 - when STR >= 10 and holding)
+  if (player && player.holding && statB.STR >= CHARGED_THROW_THRESHOLD && charging) {
+    const cbW = 30;
+    const cbH = 4;
+    const cbX = GW / 2 - cbW / 2;
+    const cbY = 48;
+    const pct = chargeTimer / CHARGE_TIME;
+    ctx.fillStyle = '#333333';
+    ctx.fillRect(cbX, cbY, cbW, cbH);
+    ctx.fillStyle = pct >= 0.8 ? '#ffaa00' : '#ffdd44';
+    ctx.fillRect(cbX, cbY, Math.floor(cbW * pct), cbH);
+    if (pct >= 0.8) {
+      ctx.fillStyle = '#ffaa00';
+      ctx.font = '7px monospace';
+      ctx.textAlign = 'center';
+      ctx.fillText('CHARGED!', GW / 2, cbY - 2);
+      ctx.textAlign = 'left';
+    }
+  }
+
+  // Zone name on level start (PASS 3 - larger, with fade)
   if (frame < 180) {
     const zone = ZONES[Math.floor(level / 2)];
-    ctx.globalAlpha = Math.max(0, 1 - frame / 180);
+    const fadeAlpha = Math.max(0, 1 - frame / 180);
+    const slideY = Math.min(0, -20 + frame * 0.5);
+    ctx.globalAlpha = fadeAlpha;
     ctx.fillStyle = zone.accentColor;
     ctx.font = 'bold 16px monospace';
     ctx.textAlign = 'center';
-    ctx.fillText(zone.name + ' - Stage ' + ((level % 2) + 1), GW / 2, GH / 2 - 20);
+    ctx.fillText(zone.name, GW / 2, GH / 2 - 20 + slideY);
+    ctx.fillStyle = '#aaaaaa';
+    ctx.font = '10px monospace';
+    ctx.fillText('Stage ' + ((level % 2) + 1), GW / 2, GH / 2 - 2 + slideY);
     if (level % 2 === 1) {
       ctx.fillStyle = '#ff4444';
       ctx.font = 'bold 12px monospace';
-      ctx.fillText('BOSS FIGHT!', GW / 2, GH / 2 + 5);
+      ctx.fillText('BOSS FIGHT!', GW / 2, GH / 2 + 14 + slideY);
     }
     ctx.textAlign = 'left';
     ctx.globalAlpha = 1;
@@ -1879,12 +2460,12 @@ function drawLevelComplete() {
   }
   ctx.fillStyle = '#ffdd44';
   ctx.font = '12px monospace';
-  ctx.fillText('+500 POINTS', GW / 2, GH / 2 + 15);
+  ctx.fillText('+' + Math.floor(500 * getScoreMultiplier()) + ' POINTS', GW / 2, GH / 2 + 15);
   ctx.textAlign = 'left';
 }
 
 // ============================================================
-// DRAWING - CHAR SELECT
+// DRAWING - CHAR SELECT (PASS 1 - stat display)
 // ============================================================
 function drawCharSelect() {
   ctx.fillStyle = '#111122';
@@ -1895,12 +2476,11 @@ function drawCharSelect() {
   ctx.textAlign = 'center';
   ctx.fillText('CHOOSE YOUR BASELING', GW / 2, 50);
 
-  // Bolt (fast)
   const lx = GW / 4;
   const rx = GW * 3 / 4;
   const cy = GH / 2;
 
-  // Left character
+  // Left character - Bolt
   ctx.fillStyle = selectedChar === 0 ? '#44aaff' : '#224466';
   ctx.fillRect(lx - 15, cy - 20, 30, 40);
   ctx.beginPath();
@@ -1914,7 +2494,7 @@ function drawCharSelect() {
   ctx.fillText('Faster speed', lx, cy + 55);
   ctx.fillText('Quick dodging', lx, cy + 67);
 
-  // Right character
+  // Right character - Chunk
   ctx.fillStyle = selectedChar === 1 ? '#ff8844' : '#663311';
   ctx.fillRect(rx - 15, cy - 20, 30, 40);
   ctx.beginPath();
@@ -1936,6 +2516,12 @@ function drawCharSelect() {
     ctx.font = 'bold 14px monospace';
     ctx.fillText('\u25BC', arrowX, cy - 42);
   }
+
+  // Stat display (PASS 1)
+  ctx.fillStyle = '#555566';
+  ctx.font = '8px monospace';
+  ctx.fillText('STR:' + statB.STR + ' DEX:' + statB.DEX + ' CON:' + statB.CON, GW / 2, GH - 55);
+  ctx.fillText('INT:' + statB.INT + ' WIS:' + statB.WIS + ' CHA:' + statB.CHA, GW / 2, GH - 44);
 
   ctx.fillStyle = '#888888';
   ctx.font = '10px monospace';
@@ -1968,7 +2554,7 @@ function drawVictory() {
   ctx.fillStyle = '#ffffff';
   ctx.font = '12px monospace';
   ctx.fillText('The stolen tokens are recovered!', GW / 2, 100);
-  ctx.fillText('The fortress crumbles behind you.', GW / 2, 118);
+  ctx.fillText('The Dark Reactor crumbles behind you.', GW / 2, 118);
 
   ctx.fillStyle = '#ffdd44';
   ctx.font = 'bold 14px monospace';
@@ -2006,7 +2592,6 @@ function draw(dt) {
 
   if (state === 'title') {
     TAS.ui.drawTitle('BASELING RESCUE RANGERS', 'A Tasern Tale', GW, GH, { frame });
-    // Instructions
     ctx.fillStyle = '#666';
     ctx.font = '9px monospace';
     ctx.textAlign = 'center';
@@ -2037,11 +2622,11 @@ function draw(dt) {
 
   drawBackground();
 
-  // Apply camera/scroll
   ctx.save();
   ctx.translate(-scrollX, 0);
 
   drawPlatforms();
+  drawHazards();
   drawGoal();
   drawCollectibles();
   drawPowerups();

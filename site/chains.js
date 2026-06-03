@@ -1,4 +1,4 @@
-// Multi-chain config for Unrugable Launcher (V5.9 — USDC → mftUSD → MfT floor + mftUSD walls)
+// Multi-chain config for Unrugable Launcher (V7 — Free launch, 2 pools, 1 reactor)
 export const CHAINS = {
   8453: {
     name: "Base",
@@ -11,8 +11,8 @@ export const CHAINS = {
     pm:           "0x03a520b32C04BF3bEEf7BEb72E919cf822Ed34f1",
     router:       "0x2626664c2603336E57B271c5C0b26F421741e481",
     explorer:     "https://basescan.org",
-    reactorImpl:  "0x82eC86F4536167A95eF302056162b1c8b9c7F4FA",
-    factory:      "0x0cE80fC0Fb866aD807D6D24D01bd879ef79622E7"
+    reactorImpl:  "0x891587AD62bcBc6aceE9061D9C4306b9aB16cE45",
+    factory:      "0x90297A8a1F9A7E35bbC9DF8C35Aa7F3FFBe9BDb2"
   }
 };
 

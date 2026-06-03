@@ -26,7 +26,7 @@ Apply: https://www.coingecko.com/en/coins/new
 | POOP | POOP | 0x126555aecBAC290b25644e4b7f29c016aE95f4dc | Game economy token, meme appeal |
 
 **Description for MfT:**
-> MfT is the infrastructure token of the Unrugable reactor network on Base. Autonomous reactors fire every 2 hours across hundreds of pools, collecting trading fees, buying MfT, and burning supply permanently. Five reactors are fully renounced and immutable. Every token launched on Unrugable creates floor pools paired against MfT. Built toward registered charity status with automated carbon credit removal from markets via CHAR.
+> MfT is the infrastructure token of the Unrugable reactor network on Base. Autonomous reactors fire every 2 hours across the reactor network, collecting trading fees, buying MfT, and burning supply permanently. Five reactors are fully renounced and immutable. Every token launched on Unrugable creates locked pools paired against MfT. Built toward registered charity status with automated carbon credit removal from markets via CHAR.
 
 **Status:** READY — needs human to fill application form with logo + description.
 

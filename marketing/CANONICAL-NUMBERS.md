@@ -1,31 +1,42 @@
 # Canonical Numbers Reference
 
 Single source of truth for all marketing materials.
-Last verified: 2026-05-26.
+Last verified: 2026-06-03.
+
+## V7 Launch Specs
+
+**FREE launch** — no seed, no USDC, just gas (~$0.01 on Base).
+
+**2 pools** per launch:
+- TOKEN/Money (70% of supply) — semi-stable side, backed by Aave yield, funds trees
+- TOKEN/Meme (30% of supply) — wild meme side, reactor heartbeat
+
+**1 reactor** per launch (SporeReactorV4 clone).
+
+**1,000,000,000 tokens** fixed supply per launch.
+
+**$10,000 starting market cap** — every token starts at the same price.
+
+**Single transaction** — one click deploys token + 2 pools + reactor.
+
+## Reactor V4 Split
+
+Every 2 hours, the reactor fires:
+1. Collects V3 fees from both pools
+2. Core token fees: **50% burned, 50% sent to launcher's wallet**
+3. Cross-token (Meme) fees: 10% upstream to reactor network, remainder swapped and deposited as LP
+4. Dust burned
+
+Launcher earns passively from their token's trading volume. Forever.
 
 ## Pools Per Launch
 
-**8 LP positions** created per launch, locked across **2 reactors**.
+**2 LP positions** created per launch, managed by **1 reactor**.
 
-Breakdown (from MycoPadV5_2.sol):
-- 3 floor pools: TOKEN/AZUSD, TOKEN/cbBTC, TOKEN/WETH
-- 3 MfT sell walls: TOKEN/MfT at 1.1x, 2x, 5x price bands
-- 2 CHAR carbon pools: CHAR/cbBTC, CHAR/WETH
+- TOKEN/Money at 1% fee tier (70% of supply, single-sided sell wall)
+- TOKEN/Meme at 1% fee tier (30% of supply, single-sided sell wall)
 
-Primary reactor holds 6 pools (3 floor + 3 MfT walls).
-CHAR reactor holds 2 pools.
-
-## Seed Split
-
-94% floor liquidity, 6% CHAR carbon reactor.
-
-Floor split: 40% AZUSD, 30% cbBTC, 30% WETH.
-
-## Minimum Seed Cost
-
-Contract minimum: $1 USDC (minSeed = 1_000_000, 6 decimals).
-UI default: $5 USDC.
-Use "$5" in marketing (the practical launch cost).
+Walls start at $10K market cap price and extend to max tick range.
 
 ## Static Reactor Network
 
@@ -38,7 +49,7 @@ Use "$5" in marketing (the practical launch cost).
 - 5 main chain (TGN, AZUSD, BURGERS, CHAR, EGP)
 - 1 MfT V1 Prime
 
-Plus 2 reactors per launched token (primary + CHAR), auto-discovered.
+Plus 1 reactor per V7 launch, auto-discovered.
 
 The number grows with each launch. Do NOT pin a specific count.
 - Use "network of reactors" or "reactor network" in marketing
@@ -46,21 +57,8 @@ The number grows with each launch. Do NOT pin a specific count.
 
 ## MCP Tool Count
 
-**49 tools** (baselings-mcp v1.2.0):
-- 10 read tools (get_balances through get_global_stats)
-- 14 write tools (buy_egg through ensure_approvals)
-- 3 strategy tools (welcome, choose_strategy, next_actions)
-- 3 tokenomics tools (mft_flywheel, tokenomics_metrics, why_mft)
-- 3 economy tools (build_phase, feeding_guide, economy_rules)
-- 1 info tool (game_guide)
-- 5 launch tools (unrugable_info through unrugable_invite_link)
-- 1 reactor tool (fire_reactor)
-- 3 data tools (get_reactor_list, mft_price, liquidity_depth)
-- 4 swap tools (swap_token, swap_quote, swap_status, arb_signal)
-- 1 timing tool (reactor_timing)
-- 1 portfolio tool (portfolio_value)
-
-Use "49 MCP tools" in marketing. Do NOT say 39, 42, 43, 44, 46, or 48.
+**49 tools** (baselings-mcp v1.2.0).
+Use "49 MCP tools" in marketing.
 
 ## Immutable Reactors
 
@@ -72,17 +70,28 @@ Remaining reactors have add-only admin keys (can only call addPool).
 Every 2 hours. Permissionless execute().
 3% max slippage per pool per firing.
 
+## Key Contracts (V7)
+
+| Contract | Address |
+|----------|---------|
+| V7 Factory | 0x90297A8a1F9A7E35bbC9DF8C35Aa7F3FFBe9BDb2 |
+| SporeReactorV4 Impl | 0x891587AD62bcBc6aceE9061D9C4306b9aB16cE45 |
+| ReactorPrimeV3 | 0xA97af9770B79C3f0467ec8b3AD7e464154dbc9BA |
+| Money for Trees | 0xe3dd3881477c20C17Df080cEec0C1bD0C065A072 |
+| Meme for Trees | 0x8FB87d13B40B1A67B22ED1a17e2835fe7e3a9bA3 |
+| CHAR Token | 0x20b048fA035D5763685D695e66aDF62c5D9F5055 |
+
 ## Branding
 
-Public name: **Unrugable** (ONE g — never "Unrugable" or "MycoPad")
+Public name: **Unrugable** (ONE g — never "Unruggable" or "MycoPad")
 Internal code name: MycoPad (NEVER use in public-facing content)
-Factory contract labels in code: Unrugable2 / MycoPad V5.2 (internal only)
-Active factory: V5.4 at 0xb1fE (V5.3 at 0x65F8 for BRUH/NZ)
-In marketing, always say "Unrugable" — never "Unrugable", never "MycoPad"
+Money for Trees = deposit receipt (NEVER call it a stablecoin)
+Meme for Trees = meme token (the original MfT)
 
 ## Source Files
 
-- Contract: contracts/MycoPadV5_2.sol
+- V7 Contract: contracts/MycoPadV7.sol
+- Reactor V4: contracts/SporeReactorV4.sol
 - Reactor roll call: tools/reactor-roll-call.js
 - MCP server: Baselings/agent-sdk/mcp-server.js
 - Launcher UI: site/unrugable.html

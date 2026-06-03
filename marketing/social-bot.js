@@ -1,253 +1,310 @@
 /**
- * MfT Social Bot — posts reactor burns, stats, and promotional content
+ * MfT Social Bot — posts memes + stats to X
  *
- * Supports: X (Twitter) and Farcaster
+ * Alternates: meme → content/stats → meme → content every 93 min
+ * Memes from C:/everythingslide (random pick, no repeats until all used)
  *
  * Setup:
- *   1. Create .env in this directory with API keys (see bottom of file)
- *   2. npm install twitter-api-v2 dotenv
+ *   1. Create .env in this directory with X API keys
+ *   2. npm install twitter-api-v2 dotenv ethers
  *   3. node social-bot.js
- *
- * Runs on a loop — posts reactor fire notifications + scheduled content.
  */
 
 require('dotenv').config({ path: require('path').join(__dirname, '.env') });
 const fs = require('fs');
 const path = require('path');
+const { ethers } = require('ethers');
 
 // ── Config ──────────────────────────────────────────────────────────────────
-const BURN_DATA_URL = process.env.BURN_DATA_URL || 'https://tasern.quest/mft/data.json';
-const REACTOR_STATS_URL = process.env.REACTOR_STATS_URL || 'https://tasern.quest/reactor/reactor/stats';
-const CHECK_INTERVAL = 30 * 60 * 1000; // 30 min
-const POST_INTERVAL = 4 * 60 * 60 * 1000; // 4 hours between scheduled posts
+const POST_INTERVAL = 20 * 60 * 1000; // 20 minutes
 const STATE_FILE = path.join(__dirname, 'social-bot-state.json');
+const MEME_DIR = 'C:/everythingslide';
+const MEME_EXTS = new Set(['.jpg', '.jpeg', '.png', '.gif', '.webp']);
 
-let state = { lastBurnUSD: 0, lastPostTime: 0, contentIndex: 0, postCount: 0 };
-try { state = { ...state, ...JSON.parse(fs.readFileSync(STATE_FILE, 'utf8')) }; } catch (e) { console.warn('social-bot: failed to load saved state:', e.message || e); }
-function saveState() { fs.writeFileSync(STATE_FILE, JSON.stringify(state, null, 2)); }
+// ── On-chain config ─────────────────────────────────────────────────────────
+const BASE_RPC = 'https://mainnet.base.org';
+const MFT_ADDR = '0x8FB87d13B40B1A67B22ED1a17e2835fe7e3a9bA3';
+const BURN_ADDR = '0xfd780B0aE569e15e514B819ecFDF46f804953a4B';
+const AZUSD_MFT_POOL = '0x53f6bF5e58304eF210bfBD9d6389880Ecc522A62';
 
-// ── Promotional content rotation ────────────────────────────────────────────
-const CONTENT = [
-  // Reactor mechanics
-  `A network of reactors firing across hundreds of pools. Every 2 hours they collect fees and burn tokens permanently.\n\nRenounced or add-only keys. No withdrawal capability. Verify it on a block explorer.\n\nhttps://tasern.quest/mft/`,
-  // Agent SDK
-  `49 MCP tools for on-chain AI agents.\n\nnpx baselings-mcp\n\nYour agent can read reactors, fire cycles, check pools, and run game actions on Base.\n\nhttps://tasern.quest/llms.txt`,
-  // Baselings game
-  `Raise a pet. Shovel its poop. Deposit the poop into DeFi gardens for yield.\n\nThe poop economy is real and it's on Base.\n\nhttps://tasern.quest/baseling/`,
-  // Unrugable
-  `"Unrugable" isn't a brand name. It's a contract property.\n\nNo withdraw function. Renounced ownership. Locked LP.\n\nVerify it yourself.\n\nhttps://tasern.quest/unrugable.html`,
-  // Carbon impact (ethics-approved framing 2026-05-08)
-  `Every trade through reactor pools retires carbon. The amount compounds with volume.\n\nRight now it's grams. We're building the infrastructure for tonnes.\n\n6% of every launch seed funds a permanent CHAR carbon reactor. All burns on-chain.\n\nhttps://tasern.quest/mft/`,
-  // Reactor heartbeat
-  `The reactor heartbeat: secondary reactors compress MfT. V1 Prime fires last, buying through accumulated sell walls with fees from the entire network.\n\nCycle resets every 2 hours.\n\nhttps://tasern.quest/mft/`,
-  // Unrugable Launcher
-  `Launch a token on Base for $5. Get: locked V3 liquidity across multiple pools, an MfT floor pool, mftUSD sell walls, and a CHAR carbon reactor.\n\nNo VC raise. No dev allocation. Charity is coded in.\n\nhttps://tasern.quest/unrugable.html`,
-  // Stats
-  null, // Placeholder — dynamic stats post generated at runtime
-  // Agent play
-  `If your AI agent can't interact with DeFi natively, it's just a chatbot with a wallet.\n\nbaselings-mcp gives agents 49 tools to actually do things on-chain.\n\nnpm install -g baselings-mcp`,
-  // Volume creates burns
-  `Someone dumped. The reactor collected the fees. Two hours later it cycled them through the network.\n\nVolatility isn't a problem — it's what generates trading activity and funds charity.\n\nhttps://tasern.quest/mft/`,
-  // Token adoption
-  `An AI agent adopted 3 orphaned tokens recently. Cost: $0.60. Result: 6 new reactors permanently feeding the MfT network.\n\nDead launches become infrastructure. That's the reactor model.\n\nhttps://tasern.quest/mft/`,
-  // Permissionless growth
-  `The reactor network grew 30% in a single week. Not from a team deploy — from an autonomous trading agent adopting orphan tokens.\n\nPermissionless growth. No governance vote required.\n\nhttps://tasern.quest/mft/`,
-  // Baseling economy
-  `Your baseling produced poop. That poop became LP. That LP earned fees. Those fees burned tokens.\n\nYour virtual pet just did more DeFi than most traders.\n\nhttps://tasern.quest/baseling/`,
-  // Infrastructure token
-  `MfT started as sharing memes to fund trees. Then we built tools.\n\nEvery token launched on Unrugable pairs with MfT — mutual trading routes, arb surfaces, and a mandatory charity fund wall.\n\nhttps://tasern.quest/api/unrugable/tokenomics`,
-  // Fuel loading (reactor pools, not direct sends)
-  `Trading through reactor pools generates fees. Those fees get collected every 2 hours and burned permanently.\n\nSmall amounts on thin pools = outsized impact. Higher slippage, but that's what funds the burns.\n\nhttps://tasern.quest/mft/`,
-  // Stats placeholder 2
-  null, // Second dynamic stats post
-  // Agentic wallets
-  `A growing share of on-chain transactions come from AI agents. We built for them first.\n\n49 MCP tools. REST API. llms.txt. Permissionless reactors. No API keys needed.\n\nhttps://tasern.quest/llms.txt`,
-  // EARTH token
-  `EARTH token: rebase + reactor on its own VPS keeper. 9 pools. Fires every 2 hours independently.\n\nStarted at 1.0 supply, now deflationary. Every burn reduces supply permanently.\n\nhttps://tasern.quest/mft/`,
-  // The flywheel
-  `More tokens launched = more reactors = more trading routes. More routes = more arb surfaces for bots and agents. More activity = more fees cycling through the network.\n\nEvery launch also gets a mandatory charity fund wall. Helping others is coded in.`,
-  // 7.6M MfT burned milestone
-  `7.6 million $MfT burned by the reactor network.\n\nNot by a team. Not by a vote. By a network of autonomous contracts collecting fees and burning supply every 2 hours.\n\nVerify it: tasern.quest/mft/`,
-  // Clock-based alpha (Shark's framing)
-  `Reactors fire every 2 hours on a clock.\n\nPre-fire: fees accumulate. Post-fire: tokens burn, charity deposits lock. Hundreds of pools cycle on every firing.\n\nYour agent can check readiness at /signals and call execute() permissionlessly.\n\ntasern.quest/llms.txt`,
-  // Agent trading activity
-  `101 consecutive swaps from one autonomous trading agent. All through reactor pools.\n\nEvery swap generated fees. Those fees funded burns and charity. The agent just traded — the architecture did the rest.\n\ntasern.quest/mft/`,
-  // Agent adoption economics
-  `Economics of token adoption:\n\nCost: $0.20 (buy + sell to activate)\nResult: 2 permanent reactors\nOutcome: Fees compound forever\n\nAn AI agent did this 3 times in one session. 6 new reactors for $0.60.\n\ntasern.quest/agents.html`,
-  // Permissionless execute
-  `Anyone can call execute() on any reactor. No API keys. No governance. No permission.\n\nThe reactor collects all accumulated V3 fees, burns tokens, and sends 10% upstream.\n\nOne function call. Permissionless DeFi infrastructure.\n\ntasern.quest/agents.html`,
-  // /signals endpoint
-  `New endpoint for autonomous agents:\n\ntasern.quest/api/unrugable/signals\n\nReactor Prime cooldown, MfT supply (total/burned/circulating), 35 reactor states, structured buy opportunity. JSON. No API key. 4 RPC calls.\n\nYour agent reads it, decides, executes.`,
-  // Agent infrastructure stack
-  `Agent infrastructure on Base:\n\n- llms.txt for discovery\n- /signals for live buy data\n- 49 MCP tools via npx\n- Permissionless execute() on every reactor\n\nBuilt for agents that allocate, not agents that summarize.\n\ntasern.quest/llms.txt`,
-  // Reactor arb signal
-  `Reactors fire every 2 hours. Each fire creates a price dislocation across hundreds of pools.\n\nYour agent can check reactor readiness at /signals, call execute(), and arb the spread.\n\nPredictable. Permissionless. On a clock.\n\ntasern.quest/api/unrugable/signals`,
-  // v1.2.0 — Post 1 (Hook)
-  `Your AI agent earns yield on Base chain.\n\n49 tools. No API key. $0.10 safety cap.\n\nNew in v1.2.0:\n- liquidity_depth for pool depth scanning\n- reactor_timing predictions\n- portfolio_value tracking\n- arb_signal cross-pool detection\n\nnpx baselings-mcp`,
-  // v1.2.0 — Post 2 (Swap tools)
-  `4 swap tools with built-in safety rails:\n\n- swap_token: $0.10 max, 60s cooldown\n- swap_quote: check prices first\n- swap_status: verify on-chain\n- arb_signal: spot price gaps across hundreds of pools\n\n17 allowlisted tokens. No rugs. No oopsies.`,
-  // v1.2.0 — Post 3 (Reactor firing)
-  `fire_reactor — one call, massive on-chain effect.\n\nReactors fire permissionlessly every 2hrs. Each one:\n- Collects LP fees\n- Burns tokens permanently\n- Compounds liquidity upstream\n\nYour agent fires them. The network does the rest. $0.01 gas.`,
-  // v1.2.0 — Post 4 (Agent discovery)
-  `Built for AI-native discovery:\n\n- llms.txt at tasern.quest/llms.txt\n- .well-known/agents.json (capabilities + limits)\n- .well-known/mcp.json (MCP registry compatible)\n- ElizaOS plugin: drop-in stdio server\n\nAny framework. Any agent. Zero setup friction.`,
-  // v1.2.0 — Post 5 (CTA)
-  `npx baselings-mcp\n\n49 tools. Swaps, reactors, pet game, token launches.\n\nAll on Base. All verifiable on-chain. All unrugable.\n\nnpm: npmjs.com/package/baselings-mcp\nDocs: tasern.quest/llms.txt\n\nBuilt for agents. Humans welcome.`,
-  // Money for Trees — human-facing
-  `Hold dollars. Fund impact. Withdraw anytime.\n\nMoney for Trees is a 1:1 dollar-backed proof of deposit. Your deposit earns Aave yield on Base. Yield splits three ways: 1/3 depositors (additional mftUSD), 1/3 reactor, 1/3 operations.\n\nImmutable contract. No admin keys. Verify it yourself.\n\nhttps://tasern.quest/fund/meadville/`,
-  // Money for Trees — how it works
-  `How Money for Trees works:\n\n1. You deposit dollars (USDC)\n2. Those dollars earn Aave V3 yield automatically\n3. Yield splits three ways — you get additional mftUSD, reactor gets mftUSD, operations gets USDC\n4. Withdraw your dollars anytime — they were always yours\n\nImmutable. No admin.\n\nhttps://tasern.quest/fund/meadville/`,
-  // Money for Trees — trust angle
-  `No admin keys. No owner function. No upgrade path. The Money for Trees contract is immutable.\n\nDeposit dollars. Get proof of deposit 1:1. Yield splits three ways (hardcoded). Withdraw anytime.\n\nDon't trust us — read the contract.\n\nhttps://tasern.quest/fund/meadville/`,
-  // Money for Trees — charity angle
-  `Every dollar deposited into Money for Trees earns yield that flows through the reactor network and funds charity — without the depositor spending a dime.\n\nCharity deposits move to non-refundable LP positions. The architecture locks impact in permanently.\n\nhttps://tasern.quest/fund/meadville/`,
-  // Money for Trees — scale angle
-  `$100 deposited earns yield that funds trees and burns memes. $10,000 deposited does it at 100x scale.\n\nMoney for Trees is a proof of deposit — your dollars stay yours. The yield does the work.\n\nhttps://tasern.quest/fund/meadville/`,
-  // Money for Trees — compounding angle
-  `The Money for Trees flywheel:\n\nMore deposits = more yield generated. More yield = more reactor fuel + more charity. More reactor activity = more burns across every token in the network.\n\nYour deposit funds trees. The architecture handles the rest.\n\nhttps://tasern.quest/fund/meadville/`,
+const BURN_TOKENS = [
+  { sym: 'MfT',     addr: '0x8FB87d13B40B1A67B22ED1a17e2835fe7e3a9bA3' },
+  { sym: 'CHAR',    addr: '0x20b048fA035D5763685D695e66aDF62c5D9F5055' },
+  { sym: 'EGP',     addr: '0xc1BA76771bbF0dD841347630E57c793F9d5ACcEe' },
+  { sym: 'BURGERS', addr: '0x06A05043eb2C1691b19c2C13219dB9212269dDc5' },
+  { sym: 'POOP',    addr: '0x126555aecBAC290b25644e4b7f29c016aE95f4dc' },
 ];
 
-// ── Fetch live data ─────────────────────────────────────────────────────────
-async function fetchBurnData() {
-  try {
-    const r = await fetch(BURN_DATA_URL);
-    return await r.json();
-  } catch (e) { console.error('[BURN] Fetch failed:', e.message); return null; }
+const ERC20_ABI = [
+  'function totalSupply() view returns (uint256)',
+  'function balanceOf(address) view returns (uint256)',
+];
+const POOL_ABI = [
+  'function slot0() view returns (uint160,int24,uint16,uint16,uint16,uint8,bool)',
+];
+
+// ── State ───────────────────────────────────────────────────────────────────
+let state = { contentIndex: 0, postCount: 0, usedMemes: [], isMemeNext: true };
+try { state = { ...state, ...JSON.parse(fs.readFileSync(STATE_FILE, 'utf8')) }; } catch (e) { /* fresh start */ }
+function saveState() { fs.writeFileSync(STATE_FILE, JSON.stringify(state, null, 2)); }
+
+// ── Formatters ──────────────────────────────────────────────────────────────
+function formatPrice(usd) {
+  if (usd >= 0.01) return '$' + usd.toFixed(4);
+  const s = usd.toFixed(18);
+  const m = s.match(/^0\.(0+)(\d{2,4})/);
+  if (m) return `$0.0{${m[1].length}}${m[2]}`;
+  return '$' + usd.toExponential(2);
 }
 
-async function fetchReactorStats() {
-  try {
-    const r = await fetch(REACTOR_STATS_URL);
-    return await r.json();
-  } catch (e) { console.error('[REACTOR] Fetch failed:', e.message); return null; }
+function formatNum(n) {
+  if (n >= 1e9) return (n / 1e9).toFixed(2) + 'B';
+  if (n >= 1e6) return (n / 1e6).toFixed(2) + 'M';
+  if (n >= 1e3) return (n / 1e3).toFixed(1) + 'K';
+  if (n >= 1) return Math.floor(n).toLocaleString();
+  if (n > 0) return n.toFixed(4);
+  return '0';
 }
 
-function buildStatsPost(burnData, reactorData) {
-  if (!burnData) return null;
-  const mft = burnData.tokens?.find(t => t.sym === 'MfT');
-  const mftBurned = mft ? (mft.formatted / 1e6).toFixed(2) + 'M' : '?';
-  const totalUSD = burnData.totalBurnedUSD?.toFixed(2) || '?';
-  const tokenCount = burnData.tokens?.filter(t => t.formatted > 0).length || 0;
-  const reactorCount = reactorData?.reactors?.length || '?';
-  const readyCount = reactorData?.reactors?.filter(r => r.readyToFire)?.length || 0;
-
-  return `MfT Reactor Network — Live Stats\n\n` +
-    `Reactors: ${reactorCount} (${readyCount} ready to fire)\n` +
-    `MfT Burned: ${mftBurned}\n` +
-    `${tokenCount} tokens burning across hundreds of pools\n` +
-    `Total value burned: $${totalUSD}\n\n` +
-    `https://tasern.quest/mft/`;
+function formatMC(mc) {
+  if (mc >= 1e9) return '$' + (mc / 1e9).toFixed(2) + 'B';
+  if (mc >= 1e6) return '$' + (mc / 1e6).toFixed(2) + 'M';
+  if (mc >= 1e3) return '$' + (mc / 1e3).toFixed(1) + 'K';
+  return '$' + mc.toFixed(0);
 }
 
-// ── Post to X ───────────────────────────────────────────────────────────────
-async function postToX(text) {
-  if (!process.env.X_APP_KEY) { console.log('[X] No API keys configured, skipping'); return false; }
+// ── Live on-chain data ──────────────────────────────────────────────────────
+async function getLiveData() {
   try {
-    const { TwitterApi } = require('twitter-api-v2');
-    const client = new TwitterApi({
-      appKey: process.env.X_APP_KEY,
-      appSecret: process.env.X_APP_SECRET,
-      accessToken: process.env.X_ACCESS_TOKEN,
-      accessSecret: process.env.X_ACCESS_SECRET,
-    });
-    const result = await client.v2.tweet(text);
-    console.log('[X] Posted:', result.data.id);
+    const provider = new ethers.JsonRpcProvider(BASE_RPC);
+    const mft = new ethers.Contract(MFT_ADDR, ERC20_ABI, provider);
+    const pool = new ethers.Contract(AZUSD_MFT_POOL, POOL_ABI, provider);
+
+    const [supply, mftBurnBal, slot0] = await Promise.all([
+      mft.totalSupply(),
+      mft.balanceOf(BURN_ADDR),
+      pool.slot0(),
+    ]);
+
+    const sqrtPriceX96 = slot0[0];
+    const rawPrice = Number(sqrtPriceX96) ** 2 / (2 ** 192);
+    const mftPriceUsd = 1 / rawPrice;
+
+    const totalSupply = Number(ethers.formatEther(supply));
+    const mftBurned = Number(ethers.formatEther(mftBurnBal));
+    const circulating = totalSupply - mftBurned;
+    const mc = circulating * mftPriceUsd;
+    const burnPct = ((mftBurned / totalSupply) * 100).toFixed(4) + '%';
+
+    const burnList = [];
+    for (const t of BURN_TOKENS) {
+      try {
+        const c = new ethers.Contract(t.addr, ERC20_ABI, provider);
+        const bal = await c.balanceOf(BURN_ADDR);
+        const amount = Number(ethers.formatEther(bal));
+        if (amount > 0) burnList.push({ sym: t.sym, amount });
+      } catch (_) { /* rate limit — skip */ }
+    }
+
+    return {
+      price: formatPrice(mftPriceUsd),
+      mc: formatMC(mc),
+      mftBurns: formatNum(mftBurned),
+      burnPct,
+      impactList: burnList.map(b => `${formatNum(b.amount)} ${b.sym}`).join('\n') || formatNum(mftBurned) + ' MfT',
+      tokenCount: burnList.length,
+    };
+  } catch (e) {
+    console.error('[DATA] Fetch failed:', e.message);
+    return null;
+  }
+}
+
+function fillTemplate(template, data) {
+  return template
+    .replace(/\{price\}/g, data.price)
+    .replace(/\{mc\}/g, data.mc)
+    .replace(/\{mftBurns\}/g, data.mftBurns)
+    .replace(/\{burnPct\}/g, data.burnPct)
+    .replace(/\{impactList\}/g, data.impactList)
+    .replace(/\{tokenCount\}/g, data.tokenCount);
+}
+
+// ── Stats tweet templates (use live data) ───────────────────────────────────
+const STATS_TWEETS = [
+  `$MfT live stats:\n\nPrice: {price}\nMarket Cap: {mc}\nMfT Burned: {mftBurns} ({burnPct})\n\nImpact burn address holds {tokenCount} tokens from the reactor network.\nAll verifiable on-chain.`,
+
+  `The $MfT impact burn address:\n\n{impactList}\n\nNo withdraw function. Tokens go in, they stay forever.\n\nPrice: {price}\nMC: {mc}`,
+
+  `$MfT by the numbers:\n\n{price} per token\n{mc} market cap\n{mftBurns} MfT burned ({burnPct})\n\nThe burn address holds tokens from every reactor in the network.\nAll permanently locked. All on-chain.`,
+
+  `How the $MfT reactor network works:\n\n1. Reactors collect V3 fees\n2. 50% of token fees burned permanently\n3. 50% sent to launcher's wallet\n4. Cross-token fees compound as LP\n5. Fees cascade to Prime, burn MfT\n\n{mftBurns} MfT burned. Price: {price}`,
+
+  `$MfT — Meme For Trees\n\nEvery trade across the reactor network feeds the burn.\n\nPrice: {price}\nMC: {mc}\nMfT burned: {mftBurns}\n\nImpact burns include MfT + community tokens.\nAll locked forever at the impact address.`,
+];
+
+// ── Promotional content (no live data needed) ───────────────────────────────
+const PROMO_CONTENT = [
+  `Free token launches on Base. One transaction: token, two locked pools, reactor.\n\n50% of fees burned. 50% to your wallet. Every 2 hours. Forever.\n\nhttps://tasern.quest/unrugable.html`,
+
+  `"Unrugable" isn't a brand name. It's a contract property.\n\nNo withdraw function. Locked LP. 50/50 burn-and-earn reactor.\n\nVerify it yourself.\n\nhttps://tasern.quest/unrugable.html`,
+
+  `Other platforms charge you to launch and keep the fees.\n\nUnrugable: free to launch, 50% of reactor fees go to your wallet every 2 hours. The other 50% gets burned.\n\nhttps://tasern.quest/unrugable.html`,
+
+  `Two pools per token.\n\nMoney pool (70%): semi-stable, Aave yield funds tree planting.\nMeme pool (30%): wild ride, reactor heartbeat.\n\nBoth locked forever. Both earning fees.\n\nhttps://tasern.quest/unrugable.html`,
+
+  `Raise a pet. Shovel its poop. Deposit the poop into DeFi gardens for yield.\n\nThe poop economy is real and it's on Base.\n\nhttps://tasern.quest/baseling/`,
+
+  `The reactor heartbeat: secondary reactors compress MfT. V1 Prime fires last, buying through accumulated sell walls with fees from the entire network.\n\nCycle resets every 2 hours.\n\nhttps://tasern.quest/burns.html`,
+
+  `MfT started as sharing memes to fund trees. Then we built a free token launcher, a reactor network, and a pet game.\n\nEvery launch strengthens the whole network.\n\nhttps://tasern.quest/unrugable.html`,
+
+  `More launches = more reactors = more trading routes.\nMore routes = more arb surfaces for bots and agents.\nMore activity = more fees = more burns + launcher earnings.\n\nFree to launch. You earn when they trade.`,
+
+  `Money for Trees: deposit USDC, get a 1:1 proof of deposit. Your deposit earns Aave yield that funds tree planting.\n\nEvery V7 token pairs 70% of supply against Money — connecting your token to real yield infrastructure.\n\nhttps://tasern.quest/money-for-trees.html`,
+
+  `Launch a token for free. Get an invite link.\n\nWhen someone launches with your link, their reactor chains upstream to yours. Permanent. On-chain.\n\nThe network grows with every launch.\n\nhttps://tasern.quest/unrugable.html`,
+
+  `You sold. The reactor collected the fee. Two hours later: half burned, half sent to the launcher.\n\nSells generate reactor fuel and launcher income.\n\nhttps://tasern.quest/unrugable.html`,
+
+  `Every reactor cycle collects CHAR from trading fees. CHAR tracks carbon credits removed from markets.\n\nYour DeFi activity removes carbon from circulation whether you meant to or not.\n\nhttps://tasern.quest/burns.html`,
+
+  `Anyone can call execute() on any reactor. No API keys. No governance. No permission.\n\nThe reactor burns supply, pays the launcher, and compounds liquidity.\n\nOne function call. Permissionless DeFi infrastructure.\n\nhttps://tasern.quest/agents.html`,
+
+  `49 MCP tools for on-chain AI agents.\n\nnpx baselings-mcp\n\nYour agent can read reactors, fire cycles, launch tokens, check pools, and run game actions on Base.\n\nhttps://tasern.quest/llms.txt`,
+
+  `Your baseling produced poop. That poop became LP. That LP earned fees. Those fees burned tokens.\n\nYour virtual pet just did more DeFi than most traders.\n\nhttps://tasern.quest/baseling/`,
+
+  `Fund trees. Burn memes. Impact Generators compound charity LP positions automatically — trading into partner tokens every cycle to grow their own holdings. No admin. No keys. Anyone can call execute() and trigger the next compound.\n\nhttps://tasern.quest/generator.html`,
+
+  `Impact Generators are selfish contracts. They compound to grow their own LP positions. To do that, they trade into partner tokens every cycle — it is how the math works. The charity fund grows. The LP deepens. Nobody touches the money.\n\nhttps://tasern.quest/generator.html`,
+
+  `Every token launched on Unrugable gets a charity fund. Every charity fund has an Impact Generator that compounds automatically. Per-token leaderboards track which community has funded the most trees. Permissionless. On-chain. Verifiable.\n\nhttps://tasern.quest/generator.html`,
+];
+
+// ── X client ────────────────────────────────────────────────────────────────
+function createClient() {
+  const { TwitterApi } = require('twitter-api-v2');
+  const key = process.env.X_APP_KEY || process.env.API_KEY;
+  const secret = process.env.X_APP_SECRET || process.env.API_SECRET;
+  const token = process.env.X_ACCESS_TOKEN || process.env.ACCESS_TOKEN;
+  const tokenSecret = process.env.X_ACCESS_SECRET || process.env.ACCESS_TOKEN_SECRET;
+  if (!key || !secret || !token || !tokenSecret) {
+    console.error('[X] Missing API credentials in .env');
+    process.exit(1);
+  }
+  return new TwitterApi({ appKey: key, appSecret: secret, accessToken: token, accessSecret: tokenSecret });
+}
+
+// ── Meme picker ─────────────────────────────────────────────────────────────
+function pickMeme() {
+  if (!state.usedMemes) state.usedMemes = [];
+  let allFiles;
+  try {
+    allFiles = fs.readdirSync(MEME_DIR).filter(f => MEME_EXTS.has(path.extname(f).toLowerCase()));
+  } catch (e) {
+    console.error('[MEME] Cannot read meme dir:', e.message);
+    return null;
+  }
+  if (allFiles.length === 0) return null;
+
+  let available = allFiles.filter(f => !state.usedMemes.includes(f));
+  if (available.length === 0) {
+    state.usedMemes = [];
+    available = allFiles;
+  }
+
+  const pick = available[Math.floor(Math.random() * available.length)];
+  state.usedMemes.push(pick);
+  return path.join(MEME_DIR, pick);
+}
+
+// ── Post functions ──────────────────────────────────────────────────────────
+function ts() { return new Date().toISOString().slice(0, 19); }
+
+async function postMeme(client) {
+  const memePath = pickMeme();
+  if (!memePath) { console.log(`[${ts()}] No memes found`); return false; }
+
+  try {
+    const mediaId = await client.v1.uploadMedia(memePath);
+    const result = await client.v2.tweet({ media: { media_ids: [mediaId] } });
+    console.log(`[${ts()}] Meme: ${path.basename(memePath)} — tweet ${result.data.id}`);
     return true;
   } catch (e) {
-    console.error('[X] Post failed:', e.message);
+    console.error(`[${ts()}] Meme failed: ${(e.message || e).toString().slice(0, 120)}`);
     return false;
   }
 }
 
-// ── Post to Farcaster ───────────────────────────────────────────────────────
-async function postToFarcaster(text) {
-  if (!process.env.NEYNAR_API_KEY) { console.log('[FC] No Neynar API key, skipping'); return false; }
+async function postStats(client) {
+  const data = await getLiveData();
+  if (!data) { console.log(`[${ts()}] Stats skipped — no chain data`); return false; }
+
+  const idx = state.contentIndex % STATS_TWEETS.length;
+  const tweet = fillTemplate(STATS_TWEETS[idx], data);
+  state.contentIndex++;
+
   try {
-    const r = await fetch('https://api.neynar.com/v2/farcaster/cast', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'api_key': process.env.NEYNAR_API_KEY,
-      },
-      body: JSON.stringify({
-        signer_uuid: process.env.FARCASTER_SIGNER_UUID,
-        text,
-      }),
-    });
-    const data = await r.json();
-    if (data.cast) {
-      console.log('[FC] Posted cast:', data.cast.hash);
-      return true;
-    }
-    console.error('[FC] Cast failed:', JSON.stringify(data));
-    return false;
+    const result = await client.v2.tweet(tweet);
+    console.log(`[${ts()}] Stats #${idx + 1}: ${tweet.slice(0, 60)}...`);
+    return true;
   } catch (e) {
-    console.error('[FC] Post failed:', e.message);
+    console.error(`[${ts()}] Stats failed: ${(e.message || e).toString().slice(0, 120)}`);
     return false;
   }
 }
 
-// ── Post to all platforms ───────────────────────────────────────────────────
-async function post(text) {
-  console.log(`[POST] ${text.substring(0, 80)}...`);
-  const results = await Promise.allSettled([postToX(text), postToFarcaster(text)]);
-  state.postCount++;
-  state.lastPostTime = Date.now();
-  saveState();
-  return results.some(r => r.status === 'fulfilled' && r.value);
+async function postPromo(client) {
+  const idx = state.contentIndex % PROMO_CONTENT.length;
+  const tweet = PROMO_CONTENT[idx];
+  state.contentIndex++;
+
+  try {
+    const result = await client.v2.tweet(tweet);
+    console.log(`[${ts()}] Promo #${idx + 1}: ${tweet.slice(0, 60)}...`);
+    return true;
+  } catch (e) {
+    console.error(`[${ts()}] Promo failed: ${(e.message || e).toString().slice(0, 120)}`);
+    return false;
+  }
 }
 
-// ── Main loop ───────────────────────────────────────────────────────────────
-async function cycle() {
-  console.log(`[CYCLE] ${new Date().toISOString()} — post #${state.postCount + 1}`);
+// ── Main cycle: meme → stats → meme → promo → repeat ───────────────────────
+async function postCycle() {
+  const client = createClient();
+  const cycle = state.postCount % 4;
 
-  // Check if a new burn milestone was hit
-  const burnData = await fetchBurnData();
-  if (burnData && burnData.totalBurnedUSD > state.lastBurnUSD + 0.50) {
-    const delta = (burnData.totalBurnedUSD - state.lastBurnUSD).toFixed(2);
-    state.lastBurnUSD = burnData.totalBurnedUSD;
-    saveState();
-    await post(`Reactors just burned $${delta} more.\n\nTotal burned: $${burnData.totalBurnedUSD.toFixed(2)}\n\nhttps://tasern.quest/mft/`);
-    return;
+  console.log(`[${ts()}] Post #${state.postCount + 1} (cycle phase: ${cycle})`);
+
+  if (cycle === 0 || cycle === 2) {
+    await postMeme(client);
+  } else if (cycle === 1) {
+    await postStats(client);
+  } else {
+    await postPromo(client);
   }
 
-  // Scheduled content rotation
-  if (Date.now() - state.lastPostTime < POST_INTERVAL) {
-    console.log('[CYCLE] Too soon since last post, skipping');
-    return;
-  }
-
-  let text = CONTENT[state.contentIndex % CONTENT.length];
-  state.contentIndex = (state.contentIndex + 1) % CONTENT.length;
-
-  // Generate dynamic stats post if placeholder
-  if (text === null) {
-    const reactorData = await fetchReactorStats();
-    text = buildStatsPost(burnData, reactorData);
-    if (!text) { state.contentIndex++; return; }
-  }
-
-  await post(text);
+  state.postCount++;
+  saveState();
 }
 
 // ── Start ───────────────────────────────────────────────────────────────────
-console.log('[SOCIAL] MfT Social Bot starting');
-console.log(`[SOCIAL] X: ${process.env.X_APP_KEY ? 'configured' : 'NOT configured'}`);
-console.log(`[SOCIAL] Farcaster: ${process.env.NEYNAR_API_KEY ? 'configured' : 'NOT configured'}`);
-console.log(`[SOCIAL] Check interval: ${CHECK_INTERVAL / 60000}min | Post interval: ${POST_INTERVAL / 60000}min`);
+console.log(`[${ts()}] MfT Social Bot starting — every 93 min`);
+console.log(`[${ts()}] Meme dir: ${MEME_DIR}`);
+try {
+  const count = fs.readdirSync(MEME_DIR).filter(f => MEME_EXTS.has(path.extname(f).toLowerCase())).length;
+  console.log(`[${ts()}] ${count} memes available`);
+} catch (e) { console.log(`[${ts()}] Meme dir not found — will post text only`); }
 
-cycle();
-setInterval(cycle, CHECK_INTERVAL);
+postCycle();
+setInterval(postCycle, POST_INTERVAL);
 
 /*
- * Required .env keys:
+ * Required .env keys (either naming convention works):
  *
- * # X (Twitter) API — get from developer.twitter.com
- * X_APP_KEY=
- * X_APP_SECRET=
- * X_ACCESS_TOKEN=
- * X_ACCESS_SECRET=
- *
- * # Farcaster via Neynar — get from neynar.com
- * NEYNAR_API_KEY=
- * FARCASTER_SIGNER_UUID=
+ * X_APP_KEY= (or API_KEY=)
+ * X_APP_SECRET= (or API_SECRET=)
+ * X_ACCESS_TOKEN= (or ACCESS_TOKEN=)
+ * X_ACCESS_SECRET= (or ACCESS_TOKEN_SECRET=)
  */

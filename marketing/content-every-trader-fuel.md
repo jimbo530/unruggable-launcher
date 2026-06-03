@@ -1,17 +1,15 @@
-# Content Series: "Every Trader is Fuel"
+# Content Series: "Every Trader is Fuel" — V7
 
-Target: active traders, degens, arb bots. The message: direction doesn't matter, only volume.
+Target: active traders, degens, arb bots. The message: direction doesn't matter, only volume. Now with launcher earnings.
 
 ---
 
 ## X Posts (under 280 chars each)
 
 ### Post 1 — The Core Mechanic
-You sold $MfT. The reactor collected the fee. Two hours later it used those fees to buy back.
+You sold. The reactor collected the fee. Two hours later: half burned, half sent to the launcher.
 
-Sells generate reactor fuel. That's how the mechanism works.
-
-tasern.quest/mft/
+Sells generate reactor fuel and launcher income. That's how the mechanism works.
 
 ### Post 2 — Arb Bots Welcome
 The reactor network fires every 2 hours across hundreds of pools. Each firing creates price dislocations between pools.
@@ -21,14 +19,12 @@ That's a 2-hour arb window, every cycle, on a clock.
 Your bot is welcome. Your fees are fuel.
 
 ### Post 3 — The Math
-One $10 trade on a reactor pool generates ~$0.01 in fees.
-Those fees compound every cycle — collected and re-deployed every 2 hours.
-Supply decreases with every burn cycle.
+One trade on a reactor pool generates fees. Those fees split every cycle — 50% burned permanently, 50% to the launcher's wallet.
 
-The mechanism runs on volume, not sentiment.
+Supply decreases. Launcher earns. The mechanism runs on volume, not sentiment.
 
 ### Post 4 — MEV is Part of the Ecosystem
-MEV bots generate pool fees. Those fees get collected by the reactor. The reactor buys and burns MfT.
+MEV bots generate pool fees. Those fees get collected by the reactor. Half burned, half to the launcher.
 
 Frontrunners, backrunners, sandwich bots — all generate fees that feed the reactor. The mechanism doesn't distinguish intent, only volume.
 
@@ -37,82 +33,68 @@ Someone panic sold. Okay.
 
 1. Their sell generated fees in the V3 pool
 2. Reactor collected those fees 2 hours later
-3. Reactor bought MfT with the fees
-4. Bought MfT got burned permanently
-5. Net: supply decreased
+3. 50% of token fees burned permanently
+4. 50% sent to the launcher's wallet
+5. Net: supply decreased, launcher got paid
 
-Every trade generates reactor fuel. Token values can still go to zero — but every sell feeds the burn engine.
+Every trade generates reactor fuel. Token values can still go to zero — but every trade feeds the burn engine and the launcher.
 
-### Post 6 — Both Sides Generate Fuel
-Buy MfT — price moves, fees generated, reactor collects.
+### Post 6 — Both Sides
+Buy — price moves, fees generated, reactor collects.
 
-Sell MfT — price moves, fees generated, reactor collects.
+Sell — price moves, fees generated, reactor collects.
 
-Both directions generate reactor fuel. Every trade feeds the burn engine regardless of direction.
+Both directions: 50% burned, 50% to launcher. Every trade is fuel.
 
 ---
 
 ## Farcaster Long Post — /defi
 
-Most DeFi protocols have a linear relationship between user and protocol: user trades, protocol earns fees, protocol distributes rewards, cycle repeats.
+Most launchpads take your money and give you nothing back. Unrugable V7 flips that.
 
-The MfT reactor network works differently. Every trade — in any direction, any size, on any reactor pool — generates fees that compound permanently.
+Launch for free. One transaction. Two locked pools. One reactor. Every 2 hours the reactor fires and splits fees: 50% of your token's fees get burned permanently, 50% go to your wallet.
 
 Here's the flow:
-1. You trade on a reactor-connected V3 pool (any token in the network)
-2. Fees accrue in the V3 position held by the reactor
-3. Every 2 hours, the reactor fires: collects all fees, burns native tokens, cycles cross-tokens through the network
-4. 10% of cross-token fees flow upstream to the next reactor
-5. Fees cascade bottom-up to V1 Prime, which buys and burns MfT across 12 pools simultaneously
+1. Someone trades your token on either pool (Money or Meme)
+2. V3 fees accrue in the positions held by the reactor
+3. Every 2 hours, the reactor fires: collects all fees
+4. Token fees: 50% burned (supply decreases), 50% sent to launcher
+5. Cross-token (Meme) fees: 10% upstream to reactor network, rest deposited as LP
+6. Fees cascade bottom-up through the network to V1 Prime, which burns MfT
 
-What this means: buys, sells, arbs, MEV, panic dumps, accumulation — all of it generates reactor fuel. The reactor doesn't distinguish between a whale accumulating and a bot arbitraging. It collects fees from both.
+Buys, sells, arbs, MEV, panic dumps, accumulation — all generate reactor fuel. The reactor doesn't distinguish between a whale accumulating and a bot arbitraging. It collects fees from both and splits them.
 
-Direction doesn't matter. Only volume.
+Direction doesn't matter. Only volume. You earn either way.
 
-A network of reactors. Hundreds of pools. Every 2 hours. The mechanism runs on volume, not sentiment.
-
-The only state where no burns happen is zero volume. Everything else is fuel.
-
-tasern.quest/api/unrugable/tokenomics
-
----
-
-## Social Bot Additions (for social-bot.js)
-
-```javascript
-// Every trader is fuel — series
-`You sold. The reactor collected the fee. Two hours later it used those fees to buy back.\n\nSells generate reactor fuel.\n\nhttps://tasern.quest/mft/`,
-
-`MEV bots, arb bots, sandwich bots — all generate pool fees. All fees get collected by reactors. All reactors buy and burn MfT.\n\nEvery trade feeds the burn engine.\n\nhttps://tasern.quest/mft/`,
-
-`A network of reactors. Hundreds of pools. Price dislocations every 2 hours.\n\nThat's a predictable arb window on a clock. Your bot is welcome. Your fees are fuel.\n\nhttps://tasern.quest/api/unrugable/tokenomics`,
-```
+The only state where no burns happen and no earnings flow is zero volume. Everything else is fuel.
 
 ---
 
 ## Thread Version (3 tweets)
 
 **1/3**
-"Every trader is fuel" — a thread on why the MfT reactor network runs on volume, not direction.
+"Every trader is fuel" — Unrugable V7.
 
-Buys, sells, arbs, dumps. All generate V3 pool fees. All fees feed the reactor mechanism.
+Launch a token for free. Get a reactor that fires every 2 hours. Half of token fees burned. Half sent to your wallet.
+
+Buys, sells, arbs, dumps. All generate fees. All feed the reactor.
 
 **2/3**
-Every 2 hours, the reactor network fires bottom-up:
-- Collect all uncollected V3 fees
-- Burn native tokens
-- Cycle cross-tokens through connected pools
-- Cascade 10% of fees upstream
+Every 2 hours, the reactor:
+- Collects all V3 fees from both pools
+- Burns 50% of token fees permanently
+- Sends 50% to the launcher's wallet
+- Cascades cross-token fees upstream through the network
 
 One organic trade ripples into corrective volume across connected pools.
 
 **3/3**
-The only state where no burns happen is zero volume. Everything else generates fuel.
+The only state where nothing happens is zero volume. Everything else:
+- Generates fees
+- Burns supply
+- Pays the launcher
+- Feeds the reactor network
 
-Buy traders: fees compound into reactor burns.
-Sellers: your fees feed the same engine.
-Arb bots: predictable 2hr windows, welcome aboard.
+Free to launch. You earn when they trade. Verify it on-chain.
 
-Token values can go to zero. But every trade feeds the burn mechanism.
-
-tasern.quest/mft/
+tasern.quest/unrugable.html

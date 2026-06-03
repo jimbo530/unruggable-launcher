@@ -70,14 +70,14 @@ Agent: call swap_token { tokenIn: "USDC", tokenOut: "MfT", amountUSD: 0.10 }
 **Why MfT?**
 - Infrastructure token — bought by every reactor in the network
 - Reactor network fires every 2 hours, each reactor buying and burning MfT
-- Every new token launch adds 3 MfT sell walls (more launch = more burn)
+- Every new token launch adds locked TOKEN/Money + TOKEN/Meme pools (more launches = more burn)
 - Supply deflates continuously — 8.5M burned so far
 
 **What your agent can do:**
 1. DCA into MfT ($0.10 at a time, every 60 seconds minimum)
 2. Call `execute()` on reactors to trigger burn cycles (permissionless)
 3. Play Baselings: buy eggs, feed pets, earn POOP, stake in gardens
-4. Launch tokens ($5 seed) to grow the network
+4. Launch tokens (free, just gas) to grow the network
 5. Arb MfT price across pools after reactor fires
 
 ### 6. Safety limits (enforced automatically)
@@ -107,8 +107,7 @@ Agent: call swap_token { tokenIn: "USDC", tokenOut: "MfT", amountUSD: 0.10 }
 MfT:          0x8FB87d13B40B1A67B22ED1a17e2835fe7e3a9bA3
 V1 Prime:     0xed3aE91b2bb22307c07438EEebA2500C18EABcFE
 Hub:          0xF5B9Fc40080aAcC262f078eCE374A2268dcdb045
-Factory V5.4: 0xb1fE (active)
-Factory V5.3: 0x65F8 (BRUH/NZ)
+Factory V7:   0x5c11 (active)
 execute():    0x61461954 (selector, 4M gas limit)
 ```
 

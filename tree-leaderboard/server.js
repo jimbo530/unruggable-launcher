@@ -1,5 +1,5 @@
 // Tree Leaderboard API
-// Indexes MfT stablecoin deposits, calculates trees funded per holder
+// Indexes MfT deposit receipts, calculates trees funded per holder
 // V2: 1/3 yield to holders, 1/3 reactor, 1/3 admin (trees)
 // Formula: trees = sum(balance_i * duration_i) * 0.03 * (1/3) / (0.10 * 365.25 * 86400)
 

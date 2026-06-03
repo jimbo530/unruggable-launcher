@@ -28,11 +28,21 @@ var TS = 16; // tile size
 var COLS = 48, ROWS = 16; // level size in tiles (scrolling)
 var GRAVITY = 600;
 var MAX_FALL = 350;
-var KEYS_PER_LEVEL = 6;
+var BASE_KEYS = 6;
 var ctx = TAS.ctx;
 
 TAS.initCanvas(GW, GH);
 TAS.input.initTouch({ buttons: ['a', 'b'], labels: { a: 'JUMP', b: 'ACTION' } });
+
+// === STAT BONUSES (from NftLoader) ===
+var statB = { damage: 1, speed: 1, lives: 0, hpMult: 1, scoreMult: 1, cooldown: 1, luck: 1, str: 10, dex: 10, con: 10, int: 10, wis: 10, cha: 10, level: 0, color: '#44dd88', name: 'Baseling', icon: 'B' };
+try { if (window.NftLoader && NftLoader.getStatBonuses) statB = NftLoader.getStatBonuses(); } catch(e) {}
+
+// Scaled score add — always Math.floor
+function addScore(base) { score += Math.floor(base * statB.scoreMult); }
+
+// Keys per level scaled by CHA luck (more luck = fewer keys needed)
+function keysNeeded() { return Math.floor(Math.max(3, BASE_KEYS - (statB.luck - 1) * 2)); }
 
 // === GAME STATE ===
 var state = 'title';
@@ -42,6 +52,7 @@ var score = 0;
 var hp = 3;
 var maxHp = 3;
 var keysCollected = 0;
+var keysPerLevel = BASE_KEYS;
 var highScore = TAS.score.load('littlenemo_hi');
 var invincTimer = 0;
 var levelCompleteTimer = 0;
@@ -49,6 +60,9 @@ var deathTimer = 0;
 var levelTransTimer = 0;
 var candyThrown = [];
 var shakeTimer = 0;
+var abilityCooldown = 0;
+var bgStars = [];
+var bgClouds = [];
 
 // Camera
 var camX = 0, camY = 0;
@@ -62,7 +76,7 @@ var animals = [];
 var enemies = [];
 // Keys in current level
 var keys = [];
-// Floating items (hearts)
+// Floating items (hearts, spore caps, mycelium threads)
 var items = [];
 // Level tile data
 var tiles = [];
@@ -71,21 +85,32 @@ var floaters = [];
 // Door position
 var doorX = 0, doorY = 0;
 var doorOpen = false;
+// Boss state
+var boss = null;
+var bossFlash = 0;
 
-// Animal types
-var ANIMAL = {
-  FROG: 0, MOLE: 1, BEE: 2, LIZARD: 3, FISH: 4, GORILLA: 5
+// Tasern creature types (replacing generic animals)
+var CREATURE = {
+  REACTOR_FROG: 0, MYCELIAL_MOLE: 1, SPORE_BEE: 2, LICHEN_LIZARD: 3, FUNGI_FISH: 4, MOSS_GORILLA: 5
 };
-var ANIMAL_NAMES = ['Frog', 'Mole', 'Bee', 'Lizard', 'Fish', 'Gorilla'];
-var ANIMAL_COLORS = ['#44cc44', '#8b5e3c', '#ffdd00', '#44bbaa', '#4488ff', '#884422'];
+var CREATURE_NAMES = ['Reactor Frog', 'Mycelial Mole', 'Spore Bee', 'Lichen Lizard', 'Fungi Fish', 'Moss Gorilla'];
+var CREATURE_COLORS = ['#33ff88', '#9b6e4c', '#ffcc00', '#33ddaa', '#44aaff', '#667744'];
 
-// Level themes
-var LEVEL_NAMES = ['Mushroom Forest', 'Flower Garden', 'Underground', 'Night Sea', 'Cloud Tops', 'Toy Castle', 'Nightmare Realm'];
-var LEVEL_BG = ['#0a1a2a', '#1a0a2a', '#0a0a0f', '#050a1a', '#0a0a2a', '#1a0a1a', '#0f0505'];
-var LEVEL_FOCUS = [ANIMAL.FROG, ANIMAL.BEE, ANIMAL.MOLE, ANIMAL.FISH, ANIMAL.LIZARD, ANIMAL.GORILLA, -1];
+// Level themes — Tasern dreamscapes
+var LEVEL_NAMES = [
+  'Spore Hollow',       // mushroom forest
+  'Bloom Canopy',       // flower garden
+  'Mycelium Depths',    // underground
+  'Bioluminescent Reef', // night sea
+  'Reactor Dream',      // cloud tops replaced with reactor dream
+  'Moss Citadel',       // toy castle
+  'Fungal Nightmare'    // nightmare realm
+];
+var LEVEL_BG = ['#060f1a', '#0f061a', '#060608', '#030810', '#080818', '#0f0610', '#120308'];
+var LEVEL_FOCUS = [CREATURE.REACTOR_FROG, CREATURE.SPORE_BEE, CREATURE.MYCELIAL_MOLE, CREATURE.FUNGI_FISH, CREATURE.LICHEN_LIZARD, CREATURE.MOSS_GORILLA, -1];
 
 // Tile types
-var TILE = { AIR: 0, SOLID: 1, DIRT: 2, WATER: 3, PLATFORM: 4, LADDER: 5, SPIKE: 6 };
+var TILE = { AIR: 0, SOLID: 1, DIRT: 2, WATER: 3, PLATFORM: 4, LADDER: 5, SPIKE: 6, MYCELIUM: 7 };
 
 // === LEVEL GENERATION ===
 function generateLevel(lvl) {
@@ -98,6 +123,14 @@ function generateLevel(lvl) {
   floaters = [];
   keysCollected = 0;
   doorOpen = false;
+  boss = null;
+  bossFlash = 0;
+  abilityCooldown = 0;
+
+  // Recalculate stat-driven values (CON → HP)
+  maxHp = Math.floor(3 * statB.hpMult) + statB.lives;
+  if (hp > maxHp) hp = maxHp;
+  keysPerLevel = keysNeeded();
 
   var w = COLS, h = ROWS;
   // Init with air
@@ -118,8 +151,7 @@ function generateLevel(lvl) {
   var seed = lvl * 137 + 42;
   function rng() { seed = (seed * 1664525 + 1013904223) & 0x7fffffff; return (seed & 0xffff) / 0xffff; }
 
-  if (lvl === 0) { // Mushroom Forest - vertical, ponds
-    // Platforms and tall structures
+  if (lvl === 0) { // Spore Hollow
     for (var i = 0; i < 12; i++) {
       var px = Math.floor(rng() * (w - 8)) + 4;
       var py = Math.floor(rng() * 8) + 4;
@@ -128,24 +160,27 @@ function generateLevel(lvl) {
         if (px + j < w) tiles[py][px + j] = TILE.SOLID;
       }
     }
-    // Ponds
     for (var i = 0; i < 3; i++) {
       var px = Math.floor(rng() * 8) + i * 14 + 3;
       for (var j = 0; j < 4; j++) {
         if (px + j < w) { tiles[h - 2][px + j] = TILE.WATER; tiles[h - 3][px + j] = TILE.WATER; }
       }
     }
-    // Tall mushroom stems (ladders)
     for (var i = 0; i < 5; i++) {
       var lx = Math.floor(rng() * (w - 4)) + 2;
       for (var ly = 4; ly < h - 3; ly++) tiles[ly][lx] = TILE.LADDER;
     }
-  } else if (lvl === 1) { // Flower Garden - open sky, floating platforms
-    // Remove much of the ground
+    // Mycelium patches
+    for (var i = 0; i < 6; i++) {
+      var mx = Math.floor(rng() * (w - 4)) + 2;
+      var my = Math.floor(rng() * 4) + 8;
+      if (my < h && mx < w) tiles[my][mx] = TILE.MYCELIUM;
+      if (my < h && mx + 1 < w) tiles[my][mx + 1] = TILE.MYCELIUM;
+    }
+  } else if (lvl === 1) { // Bloom Canopy
     for (var x = 8; x < w - 8; x++) {
       if (rng() > 0.4) { tiles[h - 2][x] = TILE.AIR; }
     }
-    // Floating platforms scattered vertically
     for (var i = 0; i < 20; i++) {
       var px = Math.floor(rng() * (w - 6)) + 3;
       var py = Math.floor(rng() * 10) + 3;
@@ -154,7 +189,6 @@ function generateLevel(lvl) {
         if (px + j < w && py < h) tiles[py][px + j] = TILE.PLATFORM;
       }
     }
-    // Some solid ground patches
     for (var i = 0; i < 6; i++) {
       var px = Math.floor(rng() * 6) + i * 7 + 2;
       var pw = Math.floor(rng() * 3) + 2;
@@ -162,15 +196,13 @@ function generateLevel(lvl) {
         if (px + j < w) tiles[h - 2][px + j] = TILE.SOLID;
       }
     }
-  } else if (lvl === 2) { // Underground - diggable dirt
-    // Fill most with dirt
+  } else if (lvl === 2) { // Mycelium Depths
     for (var y = 3; y < h - 2; y++) {
       for (var x = 2; x < w - 2; x++) {
         if (rng() > 0.35) tiles[y][x] = TILE.DIRT;
         else if (rng() > 0.5) tiles[y][x] = TILE.SOLID;
       }
     }
-    // Carve some tunnels
     for (var i = 0; i < 5; i++) {
       var ty = Math.floor(rng() * 8) + 4;
       var tx = Math.floor(rng() * 10) + 2;
@@ -179,15 +211,19 @@ function generateLevel(lvl) {
         if (ty + 1 < h && tx + j < w) tiles[ty + 1][tx + j] = TILE.AIR;
       }
     }
-    // Open starting area
     for (var y = 3; y < h - 2; y++) { tiles[y][1] = TILE.AIR; tiles[y][2] = TILE.AIR; tiles[y][3] = TILE.AIR; }
-  } else if (lvl === 3) { // Night Sea - lots of water
+    // Mycelium networks
+    for (var i = 0; i < 10; i++) {
+      var mx = Math.floor(rng() * (w - 4)) + 2;
+      var my = Math.floor(rng() * (h - 6)) + 3;
+      if (tiles[my][mx] === TILE.DIRT) tiles[my][mx] = TILE.MYCELIUM;
+    }
+  } else if (lvl === 3) { // Bioluminescent Reef
     for (var y = 5; y < h - 2; y++) {
       for (var x = 0; x < w; x++) {
         tiles[y][x] = TILE.WATER;
       }
     }
-    // Islands on top
     for (var i = 0; i < 8; i++) {
       var px = Math.floor(rng() * 5) + i * 6;
       var pw = Math.floor(rng() * 3) + 2;
@@ -195,15 +231,13 @@ function generateLevel(lvl) {
         if (px + j < w) { tiles[4][px + j] = TILE.SOLID; tiles[3][px + j] = TILE.AIR; }
       }
     }
-    // Air pockets underwater
     for (var i = 0; i < 6; i++) {
       var ax = Math.floor(rng() * (w - 4)) + 2;
       var ay = Math.floor(rng() * 5) + 7;
       for (var j = 0; j < 3; j++) { if (ax + j < w && ay < h) tiles[ay][ax + j] = TILE.AIR; }
       if (ay - 1 >= 0) { for (var j = 0; j < 3; j++) { if (ax + j < w) tiles[ay - 1][ax + j] = TILE.AIR; } }
     }
-  } else if (lvl === 4) { // Cloud Tops - walls and ceilings
-    // Scattered solid blocks (walls to climb)
+  } else if (lvl === 4) { // Reactor Dream — glowing reactor pipes + platforms
     for (var i = 0; i < 15; i++) {
       var px = Math.floor(rng() * (w - 4)) + 2;
       var py = Math.floor(rng() * 10) + 2;
@@ -213,37 +247,37 @@ function generateLevel(lvl) {
         if (px + 1 < w && py + j < h - 2) tiles[py + j][px + 1] = TILE.SOLID;
       }
     }
-    // Ceiling sections
     for (var x = 4; x < w - 4; x++) {
       if (rng() > 0.5) { tiles[1][x] = TILE.SOLID; tiles[2][x] = TILE.SOLID; }
     }
-    // Platforms
     for (var i = 0; i < 10; i++) {
       var px = Math.floor(rng() * (w - 5)) + 2;
       var py = Math.floor(rng() * 6) + 5;
       for (var j = 0; j < 3; j++) { if (px + j < w) tiles[py][px + j] = TILE.PLATFORM; }
     }
-  } else if (lvl === 5) { // Toy Castle - heavy blocks, ladders
-    // Castle walls
+    // Mycelium conduits
+    for (var i = 0; i < 8; i++) {
+      var mx = Math.floor(rng() * (w - 4)) + 2;
+      var my = Math.floor(rng() * 8) + 3;
+      if (my < h && mx < w) tiles[my][mx] = TILE.MYCELIUM;
+    }
+  } else if (lvl === 5) { // Moss Citadel
     for (var y = 0; y < h; y++) {
       for (var x = 0; x < w; x++) {
         if (x % 10 === 0 && y > 1) tiles[y][x] = TILE.SOLID;
       }
     }
-    // Floors every 4 rows
     for (var y = 4; y < h - 2; y += 4) {
       for (var x = 0; x < w; x++) {
         if (rng() > 0.3) tiles[y][x] = TILE.SOLID;
       }
     }
-    // Ladders between floors
     for (var i = 0; i < 10; i++) {
       var lx = Math.floor(rng() * (w - 4)) + 2;
       for (var ly = 1; ly < h - 2; ly++) {
         if (tiles[ly][lx] !== TILE.SOLID) tiles[ly][lx] = TILE.LADDER;
       }
     }
-    // Openings in floors
     for (var y = 4; y < h - 2; y += 4) {
       for (var i = 0; i < 5; i++) {
         var gx = Math.floor(rng() * (w - 2)) + 1;
@@ -251,7 +285,7 @@ function generateLevel(lvl) {
         if (gx + 1 < w) tiles[y][gx + 1] = TILE.AIR;
       }
     }
-  } else { // Nightmare Realm - mixed
+  } else { // Fungal Nightmare
     for (var i = 0; i < 15; i++) {
       var px = Math.floor(rng() * (w - 6)) + 3;
       var py = Math.floor(rng() * 10) + 3;
@@ -271,6 +305,12 @@ function generateLevel(lvl) {
       var py = Math.floor(rng() * 6) + 4;
       for (var j = 0; j < 3; j++) { if (px + j < w) tiles[py][px + j] = TILE.PLATFORM; }
     }
+    // Mycelium webs in nightmare
+    for (var i = 0; i < 12; i++) {
+      var mx = Math.floor(rng() * (w - 4)) + 2;
+      var my = Math.floor(rng() * (h - 6)) + 3;
+      if (my < h && mx < w && tiles[my][mx] === TILE.AIR) tiles[my][mx] = TILE.MYCELIUM;
+    }
   }
 
   // Ensure start area is clear
@@ -286,8 +326,10 @@ function generateLevel(lvl) {
   // Place door at far end
   doorX = (w - 3) * TS; doorY = findGround(w - 3) * TS - TS;
 
-  // Place keys
-  for (var i = 0; i < KEYS_PER_LEVEL; i++) {
+  // Place keys — CHA boosts extra key spawns
+  // CHA luck → extra key spawns
+  var totalKeys = keysPerLevel + Math.floor(Math.max(0, (statB.luck - 1) * 3));
+  for (var i = 0; i < totalKeys; i++) {
     var attempts = 0;
     while (attempts < 100) {
       var kx = Math.floor(rng() * (w - 6)) + 3;
@@ -300,18 +342,17 @@ function generateLevel(lvl) {
     }
   }
 
-  // Place animals (focused animal + 1-2 others in later levels)
-  var focusAnimal = LEVEL_FOCUS[lvl];
-  if (focusAnimal >= 0) {
-    placeAnimal(focusAnimal, rng);
-    placeAnimal(focusAnimal, rng);
+  // Place creatures (focused creature + 1-2 others in later levels)
+  var focusCreature = LEVEL_FOCUS[lvl];
+  if (focusCreature >= 0) {
+    placeAnimal(focusCreature, rng);
+    placeAnimal(focusCreature, rng);
     if (lvl >= 3) { placeAnimal(Math.floor(rng() * 6), rng); }
   } else {
-    // Nightmare realm - all animals
     for (var a = 0; a < 6; a++) placeAnimal(a, rng);
   }
 
-  // Place enemies
+  // Place enemies — more at higher levels
   var enemyCount = 4 + lvl * 2;
   for (var i = 0; i < enemyCount; i++) {
     var attempts = 0;
@@ -319,25 +360,65 @@ function generateLevel(lvl) {
       var ex = Math.floor(rng() * (w - 8)) + 4;
       var ey = findGround(ex) - 1;
       if (ey > 0 && ey < h - 1) {
-        enemies.push({ x: ex * TS, y: ey * TS, w: 12, h: 12, vx: (rng() > 0.5 ? 1 : -1) * (30 + rng() * 40), type: Math.floor(rng() * 3), animT: rng() * 6 });
+        enemies.push({ x: ex * TS, y: ey * TS, w: 12, h: 12, vx: (rng() > 0.5 ? 1 : -1) * (30 + rng() * 40), type: Math.floor(rng() * 4), hp: 1, animT: rng() * 6 });
         break;
       }
       attempts++;
     }
   }
 
-  // Place hearts
-  for (var i = 0; i < 3; i++) {
+  // Place items: hearts + Tasern items (spore caps, mycelium threads)
+  // CHA luck → more heart drops
+  var heartCount = Math.floor(3 * statB.luck);
+  for (var i = 0; i < heartCount; i++) {
     var hx = Math.floor(rng() * (w - 6)) + 3;
     var hy = Math.floor(rng() * (h - 5)) + 2;
     if (getTile(hx, hy) === TILE.AIR) {
       items.push({ x: hx * TS + 4, y: hy * TS + 4, w: 8, h: 8, type: 'heart' });
     }
   }
+  // Spore caps (bonus score)
+  for (var i = 0; i < 4; i++) {
+    var sx = Math.floor(rng() * (w - 6)) + 3;
+    var sy = Math.floor(rng() * (h - 5)) + 2;
+    if (getTile(sx, sy) === TILE.AIR) {
+      items.push({ x: sx * TS + 4, y: sy * TS + 4, w: 8, h: 8, type: 'sporecap' });
+    }
+  }
+  // Mycelium threads (temporary speed boost)
+  for (var i = 0; i < 2; i++) {
+    var tx = Math.floor(rng() * (w - 6)) + 3;
+    var ty = Math.floor(rng() * (h - 5)) + 2;
+    if (getTile(tx, ty) === TILE.AIR) {
+      items.push({ x: tx * TS + 4, y: ty * TS + 4, w: 8, h: 8, type: 'thread' });
+    }
+  }
 
-  // Generate floating decoration particles
-  for (var i = 0; i < 20; i++) {
-    floaters.push({ x: rng() * w * TS, y: rng() * h * TS, speed: 0.2 + rng() * 0.5, size: 1 + rng() * 2, phase: rng() * 6.28 });
+  // Boss on levels 3, 5, and 6 (Nightmare)
+  if (lvl === 3 || lvl === 5 || lvl >= 6) {
+    var bx = Math.floor(w * 0.7) * TS;
+    var by = findGround(Math.floor(w * 0.7)) * TS - 32;
+    boss = {
+      x: bx, y: by, w: 24, h: 24, hp: Math.floor(3 + lvl), maxHp: Math.floor(3 + lvl),
+      vx: 40, phase: 0, timer: 0, type: lvl >= 6 ? 2 : (lvl === 5 ? 1 : 0),
+      flashTimer: 0
+    };
+  }
+
+  // Generate floating decoration particles (spores)
+  for (var i = 0; i < 30; i++) {
+    floaters.push({ x: rng() * w * TS, y: rng() * h * TS, speed: 0.2 + rng() * 0.5, size: 1 + rng() * 2, phase: rng() * 6.28, color: i % 3 });
+  }
+
+  // Generate background stars for dreamy sky
+  bgStars = [];
+  for (var i = 0; i < 40; i++) {
+    bgStars.push({ x: rng() * GW, y: rng() * (GH * 0.6), size: 1 + Math.floor(rng() * 2), twinkle: rng() * 6.28, speed: 0.3 + rng() * 0.7 });
+  }
+  // Background clouds
+  bgClouds = [];
+  for (var i = 0; i < 5; i++) {
+    bgClouds.push({ x: rng() * GW * 1.5, y: 10 + rng() * 60, w: 30 + Math.floor(rng() * 40), speed: 3 + rng() * 5 });
   }
 
   camX = 0; camY = 0;
@@ -349,7 +430,7 @@ function placeAnimal(type, rng) {
   while (attempts < 80) {
     var ax = Math.floor(rng() * (w - 8)) + 4;
     var ay = findGround(ax) - 1;
-    if (type === ANIMAL.FISH) { // Place in water
+    if (type === CREATURE.FUNGI_FISH) {
       for (var y = 5; y < h - 2; y++) {
         if (getTile(ax, y) === TILE.WATER) { ay = y; break; }
       }
@@ -387,17 +468,20 @@ function isPlatform(col, row) {
   return getTile(col, row) === TILE.PLATFORM;
 }
 
-// === INPUT HELPERS ===
+// === INPUT HELPERS (NES-style: Z=B button, X=A button) ===
 function btnLeft() { return TAS.input.keys['ArrowLeft'] || TAS.input.keys['KeyA'] || TAS.input.touch.left; }
 function btnRight() { return TAS.input.keys['ArrowRight'] || TAS.input.keys['KeyD'] || TAS.input.touch.right; }
 function btnUp() { return TAS.input.keys['ArrowUp'] || TAS.input.keys['KeyW'] || TAS.input.touch.up; }
 function btnDown() { return TAS.input.keys['ArrowDown'] || TAS.input.keys['KeyS'] || TAS.input.touch.down; }
 function btnJump() { return TAS.input.keys['KeyZ'] || TAS.input.keys['Space'] || TAS.input.touch.a; }
 function btnAction() { return TAS.input.keys['KeyX'] || TAS.input.keys['ShiftLeft'] || TAS.input.touch.b; }
+function btnStart() { return TAS.input.keys['Enter'] || TAS.input.keys['Escape']; }
+function btnSelect() { return TAS.input.keys['ShiftRight'] || TAS.input.keys['Tab']; }
 
-var prevJump = false, prevAction = false;
+var prevJump = false, prevAction = false, prevStart = false;
 function jumpPressed() { var b = btnJump(); var r = b && !prevJump; return r; }
 function actionPressed() { var b = btnAction(); var r = b && !prevAction; return r; }
+function startPressed() { var b = btnStart(); var r = b && !prevStart; return r; }
 
 // === SOUND EFFECTS ===
 function sfxCandy() { TAS.audio.playTone(800, 0.08, 'sine', 0.1); TAS.audio.playTone(1200, 0.06, 'sine', 0.08); }
@@ -408,45 +492,59 @@ function sfxHit() { TAS.audio.playTone(200, 0.15, 'square', 0.12, 80); }
 function sfxEnemyHit() { TAS.audio.playTone(400, 0.08, 'square', 0.08, 200); }
 function sfxLevelClear() { TAS.audio.playMelody([[523, 0.15], [659, 0.15], [784, 0.15], [1047, 0.3]], 150); }
 function sfxDeath() { TAS.audio.playMelody([[400, 0.2], [300, 0.2], [200, 0.3]], 200); }
+function sfxBossHit() { TAS.audio.playTone(150, 0.2, 'square', 0.15, 60); TAS.audio.playTone(250, 0.1, 'sawtooth', 0.1); }
+function sfxSporePop() { TAS.audio.playTone(900, 0.06, 'sine', 0.06); TAS.audio.playTone(1400, 0.04, 'sine', 0.04); }
+function sfxThread() { TAS.audio.playMelody([[600, 0.04], [800, 0.04], [1000, 0.06]], 40); }
 
-// === CANDY THROW ===
+// Temporary speed boost state
+var speedBoostTimer = 0;
+
+// === CANDY THROW (CHA luck affects max candy, WIS cooldown) ===
 function throwCandy() {
-  if (candyThrown.length >= 3) return;
+  var maxCandy = Math.floor(3 * statB.luck);
+  if (candyThrown.length >= maxCandy) return;
+  if (abilityCooldown > 0) return;
   sfxCandy();
-  candyThrown.push({ x: P.x + (P.facing > 0 ? P.w : 0), y: P.y + 4, vx: P.facing * 200, vy: -80, life: 1.5 });
+  abilityCooldown = 0.2 * statB.cooldown;
+  candyThrown.push({ x: P.x + (P.facing > 0 ? P.w : 0), y: P.y + 4, vx: Math.floor(P.facing * 200 * statB.speed), vy: -80, life: 1.5 });
 }
 
-// === PLAYER PHYSICS ===
+// === PLAYER PHYSICS (DEX scales speed) ===
 function updatePlayer(dt) {
-  var speed = 100;
+  var baseSpeed = 100;
+  var speed = Math.floor(baseSpeed * statB.speed);
   var jumpForce = -260;
   var riding = P.riding;
 
+  // Speed boost
+  if (speedBoostTimer > 0) {
+    speedBoostTimer -= dt;
+    speed = Math.floor(speed * 1.4);
+  }
+
   if (riding) {
-    // Animal-specific movement
     switch (riding.type) {
-      case ANIMAL.FROG:
-        speed = 110;
-        jumpForce = -380; // High jump
+      case CREATURE.REACTOR_FROG:
+        speed = Math.floor(110 * statB.speed);
+        jumpForce = -380;
         break;
-      case ANIMAL.MOLE:
-        speed = 80;
+      case CREATURE.MYCELIAL_MOLE:
+        speed = Math.floor(80 * statB.speed);
         jumpForce = -220;
         break;
-      case ANIMAL.BEE:
-        speed = 90;
-        // Flying
+      case CREATURE.SPORE_BEE:
+        speed = Math.floor(90 * statB.speed);
         break;
-      case ANIMAL.LIZARD:
-        speed = 140; // Fast runner
+      case CREATURE.LICHEN_LIZARD:
+        speed = Math.floor(140 * statB.speed);
         jumpForce = -260;
         break;
-      case ANIMAL.FISH:
-        speed = 100;
+      case CREATURE.FUNGI_FISH:
+        speed = Math.floor(100 * statB.speed);
         break;
-      case ANIMAL.GORILLA:
-        speed = 70;
-        jumpForce = -180; // Can't jump high
+      case CREATURE.MOSS_GORILLA:
+        speed = Math.floor(70 * statB.speed);
+        jumpForce = -180;
         break;
     }
   }
@@ -456,18 +554,18 @@ function updatePlayer(dt) {
   if (btnLeft()) { P.vx = -speed; P.facing = -1; }
   if (btnRight()) { P.vx = speed; P.facing = 1; }
 
-  // Special: Bee flying
-  if (riding && riding.type === ANIMAL.BEE) {
+  // Special: Spore Bee flying
+  if (riding && riding.type === CREATURE.SPORE_BEE) {
     P.vy = 0;
     if (btnUp()) P.vy = -120;
     if (btnDown()) P.vy = 100;
-    if (!btnUp() && !btnDown()) P.vy = 20; // Gentle fall
+    if (!btnUp() && !btnDown()) P.vy = 20;
     P.x += P.vx * dt;
     P.y += P.vy * dt;
     P.animT += dt;
   }
-  // Special: Fish swimming
-  else if (riding && riding.type === ANIMAL.FISH) {
+  // Special: Fungi Fish swimming
+  else if (riding && riding.type === CREATURE.FUNGI_FISH) {
     var inWater = getTileAt(P.x + P.w / 2, P.y + P.h / 2) === TILE.WATER;
     if (inWater) {
       P.vy = 0;
@@ -477,22 +575,21 @@ function updatePlayer(dt) {
       P.x += P.vx * dt;
       P.y += P.vy * dt;
     } else {
-      // Normal physics outside water
       applyGravity(dt, jumpForce);
       P.x += P.vx * dt;
       P.y += P.vy * dt;
     }
     P.animT += dt;
   }
-  // Special: Lizard wall cling
-  else if (riding && riding.type === ANIMAL.LIZARD) {
+  // Special: Lichen Lizard wall cling
+  else if (riding && riding.type === CREATURE.LICHEN_LIZARD) {
     var onWall = false;
     var wallDir = 0;
     if (isSolid(Math.floor((P.x - 2) / TS), Math.floor((P.y + P.h / 2) / TS))) { onWall = true; wallDir = -1; }
     if (isSolid(Math.floor((P.x + P.w + 2) / TS), Math.floor((P.y + P.h / 2) / TS))) { onWall = true; wallDir = 1; }
 
     if (onWall && !P.onGround) {
-      P.vy = 20; // Slow slide
+      P.vy = 20;
       if (btnUp()) P.vy = -100;
       if (btnDown()) P.vy = 60;
       if (jumpPressed()) { P.vy = -280; P.vx = -wallDir * 120; }
@@ -503,9 +600,7 @@ function updatePlayer(dt) {
     P.y += P.vy * dt;
     P.animT += dt;
   }
-  // Normal/Frog/Mole/Gorilla physics
   else {
-    // Ladder climbing (any form)
     var onLadder = getTileAt(P.x + P.w / 2, P.y + P.h / 2) === TILE.LADDER;
     if (onLadder && (btnUp() || btnDown())) {
       P.vy = 0;
@@ -521,26 +616,37 @@ function updatePlayer(dt) {
     P.animT += dt;
   }
 
-  // Mole dig
-  if (riding && riding.type === ANIMAL.MOLE && btnAction() && actionPressed()) {
-    var digX = Math.floor((P.x + P.w / 2 + P.facing * 12) / TS);
-    var digY = Math.floor((P.y + P.h / 2) / TS);
-    if (digX >= 0 && digX < COLS && digY >= 0 && digY < ROWS && tiles[digY][digX] === TILE.DIRT) {
-      tiles[digY][digX] = TILE.AIR;
-      TAS.particles.spawn(digX * TS + 8, digY * TS + 8, '#8b5e3c', 6, 2, { gravity: 1 });
-      TAS.audio.playNoise(0.1, 0.06, 400);
+  // Mycelial Mole dig (WIS cooldown)
+  if (riding && riding.type === CREATURE.MYCELIAL_MOLE && btnAction() && actionPressed()) {
+    if (abilityCooldown <= 0) {
+      var digX = Math.floor((P.x + P.w / 2 + P.facing * 12) / TS);
+      var digY = Math.floor((P.y + P.h / 2) / TS);
+      if (digX >= 0 && digX < COLS && digY >= 0 && digY < ROWS && (tiles[digY][digX] === TILE.DIRT || tiles[digY][digX] === TILE.MYCELIUM)) {
+        tiles[digY][digX] = TILE.AIR;
+        TAS.particles.spawn(digX * TS + 8, digY * TS + 8, '#9b6e4c', 8, 2, { gravity: 1 });
+        TAS.audio.playNoise(0.1, 0.06, 400);
+        abilityCooldown = 0.4 * statB.cooldown;
+      }
     }
+  }
+
+  // Mycelium tile — bounce pad
+  var footTile = getTileAt(P.x + P.w / 2, P.y + P.h + 1);
+  if (footTile === TILE.MYCELIUM && P.onGround) {
+    P.vy = -200;
+    P.onGround = false;
+    TAS.particles.spawn(P.x + P.w / 2, P.y + P.h, '#88ff88', 6, 2, { gravity: -0.5 });
+    TAS.audio.playTone(500, 0.06, 'sine', 0.05, 400);
   }
 
   // Collide with level
   resolveCollision();
 
-  // Water check (not on fish)
-  if (!riding || riding.type !== ANIMAL.FISH) {
+  // Water check (not on Fungi Fish)
+  if (!riding || riding.type !== CREATURE.FUNGI_FISH) {
     var inWater = getTileAt(P.x + P.w / 2, P.y + P.h) === TILE.WATER;
-    if (inWater && (!riding || riding.type !== ANIMAL.BEE)) {
+    if (inWater && (!riding || riding.type !== CREATURE.SPORE_BEE)) {
       if (riding) { dismount(); }
-      // Slow in water
       P.vy = Math.min(P.vy, 40);
       if (btnUp()) P.vy = -60;
     }
@@ -554,9 +660,9 @@ function updatePlayer(dt) {
   if (P.x < 0) P.x = 0;
   if (P.x > (COLS - 1) * TS - P.w) P.x = (COLS - 1) * TS - P.w;
   if (P.y < 0) { P.y = 0; P.vy = 0; }
-  if (P.y > ROWS * TS) takeDamage(); // Fell off
+  if (P.y > ROWS * TS) takeDamage();
 
-  // Update camera
+  // Update camera — smooth follow
   var targetCamX = P.x - GW / 2 + P.w / 2;
   var targetCamY = P.y - GH / 2 + P.h / 2;
   camX += (targetCamX - camX) * 4 * dt;
@@ -566,14 +672,12 @@ function updatePlayer(dt) {
 }
 
 function applyGravity(dt, jumpForce) {
-  // Jumping
   if (P.onGround && jumpPressed()) {
     P.vy = jumpForce;
     P.onGround = false;
     P.jumpHeld = true;
     TAS.audio.playTone(350, 0.06, 'square', 0.05, 500);
   }
-  // Variable jump height
   if (!btnJump()) P.jumpHeld = false;
   if (P.jumpHeld && P.vy < 0) {
     P.vy += GRAVITY * 0.5 * dt;
@@ -590,7 +694,6 @@ function resolveCollision() {
   var top = Math.floor(P.y / TS);
   var bottom = Math.floor((P.y + P.h - 1) / TS);
 
-  // Vertical
   if (P.vy > 0) {
     var footRow = Math.floor((P.y + P.h) / TS);
     for (var col = left; col <= right; col++) {
@@ -612,7 +715,6 @@ function resolveCollision() {
     }
   }
 
-  // Horizontal
   left = Math.floor(P.x / TS);
   right = Math.floor((P.x + P.w - 1) / TS);
   top = Math.floor(P.y / TS);
@@ -641,7 +743,8 @@ function mount(animal) {
   animal.ridden = true;
   P.w = 14; P.h = 14;
   sfxMount();
-  TAS.particles.spawn(P.x + P.w / 2, P.y + P.h / 2, ANIMAL_COLORS[animal.type], 8, 3);
+  TAS.particles.spawn(P.x + P.w / 2, P.y + P.h / 2, CREATURE_COLORS[animal.type], 10, 3);
+  TAS.fx.shake(2, 0.9);
 }
 
 function dismount() {
@@ -652,59 +755,90 @@ function dismount() {
   P.riding = null;
   P.w = 10; P.h = 14;
   sfxDismount();
-  TAS.particles.spawn(P.x + P.w / 2, P.y + P.h / 2, '#fff', 6, 2);
+  TAS.particles.spawn(P.x + P.w / 2, P.y + P.h / 2, '#ddeeff', 8, 2);
 }
 
-// === DAMAGE ===
+// === DAMAGE (CON affects max HP) ===
 function takeDamage() {
   if (invincTimer > 0) return;
   if (P.riding) {
     dismount();
-    invincTimer = 1.5;
-    TAS.fx.shake(4, 0.85);
+    invincTimer = 1.5 * statB.hpMult;
+    TAS.fx.shake(5, 0.85);
     return;
   }
   hp--;
-  invincTimer = 2;
-  TAS.fx.shake(6, 0.8);
+  invincTimer = 2 * statB.hpMult;
+  TAS.fx.shake(8, 0.75);
   TAS.fx.flash('#ff0000', 0.4);
   sfxHit();
   if (hp <= 0) {
     deathTimer = 2;
     sfxDeath();
+    TAS.fx.shake(12, 0.6);
   }
 }
 
-// === ATTACK (mounted) ===
+// === ATTACK (STR scales damage, WIS scales cooldown) ===
 function doAttack() {
   if (!P.riding) return;
+  if (abilityCooldown > 0) return;
+
   var ax = P.x + (P.facing > 0 ? P.w : -16);
   var ay = P.y - 2;
   var aw = 16, ah = P.h + 4;
   var hitSomething = false;
 
-  // Frog tongue - longer range
-  if (P.riding.type === ANIMAL.FROG) { aw = 32; ax = P.x + (P.facing > 0 ? P.w : -32); }
-  // Gorilla - wider
-  if (P.riding.type === ANIMAL.GORILLA) { aw = 20; ah = 18; }
+  // Reactor Frog tongue — longer range (STR scales)
+  if (P.riding.type === CREATURE.REACTOR_FROG) { aw = Math.floor(32 * statB.damage); ax = P.x + (P.facing > 0 ? P.w : -aw); }
+  // Moss Gorilla — wider, stronger (STR scales)
+  if (P.riding.type === CREATURE.MOSS_GORILLA) { aw = Math.floor(20 * statB.damage); ah = Math.floor(18 * statB.damage); }
+
+  var dmg = Math.floor(1 * statB.damage);
 
   for (var i = enemies.length - 1; i >= 0; i--) {
     var e = enemies[i];
     if (TAS.hit.rectOverlap(ax, ay, aw, ah, e.x, e.y, e.w, e.h)) {
-      TAS.particles.spawn(e.x + e.w / 2, e.y + e.h / 2, '#ffdd44', 8, 3, { gravity: 1 });
-      sfxEnemyHit();
-      enemies.splice(i, 1);
-      score += 100;
+      e.hp -= dmg;
+      if (e.hp <= 0) {
+        TAS.particles.spawn(e.x + e.w / 2, e.y + e.h / 2, '#ffdd44', 10, 3, { gravity: 1 });
+        sfxEnemyHit();
+        enemies.splice(i, 1);
+        addScore(100);
+        // CHA luck: chance to drop item on kill
+        if (Math.random() < statB.luck * 0.15) {
+          items.push({ x: e.x + 4, y: e.y + 4, w: 8, h: 8, type: 'sporecap' });
+        }
+      } else {
+        TAS.particles.spawn(e.x + e.w / 2, e.y + e.h / 2, '#ff8844', 4, 2);
+      }
       hitSomething = true;
     }
   }
 
+  // Boss hit
+  if (boss && TAS.hit.rectOverlap(ax, ay, aw, ah, boss.x, boss.y, boss.w, boss.h)) {
+    boss.hp -= dmg;
+    boss.flashTimer = 0.15;
+    sfxBossHit();
+    TAS.fx.shake(6, 0.8);
+    TAS.particles.spawn(boss.x + boss.w / 2, boss.y + boss.h / 2, '#ff4444', 12, 3, { gravity: 1 });
+    if (boss.hp <= 0) {
+      addScore(2000);
+      TAS.particles.spawn(boss.x + boss.w / 2, boss.y + boss.h / 2, '#ffdd44', 25, 5, { gravity: -1 });
+      TAS.fx.flash('#ffffff', 0.5);
+      TAS.fx.shake(10, 0.6);
+      boss = null;
+    }
+  }
+
+  abilityCooldown = 0.3 * statB.cooldown;
+
   // Visual feedback
-  if (P.riding.type === ANIMAL.FROG) {
-    // Tongue line effect
-    TAS.particles.spawn(ax + aw / 2, ay + ah / 2, '#ff4488', 3, 1);
+  if (P.riding.type === CREATURE.REACTOR_FROG) {
+    TAS.particles.spawn(ax + aw / 2, ay + ah / 2, '#33ff88', 4, 1);
   } else {
-    TAS.particles.spawn(ax + aw / 2, ay + ah / 2, ANIMAL_COLORS[P.riding.type], 4, 2);
+    TAS.particles.spawn(ax + aw / 2, ay + ah / 2, CREATURE_COLORS[P.riding.type], 5, 2);
   }
 }
 
@@ -712,8 +846,10 @@ function doAttack() {
 function startGame() {
   state = 'playing';
   score = 0;
-  hp = 3;
+  maxHp = Math.floor(3 * statB.hpMult) + statB.lives;
+  hp = maxHp;
   level = 0;
+  speedBoostTimer = 0;
   TAS.particles.clear();
   generateLevel(level);
   levelTransTimer = 1.5;
@@ -722,7 +858,6 @@ function startGame() {
 function nextLevel() {
   level++;
   if (level >= 7) {
-    // Won the game!
     state = 'victory';
     if (score > highScore) { highScore = score; TAS.score.save('littlenemo_hi', score); }
     return;
@@ -736,6 +871,7 @@ function update(dt) {
   frame++;
   TAS.particles.update(dt);
   TAS.fx.updateEffects(dt);
+  if (abilityCooldown > 0) abilityCooldown -= dt;
 
   if (state === 'title') {
     if (Object.values(TAS.input.keys).some(Boolean) || TAS.input.touch.a) {
@@ -811,17 +947,16 @@ function update(dt) {
     c.vy += 300 * dt;
     c.life -= dt;
     if (c.life <= 0 || isSolid(Math.floor(c.x / TS), Math.floor(c.y / TS))) {
-      TAS.particles.spawn(c.x, c.y, '#ff88cc', 4, 2);
+      TAS.particles.spawn(c.x, c.y, '#ff88cc', 5, 2);
       candyThrown.splice(i, 1);
       continue;
     }
-    // Check if candy hits an animal
     for (var j = 0; j < animals.length; j++) {
       var a = animals[j];
       if (!a.ridden && !a.stunned && TAS.hit.rectOverlap(c.x - 3, c.y - 3, 6, 6, a.x, a.y, a.w, a.h)) {
         a.stunned = true;
-        a.stunTimer = 4;
-        TAS.particles.spawn(a.x + a.w / 2, a.y + a.h / 2, '#ffaadd', 6, 2);
+        a.stunTimer = 4 * statB.luck;
+        TAS.particles.spawn(a.x + a.w / 2, a.y + a.h / 2, '#ffaadd', 8, 2);
         TAS.audio.playTone(600, 0.1, 'sine', 0.08);
         candyThrown.splice(i, 1);
         break;
@@ -837,12 +972,10 @@ function update(dt) {
     if (a.stunned) {
       a.stunTimer -= dt;
       if (a.stunTimer <= 0) a.stunned = false;
-      // Player can mount stunned animal
       if (TAS.hit.rectOverlap(P.x, P.y, P.w, P.h, a.x, a.y, a.w, a.h) && !P.riding) {
         mount(a);
       }
     } else {
-      // Wander
       a.x += Math.sin(a.animT * 1.5) * 0.3 * a.facing;
     }
   }
@@ -852,22 +985,60 @@ function update(dt) {
     var e = enemies[i];
     e.x += e.vx * dt;
     e.animT += dt;
-    // Bounce off walls
     var eCol = Math.floor((e.x + (e.vx > 0 ? e.w : 0)) / TS);
     var eRow = Math.floor((e.y + e.h / 2) / TS);
     if (isSolid(eCol, eRow) || e.x < 0 || e.x > (COLS - 1) * TS) {
       e.vx = -e.vx;
     }
-    // Check ground beneath
     var belowRow = Math.floor((e.y + e.h + 2) / TS);
     var belowCol = Math.floor((e.x + e.w / 2) / TS);
     if (!isSolid(belowCol, belowRow) && getTile(belowCol, belowRow) !== TILE.PLATFORM) {
-      // Turn around at edges (some enemies)
       if (e.type === 0) e.vx = -e.vx;
     }
-
-    // Hit player
     if (invincTimer <= 0 && TAS.hit.rectOverlap(P.x, P.y, P.w, P.h, e.x, e.y, e.w, e.h)) {
+      takeDamage();
+    }
+  }
+
+  // Update boss
+  if (boss) {
+    boss.timer += dt;
+    if (boss.flashTimer > 0) boss.flashTimer -= dt;
+
+    // Boss movement pattern
+    boss.x += boss.vx * dt;
+    if (boss.x < 4 * TS || boss.x > (COLS - 6) * TS) boss.vx = -boss.vx;
+
+    // Boss phases
+    if (boss.type === 0) {
+      // Reef Guardian — bounces, spawns bubbles
+      boss.y += Math.sin(boss.timer * 2) * 0.8;
+    } else if (boss.type === 1) {
+      // Moss Colossus — charges at player
+      if (Math.floor(boss.timer) % 4 === 0 && boss.phase === 0) {
+        boss.vx = (P.x > boss.x ? 1 : -1) * 80;
+        boss.phase = 1;
+      }
+      if (boss.phase === 1 && Math.floor(boss.timer) % 4 === 2) {
+        boss.vx = 40 * (boss.vx > 0 ? 1 : -1);
+        boss.phase = 0;
+      }
+    } else {
+      // Nightmare Fungus — teleports, spawns spores
+      if (Math.floor(boss.timer * 2) % 6 === 0 && boss.phase === 0) {
+        boss.phase = 1;
+        TAS.particles.spawn(boss.x + boss.w / 2, boss.y + boss.h / 2, '#aa22ff', 12, 3);
+      }
+      if (boss.phase === 1 && Math.floor(boss.timer * 2) % 6 === 3) {
+        boss.x = P.x + (Math.random() > 0.5 ? 60 : -60);
+        boss.y = P.y - 20;
+        boss.phase = 0;
+        TAS.particles.spawn(boss.x + boss.w / 2, boss.y + boss.h / 2, '#ff22aa', 12, 3);
+      }
+    }
+
+    // Boss hits player
+    if (invincTimer <= 0 && TAS.hit.rectOverlap(P.x, P.y, P.w, P.h, boss.x, boss.y, boss.w, boss.h)) {
       takeDamage();
     }
   }
@@ -880,24 +1051,35 @@ function update(dt) {
     if (TAS.hit.rectOverlap(P.x, P.y, P.w, P.h, k.x, k.y + Math.sin(k.bobT) * 2, k.w, k.h)) {
       k.collected = true;
       keysCollected++;
-      score += 500;
+      addScore(500);
       sfxKey();
-      TAS.particles.spawn(k.x + 4, k.y + 4, '#ffdd44', 12, 3, { gravity: -0.5 });
-      if (keysCollected >= KEYS_PER_LEVEL) {
+      TAS.particles.spawn(k.x + 4, k.y + 4, '#ffdd44', 14, 3, { gravity: -0.5 });
+      if (keysCollected >= keysPerLevel) {
         doorOpen = true;
         TAS.audio.playMelody([[440, 0.1], [550, 0.1], [660, 0.15]], 100);
+        TAS.fx.shake(3, 0.9);
       }
     }
   }
 
-  // Collect hearts
+  // Collect items
   for (var i = items.length - 1; i >= 0; i--) {
     var it = items[i];
     if (TAS.hit.rectOverlap(P.x, P.y, P.w, P.h, it.x, it.y, it.w, it.h)) {
       if (it.type === 'heart' && hp < maxHp) {
         hp++;
         TAS.audio.playTone(880, 0.1, 'sine', 0.08);
-        TAS.particles.spawn(it.x + 4, it.y + 4, '#ff4466', 6, 2);
+        TAS.particles.spawn(it.x + 4, it.y + 4, '#ff4466', 8, 2);
+        items.splice(i, 1);
+      } else if (it.type === 'sporecap') {
+        addScore(250);
+        sfxSporePop();
+        TAS.particles.spawn(it.x + 4, it.y + 4, '#88ff44', 8, 2, { gravity: -0.5 });
+        items.splice(i, 1);
+      } else if (it.type === 'thread') {
+        speedBoostTimer = 5 * statB.speed;
+        sfxThread();
+        TAS.particles.spawn(it.x + 4, it.y + 4, '#44ffcc', 10, 2, { gravity: -0.3 });
         items.splice(i, 1);
       }
     }
@@ -906,9 +1088,10 @@ function update(dt) {
   // Check door
   if (doorOpen && TAS.hit.rectOverlap(P.x, P.y, P.w, P.h, doorX, doorY, 16, 16)) {
     levelCompleteTimer = 2;
-    score += 1000;
+    addScore(1000);
     sfxLevelClear();
-    TAS.particles.spawn(doorX + 8, doorY + 8, '#ffdd44', 20, 4, { gravity: -1 });
+    TAS.particles.spawn(doorX + 8, doorY + 8, '#ffdd44', 25, 4, { gravity: -1 });
+    TAS.fx.shake(4, 0.85);
   }
 
   // Update floaters
@@ -921,11 +1104,12 @@ function update(dt) {
 
   prevJump = btnJump();
   prevAction = btnAction();
+  prevStart = btnStart();
 }
 
 // === DRAW ===
 function draw(dt) {
-  var bgColor = LEVEL_BG[level] || '#0a0a1a';
+  var bgColor = LEVEL_BG[level] || '#060a1a';
   ctx.fillStyle = bgColor;
   ctx.fillRect(0, 0, GW, GH);
 
@@ -935,7 +1119,7 @@ function draw(dt) {
   }
 
   if (state === 'gameOver') {
-    TAS.ui.drawGameOver(score, highScore, GW, GH, { frame: frame, extra: 'Level: ' + (level + 1) + ' - ' + LEVEL_NAMES[level] });
+    TAS.ui.drawGameOver(score, highScore, GW, GH, { frame: frame, extra: 'Dream ' + (level + 1) + ' - ' + LEVEL_NAMES[level] });
     return;
   }
 
@@ -944,11 +1128,14 @@ function draw(dt) {
     return;
   }
 
+  // Dreamy parallax background
+  drawDreamBackground();
+
   ctx.save();
   TAS.fx.applyShake();
   ctx.translate(-Math.floor(camX), -Math.floor(camY));
 
-  // Draw background floaters
+  // Draw background floaters (spores)
   drawFloaters();
 
   // Draw tiles
@@ -968,6 +1155,9 @@ function draw(dt) {
 
   // Draw enemies
   drawEnemies();
+
+  // Draw boss
+  if (boss) drawBoss();
 
   // Draw player
   drawPlayer();
@@ -993,16 +1183,21 @@ function draw(dt) {
     ctx.textAlign = 'center';
     ctx.fillStyle = '#ffdd44';
     ctx.font = 'bold 14px monospace';
-    ctx.fillText('Level ' + (level + 1), GW / 2, GH / 2 - 16);
+    ctx.fillText('Dream ' + (level + 1), GW / 2, GH / 2 - 20);
     ctx.fillStyle = '#88ccff';
     ctx.font = '11px monospace';
-    ctx.fillText(LEVEL_NAMES[level], GW / 2, GH / 2 + 4);
+    ctx.fillText(LEVEL_NAMES[level], GW / 2, GH / 2);
     if (LEVEL_FOCUS[level] >= 0) {
-      ctx.fillStyle = ANIMAL_COLORS[LEVEL_FOCUS[level]];
-      ctx.fillText('Ride the ' + ANIMAL_NAMES[LEVEL_FOCUS[level]] + '!', GW / 2, GH / 2 + 22);
+      ctx.fillStyle = CREATURE_COLORS[LEVEL_FOCUS[level]];
+      ctx.fillText('Befriend the ' + CREATURE_NAMES[LEVEL_FOCUS[level]] + '!', GW / 2, GH / 2 + 18);
     } else {
       ctx.fillStyle = '#ff88cc';
-      ctx.fillText('All animals available!', GW / 2, GH / 2 + 22);
+      ctx.fillText('All creatures roam free!', GW / 2, GH / 2 + 18);
+    }
+    if (boss) {
+      ctx.fillStyle = '#ff4444';
+      ctx.font = '9px monospace';
+      ctx.fillText('A great fungal beast guards this dream...', GW / 2, GH / 2 + 34);
     }
   }
 
@@ -1016,93 +1211,144 @@ function draw(dt) {
     ctx.fillText('DREAM CLEAR!', GW / 2, GH / 2 - 10);
     ctx.fillStyle = '#fff';
     ctx.font = '10px monospace';
-    ctx.fillText('+1000 points', GW / 2, GH / 2 + 10);
+    var bonusPts = Math.floor(1000 * statB.scoreMult);
+    ctx.fillText('+' + bonusPts + ' dream points', GW / 2, GH / 2 + 10);
   }
 
   TAS.input.drawTouchControls(GW, GH);
 }
 
 // === DRAWING HELPERS ===
+
+// Dreamy parallax background — stars and clouds
+function drawDreamBackground() {
+  var t = frame * 0.015;
+  // Stars
+  for (var i = 0; i < bgStars.length; i++) {
+    var s = bgStars[i];
+    var twinkle = Math.sin(t * s.speed + s.twinkle) * 0.4 + 0.6;
+    ctx.globalAlpha = twinkle * 0.5;
+    ctx.fillStyle = i % 3 === 0 ? '#aaccff' : (i % 3 === 1 ? '#ffddaa' : '#ddddff');
+    ctx.fillRect(Math.floor(s.x - camX * 0.05) % GW, Math.floor(s.y), s.size, s.size);
+  }
+  // Clouds (parallax)
+  ctx.globalAlpha = 0.08;
+  for (var i = 0; i < bgClouds.length; i++) {
+    var c = bgClouds[i];
+    var cx = (c.x - camX * 0.1 + frame * 0.1 * c.speed * 0.1) % (GW + c.w * 2) - c.w;
+    ctx.fillStyle = level === 4 ? '#22ff88' : (level >= 6 ? '#882244' : '#8888cc');
+    ctx.fillRect(Math.floor(cx), Math.floor(c.y), c.w, 6);
+    ctx.fillRect(Math.floor(cx) + 4, Math.floor(c.y) - 3, c.w - 8, 4);
+  }
+  ctx.globalAlpha = 1;
+}
+
 function drawTitleScreen() {
-  // Dreamy background
+  // Dreamy background particles
   var t = frame * 0.02;
   for (var i = 0; i < 30; i++) {
     var sx = (Math.sin(t + i * 0.7) * 0.5 + 0.5) * GW;
     var sy = (Math.cos(t + i * 1.1) * 0.5 + 0.5) * GH;
     ctx.globalAlpha = 0.15;
-    ctx.fillStyle = ['#4488ff', '#ff88cc', '#88ffaa', '#ffdd44', '#aa88ff'][i % 5];
+    ctx.fillStyle = ['#33ff88', '#ff88cc', '#88ffaa', '#ffcc00', '#44aaff'][i % 5];
     ctx.beginPath();
     ctx.arc(sx, sy, 3 + Math.sin(t + i) * 2, 0, Math.PI * 2);
     ctx.fill();
   }
+  // Spore drifts
+  for (var i = 0; i < 15; i++) {
+    var spx = (Math.sin(t * 0.5 + i * 1.3) * 0.5 + 0.5) * GW;
+    var spy = ((t * 8 + i * 17) % GH);
+    ctx.globalAlpha = 0.1;
+    ctx.fillStyle = '#88ff88';
+    ctx.fillRect(Math.floor(spx), Math.floor(spy), 2, 2);
+  }
   ctx.globalAlpha = 1;
 
-  // Title
+  // Title — NES shadow + glow
   ctx.textAlign = 'center';
   ctx.fillStyle = '#000';
   ctx.font = 'bold 20px monospace';
-  ctx.fillText('LITTLE NEMO', GW / 2 + 1, 50 + 1);
+  ctx.fillText('LITTLE NEMO', GW / 2 + 1, 44 + 1);
   ctx.fillStyle = '#88ccff';
-  ctx.fillText('LITTLE NEMO', GW / 2, 50);
+  ctx.fillText('LITTLE NEMO', GW / 2, 44);
 
   ctx.fillStyle = '#ffaadd';
   ctx.font = '10px monospace';
-  ctx.fillText('Dream Master', GW / 2, 68);
+  ctx.fillText('Dream Master of Tasern', GW / 2, 60);
 
   // Instructions
   ctx.fillStyle = '#aaa';
   ctx.font = '9px monospace';
-  ctx.fillText('Ride animals to explore dreamland!', GW / 2, 100);
-  ctx.fillText('Throw candy to stun animals, then touch to mount', GW / 2, 114);
-  ctx.fillText('Collect all 6 keys to unlock the exit', GW / 2, 128);
+  ctx.fillText('Befriend Tasern creatures in dreamland!', GW / 2, 86);
+  ctx.fillText('Throw candy to stun, then touch to ride', GW / 2, 100);
+  ctx.fillText('Collect dream keys to unlock the exit', GW / 2, 114);
 
-  // Animal list
+  // Creature list
   ctx.font = '8px monospace';
-  var animalDesc = ['Frog: high jump, tongue', 'Bee: fly freely, stinger', 'Mole: dig dirt, claw', 'Fish: swim water, bubbles', 'Lizard: climb walls, fast', 'Gorilla: strong punch'];
+  var creatureDesc = [
+    'Reactor Frog: high jump, tongue lash',
+    'Spore Bee: free flight, stinger',
+    'Mycelial Mole: dig earth, claw',
+    'Fungi Fish: swim depths, bubbles',
+    'Lichen Lizard: climb walls, dash',
+    'Moss Gorilla: mighty punch'
+  ];
   for (var i = 0; i < 6; i++) {
-    ctx.fillStyle = ANIMAL_COLORS[i];
-    ctx.fillText(animalDesc[i], GW / 2, 152 + i * 12);
+    ctx.fillStyle = CREATURE_COLORS[i];
+    ctx.fillText(creatureDesc[i], GW / 2, 136 + i * 12);
   }
+
+  // NES controls hint
+  ctx.fillStyle = '#666';
+  ctx.font = '7px monospace';
+  ctx.fillText('Z=JUMP  X=ACTION  ARROWS=MOVE', GW / 2, 214);
+
+  // Stat bar
+  if (window.NftLoader && NftLoader.drawStatBar) NftLoader.drawStatBar(ctx, 10, 10, 120);
 
   // Start prompt
   var pulse = Math.sin(frame * 0.05) * 0.3 + 0.7;
   ctx.globalAlpha = pulse;
   ctx.fillStyle = '#ffdd44';
   ctx.font = 'bold 10px monospace';
-  ctx.fillText('PRESS ANY KEY TO START', GW / 2, GH - 24);
+  ctx.fillText('PRESS ANY KEY TO DREAM', GW / 2, GH - 24);
   ctx.globalAlpha = 1;
 
-  // High score
   if (highScore > 0) {
     ctx.fillStyle = '#666';
     ctx.font = '8px monospace';
-    ctx.fillText('High Score: ' + highScore, GW / 2, GH - 10);
+    ctx.fillText('Best Dream: ' + highScore, GW / 2, GH - 10);
   }
 }
 
 function drawVictoryScreen() {
   var t = frame * 0.03;
-  ctx.fillStyle = '#0a0a2a';
+  ctx.fillStyle = '#060a2a';
   ctx.fillRect(0, 0, GW, GH);
 
-  // Stars
-  for (var i = 0; i < 40; i++) {
+  // Stars + spore shower
+  for (var i = 0; i < 50; i++) {
     var sx = (Math.sin(t + i * 0.5) * 0.5 + 0.5) * GW;
     var sy = (Math.cos(t * 0.7 + i * 0.8) * 0.5 + 0.5) * GH;
     ctx.globalAlpha = 0.4 + Math.sin(t + i) * 0.3;
-    ctx.fillStyle = '#ffdd44';
-    ctx.fillRect(sx, sy, 2, 2);
+    ctx.fillStyle = i % 4 === 0 ? '#88ff88' : (i % 4 === 1 ? '#ffdd44' : (i % 4 === 2 ? '#ff88cc' : '#44aaff'));
+    ctx.fillRect(Math.floor(sx), Math.floor(sy), 2, 2);
   }
   ctx.globalAlpha = 1;
 
   ctx.textAlign = 'center';
   ctx.fillStyle = '#ffdd44';
   ctx.font = 'bold 18px monospace';
-  ctx.fillText('SWEET DREAMS!', GW / 2, 60);
+  ctx.fillText('SWEET DREAMS!', GW / 2, 50);
 
   ctx.fillStyle = '#88ccff';
   ctx.font = '12px monospace';
-  ctx.fillText('You conquered all 7 dreams!', GW / 2, 90);
+  ctx.fillText('All 7 dreams conquered!', GW / 2, 78);
+
+  ctx.fillStyle = '#88ff88';
+  ctx.font = '10px monospace';
+  ctx.fillText('The spores of Tasern rest in peace.', GW / 2, 100);
 
   ctx.fillStyle = '#ffaadd';
   ctx.font = 'bold 14px monospace';
@@ -1113,7 +1359,7 @@ function drawVictoryScreen() {
     ctx.globalAlpha = p;
     ctx.fillStyle = '#ffdd44';
     ctx.font = '10px monospace';
-    ctx.fillText('NEW HIGH SCORE!', GW / 2, 150);
+    ctx.fillText('NEW BEST DREAM!', GW / 2, 150);
     ctx.globalAlpha = 1;
   }
 
@@ -1140,28 +1386,37 @@ function drawTiles() {
         case TILE.SOLID:
           ctx.fillStyle = getLevelTileColor(0);
           ctx.fillRect(px, py, TS, TS);
-          // Slight border
           ctx.fillStyle = getLevelTileColor(1);
           ctx.fillRect(px, py, TS, 1);
           ctx.fillRect(px, py, 1, TS);
           break;
         case TILE.DIRT:
-          ctx.fillStyle = '#6b4226';
+          ctx.fillStyle = '#5b3216';
           ctx.fillRect(px, py, TS, TS);
-          ctx.fillStyle = '#8b5e3c';
+          ctx.fillStyle = '#7b4e2c';
           ctx.fillRect(px + 2, py + 2, 3, 3);
           ctx.fillRect(px + 9, py + 7, 4, 3);
           ctx.fillRect(px + 4, py + 11, 3, 2);
+          // Speckles
+          ctx.fillStyle = '#9b6e4c';
+          ctx.fillRect(px + 7, py + 3, 2, 2);
+          ctx.fillRect(px + 1, py + 9, 2, 2);
           break;
         case TILE.WATER:
-          ctx.fillStyle = 'rgba(30,80,180,0.6)';
+          ctx.fillStyle = 'rgba(20,60,160,0.6)';
           ctx.fillRect(px, py, TS, TS);
-          ctx.fillStyle = 'rgba(80,160,255,0.3)';
+          ctx.fillStyle = 'rgba(60,140,255,0.3)';
           ctx.fillRect(px, py, TS, 2);
-          // Animated wave
           var wave = Math.sin(frame * 0.08 + x * 0.5) * 2;
-          ctx.fillStyle = 'rgba(120,200,255,0.3)';
+          ctx.fillStyle = 'rgba(100,200,255,0.25)';
           ctx.fillRect(px, py + wave + 4, TS, 1);
+          // Bioluminescent glow in reef level
+          if (level === 3) {
+            ctx.globalAlpha = 0.08 + Math.sin(frame * 0.04 + x * 0.3 + y * 0.2) * 0.05;
+            ctx.fillStyle = '#44ffaa';
+            ctx.fillRect(px, py, TS, TS);
+            ctx.globalAlpha = 1;
+          }
           break;
         case TILE.PLATFORM:
           ctx.fillStyle = getLevelTileColor(2);
@@ -1186,6 +1441,20 @@ function drawTiles() {
             ctx.fill();
           }
           break;
+        case TILE.MYCELIUM:
+          // Glowing mycelium network tile
+          ctx.fillStyle = '#1a3a1a';
+          ctx.fillRect(px, py, TS, TS);
+          var glow = Math.sin(frame * 0.06 + x * 0.4 + y * 0.3) * 0.3 + 0.7;
+          ctx.globalAlpha = glow * 0.6;
+          ctx.fillStyle = '#44ff88';
+          ctx.fillRect(px + 2, py + 6, TS - 4, 3);
+          ctx.fillRect(px + 5, py + 2, 3, TS - 4);
+          // Node dots
+          ctx.fillStyle = '#88ffaa';
+          ctx.fillRect(px + 6, py + 7, 3, 3);
+          ctx.globalAlpha = 1;
+          break;
       }
     }
   }
@@ -1193,13 +1462,13 @@ function drawTiles() {
 
 function getLevelTileColor(variant) {
   var colors = [
-    ['#2a5a2a', '#3a7a3a', '#225522', '#44aa44'], // Mushroom Forest
-    ['#5a2a5a', '#7a4a7a', '#442255', '#aa66aa'], // Flower Garden
-    ['#3a3a3a', '#555555', '#222222', '#666666'], // Underground
-    ['#1a3a5a', '#2a5a8a', '#112244', '#4488aa'], // Night Sea
-    ['#4a4a6a', '#6a6a9a', '#333355', '#8888bb'], // Cloud Tops
-    ['#5a3a3a', '#7a5a5a', '#442222', '#aa7777'], // Toy Castle
-    ['#3a1a2a', '#5a2a4a', '#220011', '#882255'], // Nightmare
+    ['#1a4a2a', '#2a6a3a', '#124418', '#339944'], // Spore Hollow
+    ['#4a1a4a', '#6a3a6a', '#331144', '#994499'], // Bloom Canopy
+    ['#2a2a2a', '#444444', '#181818', '#555555'], // Mycelium Depths
+    ['#0a2a4a', '#1a4a7a', '#081833', '#336699'], // Bioluminescent Reef
+    ['#1a3a2a', '#2a5a4a', '#0a2218', '#44886a'], // Reactor Dream (green-teal glow)
+    ['#3a2a1a', '#5a4a3a', '#221808', '#887744'], // Moss Citadel
+    ['#2a0a1a', '#4a1a3a', '#180008', '#771144'], // Fungal Nightmare
   ];
   var l = TAS.math.clamp(level, 0, 6);
   return colors[l][variant];
@@ -1208,21 +1477,23 @@ function getLevelTileColor(variant) {
 function drawDoor() {
   var pulse = Math.sin(frame * 0.06) * 0.2 + 0.8;
   if (doorOpen) {
-    ctx.fillStyle = '#ffdd44';
+    // Glowing portal
+    ctx.fillStyle = '#33ff88';
+    ctx.globalAlpha = pulse * 0.4;
+    ctx.fillRect(doorX - 3, doorY - 3, 22, 22);
     ctx.globalAlpha = pulse;
+    ctx.fillStyle = '#ffdd44';
     ctx.fillRect(doorX - 1, doorY - 1, 18, 18);
     ctx.globalAlpha = 1;
     ctx.fillStyle = '#ffaa00';
   } else {
-    ctx.fillStyle = '#555555';
+    ctx.fillStyle = '#444444';
   }
   ctx.fillRect(doorX, doorY, 16, 16);
-  // Door details
   ctx.fillStyle = doorOpen ? '#fff' : '#333';
   ctx.fillRect(doorX + 3, doorY + 2, 10, 12);
   ctx.fillStyle = doorOpen ? '#ffdd44' : '#666';
   ctx.fillRect(doorX + 11, doorY + 7, 2, 2);
-  // Lock indicator
   if (!doorOpen) {
     ctx.fillStyle = '#886600';
     ctx.fillRect(doorX + 5, doorY + 5, 6, 6);
@@ -1238,8 +1509,10 @@ function drawKeys() {
     var bob = Math.sin(k.bobT) * 2;
     var glow = Math.sin(frame * 0.08 + i) * 0.2 + 0.8;
     ctx.globalAlpha = glow;
+    // Glow aura
+    ctx.fillStyle = 'rgba(255,221,68,0.2)';
+    ctx.fillRect(k.x - 1, k.y + bob - 1, 10, 12);
     ctx.fillStyle = '#ffdd44';
-    // Key shape
     ctx.fillRect(k.x + 1, k.y + bob, 6, 3);
     ctx.fillRect(k.x, k.y + bob + 1, 2, 5);
     ctx.fillRect(k.x + 4, k.y + bob + 3, 3, 2);
@@ -1254,12 +1527,30 @@ function drawItems() {
     var bob = Math.sin(frame * 0.05 + i * 2) * 2;
     if (it.type === 'heart') {
       ctx.fillStyle = '#ff4466';
-      // Heart shape
       ctx.fillRect(it.x + 1, it.y + bob, 2, 2);
       ctx.fillRect(it.x + 4, it.y + bob, 2, 2);
       ctx.fillRect(it.x, it.y + bob + 2, 7, 3);
       ctx.fillRect(it.x + 1, it.y + bob + 5, 5, 2);
       ctx.fillRect(it.x + 2, it.y + bob + 7, 3, 1);
+    } else if (it.type === 'sporecap') {
+      // Mushroom cap
+      ctx.fillStyle = '#44cc44';
+      ctx.fillRect(it.x + 1, it.y + bob, 6, 4);
+      ctx.fillStyle = '#88ff88';
+      ctx.fillRect(it.x + 2, it.y + bob + 1, 2, 2);
+      // Stem
+      ctx.fillStyle = '#ddddaa';
+      ctx.fillRect(it.x + 3, it.y + bob + 4, 2, 4);
+    } else if (it.type === 'thread') {
+      // Mycelium thread (glowing)
+      var tGlow = Math.sin(frame * 0.1 + i) * 0.3 + 0.7;
+      ctx.globalAlpha = tGlow;
+      ctx.fillStyle = '#44ffcc';
+      ctx.fillRect(it.x + 1, it.y + bob + 2, 6, 2);
+      ctx.fillRect(it.x + 3, it.y + bob, 2, 6);
+      ctx.fillStyle = '#88ffdd';
+      ctx.fillRect(it.x + 3, it.y + bob + 2, 2, 2);
+      ctx.globalAlpha = 1;
     }
   }
 }
@@ -1268,28 +1559,39 @@ function drawAnimals() {
   for (var i = 0; i < animals.length; i++) {
     var a = animals[i];
     if (a.ridden) continue;
-    var color = ANIMAL_COLORS[a.type];
+    var color = CREATURE_COLORS[a.type];
     var blink = a.stunned ? (Math.floor(frame * 0.2) % 2 === 0) : false;
 
     if (blink) { ctx.globalAlpha = 0.5; }
     ctx.fillStyle = color;
 
     switch (a.type) {
-      case ANIMAL.FROG:
-        // Body
+      case CREATURE.REACTOR_FROG:
+        // Body with reactor spots
         ctx.fillRect(a.x + 2, a.y + 4, 10, 8);
-        // Eyes
-        ctx.fillRect(a.x + 2, a.y + 1, 4, 4);
-        ctx.fillRect(a.x + 8, a.y + 1, 4, 4);
+        ctx.fillStyle = '#22cc66';
+        ctx.fillRect(a.x + 4, a.y + 6, 3, 3);
+        ctx.fillStyle = color;
+        // Eyes (larger, more expressive)
+        ctx.fillRect(a.x + 1, a.y + 1, 5, 4);
+        ctx.fillRect(a.x + 8, a.y + 1, 5, 4);
         ctx.fillStyle = '#fff';
-        ctx.fillRect(a.x + 3, a.y + 2, 2, 2);
-        ctx.fillRect(a.x + 9, a.y + 2, 2, 2);
+        ctx.fillRect(a.x + 2, a.y + 2, 3, 2);
+        ctx.fillRect(a.x + 9, a.y + 2, 3, 2);
+        ctx.fillStyle = '#111';
+        ctx.fillRect(a.x + 3, a.y + 2, 1, 2);
+        ctx.fillRect(a.x + 10, a.y + 2, 1, 2);
         // Legs
         ctx.fillStyle = color;
         ctx.fillRect(a.x, a.y + 10, 4, 4);
         ctx.fillRect(a.x + 10, a.y + 10, 4, 4);
+        // Reactor glow spot
+        ctx.globalAlpha = Math.sin(frame * 0.1) * 0.3 + 0.5;
+        ctx.fillStyle = '#88ffaa';
+        ctx.fillRect(a.x + 5, a.y + 7, 2, 2);
+        ctx.globalAlpha = blink ? 0.5 : 1;
         break;
-      case ANIMAL.MOLE:
+      case CREATURE.MYCELIAL_MOLE:
         // Body
         ctx.fillRect(a.x + 2, a.y + 3, 10, 10);
         // Nose
@@ -1299,46 +1601,63 @@ function drawAnimals() {
         ctx.fillStyle = '#111';
         ctx.fillRect(a.x + 4, a.y + 5, 2, 2);
         ctx.fillRect(a.x + 9, a.y + 5, 2, 2);
-        // Claws
+        // Mycelium-infused claws (glowing tips)
         ctx.fillStyle = '#ddd';
         ctx.fillRect(a.x, a.y + 11, 3, 3);
         ctx.fillRect(a.x + 11, a.y + 11, 3, 3);
+        ctx.fillStyle = '#88ffaa';
+        ctx.fillRect(a.x, a.y + 13, 3, 1);
+        ctx.fillRect(a.x + 11, a.y + 13, 3, 1);
         break;
-      case ANIMAL.BEE:
-        // Body stripes
+      case CREATURE.SPORE_BEE:
+        // Body stripes (golden + dark)
         ctx.fillRect(a.x + 3, a.y + 4, 8, 8);
-        ctx.fillStyle = '#111';
+        ctx.fillStyle = '#332200';
         ctx.fillRect(a.x + 3, a.y + 6, 8, 2);
         ctx.fillRect(a.x + 3, a.y + 10, 8, 2);
-        // Wings
-        ctx.fillStyle = 'rgba(200,220,255,0.6)';
-        ctx.fillRect(a.x + 1, a.y + 1, 5, 4);
-        ctx.fillRect(a.x + 8, a.y + 1, 5, 4);
+        // Wings (translucent, animated)
+        var wingBob = Math.sin(frame * 0.4) * 2;
+        ctx.fillStyle = 'rgba(200,255,220,0.5)';
+        ctx.fillRect(a.x + 1, a.y + 1 + wingBob, 5, 4);
+        ctx.fillRect(a.x + 8, a.y + 1 - wingBob, 5, 4);
+        // Spore dust trail
+        ctx.globalAlpha = 0.3;
+        ctx.fillStyle = '#ffff88';
+        ctx.fillRect(a.x + 5 + Math.sin(frame * 0.2) * 2, a.y + 12, 2, 2);
+        ctx.globalAlpha = blink ? 0.5 : 1;
         // Eyes
         ctx.fillStyle = '#111';
         ctx.fillRect(a.x + 5, a.y + 4, 2, 2);
         ctx.fillRect(a.x + 8, a.y + 4, 2, 2);
         break;
-      case ANIMAL.LIZARD:
+      case CREATURE.LICHEN_LIZARD:
         // Body
         ctx.fillRect(a.x + 1, a.y + 5, 12, 6);
         // Head
         ctx.fillRect(a.x + 10, a.y + 3, 4, 5);
-        // Tail
+        // Tail (with lichen pattern)
         ctx.fillRect(a.x - 2, a.y + 7, 4, 3);
+        ctx.fillStyle = '#22bb88';
+        ctx.fillRect(a.x - 1, a.y + 8, 2, 1);
         // Eyes
         ctx.fillStyle = '#fff';
         ctx.fillRect(a.x + 11, a.y + 4, 2, 2);
+        ctx.fillStyle = '#ff4400';
+        ctx.fillRect(a.x + 12, a.y + 4, 1, 1);
         // Legs
         ctx.fillStyle = color;
         ctx.fillRect(a.x + 2, a.y + 11, 2, 3);
         ctx.fillRect(a.x + 9, a.y + 11, 2, 3);
         break;
-      case ANIMAL.FISH:
+      case CREATURE.FUNGI_FISH:
         // Body
         ctx.fillRect(a.x + 3, a.y + 4, 10, 7);
         // Tail
         ctx.fillRect(a.x, a.y + 5, 4, 5);
+        // Bioluminescent spots
+        ctx.fillStyle = '#88ddff';
+        ctx.fillRect(a.x + 5, a.y + 6, 2, 2);
+        ctx.fillRect(a.x + 8, a.y + 8, 2, 2);
         // Eye
         ctx.fillStyle = '#fff';
         ctx.fillRect(a.x + 10, a.y + 5, 3, 3);
@@ -1348,24 +1667,31 @@ function drawAnimals() {
         ctx.fillStyle = color;
         ctx.fillRect(a.x + 6, a.y + 2, 4, 3);
         break;
-      case ANIMAL.GORILLA:
+      case CREATURE.MOSS_GORILLA:
         // Body (big)
         ctx.fillRect(a.x + 2, a.y + 2, 10, 12);
-        // Arms
+        // Arms (thick)
         ctx.fillRect(a.x - 1, a.y + 5, 3, 8);
         ctx.fillRect(a.x + 12, a.y + 5, 3, 8);
+        // Mossy shoulders
+        ctx.fillStyle = '#88aa44';
+        ctx.fillRect(a.x + 1, a.y + 2, 3, 2);
+        ctx.fillRect(a.x + 10, a.y + 2, 3, 2);
         // Face
-        ctx.fillStyle = '#aa7744';
+        ctx.fillStyle = '#997744';
         ctx.fillRect(a.x + 4, a.y + 3, 6, 5);
         // Eyes
         ctx.fillStyle = '#fff';
         ctx.fillRect(a.x + 4, a.y + 4, 2, 2);
         ctx.fillRect(a.x + 8, a.y + 4, 2, 2);
+        ctx.fillStyle = '#111';
+        ctx.fillRect(a.x + 5, a.y + 4, 1, 2);
+        ctx.fillRect(a.x + 9, a.y + 4, 1, 2);
         break;
     }
     ctx.globalAlpha = 1;
 
-    // Stunned indicator (stars)
+    // Stunned indicator (spore stars)
     if (a.stunned) {
       ctx.fillStyle = '#ffdd44';
       var starOffset = Math.sin(frame * 0.15) * 3;
@@ -1382,17 +1708,20 @@ function drawEnemies() {
     var bounce = Math.sin(e.animT * 4) * 2;
 
     switch (e.type) {
-      case 0: // Slime
-        ctx.fillStyle = '#aa44cc';
+      case 0: // Toxic Slime
+        ctx.fillStyle = '#88cc44';
         ctx.fillRect(e.x + 1, e.y + 4 + bounce, 10, 8);
         ctx.fillRect(e.x + 3, e.y + 2 + bounce, 6, 4);
         ctx.fillStyle = '#fff';
         ctx.fillRect(e.x + 3, e.y + 5 + bounce, 2, 2);
         ctx.fillRect(e.x + 7, e.y + 5 + bounce, 2, 2);
+        ctx.fillStyle = '#111';
+        ctx.fillRect(e.x + 4, e.y + 5 + bounce, 1, 1);
+        ctx.fillRect(e.x + 8, e.y + 5 + bounce, 1, 1);
         break;
-      case 1: // Ghost
-        ctx.globalAlpha = 0.7;
-        ctx.fillStyle = '#aaddff';
+      case 1: // Spore Ghost
+        ctx.globalAlpha = 0.65;
+        ctx.fillStyle = '#aaddcc';
         ctx.fillRect(e.x + 1, e.y + 2, 10, 8);
         ctx.fillRect(e.x + 3, e.y, 6, 4);
         ctx.fillRect(e.x + 1, e.y + 10, 3, 2);
@@ -1401,24 +1730,121 @@ function drawEnemies() {
         ctx.fillStyle = '#224';
         ctx.fillRect(e.x + 3, e.y + 4, 2, 3);
         ctx.fillRect(e.x + 7, e.y + 4, 2, 3);
+        // Spore trail
+        ctx.fillStyle = '#88ff88';
+        ctx.fillRect(e.x + 5, e.y + 12, 2, 2);
         ctx.globalAlpha = 1;
         break;
-      case 2: // Fire wisp
+      case 2: // Fire Wisp
         ctx.fillStyle = '#ff6622';
         ctx.fillRect(e.x + 2, e.y + 3, 8, 8);
         ctx.fillStyle = '#ffaa44';
         ctx.fillRect(e.x + 4, e.y + 1, 4, 4);
         ctx.fillStyle = '#ffdd88';
         ctx.fillRect(e.x + 4, e.y + 5, 4, 3);
-        // Flicker
         if (frame % 4 < 2) {
           ctx.fillStyle = '#ff4400';
           ctx.fillRect(e.x + 3, e.y - 1, 2, 3);
           ctx.fillRect(e.x + 7, e.y - 2, 2, 4);
         }
         break;
+      case 3: // Mycelium Crawler
+        ctx.fillStyle = '#666644';
+        ctx.fillRect(e.x + 1, e.y + 5, 10, 6);
+        // Legs (animated)
+        var legPhase = Math.sin(e.animT * 6);
+        ctx.fillRect(e.x, e.y + 10 + legPhase, 2, 3);
+        ctx.fillRect(e.x + 4, e.y + 10 - legPhase, 2, 3);
+        ctx.fillRect(e.x + 8, e.y + 10 + legPhase, 2, 3);
+        // Eyes
+        ctx.fillStyle = '#ff8800';
+        ctx.fillRect(e.x + 3, e.y + 6, 2, 2);
+        ctx.fillRect(e.x + 7, e.y + 6, 2, 2);
+        // Antennae
+        ctx.fillStyle = '#888866';
+        ctx.fillRect(e.x + 3, e.y + 3, 1, 3);
+        ctx.fillRect(e.x + 8, e.y + 3, 1, 3);
+        break;
     }
   }
+}
+
+function drawBoss() {
+  if (!boss) return;
+  var b = boss;
+  var pulse = Math.sin(frame * 0.08) * 3;
+
+  if (b.flashTimer > 0) {
+    ctx.globalAlpha = 0.6;
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(b.x - 2, b.y - 2, b.w + 4, b.h + 4);
+    ctx.globalAlpha = 1;
+  }
+
+  if (b.type === 0) {
+    // Reef Guardian — glowing jellyfish boss
+    ctx.fillStyle = '#4488ff';
+    ctx.fillRect(b.x + 2, b.y + 2 + pulse, b.w - 4, b.h - 8);
+    ctx.fillStyle = '#88ccff';
+    ctx.fillRect(b.x + 4, b.y + 4 + pulse, b.w - 8, b.h - 12);
+    // Tentacles
+    ctx.fillStyle = '#4488ff';
+    for (var t = 0; t < 4; t++) {
+      var tx = b.x + 4 + t * 5;
+      var ty = b.y + b.h - 6 + Math.sin(frame * 0.1 + t) * 3;
+      ctx.fillRect(tx, ty, 2, 6);
+    }
+    // Eyes
+    ctx.fillStyle = '#fff';
+    ctx.fillRect(b.x + 6, b.y + 8 + pulse, 4, 4);
+    ctx.fillRect(b.x + 14, b.y + 8 + pulse, 4, 4);
+    ctx.fillStyle = '#111';
+    ctx.fillRect(b.x + 7, b.y + 9 + pulse, 2, 2);
+    ctx.fillRect(b.x + 15, b.y + 9 + pulse, 2, 2);
+  } else if (b.type === 1) {
+    // Moss Colossus — hulking mossy beast
+    ctx.fillStyle = '#556633';
+    ctx.fillRect(b.x + 2, b.y + 4, b.w - 4, b.h - 4);
+    ctx.fillStyle = '#667744';
+    ctx.fillRect(b.x, b.y + 8, b.w, b.h - 8);
+    // Arms
+    ctx.fillRect(b.x - 4, b.y + 10, 5, 10);
+    ctx.fillRect(b.x + b.w - 1, b.y + 10, 5, 10);
+    // Mossy top
+    ctx.fillStyle = '#88aa44';
+    ctx.fillRect(b.x + 4, b.y, b.w - 8, 6);
+    ctx.fillRect(b.x + 6, b.y - 2, b.w - 12, 4);
+    // Eyes
+    ctx.fillStyle = '#ff4400';
+    ctx.fillRect(b.x + 6, b.y + 8, 4, 3);
+    ctx.fillRect(b.x + 14, b.y + 8, 4, 3);
+  } else {
+    // Nightmare Fungus — shifting, terrifying
+    var shift = Math.sin(frame * 0.06) * 2;
+    ctx.fillStyle = '#661144';
+    ctx.fillRect(b.x + shift, b.y + 2, b.w, b.h - 2);
+    ctx.fillStyle = '#882266';
+    ctx.fillRect(b.x + 4 - shift, b.y, b.w - 8, b.h);
+    // Pulsing cap
+    ctx.fillStyle = '#aa3388';
+    ctx.fillRect(b.x + 2, b.y - 4 + pulse, b.w - 4, 8);
+    // Eyes (multiple, unsettling)
+    ctx.fillStyle = '#ffff00';
+    ctx.fillRect(b.x + 5 + shift, b.y + 6, 3, 3);
+    ctx.fillRect(b.x + 16 - shift, b.y + 8, 3, 3);
+    ctx.fillRect(b.x + 10, b.y + 4 + shift, 2, 2);
+    // Dripping spores
+    ctx.fillStyle = '#ff88cc';
+    ctx.fillRect(b.x + 4, b.y + b.h - 2 + Math.sin(frame * 0.15) * 2, 2, 3);
+    ctx.fillRect(b.x + 14, b.y + b.h + Math.cos(frame * 0.12) * 2, 2, 3);
+  }
+
+  // HP bar
+  ctx.fillStyle = '#333';
+  ctx.fillRect(b.x, b.y - 8, b.w, 3);
+  ctx.fillStyle = '#ff4444';
+  var hpFrac = Math.max(0, b.hp / b.maxHp);
+  ctx.fillRect(b.x, b.y - 8, Math.floor(b.w * hpFrac), 3);
 }
 
 function drawPlayer() {
@@ -1431,72 +1857,92 @@ function drawPlayer() {
   var px = Math.floor(P.x), py = Math.floor(P.y);
 
   if (P.riding) {
-    // Draw riding animal (larger)
-    var color = ANIMAL_COLORS[P.riding.type];
+    var color = CREATURE_COLORS[P.riding.type];
     ctx.fillStyle = color;
     ctx.fillRect(px, py + 4, P.w, P.h - 4);
 
-    // Animal head
     switch (P.riding.type) {
-      case ANIMAL.FROG:
+      case CREATURE.REACTOR_FROG:
         ctx.fillRect(px + (P.facing > 0 ? 8 : -2), py + 1, 6, 5);
         ctx.fillStyle = '#fff';
         ctx.fillRect(px + (P.facing > 0 ? 10 : 0), py + 2, 2, 2);
+        // Reactor glow
+        ctx.globalAlpha = Math.sin(frame * 0.1) * 0.3 + 0.4;
+        ctx.fillStyle = '#88ffaa';
+        ctx.fillRect(px + 4, py + 8, 4, 3);
+        ctx.globalAlpha = (invincTimer > 0 && Math.floor(frame * 0.2) % 2) ? 0.4 : 1;
         break;
-      case ANIMAL.BEE:
-        ctx.fillStyle = '#111';
+      case CREATURE.SPORE_BEE:
+        ctx.fillStyle = '#332200';
         ctx.fillRect(px + 2, py + 7, P.w - 4, 2);
-        ctx.fillStyle = 'rgba(200,220,255,0.5)';
+        ctx.fillStyle = 'rgba(200,255,220,0.45)';
         ctx.fillRect(px + 2, py - 2 + Math.sin(frame * 0.4) * 2, 5, 4);
         ctx.fillRect(px + 7, py - 2 - Math.sin(frame * 0.4) * 2, 5, 4);
         break;
-      case ANIMAL.GORILLA:
+      case CREATURE.MOSS_GORILLA:
         ctx.fillRect(px - 2, py + 6, 3, 8);
         ctx.fillRect(px + P.w - 1, py + 6, 3, 8);
+        ctx.fillStyle = '#88aa44';
+        ctx.fillRect(px + 1, py + 3, 3, 2);
+        ctx.fillRect(px + P.w - 4, py + 3, 3, 2);
         break;
       default:
         ctx.fillRect(px + (P.facing > 0 ? P.w - 3 : 0), py + 2, 4, 4);
         break;
     }
 
-    // Child riding on top
+    // Nemo riding on top
     ctx.fillStyle = '#ffddbb';
     ctx.fillRect(px + 3, py - 4, 5, 5);
-    // Pajama body
-    ctx.fillStyle = '#8888ff';
+    ctx.fillStyle = '#7777ee';
     ctx.fillRect(px + 3, py + 1, 5, 3);
-    // Nightcap
-    ctx.fillStyle = '#8888ff';
-    ctx.fillRect(px + 4, py - 7, 4, 4);
+    // Nightcap (pointy, NES-style)
+    ctx.fillStyle = '#7777ee';
+    ctx.fillRect(px + 3, py - 8, 5, 5);
+    ctx.fillRect(px + 5, py - 10, 3, 3);
     ctx.fillStyle = '#fff';
-    ctx.fillRect(px + 7, py - 8, 2, 2);
+    ctx.fillRect(px + 7, py - 11, 2, 2);
   } else {
-    // Small child in pajamas
+    // Nemo sprite — NES-style child in pajamas
     // Head
     ctx.fillStyle = '#ffddbb';
     ctx.fillRect(px + 2, py, 6, 6);
     // Hair
     ctx.fillStyle = '#664422';
     ctx.fillRect(px + 2, py, 6, 2);
+    ctx.fillRect(px + (P.facing > 0 ? 7 : 2), py + 1, 1, 2);
     // Eyes
     ctx.fillStyle = '#222';
     ctx.fillRect(px + (P.facing > 0 ? 6 : 3), py + 2, 1, 2);
+    // Mouth
+    ctx.fillStyle = '#cc8866';
+    ctx.fillRect(px + (P.facing > 0 ? 5 : 4), py + 5, 2, 1);
     // Pajama body
-    ctx.fillStyle = '#8888ff';
+    ctx.fillStyle = '#7777ee';
     ctx.fillRect(px + 1, py + 6, 8, 6);
-    // Stripes on pajamas
-    ctx.fillStyle = '#6666cc';
+    // Pajama stripes
+    ctx.fillStyle = '#5555bb';
     ctx.fillRect(px + 1, py + 8, 8, 1);
     ctx.fillRect(px + 1, py + 10, 8, 1);
     // Feet
     ctx.fillStyle = '#ffddbb';
     ctx.fillRect(px + 1, py + 12, 3, 2);
     ctx.fillRect(px + 6, py + 12, 3, 2);
-    // Nightcap
-    ctx.fillStyle = '#8888ff';
+    // Nightcap (pointy, signature NES look)
+    ctx.fillStyle = '#7777ee';
     ctx.fillRect(px + 3, py - 4, 5, 5);
+    ctx.fillRect(px + 5, py - 6, 3, 3);
     ctx.fillStyle = '#fff';
-    ctx.fillRect(px + 7, py - 5, 2, 2);
+    ctx.fillRect(px + 7, py - 7, 2, 2);
+  }
+
+  // Speed boost visual
+  if (speedBoostTimer > 0) {
+    ctx.globalAlpha = 0.3;
+    ctx.fillStyle = '#44ffcc';
+    ctx.fillRect(px - 3, py + 2, 2, P.h - 4);
+    ctx.fillRect(px + P.w + 1, py + 2, 2, P.h - 4);
+    ctx.globalAlpha = 1;
   }
 
   ctx.globalAlpha = 1;
@@ -1509,37 +1955,48 @@ function drawCandy() {
     ctx.fillRect(c.x - 3, c.y - 3, 6, 6);
     ctx.fillStyle = '#ffaadd';
     ctx.fillRect(c.x - 2, c.y - 2, 3, 3);
-    // Wrapper
     ctx.fillStyle = '#ffdd44';
     ctx.fillRect(c.x - 4, c.y - 1, 2, 2);
     ctx.fillRect(c.x + 3, c.y - 1, 2, 2);
+    // Trail sparkle
+    ctx.globalAlpha = 0.4;
+    ctx.fillStyle = '#ff88cc';
+    ctx.fillRect(c.x - c.vx * 0.01 - 1, c.y + 1, 2, 2);
+    ctx.globalAlpha = 1;
   }
 }
 
 function drawFloaters() {
-  ctx.globalAlpha = 0.3;
-  var colors = ['#ffdd44', '#88ccff', '#ff88cc', '#88ffaa', '#aa88ff'];
+  ctx.globalAlpha = 0.25;
+  var fColors = [
+    ['#88ff88', '#44ffaa', '#aaffcc'],  // green spores
+    ['#ffdd44', '#88ccff', '#ff88cc'],   // mixed
+    ['#ff4488', '#aa22ff', '#ff88cc']    // nightmare
+  ];
+  var palette = level >= 6 ? 2 : (level >= 3 ? 1 : 0);
   for (var i = 0; i < floaters.length; i++) {
     var f = floaters[i];
     var wobble = Math.sin(f.phase + frame * 0.02) * 4;
-    ctx.fillStyle = colors[i % 5];
-    ctx.fillRect(f.x + wobble, f.y, f.size, f.size);
+    ctx.fillStyle = fColors[palette][f.color];
+    ctx.fillRect(Math.floor(f.x + wobble), Math.floor(f.y), f.size, f.size);
   }
   ctx.globalAlpha = 1;
 }
 
 function drawHUD() {
-  // Background bar
-  ctx.fillStyle = 'rgba(10,5,20,0.75)';
+  // Background bar (NES-style)
+  ctx.fillStyle = 'rgba(8,4,16,0.8)';
   ctx.fillRect(0, 0, GW, 22);
+  ctx.fillStyle = '#333355';
+  ctx.fillRect(0, 21, GW, 1);
 
-  // Hearts
+  // Hearts (CON-scaled)
   for (var i = 0; i < maxHp; i++) {
-    ctx.fillStyle = i < hp ? '#ff4466' : '#333';
-    ctx.fillRect(6 + i * 14, 5, 10, 10);
+    ctx.fillStyle = i < hp ? '#ff4466' : '#332233';
+    ctx.fillRect(6 + i * 12, 5, 9, 9);
     if (i < hp) {
       ctx.fillStyle = '#ff8899';
-      ctx.fillRect(7 + i * 14, 6, 3, 3);
+      ctx.fillRect(7 + i * 12, 6, 3, 3);
     }
   }
 
@@ -1547,24 +2004,55 @@ function drawHUD() {
   ctx.fillStyle = '#ffdd44';
   ctx.font = 'bold 9px monospace';
   ctx.textAlign = 'left';
-  ctx.fillText('KEYS: ' + keysCollected + '/' + KEYS_PER_LEVEL, 56, 14);
+  var keysX = 6 + maxHp * 12 + 6;
+  ctx.fillText('KEY:' + keysCollected + '/' + keysPerLevel, keysX, 14);
 
-  // Score
+  // Score (INT-boosted)
   ctx.fillStyle = '#fff';
   ctx.textAlign = 'center';
   ctx.fillText('' + score, GW / 2, 14);
 
-  // Level
+  // Dream level
   ctx.fillStyle = '#88ccff';
   ctx.textAlign = 'right';
-  ctx.fillText('Lv' + (level + 1), GW - 6, 14);
+  ctx.fillText('Dream ' + (level + 1), GW - 6, 14);
 
   // Riding indicator
   if (P.riding) {
-    ctx.fillStyle = ANIMAL_COLORS[P.riding.type];
+    ctx.fillStyle = CREATURE_COLORS[P.riding.type];
     ctx.textAlign = 'left';
     ctx.font = '8px monospace';
-    ctx.fillText('Riding: ' + ANIMAL_NAMES[P.riding.type], 6, GH - 28);
+    ctx.fillText(CREATURE_NAMES[P.riding.type], 6, GH - 28);
+  }
+
+  // Boss HP bar
+  if (boss) {
+    ctx.fillStyle = '#444';
+    ctx.fillRect(GW / 2 - 50, GH - 14, 100, 6);
+    ctx.fillStyle = '#ff4444';
+    var bossHpFrac = Math.max(0, boss.hp / boss.maxHp);
+    ctx.fillRect(GW / 2 - 50, GH - 14, Math.floor(100 * bossHpFrac), 6);
+    ctx.fillStyle = '#ff8888';
+    ctx.fillRect(GW / 2 - 50, GH - 14, Math.floor(100 * bossHpFrac), 1);
+    ctx.textAlign = 'center';
+    ctx.fillStyle = '#fff';
+    ctx.font = '7px monospace';
+    var bossNames = ['Reef Guardian', 'Moss Colossus', 'Nightmare Fungus'];
+    ctx.fillText(bossNames[boss.type] || 'BOSS', GW / 2, GH - 18);
+  }
+
+  // Speed boost indicator
+  if (speedBoostTimer > 0) {
+    ctx.fillStyle = '#44ffcc';
+    ctx.textAlign = 'right';
+    ctx.font = '7px monospace';
+    ctx.fillText('HASTE', GW - 6, GH - 28);
+  }
+
+  // Ability cooldown dot
+  if (abilityCooldown > 0) {
+    ctx.fillStyle = '#ff8844';
+    ctx.fillRect(GW - 12, 6, 6, 6);
   }
 }
 

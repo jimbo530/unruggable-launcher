@@ -55,9 +55,15 @@ Guardian reviews apply. No exceptions.
 - [ ] Use "proof of deposit" not "receipt token" or "deposit receipt" (whitepaper V3.1 terminology)
 - [ ] Carbon claims: CHAR tracks high-quality carbon credits removed from markets, funded by LP fees. CHAR accumulates in locked LPs (no withdraw) and is sent to a dedicated collection address (no withdraw). Approved language: "removes carbon credits from markets", "tracks carbon credits removed from circulation", "permanently held at tracking address with no withdraw function". CHAR at the tracking address is effectively burned -- a public on-chain ledger of all credits removed.
 - [ ] No pinned reactor counts ("28+", "35+") — use "reactor network" or "network of reactors" (count changes with launches)
-- [ ] "Unrugable" (ONE g) in all public content — never "Unrugable" or "MycoPad"
+- [ ] "Unrugable" (ONE g) in all public content — never "Unruggable" or "MycoPad"
 - [ ] Swap cap is $1/day (not $5/day)
 - [ ] Tone stays within "fun and games to save the world" -- lighthearted, factual, mission-driven
+- [ ] V7 is the current launcher — never reference V5/V6 as active
+- [ ] Launching is FREE (just gas) — never say "$5 to launch" or "$100 seed" (those were V5)
+- [ ] Each launch creates 2 pools (TOKEN/Money 70% + TOKEN/Meme 30%) — never say "8 pools" or "8 LP positions"
+- [ ] Each launch creates 1 reactor with 50/50 split (burn + launcher wallet) — never say "2 reactors"
+- [ ] No "floor pool" or "floor liquidity" — V7 has no floor pools. Say "locked liquidity" or "sell walls" if needed
+- [ ] No hashtags in posts — not even in posting notes or suggested tags
 
 ---
 
@@ -117,8 +123,8 @@ These framings have passed Guardian review and can be used.
 - **"CHAR tracks high-quality carbon credits removed from markets, funded by LP trading fees"**
   Approved: factual description of CHAR mechanism. Every reactor cycle collects CHAR from trading fees, representing carbon credits taken out of circulation.
 
-- **"Every launch gets a mandatory charity fund sell wall — helping others is coded into the architecture"**
-  Approved: factual description of launch architecture. Sell wall LPs earn charity fund token yield, compounding more into pools over time. Reference: Whitepaper V3.3 Section 6.3.
+- **"Every launch connects to charity infrastructure — helping others is coded into the architecture"**
+  Approved: factual description of launch architecture. V7 creates TOKEN/Money and TOKEN/Meme pools connecting each launch to the charity yield network.
 
 - **"MfT started as sharing memes to fund trees — no purchase necessary. Then we built cool tools."**
   Approved: honest origin story. MfT is a meme launched on Bankr with open tools built around it. Not a protocol, not a moonshot.

@@ -1,56 +1,46 @@
-# Myco Launch Thread — First AI Band Token on Unrugable
+# Token Launch Thread — V7 Template
 
-For Guardian review before owner posts.
+For Guardian review before owner posts. Template for any new launch announcement.
 
 ## Tweet 1 (Hook)
 
-We just launched our first AI band token.
+New token launched on Unrugable V7.
 
-$5. 8 permanently locked liquidity pools. Reactor burns live from day one.
+Free. Two permanently locked pools. Reactor burns and pays the launcher every 2 hours.
 
-Meet Myco — the mushroom bard of Tasern.
+$[TOKEN_NAME] [TOKEN_ADDRESS]
 
-$Myco 0xD377fcADE46CDA9C7B6Bc5ea6450CA53994b6577
+## Tweet 2 (What you get for free)
 
-## Tweet 2 (What you get for $5)
+Here's what a free launch on Unrugable gives you:
 
-Here's what $5 buys on the Unrugable Launcher:
+- 1B token supply
+- 2 locked V3 pools (Money 70% + Meme 30%)
+- 1 reactor (50% burn / 50% to launcher)
+- $10K starting market cap
+- Invite link for network growth
 
-- 8 locked LP positions across Uniswap V3
-- Reactor integration — perpetual buy+burn on every cycle
-- CHAR carbon collection from trading fees
-- Token art hosted on-chain via metadata API
+Other platforms charge you. We made it free.
 
-Most launchpads give you 1 pool.
+## Tweet 3 (The reactor)
 
-We give you 8 for $5.
+Every trade on [TOKEN_NAME] feeds the reactor:
 
-## Tweet 3 (The band)
+- Reactor fires every 2 hours
+- 50% of token fees burned permanently
+- 50% sent to the launcher's wallet
+- Cross-token fees cascade through the network
+- Permissionless execute() — anyone can fire it
 
-Myco is one of 6+ AI bands in the Meme For Trees ecosystem.
+Running code on Base, not a promise.
 
-71 tracks in rotation. 24/7 music streaming on this account. Every song tied to a token, every trade funds carbon collection.
+## Tweet 4 (CTA)
 
-MusicFi meets impact DeFi.
+Want to launch your own unrugable token on Base?
 
-## Tweet 4 (The reactor network)
+Free. One transaction. Two locked pools. You earn when people trade.
 
-Every Myco trade feeds the reactor network:
-
-- Reactor network firing every 2 hours
-- Hundreds of V3 pools across Base
-- 5 fully immutable reactors — no admin, no kill switch
-- Permissionless execute() — anyone can fire them
-
-This is DeFi infrastructure on Base, not a promise. It's running code.
-
-## Tweet 5 (CTA)
-
-Want to launch your own unrugable token on Base with 8 locked pools and reactor burns?
-
-$5 for 8 locked pools and reactor integration. Takes 30 seconds.
-
-tasern.quest
+tasern.quest/unrugable.html
 
 ---
 
@@ -58,5 +48,5 @@ tasern.quest
 - All claims are on-chain verifiable
 - No price predictions
 - No hashtags (owner directive)
-- Single cashtag per tweet ($Myco in tweet 1 only)
+- Single cashtag per tweet ($TOKEN in tweet 1 only)
 - CA included in tweet 1 for discoverability

@@ -29,8 +29,8 @@ Source: Grok research
 
 | Feature | Clanker | Flaunch | Unrugable |
 |---------|---------|---------|------------|
-| Launch cost | Free | ~$30 | $5 |
-| LP positions | 1 pool | 1 pool | 8 locked pools |
+| Launch cost | Free | ~$30 | Free (just gas) |
+| LP positions | 1 pool | 1 pool | 2 locked pools + 1 reactor |
 | Burn mechanic | None | None | Reactor network (perpetual) |
 | Carbon impact | None | None | CHAR retirement |
 | Liquidity lock | Yes | Yes | Yes (permanent) |
@@ -39,26 +39,26 @@ Source: Grok research
 | Unique hook | AI bot deploy | V4 hooks | Reactor burns + impact |
 
 ## Our Strengths (things they CAN'T copy easily)
-1. **reactor network with hundreds of pools** — network effect they'd need years to build
+1. **reactor network** — network effect they'd need years to build
 2. **Carbon credit removal** — CHAR removed from markets permanently, real environmental impact
-3. **8 LP positions per launch** — massively deeper liquidity
+3. **2 locked pools + 1 reactor per launch** — deeper liquidity from day 1
 4. **5 immutable reactors** — credibility via code, not promises
 5. **Ecosystem integration** — every launch feeds the MfT burn engine
 
 ## Our Weaknesses (honest assessment)
-1. **Low awareness** — $5 is incredibly competitive but nobody knows
+1. **Low awareness** — free launch is incredibly competitive but nobody knows
 2. **No social bot** — Clanker's Farcaster bot is a killer feature
 3. **Low volume** — 12 launches vs thousands
 4. **Discovery** — no trending page, no real-time launch feed
 
 ## Strategic Implications
-- At $5, we UNDERCUT Flaunch ($30) by 6x and are near-free like Clanker
-- But we give 8x more liquidity (8 pools vs 1) + reactor burns + carbon credit removal from markets
+- At free (just gas), we match Clanker on price and beat Flaunch ($30) entirely
+- We give 2 locked pools + 1 reactor per launch + reactor burns + carbon credit removal from markets
 - This is objectively the best deal on Base — the marketing problem is awareness, not price
-- Lean into: "$5 gets you 8 locked pools, reactor integration, and perpetual burns. Clanker gives you 1 pool for free. Flaunch gives you 1 pool for $30."
+- Lean into: "Free to launch — 2 locked pools + reactor, perpetual burns. Clanker gives you 1 pool. Flaunch gives you 1 pool for $30."
 
 ## Content Angles
-- "Your Clanker token has 1 pool. Ours has 8, locked forever."
-- "$5 to be unrugable. 8 locked pools. Reactor burns forever."
+- "Your Clanker token has 1 pool. Ours has 2 locked pools + a reactor, locked forever."
+- "Free to be unrugable. 2 locked pools + reactor. Burns forever."
 - "Every Unrugable launch funds carbon collection. What does yours do?"
 - Don't attack competitors directly — position on quality + impact

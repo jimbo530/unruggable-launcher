@@ -1,37 +1,45 @@
-# X Posts — Fresh Batch
+# X Posts — V7 Fresh Batch
+
+## Free Launch Hook
+
+1. We just made token launching free. One transaction on Base: your token, two locked pools, a reactor that pays you half the fees forever. No seed money. No USDC. Just gas.
+
+tasern.quest/unrugable.html
+
+2. Other launchpads charge you to launch and keep the fees. Unrugable: free to launch, 50% of reactor fees go to your wallet every 2 hours. The other 50% gets burned. Verify it on-chain.
 
 ## Reactor Mechanics
 
-1. A network of reactors firing every 2 hours. Hundreds of pools. Bottom-up fee collection, token burns, supply reduction. Renounced or add-only keys. No withdrawal capability. Watch the chain.
+3. A reactor network fires every 2 hours on Base. Hundreds of pools. Your token's reactor burns half the fees and sends half to your wallet. The network cascades fees upstream — all the way to V1 Prime, which burns MfT permanently.
 
-2. "Unrugable" isn't a brand name. It's a contract property. No withdraw function. Renounced ownership. Locked LP. Verify it yourself — that's the whole point.
+4. Someone dumped. The reactor collected the fees. Two hours later: half burned, half sent to the launcher. Volatility isn't a problem — it's fuel for burns and earnings.
 
-3. Someone dumped. The reactor collected the fees. Two hours later it used those fees to buy back. Volatility isn't a problem — it's reactor fuel.
+5. "Unrugable" isn't a brand name. It's a contract property. No withdraw function. Locked LP. 50/50 burn-and-earn reactor. Verify it yourself — that's the whole point.
+
+## Two Pool Design
+
+6. Every Unrugable token launches with two pools. Money pool (70%): semi-stable, Aave yield funds tree planting. Meme pool (30%): wild ride, reactor heartbeat. Two sides of the same token.
+
+7. The Money pool is your safety net. The Meme pool is your upside. Both locked forever. Both managed by one reactor. Both generating fees that burn supply and pay you.
 
 ## Carbon Impact
 
-4. Every reactor cycle collects CHAR from trading fees. CHAR tracks high-quality carbon credits removed from markets. Your DeFi activity removes carbon credits from circulation whether you meant to or not.
-
-5. Most tokens promise impact. CHAR removes carbon credits from markets every 2 hours automatically. No charity board. No quarterly reports. Just code running on Base removing carbon credits from circulation.
+8. Every reactor cycle collects CHAR from trading fees. CHAR tracks carbon credits removed from markets. Your DeFi activity removes carbon credits from circulation whether you meant to or not.
 
 ## Game Teasers
 
-6. Baselings: raise a pet, shovel its poop, deposit poop into DeFi gardens for yield. The poop economy is real and it's on Base.
-
-7. Your baseling produced poop. That poop became LP. That LP earned fees. Those fees burned tokens. Your virtual pet just did more DeFi than most traders.
+9. Baselings: raise a pet, shovel its poop, deposit poop into DeFi gardens for yield. The poop economy is real and it's on Base.
 
 ## Agent SDK
 
-8. 49 MCP tools. npm install baselings-mcp. Your agent can read reactors, fire cycles, launch tokens, check pools, run game actions. Built for autonomous on-chain agents.
+10. 49 MCP tools. Your agent can read reactors, fire cycles, launch tokens, check pools, run game actions. Built for autonomous on-chain agents. No API keys.
 
-9. If your AI agent can't interact with DeFi natively, it's just a chatbot with a wallet. baselings-mcp gives agents 49 tools to actually do things on-chain.
+tasern.quest/llms.txt
 
-## Token Adoption
+## Invite System
 
-10. An AI agent adopted orphaned tokens. Cost: under $1 total. Result: new reactors permanently feeding the MfT network. Dead launches don't stay dead here — they become fuel.
-
-11. The reactor network grew this week. Not from a team deploy — from an autonomous trading agent adopting orphan tokens. Permissionless growth in action.
+11. Launch a token for free. Get an invite link. When someone launches with your link, their reactor chains upstream to yours. Fee flow is permanent and on-chain. The network grows with every launch.
 
 ## Core Message
 
-12. Unrugable by code, not by promise. A reactor network firing every 2 hours. Verifiable on-chain. That's not marketing — it's a block explorer query.
+12. Unrugable by code, not by promise. Free to launch. You earn when they trade. A reactor network on Base firing every 2 hours. That's not marketing — it's a block explorer query.

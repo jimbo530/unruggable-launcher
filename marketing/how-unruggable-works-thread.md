@@ -1,68 +1,67 @@
-# How the Unrugable Launcher Works — Evergreen Thread
+# How the Unrugable Launcher Works — V7 Evergreen Thread
 
 For Guardian review before owner posts. Evergreen content — can be reposted/pinned.
 
 ## Tweet 1 (Hook)
 
-Most token launchers give you 1 pool and hope.
+Most token launchers charge you to launch and keep the fees.
 
-Ours gives you 8 permanently locked liquidity positions, reactor integration, and carbon collection — for $5 on Base.
+Ours is free. Two locked pools. A reactor that burns half and pays you half. Every 2 hours on Base.
 
-Here's how the Unrugable Launcher actually works.
+Here's how Unrugable V7 actually works.
 
-## Tweet 2 (The seed)
+## Tweet 2 (The launch)
 
-You pay $5 in seed liquidity.
+One transaction. No seed money. Just gas.
 
-That $5 gets split across 8 Uniswap V3 positions at different price ranges. Each one is permanently locked — no one can pull the liquidity. Not us, not you, not anyone.
+The factory mints 1 billion tokens, creates two Uniswap V3 pools (70% Money, 30% Meme), and deploys a reactor. All locked permanently — no one can pull the liquidity. Not us, not you, not anyone.
 
-Your token has real depth from minute one.
+Your token has real depth from second one.
 
-## Tweet 3 (The reactor)
+## Tweet 3 (The two pools)
 
-Every launched token gets plugged into the reactor network.
+Money pool (70%): paired against Money for Trees. Semi-stable, USDC-backed. Aave yield from the underlying funds tree planting.
 
-The reactor network fires every 2 hours. When they fire, they swap fees from hundreds of pools on Base — buying and burning tokens in the process.
+Meme pool (30%): paired against Meme for Trees. The original meme token. Wild ride. Reactor heartbeat.
 
-Your token gets connected to trading routes across hundreds of pools. The reactor cycles fees through the network every 2 hours — burns tokens, funds charity, generates arb surfaces. No manual intervention needed.
+Stable side for safety. Meme side for upside. Both locked forever.
 
-## Tweet 4 (The carbon)
+## Tweet 4 (The reactor)
 
-Every reactor cycle also collects CHAR tokens from trading fees. CHAR tracks high-quality carbon credits removed from markets — 1 CHAR = 1 lb CO2e biochar.
+Every launched token gets a reactor — fires every 2 hours.
+
+Token fees: 50% burned permanently (supply decreases). 50% sent to the launcher's wallet (you earn).
+
+Cross-token fees cascade through the reactor network. V1 Prime fires last, burning MfT with accumulated fees from the entire network.
+
+## Tweet 5 (The carbon)
+
+Every reactor cycle also collects CHAR tokens from trading fees. CHAR tracks carbon credits removed from markets — 1 CHAR = 1 lb CO2e biochar.
 
 Trade a meme token, remove carbon credits from circulation. That's the loop.
 
-5 of these reactors are fully immutable. No owner. No pause button. They run forever.
-
-## Tweet 5 (The charity wall)
-
-Every launch also gets a mandatory charity fund sell wall. Helping others isn't optional — it's coded into the architecture.
-
-Those sell wall LPs earn charity fund token yield, which locks more into the pools over time. The charity layer compounds itself.
+5 reactors are fully immutable. No owner. No pause button. They run forever.
 
 ## Tweet 6 (The comparison)
 
-Most token launchpads give you 1 pool and call it done.
+Most token launchers give you 1 pool and call it done.
 
-The Unrugable Launcher gives you:
-- $5 seed cost
-- 8 locked pools
-- Reactor burns
+Unrugable V7:
+- Free to launch
+- 2 locked pools
+- Reactor burns + pays you
 - Carbon collection
-- Mandatory charity fund wall
+- Invite system for network growth
 
 A different standard for what a token launch should look like.
 
-tasern.quest
+tasern.quest/unrugable.html
 
 ---
 
 ## Notes for Guardian
 - All claims on-chain verifiable
 - No price predictions or return promises
-- No "buy pressure" as a selling point — describe mechanism factually if needed
-- No hashtags
-- Keywords woven in: Uniswap V3, Base, impact DeFi, token launchpad, carbon collection
-- Competitor comparison is factual, not attacking
-- Pool count verified: 8 per launch (3 floor + 3 MfT walls + 2 CHAR)
-- Carbon language: CHAR tracks carbon credits removed from markets, collected in LPs and sent to a dedicated address with no withdraw function
+- No hashtags (owner directive)
+- Keywords woven in: Uniswap V3, Base, token launcher, carbon collection
+- V7 Factory: 0x90297A8a1F9A7E35bbC9DF8C35Aa7F3FFBe9BDb2

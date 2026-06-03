@@ -522,6 +522,19 @@ function dist(x1, y1, x2, y2) { const dx = x2 - x1, dy = y2 - y1; return Math.sq
 function angle(x1, y1, x2, y2) { return Math.atan2(y2 - y1, x2 - x1); }
 
 // ============================================================
+// BASELING SPRITE HELPER
+// ============================================================
+// Draw the player's selected baseling sprite. Returns true if drawn, false = use fallback.
+// Usage: if (!TAS.drawBaseling(ctx, x, y, size, opts)) { /* existing drawing */ }
+function drawBaseling(drawCtx, x, y, size, opts) {
+  var b = window.NftLoader && NftLoader.getStatBonuses();
+  if (b && b.charId && window.BaselingSprites && BaselingSprites.isLoaded(b.charId)) {
+    return BaselingSprites.draw(drawCtx, b.charId, b.colorVariant, b.sparkle, x, y, size, opts || {});
+  }
+  return false;
+}
+
+// ============================================================
 // EXPORT
 // ============================================================
 return {
@@ -536,7 +549,8 @@ return {
   loop: { start: startLoop, stop: stopLoop },
   bg: { createStarfield },
   hit: { rectOverlap, circleOverlap, pointInRect },
-  math: { lerp, clamp, randRange, randInt, dist, angle }
+  math: { lerp, clamp, randRange, randInt, dist, angle },
+  drawBaseling
 };
 
 })();

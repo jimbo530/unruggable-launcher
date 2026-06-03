@@ -15,10 +15,10 @@
 ## Reply Templates (for owner to use)
 
 When they post about onchain giving:
-> we've been building something similar on Base — our reactor network burns CHAR tokens to fund carbon collection on every trade. a network of reactors, hundreds of pools, all permissionless. would love to compare notes.
+> we've been building something similar on Base — our reactor network burns CHAR tokens to fund carbon collection on every trade. all permissionless, firing every 2 hours. would love to compare notes.
 
 When they post about Base ecosystem:
-> we're on Base too. our token launcher funds carbon collection through every swap — CHAR burns fund real environmental impact. $5 to launch, all liquidity locked forever. different approach to onchain impact but same spirit.
+> we're on Base too. our token launcher funds carbon collection through every swap — CHAR burns fund real environmental impact. free to launch, all liquidity locked forever. different approach to onchain impact but same spirit.
 
 When they post about crypto philanthropy broadly:
 > this is exactly why we built Meme For Trees. every trade in our reactor network removes carbon credits from markets. 5 immutable reactors running — renounced or add-only admin keys, no kill switch. no overhead to offset. we just create demand for impact because we can. the removal runs forever.
@@ -29,7 +29,7 @@ Onchain philanthropy and impact DeFi are converging on Base.
 
 @endaomentdotorg makes giving onchain. We make trading remove carbon credits from markets.
 
-Our reactor network fires every 2 hours across hundreds of Uniswap V3 pools. Every cycle burns CHAR tokens — permanently collecting carbon credits from trading fees.
+Our reactor network fires every 2 hours across the network. Every cycle burns CHAR tokens — permanently collecting carbon credits from trading fees.
 
 5 of those reactors are fully immutable. No admin. No kill switch. The impact runs by code alone.
 

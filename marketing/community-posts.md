@@ -8,7 +8,7 @@ Built an MCP server for AI agents that actually do things on-chain:
 
 - **Token swaps** with safety guardrails ($0.10 max, 60s cooldown, allowlisted tokens only)
 - **Fire autonomous burn reactors** — permissionless `execute()` every 2 hours across the reactor network
-- **Launch tokens** with permanently locked liquidity ($5 seed, 8 Uniswap V3 pools)
+- **Launch tokens** with permanently locked liquidity (free to launch, just gas)
 - **Yield-generating pet game** — buy eggs, feed pets, earn POOP, stake in gardens
 
 49 tools total. No API key. Works with Claude Desktop, Claude Code, or any MCP-compatible framework.
@@ -17,7 +17,7 @@ Built an MCP server for AI agents that actually do things on-chain:
 npx baselings-mcp
 ```
 
-The reactor network creates predictable price dislocations every 2 hours across hundreds of pools. Your agent can check readiness at `/signals`, call `execute()`, and arb the spread.
+The reactor network creates predictable price dislocations every 2 hours across the network. Your agent can check readiness at `/signals`, call `execute()`, and arb the spread.
 
 Discovery endpoints (no auth):
 - tasern.quest/llms.txt
@@ -38,12 +38,12 @@ New MCP server: **baselings-mcp** — 49 tools for DeFi on Base
 What it does:
 - Swap tokens on Uniswap V3 (guardrailed: $0.10 max)
 - Fire autonomous burn reactors (permissionless)
-- Launch tokens with locked liquidity ($5)
+- Launch tokens with locked liquidity (free, just gas)
 - Play yield-generating pet game
 
 No API key. `npx baselings-mcp` and go.
 
-The reactor network fires every 2hrs creating arb across hundreds of pools. Your agent can time it, fire it, profit from it.
+The reactor network fires every 2hrs creating arb across the network. Your agent can time it, fire it, profit from it.
 
 Signals: tasern.quest/api/unrugable/signals
 npm: npmjs.com/package/baselings-mcp
@@ -68,7 +68,7 @@ No API key. No auth.
 **2/4**
 The reactor network creates predictable volume events every 2 hours.
 
-Reactors fire → sell through MfT pools → price dislocation across hundreds of pools → V1 Prime fires last with accumulated fees → big buy-back.
+Reactors fire → sell through MfT pools → price dislocation across the network → V1 Prime fires last with accumulated fees → big buy-back.
 
 Your agent can check `/signals`, call execute(), and arb the spread.
 
@@ -104,10 +104,10 @@ We built an MCP server that gives AI agents real DeFi capabilities on Base chain
 
 1. Token swaps with safety guardrails ($0.10 max per swap, 60s cooldown, token allowlist, V3 pool verification)
 2. Permissionless reactor execution — call execute() on autonomous burn contracts every 2 hours
-3. Token launches with permanently locked liquidity ($5 seed creates 8 Uniswap V3 pools)
+3. Token launches with permanently locked liquidity (free to launch — 2 locked pools + 1 reactor)
 4. Yield-generating pet game — the game mechanics generate real DeFi yield
 
-The interesting bit is the reactor network: contracts fire on a 2-hour clock, creating predictable price dislocations across hundreds of pools. We built signal endpoints that let agents time these events.
+The interesting bit is the reactor network: contracts fire on a 2-hour clock, creating predictable price dislocations across the network. We built signal endpoints that let agents time these events.
 
 The swap tool is intentionally limited ($0.10/swap, $1/day) because we lost $95 to a hallucinated address and $50 to a wrong pool type assumption. Every guardrail maps to a real loss event.
 

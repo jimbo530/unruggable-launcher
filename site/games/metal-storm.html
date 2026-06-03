@@ -30,41 +30,68 @@ const GW = 480, GH = 320;
 const ctx = TAS.ctx;
 const GRAVITY = 1800;
 const JUMP_VEL = 0;
-const PLAYER_SPEED = 160;
-const BULLET_SPEED = 400;
+const BASE_PLAYER_SPEED = 160;
+const BASE_BULLET_SPEED = 400;
 const TILE = 16;
 const COLS = 30;
 const ROWS = 20;
-const STAGE_WIDTH = 240; // tiles wide per stage
+const STAGE_WIDTH = 240;
 const HUD_H = 28;
 const FLOOR_Y = GH - TILE;
 const CEIL_Y = HUD_H;
-const MAX_HP = 5;
-const MAX_LIVES = 3;
-const IFRAMES = 90; // invincibility frames after hit
+const BASE_MAX_HP = 5;
+const BASE_MAX_LIVES = 3;
+const IFRAMES = 90;
 const FLIP_FLASH_ALPHA = 0.4;
+const BASE_FIRE_RATE = 0.18;
+const BASE_RAPID_RATE = 0.08;
+const BASE_DAMAGE = 1;
+const BASE_SCORE_PER_KILL = 100;
+const BASE_SCORE_PER_FLIP = 10;
 
 // === INIT ===
 TAS.initCanvas(GW, GH);
 TAS.input.initTouch({ buttons: ['a', 'b'], labels: { a: 'FLIP', b: 'FIRE' } });
 
+// === STAT BONUSES (from NFT) ===
+function getStatB() {
+  if (window.NftLoader && NftLoader.getStatBonuses) {
+    return NftLoader.getStatBonuses();
+  }
+  return { str: 0, dex: 0, con: 0, int: 0, wis: 0, cha: 0, damage: 1, speed: 1, lives: 0, hpMult: 1, scoreMult: 1, cooldown: 1, luck: 1, level: 0 };
+}
+let statB = getStatB();
+
+// Derived stat helpers — all use Math.floor()
+function getMaxHP() { return Math.floor(BASE_MAX_HP * statB.hpMult); }
+function getMaxLives() { return Math.floor(BASE_MAX_LIVES + statB.lives); }
+function getPlayerSpeed() { return Math.floor(BASE_PLAYER_SPEED * statB.speed); }
+function getBulletDamage() { return Math.floor(BASE_DAMAGE * statB.damage); }
+function getFireRate() { return BASE_FIRE_RATE * statB.cooldown; }
+function getRapidRate() { return BASE_RAPID_RATE * statB.cooldown; }
+function getScoreValue(base) { return Math.floor(base * statB.scoreMult); }
+function getDropChance(base) { return Math.min(1, base * statB.luck); }
+function getArmor() { return Math.floor(statB.con / 7); } // 0-2 damage reduction
+
 // === GAME STATE ===
 let state = 'title';
 let score = 0;
 let highScore = TAS.score.load('metal_storm_hi');
-let lives = MAX_LIVES;
+let lives = BASE_MAX_LIVES;
 let stage = 1;
 let frame = 0;
 
 // Player
 let px, py, pvx, pvy;
-let gravDir; // 1 = normal (down), -1 = flipped (up)
+let gravDir;
 let grounded;
 let flipCooldown;
 let hp;
 let iframes;
 let fireTimer;
-let powerUp; // 'rapid', 'spread', 'shield', 'bomb'
+let chargeTimer; // charged shot (STR>=10)
+let charging;
+let powerUp;
 let powerTimer;
 let shieldHits;
 
@@ -74,10 +101,10 @@ let autoScroll;
 let autoScrollSpeed;
 
 // Level data
-let tiles; // 2D array [col][row]
+let tiles;
 let enemies;
-let bullets; // player bullets
-let eBullets; // enemy bullets
+let bullets;
+let eBullets;
 let hazards;
 let powerUps;
 let boss;
@@ -88,6 +115,48 @@ let deathTimer;
 
 // Stars background
 let stars;
+
+// Zone-specific background data
+let zoneBgColor;
+let zoneBgAccent;
+let zoneFogColor;
+
+// === ZONE NAMES & THEMES (Tasern lore) ===
+const ZONE_NAMES = [
+  '',
+  'Spore Nexus',          // Stage 1
+  'Reactor Corridor',     // Stage 2 (auto-scroll)
+  'Mycelial Depths',      // Stage 3 (crushers)
+  'Fractured Hull',       // Stage 4 (breakable)
+  'Fungal Conveyor',      // Stage 5 (conveyors)
+  'Zero-G Void',          // Stage 6 (zero-g)
+  'Mirror Spore Core',    // Stage 7 (mirror boss)
+  'Reactor Gauntlet'      // Stage 8 (final)
+];
+
+const ZONE_HINTS = [
+  '',
+  'Press UP to flip gravity',
+  'Stage auto-scrolls forward',
+  'Dodge the spore crushers!',
+  'Shoot breakable hull panels',
+  'Conveyors reverse on ceiling',
+  'Free-float: UP/DOWN to move',
+  'Boss copies your gravity flips',
+  'All mechanics - final battle!'
+];
+
+const ZONE_THEMES = [
+  null,
+  { bg: '#0a0a18', accent: '#115522', fog: 'rgba(20,60,30,0.08)', tile: '#2a4a3a', tileInner: '#3a6050' },
+  { bg: '#0f0818', accent: '#442211', fog: 'rgba(60,30,10,0.06)', tile: '#3a2a2a', tileInner: '#504040' },
+  { bg: '#080a14', accent: '#112244', fog: 'rgba(15,30,60,0.07)', tile: '#2a3a5a', tileInner: '#3a5070' },
+  { bg: '#0c0808', accent: '#332211', fog: 'rgba(40,20,10,0.06)', tile: '#3a3020', tileInner: '#504838' },
+  { bg: '#0a0c12', accent: '#223344', fog: 'rgba(20,40,60,0.07)', tile: '#2a3a4a', tileInner: '#3a5060' },
+  { bg: '#040410', accent: '#110033', fog: 'rgba(10,0,30,0.05)', tile: '#1a1a3a', tileInner: '#2a2a50' },
+  { bg: '#100818', accent: '#331144', fog: 'rgba(40,10,50,0.08)', tile: '#3a2a4a', tileInner: '#503a60' },
+  { bg: '#120808', accent: '#441100', fog: 'rgba(60,10,0,0.08)', tile: '#4a2a2a', tileInner: '#603838' }
+];
 
 // === STAGE GENERATION ===
 function generateStage(stageNum) {
@@ -100,7 +169,6 @@ function generateStage(stageNum) {
   for (let c = 0; c < width; c++) {
     tiles[c] = [];
     for (let r = 0; r < ROWS; r++) {
-      // Floor and ceiling always solid
       if (r === 0 || r === ROWS - 1) {
         tiles[c][r] = 1;
       } else if (r === 1 || r === ROWS - 2) {
@@ -111,11 +179,10 @@ function generateStage(stageNum) {
     }
   }
 
-  // Platform generation - varies by stage
   const seed = stageNum * 1337;
   const rng = makeRng(seed);
 
-  // Add platforms throughout the stage
+  // Platforms
   for (let section = 0; section < Math.floor(width / 15); section++) {
     const sx = 10 + section * 15 + Math.floor(rng() * 5);
     const platformCount = 1 + Math.floor(rng() * 3);
@@ -129,52 +196,72 @@ function generateStage(stageNum) {
     }
   }
 
-  // Stage-specific features
+  // Breakable floors/ceilings (stage 4+)
   if (stageNum >= 4) {
-    // Breakable floors/ceilings
     for (let section = 2; section < Math.floor(width / 20); section++) {
       const bx = section * 20 + Math.floor(rng() * 8);
       const br = rng() < 0.5 ? 2 : ROWS - 3;
       const bLen = 3 + Math.floor(rng() * 4);
       for (let i = 0; i < bLen && bx + i < width; i++) {
-        if (tiles[bx + i]) tiles[bx + i][br] = 2; // breakable
+        if (tiles[bx + i]) tiles[bx + i][br] = 2;
       }
     }
   }
 
+  // Conveyor belts (stage 5+)
   if (stageNum >= 5) {
-    // Conveyor belts
     for (let section = 1; section < Math.floor(width / 25); section++) {
       const cx = section * 25 + Math.floor(rng() * 5);
       const cr = 2 + Math.floor(rng() * (ROWS - 4));
       const cLen = 4 + Math.floor(rng() * 6);
       const cDir = rng() < 0.5 ? 1 : -1;
       for (let i = 0; i < cLen && cx + i < width; i++) {
-        if (tiles[cx + i]) tiles[cx + i][cr] = 3 + (cDir > 0 ? 0 : 10); // 3=conveyor right, 13=conveyor left
+        if (tiles[cx + i]) tiles[cx + i][cr] = 3 + (cDir > 0 ? 0 : 10);
       }
     }
   }
 
-  // Enemies
+  // Enemies — Tasern themed
   for (let section = 1; section < Math.floor(width / 8); section++) {
     const ex = section * 8 + Math.floor(rng() * 4);
     const etype = getEnemyType(stageNum, rng);
 
-    if (etype === 'drone') {
-      enemies.push({ type: 'drone', x: ex * TILE, y: (3 + Math.floor(rng() * (ROWS - 6))) * TILE, hp: 1, vx: 0, vy: 0, dir: -1, timer: 0 });
-    } else if (etype === 'turret_floor') {
-      enemies.push({ type: 'turret', x: ex * TILE, y: (ROWS - 3) * TILE, hp: 2, dir: -1, timer: 0, ceiling: false });
-    } else if (etype === 'turret_ceil') {
-      enemies.push({ type: 'turret', x: ex * TILE, y: 2 * TILE, hp: 2, dir: -1, timer: 0, ceiling: true });
-    } else if (etype === 'walker') {
-      enemies.push({ type: 'walker', x: ex * TILE, y: (ROWS - 3) * TILE, hp: 2, vx: -40, timer: 0, gravDir: 1 });
+    if (etype === 'reactor_drone') {
+      enemies.push({ type: 'reactor_drone', x: ex * TILE, y: (3 + Math.floor(rng() * (ROWS - 6))) * TILE, hp: 1, vx: 0, vy: 0, dir: -1, timer: 0 });
+    } else if (etype === 'spore_turret_floor') {
+      enemies.push({ type: 'spore_turret', x: ex * TILE, y: (ROWS - 3) * TILE, hp: 2, dir: -1, timer: 0, ceiling: false });
+    } else if (etype === 'spore_turret_ceil') {
+      enemies.push({ type: 'spore_turret', x: ex * TILE, y: 2 * TILE, hp: 2, dir: -1, timer: 0, ceiling: true });
+    } else if (etype === 'mycelial_walker') {
+      enemies.push({ type: 'mycelial_walker', x: ex * TILE, y: (ROWS - 3) * TILE, hp: 2, vx: -40, timer: 0, gravDir: 1, legPhase: 0 });
     } else if (etype === 'flyer') {
-      enemies.push({ type: 'flyer', x: ex * TILE, y: (4 + Math.floor(rng() * (ROWS - 8))) * TILE, hp: 1, timer: Math.floor(rng() * 100), baseY: 0 });
-      enemies[enemies.length - 1].baseY = enemies[enemies.length - 1].y;
+      const fy = (4 + Math.floor(rng() * (ROWS - 8))) * TILE;
+      enemies.push({ type: 'flyer', x: ex * TILE, y: fy, hp: 1, timer: Math.floor(rng() * 100), baseY: fy });
     }
   }
 
-  // Hazards
+  // Gravity hazards — goo ceilings and spore vents
+  if (stageNum >= 2) {
+    // Spore vents (floor geysers that push upward)
+    for (let section = 1; section < Math.floor(width / 18); section++) {
+      if (rng() < 0.4) {
+        const vx = section * 18 + Math.floor(rng() * 6);
+        hazards.push({ type: 'spore_vent', x: vx * TILE, fromTop: false, timer: Math.floor(rng() * 120), on: false, interval: 80 + Math.floor(rng() * 60), burstTimer: 0 });
+      }
+    }
+  }
+
+  if (stageNum >= 3) {
+    // Goo ceilings (sticky zones that reverse gravity temporarily)
+    for (let section = 1; section < Math.floor(width / 25); section++) {
+      if (rng() < 0.35) {
+        const gx = section * 25 + Math.floor(rng() * 8);
+        const gLen = 3 + Math.floor(rng() * 5);
+        hazards.push({ type: 'goo_ceiling', x: gx * TILE, width: gLen * TILE, dripTimer: 0, dripPhase: 0 });
+      }
+    }
+  }
+
   if (stageNum >= 3) {
     // Crushers
     for (let section = 1; section < Math.floor(width / 20); section++) {
@@ -192,12 +279,26 @@ function generateStage(stageNum) {
     }
   }
 
-  // Power-ups
+  // Power-ups — Tasern themed items
   for (let section = 2; section < Math.floor(width / 30); section++) {
     const ppx = section * 30 + Math.floor(rng() * 10);
     const ppy = 4 + Math.floor(rng() * (ROWS - 8));
-    const types = ['rapid', 'shield', 'spread', 'bomb'];
-    powerUps.push({ x: ppx * TILE, y: ppy * TILE, type: types[Math.floor(rng() * types.length)], active: true });
+    const types = ['spore_rapid', 'myco_shield', 'fungal_spread', 'reactor_bomb'];
+    // CHA increases chance of rare drops
+    let typeIdx = Math.floor(rng() * types.length);
+    if (statB.cha >= 10 && rng() < 0.3) typeIdx = 3; // more bombs for high CHA
+    powerUps.push({ x: ppx * TILE, y: ppy * TILE, type: types[typeIdx], active: true });
+  }
+
+  // CHA bonus: extra power-up drops
+  if (statB.cha >= 8) {
+    const extraDrops = Math.floor(statB.cha / 8);
+    for (let i = 0; i < extraDrops; i++) {
+      const epx = 40 + Math.floor(rng() * (width - 80));
+      const epy = 4 + Math.floor(rng() * (ROWS - 8));
+      const types = ['spore_rapid', 'myco_shield', 'fungal_spread', 'reactor_bomb'];
+      powerUps.push({ x: epx * TILE, y: epy * TILE, type: types[Math.floor(rng() * types.length)], active: true });
+    }
   }
 
   return width;
@@ -206,15 +307,15 @@ function generateStage(stageNum) {
 function getEnemyType(stageNum, rng) {
   const r = rng();
   if (stageNum <= 2) {
-    if (r < 0.3) return 'drone';
-    if (r < 0.6) return 'turret_floor';
-    if (r < 0.8) return 'turret_ceil';
-    return 'walker';
+    if (r < 0.3) return 'reactor_drone';
+    if (r < 0.6) return 'spore_turret_floor';
+    if (r < 0.8) return 'spore_turret_ceil';
+    return 'mycelial_walker';
   }
-  if (r < 0.2) return 'drone';
-  if (r < 0.4) return 'turret_floor';
-  if (r < 0.55) return 'turret_ceil';
-  if (r < 0.75) return 'walker';
+  if (r < 0.2) return 'reactor_drone';
+  if (r < 0.4) return 'spore_turret_floor';
+  if (r < 0.55) return 'spore_turret_ceil';
+  if (r < 0.75) return 'mycelial_walker';
   return 'flyer';
 }
 
@@ -228,12 +329,10 @@ function makeRng(seed) {
 
 // === BOSS GENERATION ===
 function spawnBoss(stageNum) {
-  const bossTypes = [null, null, 'gunship', null, 'tank', null, 'mirror', null, 'core'];
-  // Bosses on stages 2, 4, 6(mirror), 8(final)
   let btype = 'gunship';
   if (stageNum === 2) btype = 'gunship';
   else if (stageNum === 4) btype = 'tank';
-  else if (stageNum === 6) btype = 'mirror'; // Stage 7 is mirror boss
+  else if (stageNum === 6) btype = 'mirror';
   else if (stageNum === 8) btype = 'core';
 
   const bx = camX + GW - 80;
@@ -243,15 +342,22 @@ function spawnBoss(stageNum) {
     type: btype, x: bx, y: by, hp: 10 + stageNum * 5,
     maxHp: 10 + stageNum * 5, phase: 0, timer: 0,
     vx: 0, vy: 0, fireTimer: 0, flashTimer: 0,
-    gravDir: 1, // for mirror boss
+    gravDir: 1,
     width: btype === 'core' ? 64 : 48,
-    height: btype === 'core' ? 64 : 40
+    height: btype === 'core' ? 64 : 40,
+    // Boss enhancements
+    enraged: false, enrageFlash: 0,
+    sporeTrail: [], shieldUp: false, shieldTimer: 0,
+    attackPattern: 0
   };
   bossActive = true;
+  TAS.fx.shake(6, 0.88);
+  TAS.audio.playTone(80, 0.3, 'sawtooth', 0.1, 40);
 }
 
 // === PLAYER INIT ===
 function resetPlayer() {
+  statB = getStatB();
   px = 60;
   py = GH / 2;
   pvx = 0;
@@ -259,9 +365,11 @@ function resetPlayer() {
   gravDir = 1;
   grounded = false;
   flipCooldown = 0;
-  hp = MAX_HP;
+  hp = getMaxHP();
   iframes = 0;
   fireTimer = 0;
+  chargeTimer = 0;
+  charging = false;
   powerUp = null;
   powerTimer = 0;
   shieldHits = 0;
@@ -269,8 +377,9 @@ function resetPlayer() {
 
 function startGame() {
   state = 'playing';
+  statB = getStatB();
   score = 0;
-  lives = MAX_LIVES;
+  lives = getMaxLives();
   stage = 1;
   bullets = [];
   eBullets = [];
@@ -284,6 +393,7 @@ function startGame() {
   camX = 0;
   autoScroll = false;
   autoScrollSpeed = 0;
+  applyZoneTheme(stage);
   stars = TAS.bg.createStarfield(80, GW * 2, GH);
   TAS.particles.clear();
 }
@@ -302,7 +412,15 @@ function startStage(stageNum) {
   camX = 0;
   autoScroll = (stage === 2 || stage === 8);
   autoScrollSpeed = (stage === 2) ? 40 : (stage === 8) ? 55 : 0;
+  applyZoneTheme(stage);
   TAS.particles.clear();
+}
+
+function applyZoneTheme(stageNum) {
+  const t = ZONE_THEMES[stageNum] || ZONE_THEMES[1];
+  zoneBgColor = t.bg;
+  zoneBgAccent = t.accent;
+  zoneFogColor = t.fog;
 }
 
 // === TILE HELPERS ===
@@ -372,7 +490,6 @@ function updatePlaying(dt) {
         TAS.audio.playTone(120, 0.5, 'sawtooth', 0.15, 40);
         return;
       }
-      // Respawn
       resetPlayer();
       camX = Math.max(0, camX - 100);
       bullets = [];
@@ -386,12 +503,11 @@ function updatePlaying(dt) {
     stageTransition -= dt;
     if (stageTransition <= 0) {
       if (stage >= 8) {
-        // Victory!
         if (score > highScore) {
           highScore = score;
           TAS.score.save('metal_storm_hi', highScore);
         }
-        state = 'gameOver'; // Could be a victory screen
+        state = 'gameOver';
         return;
       }
       stage++;
@@ -404,6 +520,7 @@ function updatePlaying(dt) {
 
   const keys = TAS.input.keys;
   const touch = TAS.input.touch;
+  const PLAYER_SPEED = getPlayerSpeed();
 
   // --- Input ---
   let moveX = 0;
@@ -417,29 +534,31 @@ function updatePlaying(dt) {
     gravDir *= -1;
     flipCooldown = 0.25;
     grounded = false;
-    pvy = -gravDir * 200; // small launch
-    // Flip effects
+    pvy = -gravDir * 200;
     TAS.fx.flash('#88eeff', FLIP_FLASH_ALPHA);
     TAS.fx.shake(4, 0.85);
     TAS.audio.playTone(600, 0.08, 'square', 0.12, 1200);
     TAS.audio.playTone(900, 0.06, 'sine', 0.08);
     TAS.particles.spawn(px + 8, py + (gravDir === 1 ? -4 : 20), '#88eeff', 8, 3, { gravity: gravDir * 2 });
-    score += 10;
+    // Flip sparks
+    for (let i = 0; i < 4; i++) {
+      TAS.particles.spawn(px + 7 + TAS.math.randRange(-6, 6), py + 8, '#aaeeff', 1, 2);
+    }
+    score += getScoreValue(BASE_SCORE_PER_FLIP);
   }
 
   // Zero-G stage (6)
   const zeroG = (stage === 6 && !bossActive);
 
-  // Horizontal movement
+  // Horizontal movement (DEX -> speed)
   pvx = moveX * PLAYER_SPEED;
 
   // Conveyor belt effect
   const playerCol = worldToCol(px + 8);
   const playerRow = worldToRow(py + (gravDir === 1 ? 16 : 0));
   const standingTile = getTile(playerCol, playerRow + (gravDir === 1 ? 1 : -1));
-  if (standingTile === 3) pvx += 60; // conveyor right
-  if (standingTile === 13) pvx -= 60; // conveyor left
-  // Reversed on ceiling
+  if (standingTile === 3) pvx += 60;
+  if (standingTile === 13) pvx -= 60;
   if (gravDir === -1) {
     if (standingTile === 3) pvx -= 60;
     if (standingTile === 13) pvx += 60;
@@ -447,12 +566,10 @@ function updatePlaying(dt) {
 
   // Vertical movement
   if (zeroG) {
-    // Zero-G: free float
     let moveY = 0;
     if (keys['ArrowUp'] || keys['KeyW'] || touch.up) moveY = -1;
     if (keys['ArrowDown'] || keys['KeyS'] || touch.down) moveY = 1;
     pvy = moveY * PLAYER_SPEED * 0.8;
-    // Dampen
     pvy *= 0.95;
   } else {
     pvy += GRAVITY * gravDir * dt;
@@ -465,11 +582,9 @@ function updatePlaying(dt) {
   // Collision X
   px = newX;
   const pw = 14, ph = 16;
-  // Clamp to camera bounds
   if (px < camX) px = camX;
   if (px + pw > camX + GW) px = camX + GW - pw;
 
-  // Tile collision X
   const leftCol = worldToCol(px);
   const rightCol = worldToCol(px + pw - 1);
   const topRow = worldToCol(py + 2);
@@ -488,7 +603,6 @@ function updatePlaying(dt) {
   py = newY;
 
   if (gravDir === 1) {
-    // Normal gravity - check floor
     const footRow = worldToRow(py + ph);
     const headRow = worldToRow(py);
     const lc = worldToCol(px + 2);
@@ -510,7 +624,6 @@ function updatePlaying(dt) {
       }
     }
   } else {
-    // Flipped gravity - check ceiling
     const headRow = worldToRow(py + ph);
     const footRow = worldToRow(py);
     const lc = worldToCol(px + 2);
@@ -534,31 +647,55 @@ function updatePlaying(dt) {
   }
 
   // Landing particles
-  if (grounded && Math.abs(pvy) < 1 && frame % 60 === 0) {
-    // Subtle idle particles
+  if (grounded && frame % 120 === 0) {
+    TAS.particles.spawn(px + 7, py + (gravDir === 1 ? ph : 0), '#556677', 2, 0.5);
   }
 
-  // --- Shooting ---
-  const firePressed = keys['KeyX'] || keys['KeyZ'] || touch.b;
+  // --- Shooting (WIS -> fire rate, STR -> damage) ---
+  const firePressed = keys['KeyX'] || keys['KeyZ'] || keys['KeyJ'] || touch.b;
   if (fireTimer > 0) fireTimer -= dt;
-  if (firePressed && fireTimer <= 0) {
-    const rate = (powerUp === 'rapid') ? 0.08 : 0.18;
+
+  // Charged shot mechanic (STR >= 10)
+  const canCharge = statB.str >= 10;
+  if (canCharge && firePressed) {
+    chargeTimer += dt;
+    charging = true;
+  } else if (charging && !firePressed && chargeTimer > 0) {
+    // Release charged shot
+    if (chargeTimer >= 0.6) {
+      const bx = px + pw;
+      const by = py + ph / 2;
+      const chargeDmg = Math.floor(getBulletDamage() * (1 + chargeTimer));
+      bullets.push({ x: bx, y: by, vx: BASE_BULLET_SPEED * 1.4, vy: 0, dmg: chargeDmg, charged: true, size: Math.min(3, 1 + chargeTimer) });
+      TAS.audio.playTone(400, 0.15, 'sawtooth', 0.12, 800);
+      TAS.fx.shake(3, 0.9);
+      TAS.particles.spawn(bx, by, '#ffaa22', 6, 3);
+      fireTimer = 0.3;
+    }
+    chargeTimer = 0;
+    charging = false;
+  }
+
+  // Normal shooting
+  if (!charging && firePressed && fireTimer <= 0) {
+    const rate = (powerUp === 'spore_rapid') ? getRapidRate() : getFireRate();
     fireTimer = rate;
     const bx = px + pw;
     const by = py + ph / 2;
+    const dmg = getBulletDamage();
 
-    if (powerUp === 'spread') {
-      bullets.push({ x: bx, y: by, vx: BULLET_SPEED, vy: 0, dmg: 1 });
-      bullets.push({ x: bx, y: by, vx: BULLET_SPEED * 0.9, vy: -80, dmg: 1 });
-      bullets.push({ x: bx, y: by, vx: BULLET_SPEED * 0.9, vy: 80, dmg: 1 });
+    if (powerUp === 'fungal_spread') {
+      bullets.push({ x: bx, y: by, vx: BASE_BULLET_SPEED, vy: 0, dmg: dmg, charged: false, size: 1 });
+      bullets.push({ x: bx, y: by, vx: BASE_BULLET_SPEED * 0.9, vy: -80, dmg: dmg, charged: false, size: 1 });
+      bullets.push({ x: bx, y: by, vx: BASE_BULLET_SPEED * 0.9, vy: 80, dmg: dmg, charged: false, size: 1 });
     } else {
-      bullets.push({ x: bx, y: by, vx: BULLET_SPEED, vy: 0, dmg: powerUp === 'rapid' ? 1 : 1 });
+      bullets.push({ x: bx, y: by, vx: BASE_BULLET_SPEED, vy: 0, dmg: dmg, charged: false, size: 1 });
     }
     TAS.audio.playTone(800, 0.04, 'square', 0.06, 400);
   }
 
   // Power-up timer
-  if (powerUp && powerUp !== 'shield') {
+  if (powerUp && powerUp !== 'myco_shield') {
     powerTimer -= dt;
     if (powerTimer <= 0) {
       powerUp = null;
@@ -568,10 +705,8 @@ function updatePlaying(dt) {
   // --- Auto-scroll ---
   if (autoScroll) {
     camX += autoScrollSpeed * dt;
-    // Push player if they lag
     if (px < camX + 20) px = camX + 20;
   } else {
-    // Camera follows player
     const targetCamX = px - GW * 0.3;
     camX = Math.max(camX, targetCamX);
   }
@@ -580,14 +715,13 @@ function updatePlaying(dt) {
   // Stage end check
   const stageEnd = tiles.length * TILE - GW;
   if (camX >= stageEnd - 20 && !bossActive) {
-    // Check if this stage has a boss (even stages)
     if (stage % 2 === 0 || stage === 7 || stage === 8) {
       spawnBoss(stage);
       autoScroll = false;
     } else {
       stageComplete = true;
       stageTransition = 2.0;
-      score += 1000;
+      score += getScoreValue(1000);
       TAS.audio.playMelody([[523, 0.1], [659, 0.1], [784, 0.15], [1047, 0.2]], 100);
     }
   }
@@ -601,15 +735,19 @@ function updatePlaying(dt) {
       bullets.splice(i, 1);
       continue;
     }
-    // Hit tiles (breakable)
+    // Charged bullet trail
+    if (b.charged && frame % 2 === 0) {
+      TAS.particles.spawn(b.x - 4, b.y, '#ffcc44', 1, 0.5);
+    }
     const bc = worldToCol(b.x);
     const br = worldToRow(b.y);
     if (getTile(bc, br) === 2) {
       tiles[bc][br] = 0;
       bullets.splice(i, 1);
-      TAS.particles.spawn(b.x, b.y, '#ff8844', 6, 2, { shape: 'rect' });
+      TAS.particles.spawn(b.x, b.y, '#ff8844', 8, 2.5, { shape: 'rect' });
+      TAS.fx.shake(2, 0.92);
       TAS.audio.playTone(200, 0.1, 'sawtooth', 0.08);
-      score += 25;
+      score += getScoreValue(25);
       continue;
     }
     if (isSolid(bc, br)) {
@@ -628,7 +766,6 @@ function updatePlaying(dt) {
       eBullets.splice(i, 1);
       continue;
     }
-    // Hit player
     if (TAS.hit.rectOverlap(b.x - 3, b.y - 3, 6, 6, px, py, pw, ph)) {
       eBullets.splice(i, 1);
       hitPlayer();
@@ -639,56 +776,73 @@ function updatePlaying(dt) {
   // --- Update enemies ---
   for (let i = enemies.length - 1; i >= 0; i--) {
     const e = enemies[i];
-    // Only update if on screen (with margin)
     if (e.x < camX - 100 || e.x > camX + GW + 100) continue;
 
     e.timer += dt;
 
-    if (e.type === 'drone') {
-      // Float toward player
+    if (e.type === 'reactor_drone') {
+      // Reactor Drone — orbits and shoots tracking spore bolts
       const dx = px - e.x, dy = py - e.y;
       const dist = Math.sqrt(dx * dx + dy * dy);
       if (dist > 10) {
-        e.x += (dx / dist) * 50 * dt;
-        e.y += (dy / dist) * 50 * dt;
+        e.x += (dx / dist) * 55 * dt;
+        e.y += (dy / dist) * 55 * dt;
       }
-      // Shoot every 2s
+      // Orbiting motion
+      e.x += Math.sin(e.timer * 3) * 20 * dt;
+      e.y += Math.cos(e.timer * 2.5) * 15 * dt;
+      // Shoot spore bolts
       if (e.timer > 2) {
         e.timer = 0;
         const ang = Math.atan2(py - e.y, px - e.x);
-        eBullets.push({ x: e.x, y: e.y, vx: Math.cos(ang) * 150, vy: Math.sin(ang) * 150 });
+        eBullets.push({ x: e.x, y: e.y, vx: Math.cos(ang) * 150, vy: Math.sin(ang) * 150, type: 'spore' });
         TAS.audio.playTone(300, 0.05, 'sawtooth', 0.04);
       }
-    } else if (e.type === 'turret') {
-      // Stationary, shoot toward player periodically
+      // Trail particles
+      if (frame % 6 === 0) {
+        TAS.particles.spawn(e.x + 8, e.y + 8, '#44ff88', 1, 0.8);
+      }
+    } else if (e.type === 'spore_turret') {
+      // Spore Turret — stationary, fires spore bursts
       if (e.timer > 1.5) {
         e.timer = 0;
         const dir = px > e.x ? 1 : -1;
-        eBullets.push({ x: e.x + dir * 8, y: e.y + 8, vx: dir * 200, vy: 0 });
+        eBullets.push({ x: e.x + dir * 8, y: e.y + 8, vx: dir * 200, vy: 0, type: 'spore' });
+        // Secondary spore at angle
+        eBullets.push({ x: e.x + dir * 8, y: e.y + 8, vx: dir * 160, vy: (e.ceiling ? 40 : -40), type: 'spore' });
         TAS.audio.playTone(250, 0.06, 'square', 0.05);
+        // Muzzle flash particles
+        TAS.particles.spawn(e.x + dir * 10, e.y + 8, '#88ff44', 3, 1.5);
       }
-    } else if (e.type === 'walker') {
+    } else if (e.type === 'mycelial_walker') {
+      // Mycelial Walker — walks on surfaces, can flip gravity
       e.x += e.vx * dt;
-      // Reverse at walls
+      e.legPhase = (e.legPhase || 0) + dt * 4;
       const wc = worldToCol(e.x + (e.vx > 0 ? 16 : 0));
       const wr = worldToRow(e.y + 8);
       if (isSolid(wc, wr)) {
         e.vx *= -1;
       }
-      // Shoot occasionally
+      // Shoot mycelial bolts
       if (e.timer > 2.5) {
         e.timer = 0;
         const dir = px > e.x ? 1 : -1;
-        eBullets.push({ x: e.x + 8, y: e.y + 4, vx: dir * 180, vy: 0 });
+        eBullets.push({ x: e.x + 8, y: e.y + 4, vx: dir * 180, vy: 0, type: 'mycelial' });
+      }
+      // Fungal footprint particles
+      if (frame % 20 === 0) {
+        TAS.particles.spawn(e.x + 8, e.y + 14, '#336633', 1, 0.3);
       }
     } else if (e.type === 'flyer') {
-      // Sine wave movement
+      // Sine wave flyer with spore trail
       e.y = e.baseY + Math.sin(e.timer * 2) * 30;
       e.x -= 30 * dt;
-      // Shoot down/up
       if (e.timer > 2) {
         e.timer = 0;
-        eBullets.push({ x: e.x, y: e.y + 8, vx: 0, vy: py > e.y ? 150 : -150 });
+        eBullets.push({ x: e.x, y: e.y + 8, vx: 0, vy: py > e.y ? 150 : -150, type: 'spore' });
+      }
+      if (frame % 8 === 0) {
+        TAS.particles.spawn(e.x + 12, e.y + 8, '#aa66cc', 1, 0.5);
       }
     }
 
@@ -698,12 +852,20 @@ function updatePlaying(dt) {
       if (TAS.hit.rectOverlap(b.x - 3, b.y - 3, 6, 6, e.x, e.y, 16, 16)) {
         e.hp -= b.dmg;
         bullets.splice(j, 1);
-        TAS.particles.spawn(b.x, b.y, '#ffaa44', 4, 2);
+        TAS.particles.spawn(b.x, b.y, b.charged ? '#ffdd44' : '#ffaa44', b.charged ? 8 : 4, 2);
+        if (b.charged) TAS.fx.shake(2, 0.92);
         if (e.hp <= 0) {
           enemies.splice(i, 1);
-          score += 100;
-          TAS.particles.spawn(e.x + 8, e.y + 8, '#ff4444', 12, 3, { gravity: 1 });
+          score += getScoreValue(BASE_SCORE_PER_KILL);
+          TAS.particles.spawn(e.x + 8, e.y + 8, '#ff4444', 14, 3.5, { gravity: 1 });
+          TAS.particles.spawn(e.x + 8, e.y + 8, '#44ff88', 6, 2); // green spore burst on kill
           TAS.audio.playTone(150, 0.15, 'sawtooth', 0.1, 50);
+          TAS.fx.shake(3, 0.9);
+          // CHA: bonus drop on kill
+          if (Math.random() < getDropChance(0.08)) {
+            const types = ['spore_rapid', 'myco_shield', 'fungal_spread'];
+            powerUps.push({ x: e.x, y: e.y, type: types[Math.floor(Math.random() * types.length)], active: true });
+          }
         }
         break;
       }
@@ -732,16 +894,19 @@ function updatePlaying(dt) {
           if (h.y > GH - TILE * 3) {
             h.phase = 'return';
             h.timer = 0;
-            TAS.fx.shake(3, 0.9);
-            TAS.audio.playNoise(0.1, 0.08, 400);
+            TAS.fx.shake(5, 0.88);
+            TAS.audio.playNoise(0.12, 0.1, 400);
+            // Impact particles
+            TAS.particles.spawn(h.x + TILE, h.y + TILE * 3, '#888888', 8, 2, { gravity: -1 });
           }
         } else {
           h.y -= h.speed * dt;
           if (h.y < TILE * 3) {
             h.phase = 'return';
             h.timer = 0;
-            TAS.fx.shake(3, 0.9);
-            TAS.audio.playNoise(0.1, 0.08, 400);
+            TAS.fx.shake(5, 0.88);
+            TAS.audio.playNoise(0.12, 0.1, 400);
+            TAS.particles.spawn(h.x + TILE, h.y, '#888888', 8, 2, { gravity: 1 });
           }
         }
       }
@@ -754,7 +919,6 @@ function updatePlaying(dt) {
           if (h.y >= h.restY) { h.y = h.restY; h.phase = 'wait'; h.timer = 0; }
         }
       }
-      // Collision
       if (TAS.hit.rectOverlap(px, py, pw, ph, h.x, h.y, TILE * 2, TILE * 3)) {
         hitPlayer();
       }
@@ -770,6 +934,49 @@ function updatePlaying(dt) {
         hitPlayer();
       }
     }
+
+    if (h.type === 'spore_vent') {
+      h.timer += dt;
+      if (h.timer > h.interval / 60) {
+        h.timer = 0;
+        h.on = !h.on;
+        if (h.on) {
+          h.burstTimer = 1.5; // active for 1.5 seconds
+          TAS.audio.playTone(180, 0.1, 'sawtooth', 0.06, 300);
+        }
+      }
+      if (h.on) {
+        h.burstTimer -= dt;
+        if (h.burstTimer <= 0) h.on = false;
+        // Spore vent pushes player upward
+        if (TAS.hit.rectOverlap(px, py, pw, ph, h.x - 8, FLOOR_Y - TILE * 6, TILE + 16, TILE * 6)) {
+          pvy -= 600 * dt;
+          // Vent particles
+          if (frame % 3 === 0) {
+            TAS.particles.spawn(h.x + TAS.math.randRange(-4, 12), FLOOR_Y - TILE * 2 - Math.random() * 40, '#66ff66', 1, 2, { gravity: -2 });
+          }
+        }
+      }
+    }
+
+    if (h.type === 'goo_ceiling') {
+      h.dripTimer += dt;
+      // Goo drips
+      if (h.dripTimer > 2) {
+        h.dripTimer = 0;
+        h.dripPhase = 1;
+      }
+      if (h.dripPhase > 0) h.dripPhase -= dt * 2;
+      // Player touching goo ceiling = forced gravity flip
+      const gooY = CEIL_Y + TILE;
+      if (gravDir === -1 && TAS.hit.rectOverlap(px, py, pw, ph, h.x, gooY, h.width, TILE)) {
+        // Stuck! Slowly pull down
+        pvy += 100 * dt;
+        if (frame % 10 === 0) {
+          TAS.particles.spawn(px + 7, py + 16, '#44cc44', 2, 0.5);
+        }
+      }
+    }
   }
 
   // --- Update boss ---
@@ -783,59 +990,68 @@ function updatePlaying(dt) {
     if (p.x < camX - 50 || p.x > camX + GW + 50) continue;
     if (TAS.hit.rectOverlap(px, py, pw, ph, p.x, p.y, 12, 12)) {
       p.active = false;
-      if (p.type === 'bomb') {
-        // Kill all on-screen enemies
+      if (p.type === 'reactor_bomb') {
         for (let i = enemies.length - 1; i >= 0; i--) {
           const e = enemies[i];
           if (e.x > camX && e.x < camX + GW) {
             TAS.particles.spawn(e.x + 8, e.y + 8, '#ffff44', 15, 4);
-            score += 100;
+            score += getScoreValue(BASE_SCORE_PER_KILL);
             enemies.splice(i, 1);
           }
         }
         eBullets = [];
         TAS.fx.flash('#ffffff', 0.6);
-        TAS.fx.shake(8, 0.85);
+        TAS.fx.shake(10, 0.82);
         TAS.audio.playTone(200, 0.3, 'sawtooth', 0.15, 80);
-      } else if (p.type === 'shield') {
-        powerUp = 'shield';
-        shieldHits = 3;
+        // Reactor bomb shockwave particles
+        for (let a = 0; a < 16; a++) {
+          const ang = (Math.PI * 2 / 16) * a;
+          TAS.particles.spawn(px + 7, py + 8, '#ff8800', 1, 4, { gravity: 0 });
+        }
+      } else if (p.type === 'myco_shield') {
+        powerUp = 'myco_shield';
+        shieldHits = 3 + Math.floor(statB.con / 10); // CON adds shield durability
         TAS.audio.playTone(880, 0.1, 'sine', 0.08);
+        TAS.particles.spawn(px + 7, py + 8, '#4488ff', 8, 2);
       } else {
         powerUp = p.type;
-        powerTimer = 10; // 10 seconds
+        powerTimer = 10 + Math.floor(statB.wis / 5); // WIS extends power-up duration
         TAS.audio.playMelody([[660, 0.05], [880, 0.05]], 60);
       }
     }
   }
-
-  // --- Gravity bomb input (down + fire when holding bomb) ---
-  // Already handled by power-up pickup
 }
 
 function hitPlayer() {
   if (iframes > 0) return;
   if (deathTimer > 0) return;
 
-  if (powerUp === 'shield') {
+  if (powerUp === 'myco_shield') {
     shieldHits--;
     if (shieldHits <= 0) powerUp = null;
     iframes = 30;
     TAS.fx.flash('#4488ff', 0.2);
+    TAS.fx.shake(2, 0.92);
     TAS.audio.playTone(400, 0.08, 'sine', 0.08);
+    TAS.particles.spawn(px + 7, py + 8, '#4488ff', 6, 2);
     return;
   }
 
-  hp--;
+  // CON armor reduces damage
+  const armor = getArmor();
+  const actualDmg = Math.max(1, 1 - armor); // always take at least 1
+  hp -= actualDmg;
   iframes = IFRAMES;
   TAS.fx.flash('#ff4444', 0.3);
   TAS.fx.shake(6, 0.88);
   TAS.audio.playTone(200, 0.15, 'sawtooth', 0.12, 80);
-  TAS.particles.spawn(px + 7, py + 8, '#ff6644', 10, 3);
+  TAS.particles.spawn(px + 7, py + 8, '#ff6644', 12, 3);
 
   if (hp <= 0) {
     deathTimer = 1.5;
-    TAS.particles.spawn(px + 7, py + 8, '#ff2222', 20, 5, { gravity: 2 });
+    TAS.particles.spawn(px + 7, py + 8, '#ff2222', 24, 5, { gravity: 2 });
+    TAS.particles.spawn(px + 7, py + 8, '#ffaa00', 10, 3, { gravity: 1 });
+    TAS.fx.shake(10, 0.82);
     TAS.audio.playTone(80, 0.4, 'sawtooth', 0.15, 30);
   }
 }
@@ -846,52 +1062,88 @@ function updateBoss(dt) {
   boss.fireTimer += dt;
 
   if (boss.flashTimer > 0) boss.flashTimer -= dt;
+  if (boss.enrageFlash > 0) boss.enrageFlash -= dt;
+
+  // Enrage at 30% HP
+  if (!boss.enraged && boss.hp <= boss.maxHp * 0.3) {
+    boss.enraged = true;
+    boss.enrageFlash = 1.0;
+    TAS.fx.flash('#ff2200', 0.4);
+    TAS.fx.shake(8, 0.85);
+    TAS.audio.playTone(60, 0.4, 'sawtooth', 0.12, 30);
+  }
 
   const pw = 14, ph = 16;
+  const enrageMult = boss.enraged ? 1.5 : 1;
 
   if (boss.type === 'gunship') {
-    // Moves up and down, shoots
-    boss.y = GH / 2 + Math.sin(boss.timer * 1.5) * 80;
+    boss.y = GH / 2 + Math.sin(boss.timer * 1.5 * enrageMult) * 80;
     boss.x = camX + GW - 80 + Math.sin(boss.timer * 0.7) * 20;
 
-    if (boss.fireTimer > 0.8) {
+    const fireRate = boss.enraged ? 0.5 : 0.8;
+    if (boss.fireTimer > fireRate) {
       boss.fireTimer = 0;
-      eBullets.push({ x: boss.x - 20, y: boss.y, vx: -200, vy: TAS.math.randRange(-50, 50) });
-      eBullets.push({ x: boss.x - 20, y: boss.y + boss.height, vx: -200, vy: TAS.math.randRange(-50, 50) });
+      eBullets.push({ x: boss.x - 20, y: boss.y, vx: -200, vy: TAS.math.randRange(-50, 50), type: 'spore' });
+      eBullets.push({ x: boss.x - 20, y: boss.y + boss.height, vx: -200, vy: TAS.math.randRange(-50, 50), type: 'spore' });
+      if (boss.enraged) {
+        // Enrage: aimed shot
+        const ang = Math.atan2(py - boss.y, px - boss.x);
+        eBullets.push({ x: boss.x, y: boss.y + boss.height / 2, vx: Math.cos(ang) * 180, vy: Math.sin(ang) * 180, type: 'spore' });
+      }
       TAS.audio.playTone(180, 0.08, 'square', 0.06);
     }
+    // Spore trail
+    if (frame % 4 === 0) {
+      TAS.particles.spawn(boss.x + boss.width + 4, boss.y + boss.height / 2, '#884444', 1, 1);
+    }
+
   } else if (boss.type === 'tank') {
-    // Stays on floor or ceiling, charges
     boss.y = gravDir === 1 ? GH - TILE * 2 - boss.height : TILE * 2;
     boss.x = camX + GW - 100 + Math.sin(boss.timer * 0.5) * 30;
 
-    if (boss.fireTimer > 1.2) {
+    const fireRate = boss.enraged ? 0.7 : 1.2;
+    if (boss.fireTimer > fireRate) {
       boss.fireTimer = 0;
-      // Spread shot
-      for (let a = -2; a <= 2; a++) {
-        eBullets.push({ x: boss.x, y: boss.y + boss.height / 2, vx: -180, vy: a * 40 });
+      const spreadCount = boss.enraged ? 4 : 2;
+      for (let a = -spreadCount; a <= spreadCount; a++) {
+        eBullets.push({ x: boss.x, y: boss.y + boss.height / 2, vx: -180, vy: a * 40, type: 'mycelial' });
       }
       TAS.audio.playTone(120, 0.12, 'sawtooth', 0.08);
-      TAS.fx.shake(2, 0.9);
+      TAS.fx.shake(3, 0.9);
     }
+    // Occasional ground pound
+    if (boss.enraged && boss.timer % 4 < 0.05) {
+      TAS.fx.shake(6, 0.86);
+      TAS.particles.spawn(boss.x + boss.width / 2, boss.y + boss.height, '#886644', 10, 3, { gravity: 1 });
+    }
+
   } else if (boss.type === 'mirror') {
-    // Copies player's gravity state with delay
     if (boss.timer > 0.5) {
       boss.gravDir = gravDir;
     }
     boss.y = boss.gravDir === 1 ? GH - TILE * 2 - boss.height : TILE * 2;
     boss.x = camX + GW - 90 + Math.cos(boss.timer * 2) * 40;
 
-    if (boss.fireTimer > 0.6) {
+    // Shield mechanic — mirror boss shields periodically
+    boss.shieldTimer += dt;
+    if (boss.shieldTimer > 5) {
+      boss.shieldUp = !boss.shieldUp;
+      boss.shieldTimer = 0;
+      if (boss.shieldUp) {
+        TAS.audio.playTone(600, 0.1, 'sine', 0.06);
+      }
+    }
+
+    const fireRate = boss.enraged ? 0.35 : 0.6;
+    if (boss.fireTimer > fireRate) {
       boss.fireTimer = 0;
       const ang = Math.atan2(py - boss.y, px - boss.x);
-      eBullets.push({ x: boss.x, y: boss.y + boss.height / 2, vx: Math.cos(ang) * 220, vy: Math.sin(ang) * 220 });
-      // Also shoots opposite gravity
-      eBullets.push({ x: boss.x, y: boss.y + boss.height / 2, vx: -150, vy: -boss.gravDir * 100 });
+      eBullets.push({ x: boss.x, y: boss.y + boss.height / 2, vx: Math.cos(ang) * 220, vy: Math.sin(ang) * 220, type: 'spore' });
+      eBullets.push({ x: boss.x, y: boss.y + boss.height / 2, vx: -150, vy: -boss.gravDir * 100, type: 'spore' });
       TAS.audio.playTone(500, 0.06, 'square', 0.06, 200);
     }
+
   } else if (boss.type === 'core') {
-    // Final boss - multiple phases
     boss.x = camX + GW - 100;
     boss.y = GH / 2 - boss.height / 2 + Math.sin(boss.timer * 1.2) * 60;
 
@@ -900,19 +1152,35 @@ function updateBoss(dt) {
 
     if (boss.fireTimer > fireRate) {
       boss.fireTimer = 0;
-      // Circular burst
-      const bulletCount = hpRatio > 0.5 ? 6 : 10;
-      for (let i = 0; i < bulletCount; i++) {
-        const a = (Math.PI * 2 / bulletCount) * i + boss.timer;
-        eBullets.push({ x: boss.x + boss.width / 2, y: boss.y + boss.height / 2, vx: Math.cos(a) * 140, vy: Math.sin(a) * 140 });
+      boss.attackPattern = (boss.attackPattern + 1) % 3;
+
+      if (boss.attackPattern === 0) {
+        // Circular burst
+        const bulletCount = hpRatio > 0.5 ? 6 : 10;
+        for (let i = 0; i < bulletCount; i++) {
+          const a = (Math.PI * 2 / bulletCount) * i + boss.timer;
+          eBullets.push({ x: boss.x + boss.width / 2, y: boss.y + boss.height / 2, vx: Math.cos(a) * 140, vy: Math.sin(a) * 140, type: 'spore' });
+        }
+      } else if (boss.attackPattern === 1) {
+        // Gravity wave — top and bottom streams
+        for (let i = 0; i < 4; i++) {
+          eBullets.push({ x: boss.x, y: boss.y + boss.height / 2, vx: -160 - i * 20, vy: -80 + i * 10, type: 'mycelial' });
+          eBullets.push({ x: boss.x, y: boss.y + boss.height / 2, vx: -160 - i * 20, vy: 80 - i * 10, type: 'mycelial' });
+        }
+      } else {
+        // Aimed triple shot
+        const ang = Math.atan2(py - boss.y, px - boss.x);
+        for (let s = -1; s <= 1; s++) {
+          eBullets.push({ x: boss.x, y: boss.y + boss.height / 2, vx: Math.cos(ang + s * 0.2) * 250, vy: Math.sin(ang + s * 0.2) * 250, type: 'spore' });
+        }
       }
       TAS.audio.playTone(150, 0.1, 'sawtooth', 0.08, 60);
+    }
 
-      // Also aimed shots in later phase
-      if (hpRatio < 0.5) {
-        const ang = Math.atan2(py - boss.y, px - boss.x);
-        eBullets.push({ x: boss.x, y: boss.y + boss.height / 2, vx: Math.cos(ang) * 250, vy: Math.sin(ang) * 250 });
-      }
+    // Core pulsing particles
+    if (frame % 3 === 0) {
+      const a = Math.random() * Math.PI * 2;
+      TAS.particles.spawn(boss.x + boss.width / 2 + Math.cos(a) * 20, boss.y + boss.height / 2 + Math.sin(a) * 20, hpRatio > 0.3 ? '#8844aa' : '#ff4444', 1, 0.5);
     }
   }
 
@@ -920,22 +1188,38 @@ function updateBoss(dt) {
   for (let j = bullets.length - 1; j >= 0; j--) {
     const b = bullets[j];
     if (TAS.hit.rectOverlap(b.x - 3, b.y - 3, 6, 6, boss.x, boss.y, boss.width, boss.height)) {
+      // Mirror boss shield deflects
+      if (boss.type === 'mirror' && boss.shieldUp) {
+        bullets.splice(j, 1);
+        eBullets.push({ x: b.x, y: b.y, vx: -b.vx * 0.8, vy: b.vy + TAS.math.randRange(-30, 30), type: 'spore' });
+        TAS.audio.playTone(800, 0.04, 'sine', 0.06);
+        TAS.particles.spawn(b.x, b.y, '#88aaff', 4, 2);
+        break;
+      }
+
       boss.hp -= b.dmg;
       boss.flashTimer = 0.1;
       bullets.splice(j, 1);
-      TAS.particles.spawn(b.x, b.y, '#ffaa44', 5, 2);
+      TAS.particles.spawn(b.x, b.y, b.charged ? '#ffdd44' : '#ffaa44', b.charged ? 8 : 5, 2);
+      if (b.charged) TAS.fx.shake(3, 0.9);
       TAS.audio.playTone(300, 0.04, 'square', 0.05);
 
       if (boss.hp <= 0) {
-        // Boss defeated
         bossActive = false;
-        score += 2000 + stage * 500;
+        score += getScoreValue(2000 + stage * 500);
         stageComplete = true;
         stageTransition = 2.5;
-        TAS.particles.spawn(boss.x + boss.width / 2, boss.y + boss.height / 2, '#ffcc00', 30, 6, { gravity: 1 });
-        TAS.particles.spawn(boss.x + boss.width / 2, boss.y + boss.height / 2, '#ff4400', 20, 4);
-        TAS.fx.flash('#ffffff', 0.7);
-        TAS.fx.shake(10, 0.8);
+        // Big explosion
+        for (let burst = 0; burst < 5; burst++) {
+          setTimeout(function() {
+            if (boss) {
+              TAS.particles.spawn(boss.x + boss.width / 2 + TAS.math.randRange(-20, 20), boss.y + boss.height / 2 + TAS.math.randRange(-20, 20), '#ffcc00', 15, 5, { gravity: 1 });
+            }
+          }, burst * 150);
+        }
+        TAS.particles.spawn(boss.x + boss.width / 2, boss.y + boss.height / 2, '#ff4400', 30, 6);
+        TAS.fx.flash('#ffffff', 0.8);
+        TAS.fx.shake(12, 0.78);
         TAS.audio.playTone(100, 0.5, 'sawtooth', 0.15, 30);
         TAS.audio.playMelody([[523, 0.12], [659, 0.12], [784, 0.12], [1047, 0.2]], 120);
         boss = null;
@@ -955,7 +1239,7 @@ function updateBoss(dt) {
 
 // === DRAW ===
 function draw(dt) {
-  ctx.fillStyle = '#0a0a18';
+  ctx.fillStyle = zoneBgColor || '#0a0a18';
   ctx.fillRect(0, 0, GW, GH);
 
   if (state === 'title') {
@@ -964,7 +1248,7 @@ function draw(dt) {
   }
 
   if (state === 'gameOver') {
-    TAS.ui.drawGameOver(score, highScore, GW, GH, { frame, extra: 'Stage ' + stage });
+    TAS.ui.drawGameOver(score, highScore, GW, GH, { frame, extra: ZONE_NAMES[stage] || ('Stage ' + stage) });
     return;
   }
 
@@ -983,30 +1267,33 @@ function draw(dt) {
     stars.draw();
   }
 
-  // Draw background grid effect
+  // Zone-specific fog/atmosphere
+  drawZoneFog();
+
+  // Background grid
   drawBackground();
 
-  // Draw tiles
+  // Tiles
   drawTiles();
 
-  // Draw hazards
+  // Hazards
   drawHazards();
 
-  // Draw power-ups
+  // Power-ups
   drawPowerUps();
 
-  // Draw enemies
+  // Enemies
   drawEnemies();
 
-  // Draw bullets
+  // Bullets
   drawBullets();
 
-  // Draw player
+  // Player
   if (deathTimer <= 0) {
     drawPlayer();
   }
 
-  // Draw boss
+  // Boss
   if (bossActive && boss) {
     drawBoss();
   }
@@ -1016,18 +1303,43 @@ function draw(dt) {
 
   TAS.fx.drawFlash(GW, GH);
 
+  // Scanline overlay (NES feel)
+  drawScanlines();
+
   // HUD
   drawHUD();
   TAS.input.drawTouchControls(GW, GH);
 }
 
 // === DRAW HELPERS ===
+function drawScanlines() {
+  ctx.fillStyle = 'rgba(0,0,0,0.06)';
+  for (let y = 0; y < GH; y += 2) {
+    ctx.fillRect(0, y, GW, 1);
+  }
+}
+
+function drawZoneFog() {
+  if (!zoneFogColor) return;
+  // Drifting fog columns
+  for (let i = 0; i < 8; i++) {
+    const fogX = ((frame * 0.3 + i * 70) % (GW + 60)) - 30;
+    ctx.fillStyle = zoneFogColor;
+    ctx.fillRect(fogX, HUD_H, 30, GH - HUD_H);
+  }
+}
+
 function drawTitleScreen() {
-  // Background effect
+  // Background effect — zone-colored scan lines
   for (let i = 0; i < 20; i++) {
     const x = (frame * 2 + i * 50) % GW;
     ctx.fillStyle = 'rgba(40, 180, 255, 0.05)';
     ctx.fillRect(x, 0, 2, GH);
+  }
+
+  // Spore particles drifting
+  if (frame % 8 === 0) {
+    TAS.particles.spawn(TAS.math.randRange(0, GW), TAS.math.randRange(GH * 0.3, GH), '#225533', 1, 0.3, { gravity: -0.5 });
   }
 
   // Mech silhouette
@@ -1038,15 +1350,24 @@ function drawTitleScreen() {
 
   TAS.ui.drawTitle('METAL STORM', 'A Tasern Reactor Tale', GW, GH, { frame, titleColor: '#44ccff' });
 
-  // Controls hint
+  // Stat bar
+  if (window.NftLoader) {
+    NftLoader.drawStatBar(ctx, GW / 2 - 60, GH * 0.58, 120);
+  }
+
+  // Controls hint — NES style
   ctx.fillStyle = '#555';
   ctx.font = '10px monospace';
   ctx.textAlign = 'center';
-  ctx.fillText('UP/A = FLIP GRAVITY | Z/X/B = FIRE | ARROWS = MOVE', GW / 2, GH * 0.78);
+  ctx.fillText('ARROWS/WASD=MOVE | UP/SPACE=FLIP | Z/X/J=FIRE', GW / 2, GH * 0.78);
+  if (statB.str >= 10) {
+    ctx.fillStyle = '#ff8844';
+    ctx.fillText('HOLD FIRE to CHARGE SHOT (STR)', GW / 2, GH * 0.83);
+  }
 }
 
 function drawStageIntro() {
-  ctx.fillStyle = '#0a0a18';
+  ctx.fillStyle = zoneBgColor || '#0a0a18';
   ctx.fillRect(0, 0, GW, GH);
 
   // Scanline effect
@@ -1060,20 +1381,13 @@ function drawStageIntro() {
   ctx.font = 'bold 24px monospace';
   ctx.fillText('STAGE ' + stage, GW / 2, GH * 0.35);
 
-  const stageNames = ['', 'Gravity Protocol', 'Endless March', 'Crush Zone', 'Shattered Hull',
-    'Conveyor Chaos', 'Zero-G Void', 'Mirror Core', 'Reactor Gauntlet'];
   ctx.fillStyle = '#88ddff';
   ctx.font = '14px monospace';
-  ctx.fillText(stageNames[stage] || 'Unknown', GW / 2, GH * 0.48);
+  ctx.fillText(ZONE_NAMES[stage] || 'Unknown', GW / 2, GH * 0.48);
 
-  // Stage mechanic hint
-  const hints = ['', 'Press UP to flip gravity', 'Stage auto-scrolls forward',
-    'Dodge the crushers - flip to escape!', 'Shoot breakable walls',
-    'Conveyors reverse on ceiling', 'Free-float: UP/DOWN to move',
-    'Boss copies your gravity flips', 'All mechanics - final battle!'];
   ctx.fillStyle = '#666';
   ctx.font = '11px monospace';
-  ctx.fillText(hints[stage] || '', GW / 2, GH * 0.62);
+  ctx.fillText(ZONE_HINTS[stage] || '', GW / 2, GH * 0.62);
 
   const pulse = Math.sin(frame * 0.08) * 0.3 + 0.7;
   ctx.globalAlpha = pulse;
@@ -1084,8 +1398,7 @@ function drawStageIntro() {
 }
 
 function drawBackground() {
-  // Subtle grid
-  ctx.strokeStyle = 'rgba(30, 60, 90, 0.15)';
+  ctx.strokeStyle = 'rgba(30, 60, 90, 0.12)';
   ctx.lineWidth = 0.5;
   const offsetX = -(camX % TILE);
   for (let x = offsetX; x < GW; x += TILE * 2) {
@@ -1103,6 +1416,7 @@ function drawBackground() {
 }
 
 function drawTiles() {
+  const theme = ZONE_THEMES[stage] || ZONE_THEMES[1];
   const startCol = Math.floor(camX / TILE);
   const endCol = startCol + Math.ceil(GW / TILE) + 1;
 
@@ -1115,31 +1429,35 @@ function drawTiles() {
       const sy = r * TILE;
 
       if (t === 1) {
-        // Solid tile
-        ctx.fillStyle = '#2a3a4a';
+        ctx.fillStyle = theme.tile;
         ctx.fillRect(sx, sy, TILE, TILE);
-        ctx.fillStyle = '#3a5060';
+        ctx.fillStyle = theme.tileInner;
         ctx.fillRect(sx + 1, sy + 1, TILE - 2, TILE - 2);
-        // Edge highlight
-        ctx.fillStyle = '#1a2a3a';
+        // Edge shadow
+        ctx.fillStyle = 'rgba(0,0,0,0.2)';
         ctx.fillRect(sx, sy + TILE - 1, TILE, 1);
+        // Corner rivet (NES detail)
+        ctx.fillStyle = 'rgba(255,255,255,0.08)';
+        ctx.fillRect(sx + 1, sy + 1, 2, 2);
       } else if (t === 2) {
-        // Breakable
+        // Breakable — hull panel
         ctx.fillStyle = '#664422';
         ctx.fillRect(sx, sy, TILE, TILE);
         ctx.strokeStyle = '#885533';
         ctx.strokeRect(sx + 2, sy + 2, TILE - 4, TILE - 4);
-        // Crack lines
         ctx.strokeStyle = '#443311';
         ctx.beginPath();
         ctx.moveTo(sx + 4, sy + 4);
         ctx.lineTo(sx + TILE - 4, sy + TILE - 4);
         ctx.stroke();
+        ctx.beginPath();
+        ctx.moveTo(sx + TILE - 4, sy + 4);
+        ctx.lineTo(sx + 4, sy + TILE - 4);
+        ctx.stroke();
       } else if (t === 3 || t === 13) {
-        // Conveyor
+        // Conveyor — fungal belt
         ctx.fillStyle = '#334455';
         ctx.fillRect(sx, sy, TILE, TILE);
-        // Direction arrows
         const dir = t === 3 ? 1 : -1;
         const arrowOff = ((frame * 2 * dir) % TILE + TILE) % TILE;
         ctx.fillStyle = '#55aacc';
@@ -1165,12 +1483,10 @@ function drawHazards() {
     if (sx < -50 || sx > GW + 50) continue;
 
     if (h.type === 'crusher') {
-      // Big metal block
       ctx.fillStyle = '#884444';
       ctx.fillRect(sx, h.y, TILE * 2, TILE * 3);
       ctx.fillStyle = '#aa5555';
       ctx.fillRect(sx + 2, h.y + 2, TILE * 2 - 4, TILE * 3 - 4);
-      // Warning stripes
       ctx.fillStyle = '#ffcc00';
       for (let i = 0; i < 3; i++) {
         ctx.fillRect(sx + 4 + i * 10, h.fromTop ? h.y + TILE * 3 - 4 : h.y, 6, 3);
@@ -1179,19 +1495,55 @@ function drawHazards() {
 
     if (h.type === 'laser') {
       if (h.on) {
-        // Active laser beam
         ctx.fillStyle = 'rgba(255, 40, 40, 0.8)';
         ctx.fillRect(sx, CEIL_Y + TILE, 3, FLOOR_Y - CEIL_Y - TILE * 2);
         ctx.fillStyle = 'rgba(255, 120, 120, 0.4)';
         ctx.fillRect(sx - 2, CEIL_Y + TILE, 7, FLOOR_Y - CEIL_Y - TILE * 2);
-        // Glow
         ctx.fillStyle = 'rgba(255, 60, 60, 0.15)';
         ctx.fillRect(sx - 6, CEIL_Y + TILE, 15, FLOOR_Y - CEIL_Y - TILE * 2);
       } else {
-        // Inactive emitter dots
         ctx.fillStyle = '#442222';
         ctx.fillRect(sx, CEIL_Y + TILE, 3, 4);
         ctx.fillRect(sx, FLOOR_Y - TILE - 4, 3, 4);
+      }
+    }
+
+    if (h.type === 'spore_vent') {
+      // Vent nozzle on floor
+      ctx.fillStyle = '#336633';
+      ctx.fillRect(sx, FLOOR_Y - TILE, TILE, TILE);
+      ctx.fillStyle = '#448844';
+      ctx.fillRect(sx + 3, FLOOR_Y - TILE + 2, TILE - 6, 4);
+      if (h.on) {
+        // Spore geyser
+        const intensity = h.burstTimer / 1.5;
+        ctx.fillStyle = 'rgba(80, 255, 80, ' + (0.15 + intensity * 0.2) + ')';
+        ctx.fillRect(sx - 4, FLOOR_Y - TILE * 5, TILE + 8, TILE * 4);
+        ctx.fillStyle = 'rgba(120, 255, 120, ' + (0.1 + intensity * 0.15) + ')';
+        ctx.fillRect(sx, FLOOR_Y - TILE * 6, TILE, TILE * 5);
+        // Bright core
+        ctx.fillStyle = 'rgba(200, 255, 200, ' + (intensity * 0.3) + ')';
+        ctx.fillRect(sx + 4, FLOOR_Y - TILE * 4, TILE - 8, TILE * 3);
+      }
+    }
+
+    if (h.type === 'goo_ceiling') {
+      // Sticky goo on ceiling
+      ctx.fillStyle = 'rgba(60, 180, 60, 0.5)';
+      ctx.fillRect(sx, CEIL_Y + TILE, h.width, 8);
+      // Dripping goo blobs
+      ctx.fillStyle = 'rgba(80, 200, 80, 0.6)';
+      for (let d = 0; d < h.width; d += 10) {
+        const dripLen = 4 + Math.sin(frame * 0.05 + d) * 3;
+        ctx.fillRect(sx + d + 3, CEIL_Y + TILE + 6, 4, dripLen);
+      }
+      // Active drip animation
+      if (h.dripPhase > 0) {
+        ctx.fillStyle = 'rgba(100, 220, 100, 0.7)';
+        const dropY = CEIL_Y + TILE + 10 + (1 - h.dripPhase) * 40;
+        ctx.beginPath();
+        ctx.arc(sx + h.width / 2, dropY, 3, 0, Math.PI * 2);
+        ctx.fill();
       }
     }
   }
@@ -1204,7 +1556,18 @@ function drawPowerUps() {
     if (sx < -20 || sx > GW + 20) continue;
 
     const bob = Math.sin(frame * 0.08 + p.x) * 3;
-    const colors = { rapid: '#ff8844', shield: '#4488ff', spread: '#44ff88', bomb: '#ff44ff' };
+    const colors = {
+      spore_rapid: '#ff8844',
+      myco_shield: '#4488ff',
+      fungal_spread: '#44ff88',
+      reactor_bomb: '#ff44ff'
+    };
+    const labels = {
+      spore_rapid: 'R',
+      myco_shield: 'S',
+      fungal_spread: 'F',
+      reactor_bomb: 'B'
+    };
     const c = colors[p.type] || '#fff';
 
     ctx.fillStyle = c;
@@ -1214,11 +1577,10 @@ function drawPowerUps() {
     ctx.strokeRect(sx, p.y + bob, 12, 12);
     ctx.globalAlpha = 1;
 
-    // Letter
     ctx.fillStyle = '#000';
     ctx.font = 'bold 8px monospace';
     ctx.textAlign = 'center';
-    ctx.fillText(p.type[0].toUpperCase(), sx + 6, p.y + bob + 9);
+    ctx.fillText(labels[p.type] || '?', sx + 6, p.y + bob + 9);
   }
 }
 
@@ -1227,84 +1589,168 @@ function drawEnemies() {
     const sx = e.x - camX;
     if (sx < -20 || sx > GW + 20) continue;
 
-    if (e.type === 'drone') {
-      // Flying drone - diamond shape
+    if (e.type === 'reactor_drone') {
+      // Reactor Drone — hexagonal body with glowing reactor core
       ctx.fillStyle = '#cc4444';
       ctx.beginPath();
       ctx.moveTo(sx + 8, e.y);
-      ctx.lineTo(sx + 16, e.y + 8);
+      ctx.lineTo(sx + 16, e.y + 4);
+      ctx.lineTo(sx + 16, e.y + 12);
       ctx.lineTo(sx + 8, e.y + 16);
-      ctx.lineTo(sx, e.y + 8);
+      ctx.lineTo(sx, e.y + 12);
+      ctx.lineTo(sx, e.y + 4);
       ctx.closePath();
       ctx.fill();
-      // Eye
-      ctx.fillStyle = '#ff8888';
-      ctx.fillRect(sx + 6, e.y + 6, 4, 4);
-    } else if (e.type === 'turret') {
-      // Turret - box with barrel
-      ctx.fillStyle = e.ceiling ? '#666688' : '#668866';
-      ctx.fillRect(sx, e.y, 16, 16);
+      // Inner chassis
+      ctx.fillStyle = '#992222';
+      ctx.fillRect(sx + 3, e.y + 3, 10, 10);
+      // Reactor eye (pulsing)
+      const eyePulse = 0.6 + Math.sin(frame * 0.15 + e.x) * 0.4;
+      ctx.fillStyle = 'rgba(255, 100, 100, ' + eyePulse + ')';
+      ctx.beginPath();
+      ctx.arc(sx + 8, e.y + 8, 3, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = '#ffaaaa';
+      ctx.beginPath();
+      ctx.arc(sx + 8, e.y + 8, 1.5, 0, Math.PI * 2);
+      ctx.fill();
+      // Antenna
+      ctx.fillStyle = '#cc6666';
+      ctx.fillRect(sx + 7, e.y - 3, 2, 4);
+
+    } else if (e.type === 'spore_turret') {
+      // Spore Turret — organic mushroom turret
+      const baseColor = e.ceiling ? '#557755' : '#668866';
+      // Stalk
+      ctx.fillStyle = '#556655';
+      ctx.fillRect(sx + 5, e.y + (e.ceiling ? 0 : 8), 6, 8);
+      // Cap (mushroom head)
+      ctx.fillStyle = baseColor;
+      ctx.beginPath();
+      ctx.arc(sx + 8, e.y + (e.ceiling ? 10 : 6), 8, 0, Math.PI * 2);
+      ctx.fill();
+      // Spots
+      ctx.fillStyle = '#88aa88';
+      ctx.beginPath();
+      ctx.arc(sx + 5, e.y + (e.ceiling ? 8 : 4), 2, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.beginPath();
+      ctx.arc(sx + 11, e.y + (e.ceiling ? 11 : 7), 1.5, 0, Math.PI * 2);
+      ctx.fill();
+      // Barrel
       ctx.fillStyle = '#888';
-      const barrelY = e.y + 6;
       const barrelDir = px > e.x ? 1 : -1;
-      ctx.fillRect(sx + 8 + (barrelDir > 0 ? 4 : -8), barrelY, 8, 4);
-      // Light
-      ctx.fillStyle = '#ff4444';
-      ctx.fillRect(sx + 6, e.y + 2, 4, 3);
-    } else if (e.type === 'walker') {
-      // Walking mech enemy
+      ctx.fillRect(sx + 8 + (barrelDir > 0 ? 4 : -8), e.y + 6, 8, 3);
+      // Spore glow
+      ctx.fillStyle = 'rgba(100, 255, 100, 0.3)';
+      ctx.beginPath();
+      ctx.arc(sx + 8, e.y + 8, 10, 0, Math.PI * 2);
+      ctx.fill();
+
+    } else if (e.type === 'mycelial_walker') {
+      // Mycelial Walker — fungal mech with tendrils for legs
       ctx.fillStyle = '#448844';
-      ctx.fillRect(sx + 2, e.y, 12, 12);
-      // Legs
-      const legOff = Math.sin(frame * 0.15) * 2;
-      ctx.fillRect(sx + 3, e.y + 12, 3, 4 + legOff);
-      ctx.fillRect(sx + 10, e.y + 12, 3, 4 - legOff);
-      // Eye
+      ctx.fillRect(sx + 2, e.y, 12, 10);
+      ctx.fillStyle = '#336633';
+      ctx.fillRect(sx + 4, e.y + 1, 8, 8);
+      // Mycelial tendrils (legs)
+      const legPhase = e.legPhase || 0;
+      ctx.strokeStyle = '#55aa55';
+      ctx.lineWidth = 2;
+      for (let leg = 0; leg < 3; leg++) {
+        const lx = sx + 3 + leg * 5;
+        const ly = e.y + 10;
+        const lOff = Math.sin(legPhase + leg * 1.2) * 2;
+        ctx.beginPath();
+        ctx.moveTo(lx, ly);
+        ctx.quadraticCurveTo(lx + lOff, ly + 3, lx + lOff * 0.5, ly + 6);
+        ctx.stroke();
+      }
+      ctx.lineWidth = 1;
+      // Eye cluster
       ctx.fillStyle = '#88ff88';
-      ctx.fillRect(sx + 5, e.y + 3, 6, 3);
+      ctx.fillRect(sx + 5, e.y + 2, 2, 2);
+      ctx.fillRect(sx + 8, e.y + 2, 2, 2);
+      ctx.fillRect(sx + 6, e.y + 5, 3, 2);
+
     } else if (e.type === 'flyer') {
-      // Flying bot - circle with wings
+      // Spore Flyer — glowing spore with wing membranes
       ctx.fillStyle = '#8844aa';
       ctx.beginPath();
       ctx.arc(sx + 8, e.y + 8, 7, 0, Math.PI * 2);
       ctx.fill();
-      // Wings
+      // Inner glow
+      ctx.fillStyle = 'rgba(180, 100, 255, 0.5)';
+      ctx.beginPath();
+      ctx.arc(sx + 8, e.y + 8, 4, 0, Math.PI * 2);
+      ctx.fill();
+      // Wing membranes
       const wingFlap = Math.sin(frame * 0.3) * 3;
-      ctx.fillStyle = '#aa66cc';
-      ctx.fillRect(sx - 4, e.y + 6 + wingFlap, 6, 3);
-      ctx.fillRect(sx + 14, e.y + 6 - wingFlap, 6, 3);
+      ctx.fillStyle = 'rgba(170, 100, 200, 0.6)';
+      ctx.beginPath();
+      ctx.moveTo(sx + 1, e.y + 8);
+      ctx.lineTo(sx - 5, e.y + 5 + wingFlap);
+      ctx.lineTo(sx - 3, e.y + 11 + wingFlap);
+      ctx.closePath();
+      ctx.fill();
+      ctx.beginPath();
+      ctx.moveTo(sx + 15, e.y + 8);
+      ctx.lineTo(sx + 21, e.y + 5 - wingFlap);
+      ctx.lineTo(sx + 19, e.y + 11 - wingFlap);
+      ctx.closePath();
+      ctx.fill();
+      // Spore dots
+      ctx.fillStyle = '#cc88ff';
+      ctx.fillRect(sx + 6, e.y + 6, 2, 2);
+      ctx.fillRect(sx + 10, e.y + 9, 2, 2);
     }
   }
 }
 
 function drawBullets() {
   // Player bullets
-  ctx.fillStyle = '#ffdd44';
   for (const b of bullets) {
     const sx = b.x - camX;
-    ctx.fillRect(sx - 4, b.y - 1, 8, 3);
-    ctx.fillStyle = '#ffffff';
-    ctx.fillRect(sx - 2, b.y, 4, 1);
-    ctx.fillStyle = '#ffdd44';
+    if (b.charged) {
+      // Charged shot — bigger, brighter
+      const sz = Math.floor(b.size * 3);
+      ctx.fillStyle = '#ffaa22';
+      ctx.fillRect(sx - sz, b.y - Math.floor(sz / 2), sz * 2, sz);
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(sx - Math.floor(sz / 2), b.y, sz, 1);
+    } else {
+      ctx.fillStyle = '#ffdd44';
+      ctx.fillRect(sx - 4, b.y - 1, 8, 3);
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(sx - 2, b.y, 4, 1);
+    }
   }
 
-  // Enemy bullets
-  ctx.fillStyle = '#ff4488';
+  // Enemy bullets — spore and mycelial types
   for (const b of eBullets) {
     const sx = b.x - camX;
-    ctx.beginPath();
-    ctx.arc(sx, b.y, 3, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.fillStyle = '#ff88aa';
-    ctx.beginPath();
-    ctx.arc(sx, b.y, 1.5, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.fillStyle = '#ff4488';
+    if (b.type === 'mycelial') {
+      // Mycelial bolt — green tendril
+      ctx.fillStyle = '#44cc44';
+      ctx.fillRect(sx - 4, b.y - 1, 8, 3);
+      ctx.fillStyle = '#88ff88';
+      ctx.fillRect(sx - 2, b.y, 4, 1);
+    } else {
+      // Spore bolt — pink/purple orb
+      ctx.fillStyle = '#ff4488';
+      ctx.beginPath();
+      ctx.arc(sx, b.y, 3, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = '#ff88aa';
+      ctx.beginPath();
+      ctx.arc(sx, b.y, 1.5, 0, Math.PI * 2);
+      ctx.fill();
+    }
   }
 }
 
 function drawPlayer() {
-  if (iframes > 0 && Math.floor(iframes / 4) % 2 === 0) return; // Blink
+  if (iframes > 0 && Math.floor(iframes / 4) % 2 === 0) return;
 
   const sx = px - camX;
   const sy = py;
@@ -1319,30 +1765,59 @@ function drawPlayer() {
 
   drawMechShape(sx, sy, 1, gravDir, frame);
 
-  // Shield effect
-  if (powerUp === 'shield') {
-    ctx.strokeStyle = 'rgba(68, 136, 255, ' + (0.4 + Math.sin(frame * 0.1) * 0.2) + ')';
+  // Charge glow effect
+  if (charging && chargeTimer > 0.2) {
+    const chargeAlpha = Math.min(0.8, chargeTimer * 0.8);
+    const chargeSize = 8 + chargeTimer * 6;
+    ctx.fillStyle = 'rgba(255, 170, 34, ' + chargeAlpha + ')';
+    ctx.beginPath();
+    ctx.arc(sx + 14, sy + 8, chargeSize, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = 'rgba(255, 255, 200, ' + (chargeAlpha * 0.5) + ')';
+    ctx.beginPath();
+    ctx.arc(sx + 14, sy + 8, chargeSize * 0.5, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  // Shield effect — myco shield
+  if (powerUp === 'myco_shield') {
+    const shieldPulse = 0.3 + Math.sin(frame * 0.12) * 0.15;
+    ctx.strokeStyle = 'rgba(68, 136, 255, ' + shieldPulse + ')';
     ctx.lineWidth = 2;
     ctx.beginPath();
     ctx.arc(sx + 7, sy + 8, 12, 0, Math.PI * 2);
     ctx.stroke();
+    // Shield pips
+    for (let i = 0; i < shieldHits; i++) {
+      const a = (Math.PI * 2 / 3) * i + frame * 0.03;
+      ctx.fillStyle = '#88bbff';
+      ctx.beginPath();
+      ctx.arc(sx + 7 + Math.cos(a) * 12, sy + 8 + Math.sin(a) * 12, 2, 0, Math.PI * 2);
+      ctx.fill();
+    }
   }
 
   // Power-up glow
-  if (powerUp === 'rapid') {
-    ctx.fillStyle = 'rgba(255, 136, 68, 0.2)';
+  if (powerUp === 'spore_rapid') {
+    ctx.fillStyle = 'rgba(255, 136, 68, 0.15)';
     ctx.beginPath();
     ctx.arc(sx + 7, sy + 8, 10, 0, Math.PI * 2);
     ctx.fill();
   }
-  if (powerUp === 'spread') {
-    ctx.fillStyle = 'rgba(68, 255, 136, 0.2)';
+  if (powerUp === 'fungal_spread') {
+    ctx.fillStyle = 'rgba(68, 255, 136, 0.15)';
     ctx.beginPath();
     ctx.arc(sx + 7, sy + 8, 10, 0, Math.PI * 2);
     ctx.fill();
   }
 
   ctx.restore();
+
+  // Thruster exhaust particles
+  if (Math.abs(pvx) > 80 && frame % 4 === 0) {
+    const thrustY = sy + (gravDir === 1 ? 14 : 2);
+    TAS.particles.spawn(sx + 7, thrustY, '#4488cc', 1, 0.8);
+  }
 }
 
 function drawMechShape(sx, sy, scale, gDir, f) {
@@ -1351,19 +1826,26 @@ function drawMechShape(sx, sy, scale, gDir, f) {
   ctx.fillStyle = '#4488cc';
   ctx.fillRect(sx + 2 * s, sy + 3 * s, 10 * s, 10 * s);
 
-  // Legs
+  // Legs — articulated
   ctx.fillStyle = '#336699';
   const legOff = grounded ? 0 : Math.sin(f * 0.2) * s;
   ctx.fillRect(sx + 3 * s, sy + 13 * s, 3 * s, 3 * s + legOff);
   ctx.fillRect(sx + 8 * s, sy + 13 * s, 3 * s, 3 * s - legOff);
+  // Feet
+  ctx.fillStyle = '#2a5577';
+  ctx.fillRect(sx + 2 * s, sy + 15 * s + legOff, 4 * s, 1 * s);
+  ctx.fillRect(sx + 7 * s, sy + 15 * s - legOff, 4 * s, 1 * s);
 
   // Head / visor
   ctx.fillStyle = '#5599dd';
   ctx.fillRect(sx + 3 * s, sy + 1 * s, 8 * s, 4 * s);
   ctx.fillStyle = '#88ffff';
   ctx.fillRect(sx + 5 * s, sy + 2 * s, 4 * s, 2 * s);
+  // Visor highlight
+  ctx.fillStyle = 'rgba(200, 255, 255, 0.4)';
+  ctx.fillRect(sx + 5 * s, sy + 2 * s, 2 * s, 1 * s);
 
-  // Reactor core (center glow)
+  // Reactor core (center glow) — pulsing
   const coreGlow = 0.5 + Math.sin(f * 0.15) * 0.3;
   ctx.fillStyle = 'rgba(255, 180, 40, ' + coreGlow + ')';
   ctx.beginPath();
@@ -1373,69 +1855,99 @@ function drawMechShape(sx, sy, scale, gDir, f) {
   ctx.beginPath();
   ctx.arc(sx + 7 * s, sy + 8 * s, 1.5 * s, 0, Math.PI * 2);
   ctx.fill();
+  // Core inner dot
+  ctx.fillStyle = '#fff';
+  ctx.beginPath();
+  ctx.arc(sx + 7 * s, sy + 8 * s, 0.5 * s, 0, Math.PI * 2);
+  ctx.fill();
 
   // Arm/gun
   ctx.fillStyle = '#446688';
   ctx.fillRect(sx + 10 * s, sy + 5 * s, 4 * s, 3 * s);
   ctx.fillStyle = '#667788';
   ctx.fillRect(sx + 13 * s, sy + 6 * s, 2 * s, 1.5 * s);
+  // Gun tip
+  ctx.fillStyle = '#889999';
+  ctx.fillRect(sx + 14.5 * s, sy + 5.5 * s, 1 * s, 2 * s);
 
   // Shoulder plates
   ctx.fillStyle = '#3377aa';
   ctx.fillRect(sx + 1 * s, sy + 4 * s, 2 * s, 4 * s);
   ctx.fillRect(sx + 11 * s, sy + 4 * s, 2 * s, 4 * s);
+  // Shoulder rivets
+  ctx.fillStyle = 'rgba(255,255,255,0.15)';
+  ctx.fillRect(sx + 1 * s, sy + 4 * s, 1 * s, 1 * s);
+  ctx.fillRect(sx + 12 * s, sy + 4 * s, 1 * s, 1 * s);
 }
 
 function drawBoss() {
   const sx = boss.x - camX;
   const sy = boss.y;
   const flash = boss.flashTimer > 0;
+  const enrageGlow = boss.enraged && frame % 10 < 5;
 
   if (boss.type === 'gunship') {
-    // Big flying ship
-    ctx.fillStyle = flash ? '#ffffff' : '#884444';
+    // Reactor Gunship — armored spore carrier
+    ctx.fillStyle = flash ? '#ffffff' : (enrageGlow ? '#aa3333' : '#884444');
     ctx.fillRect(sx, sy, boss.width, boss.height);
     ctx.fillStyle = flash ? '#ffcccc' : '#aa5555';
     ctx.fillRect(sx + 4, sy + 4, boss.width - 8, boss.height - 8);
-    // Engines
+    // Exhaust ports
     ctx.fillStyle = '#ff8800';
-    ctx.fillRect(sx + boss.width, sy + 8, 6, 8);
-    ctx.fillRect(sx + boss.width, sy + boss.height - 16, 6, 8);
-    // Eye
-    ctx.fillStyle = '#ff0000';
+    const exhaust = Math.sin(frame * 0.2) * 2;
+    ctx.fillRect(sx + boss.width, sy + 8, 6 + exhaust, 8);
+    ctx.fillRect(sx + boss.width, sy + boss.height - 16, 6 + exhaust, 8);
+    // Reactor eye
+    ctx.fillStyle = boss.enraged ? '#ff0000' : '#ff4444';
     ctx.beginPath();
     ctx.arc(sx + 12, sy + boss.height / 2, 5, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = '#ffffff';
+    ctx.beginPath();
+    ctx.arc(sx + 12, sy + boss.height / 2, 2, 0, Math.PI * 2);
     ctx.fill();
     // Cannon
     ctx.fillStyle = '#666';
     ctx.fillRect(sx - 12, sy + boss.height / 2 - 3, 14, 6);
+    ctx.fillStyle = '#555';
+    ctx.fillRect(sx - 14, sy + boss.height / 2 - 2, 4, 4);
+
   } else if (boss.type === 'tank') {
-    // Ground tank
-    ctx.fillStyle = flash ? '#ffffff' : '#556644';
+    // Mycelial Tank — fungal siege engine
+    ctx.fillStyle = flash ? '#ffffff' : (enrageGlow ? '#667744' : '#556644');
     ctx.fillRect(sx, sy, boss.width, boss.height);
     ctx.fillStyle = '#667755';
     ctx.fillRect(sx + 4, sy + 4, boss.width - 8, boss.height - 8);
-    // Treads
+    // Treads with detail
     ctx.fillStyle = '#333';
     ctx.fillRect(sx, sy + boss.height - 6, boss.width, 6);
+    ctx.fillStyle = '#444';
+    for (let tr = 0; tr < boss.width; tr += 6) {
+      ctx.fillRect(sx + tr, sy + boss.height - 5, 3, 4);
+    }
     // Turret
     ctx.fillStyle = '#778866';
     ctx.fillRect(sx + 8, sy - 10, 20, 14);
     ctx.fillRect(sx - 10, sy - 5, 20, 6);
-    // Light
-    ctx.fillStyle = '#ff4444';
+    // Spore launcher
+    ctx.fillStyle = boss.enraged ? '#ff6644' : '#ff4444';
     ctx.fillRect(sx + 16, sy - 6, 4, 4);
+    // Mycelial growth
+    ctx.fillStyle = 'rgba(80, 160, 80, 0.3)';
+    ctx.fillRect(sx + 2, sy + boss.height - 10, 8, 4);
+
   } else if (boss.type === 'mirror') {
-    // Dark copy of player mech (bigger)
-    ctx.fillStyle = flash ? '#ffffff' : '#882244';
+    // Mirror Spore Core — dark mech reflection
+    ctx.fillStyle = flash ? '#ffffff' : (enrageGlow ? '#992255' : '#882244');
     ctx.fillRect(sx, sy, boss.width, boss.height);
-    // Mirror mech body
     ctx.fillStyle = '#aa3366';
     ctx.fillRect(sx + 6, sy + 6, 36, 28);
     // Dark visor
     ctx.fillStyle = '#ff4488';
     ctx.fillRect(sx + 12, sy + 8, 16, 8);
-    // Core (evil red)
+    ctx.fillStyle = '#ff88aa';
+    ctx.fillRect(sx + 14, sy + 9, 6, 3);
+    // Core (evil)
     ctx.fillStyle = '#ff2244';
     ctx.beginPath();
     ctx.arc(sx + boss.width / 2, sy + boss.height / 2, 6, 0, Math.PI * 2);
@@ -1443,10 +1955,21 @@ function drawBoss() {
     // Gravity indicator
     ctx.fillStyle = boss.gravDir === 1 ? '#ff4444' : '#4444ff';
     ctx.fillRect(sx + boss.width / 2 - 2, boss.gravDir === 1 ? sy + boss.height : sy - 6, 4, 6);
+    // Shield visual
+    if (boss.shieldUp) {
+      ctx.strokeStyle = 'rgba(100, 180, 255, ' + (0.4 + Math.sin(frame * 0.1) * 0.2) + ')';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(sx + boss.width / 2, sy + boss.height / 2, boss.width / 2 + 4, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.lineWidth = 1;
+    }
+
   } else if (boss.type === 'core') {
-    // Reactor core - big pulsating sphere
+    // Reactor Core — pulsating fungal heart
     const pulse = 1 + Math.sin(frame * 0.08) * 0.1;
     const r = boss.width / 2 * pulse;
+    const hpRatio = boss.hp / boss.maxHp;
 
     // Outer shell
     ctx.fillStyle = flash ? '#ffffff' : 'rgba(100, 40, 120, 0.6)';
@@ -1455,17 +1978,22 @@ function drawBoss() {
     ctx.fill();
 
     // Inner core
-    ctx.fillStyle = '#8844aa';
+    ctx.fillStyle = hpRatio > 0.3 ? '#8844aa' : '#aa2244';
     ctx.beginPath();
     ctx.arc(sx + boss.width / 2, sy + boss.height / 2, r, 0, Math.PI * 2);
     ctx.fill();
 
-    // Energy ring
-    ctx.strokeStyle = '#ff44ff';
+    // Energy rings (multiple)
+    ctx.strokeStyle = hpRatio > 0.3 ? '#ff44ff' : '#ff4444';
     ctx.lineWidth = 2;
     ctx.beginPath();
     ctx.arc(sx + boss.width / 2, sy + boss.height / 2, r - 4, frame * 0.05, frame * 0.05 + Math.PI * 1.5);
     ctx.stroke();
+    ctx.strokeStyle = hpRatio > 0.3 ? '#aa44ff' : '#ff2222';
+    ctx.beginPath();
+    ctx.arc(sx + boss.width / 2, sy + boss.height / 2, r + 4, -frame * 0.03, -frame * 0.03 + Math.PI);
+    ctx.stroke();
+    ctx.lineWidth = 1;
 
     // Center eye
     ctx.fillStyle = '#ff88ff';
@@ -1476,16 +2004,37 @@ function drawBoss() {
     ctx.beginPath();
     ctx.arc(sx + boss.width / 2, sy + boss.height / 2, 3, 0, Math.PI * 2);
     ctx.fill();
+
+    // Spore tendrils extending from core
+    if (boss.enraged) {
+      ctx.strokeStyle = 'rgba(255, 68, 68, 0.4)';
+      ctx.lineWidth = 2;
+      for (let t = 0; t < 6; t++) {
+        const ta = (Math.PI * 2 / 6) * t + frame * 0.02;
+        const tLen = 15 + Math.sin(frame * 0.1 + t) * 5;
+        ctx.beginPath();
+        ctx.moveTo(sx + boss.width / 2 + Math.cos(ta) * r, sy + boss.height / 2 + Math.sin(ta) * r);
+        ctx.lineTo(sx + boss.width / 2 + Math.cos(ta) * (r + tLen), sy + boss.height / 2 + Math.sin(ta) * (r + tLen));
+        ctx.stroke();
+      }
+      ctx.lineWidth = 1;
+    }
   }
 
   // Health bar
   const hpRatio = boss.hp / boss.maxHp;
   ctx.fillStyle = '#333';
-  ctx.fillRect(sx, sy - 12, boss.width, 6);
+  ctx.fillRect(sx, sy - 14, boss.width, 8);
   ctx.fillStyle = hpRatio > 0.5 ? '#44cc44' : hpRatio > 0.25 ? '#cccc44' : '#cc4444';
-  ctx.fillRect(sx, sy - 12, boss.width * hpRatio, 6);
+  ctx.fillRect(sx + 1, sy - 13, (boss.width - 2) * hpRatio, 6);
   ctx.strokeStyle = '#666';
-  ctx.strokeRect(sx, sy - 12, boss.width, 6);
+  ctx.strokeRect(sx, sy - 14, boss.width, 8);
+  // Boss name
+  const bossNames = { gunship: 'REACTOR GUNSHIP', tank: 'MYCELIAL TANK', mirror: 'MIRROR SPORE', core: 'FUNGAL CORE' };
+  ctx.fillStyle = '#888';
+  ctx.font = '7px monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText(bossNames[boss.type] || '', sx + boss.width / 2, sy - 18);
 }
 
 function drawHUD() {
@@ -1493,24 +2042,31 @@ function drawHUD() {
   ctx.fillStyle = 'rgba(10, 5, 20, 0.85)';
   ctx.fillRect(0, 0, GW, HUD_H);
 
-  // Score
+  // Score (INT -> multiplier shown)
   ctx.fillStyle = '#ffdd44';
   ctx.font = 'bold 12px monospace';
   ctx.textAlign = 'left';
   ctx.fillText('SCORE: ' + score, 6, 18);
 
-  // Stage
+  // Stage / Zone
   ctx.fillStyle = '#88ccff';
   ctx.textAlign = 'center';
-  ctx.fillText('STAGE ' + stage, GW / 2, 18);
+  ctx.font = 'bold 10px monospace';
+  ctx.fillText(ZONE_NAMES[stage] || ('STAGE ' + stage), GW / 2, 12);
+  ctx.fillStyle = '#556688';
+  ctx.font = '8px monospace';
+  ctx.fillText('STAGE ' + stage, GW / 2, 22);
 
-  // Lives
+  // Lives — mech icons
   ctx.textAlign = 'right';
   for (let i = 0; i < lives; i++) {
     ctx.fillStyle = '#44dd88';
     ctx.fillRect(GW - 14 - i * 16, 8, 12, 12);
     ctx.fillStyle = '#88ffcc';
     ctx.fillRect(GW - 12 - i * 16, 10, 4, 4);
+    // Visor
+    ctx.fillStyle = '#aaffee';
+    ctx.fillRect(GW - 11 - i * 16, 11, 2, 2);
   }
 
   // HP bar
@@ -1518,22 +2074,32 @@ function drawHUD() {
   const hpX = 120;
   ctx.fillStyle = '#222';
   ctx.fillRect(hpX, 9, hpW, 10);
-  const hpRatio = hp / MAX_HP;
+  const hpRatio = hp / getMaxHP();
   ctx.fillStyle = hpRatio > 0.6 ? '#44cc44' : hpRatio > 0.3 ? '#cccc44' : '#cc4444';
-  ctx.fillRect(hpX, 9, hpW * hpRatio, 10);
+  ctx.fillRect(hpX, 9, Math.floor(hpW * hpRatio), 10);
   ctx.strokeStyle = '#444';
   ctx.strokeRect(hpX, 9, hpW, 10);
+  // HP text
+  ctx.fillStyle = '#fff';
+  ctx.font = '7px monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText(hp + '/' + getMaxHP(), hpX + hpW / 2, 17);
 
   // Power-up indicator
   if (powerUp) {
-    const colors = { rapid: '#ff8844', shield: '#4488ff', spread: '#44ff88', bomb: '#ff44ff' };
+    const colors = { spore_rapid: '#ff8844', myco_shield: '#4488ff', fungal_spread: '#44ff88', reactor_bomb: '#ff44ff' };
+    const names = { spore_rapid: 'RAPID', myco_shield: 'SHIELD', fungal_spread: 'SPREAD', reactor_bomb: 'BOMB' };
     ctx.fillStyle = colors[powerUp] || '#fff';
     ctx.font = 'bold 9px monospace';
     ctx.textAlign = 'left';
-    ctx.fillText(powerUp.toUpperCase(), hpX + hpW + 8, 18);
-    if (powerUp !== 'shield' && powerTimer > 0) {
+    ctx.fillText(names[powerUp] || powerUp.toUpperCase(), hpX + hpW + 8, 18);
+    if (powerUp !== 'myco_shield' && powerTimer > 0) {
       ctx.fillStyle = '#888';
       ctx.fillText(Math.ceil(powerTimer) + 's', hpX + hpW + 48, 18);
+    }
+    if (powerUp === 'myco_shield') {
+      ctx.fillStyle = '#88bbff';
+      ctx.fillText('x' + shieldHits, hpX + hpW + 52, 18);
     }
   }
 
@@ -1541,7 +2107,24 @@ function drawHUD() {
   ctx.fillStyle = gravDir === 1 ? '#44ffaa' : '#ff44aa';
   ctx.font = 'bold 10px monospace';
   ctx.textAlign = 'center';
-  ctx.fillText(gravDir === 1 ? 'v' : '^', GW / 2 + 40, 18);
+  ctx.fillText(gravDir === 1 ? 'v' : '^', GW / 2 + 40, 22);
+
+  // Charge indicator (STR>=10)
+  if (charging && chargeTimer > 0.2) {
+    const chargePct = Math.min(1, chargeTimer / 0.6);
+    ctx.fillStyle = '#333';
+    ctx.fillRect(hpX, 21, hpW, 3);
+    ctx.fillStyle = chargePct >= 1 ? '#ffaa22' : '#886622';
+    ctx.fillRect(hpX, 21, Math.floor(hpW * chargePct), 3);
+  }
+
+  // Stat level display (if NFT active)
+  if (statB.level > 0) {
+    ctx.fillStyle = '#ffdd44';
+    ctx.font = '7px monospace';
+    ctx.textAlign = 'left';
+    ctx.fillText('LV' + statB.level, 6, 26);
+  }
 }
 
 // === START ===

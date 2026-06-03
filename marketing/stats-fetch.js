@@ -7,7 +7,7 @@ const { ethers } = require('ethers');
 
 const RPC = 'https://mainnet.base.org';
 const BURN = '0xfd780B0aE569e15e514B819ecFDF46f804953a4B';
-const FACTORY = '0x72efb37D70266dFFe2f7D5003c138DD613D04B75';
+const FACTORY = '0x5c11fd8D7BB21EE6d012a2c50F4b03870fA9f5F7';
 const FACTORY_DEPLOY_BLOCK = 46600000;
 
 // Only tokens that get sent to the burn address (others burn via reactor swaps)
@@ -131,7 +131,7 @@ function buildStatsTweet(stats) {
       lines.push('');
       lines.push('- No withdraw function in the contract');
       lines.push('- 0% to anyone. 100% in LP pools from block 1');
-      lines.push('- MfT floor pool + mftUSD sell walls');
+      lines.push('- Locked TOKEN/Money + TOKEN/Meme pools');
       lines.push('- Reactor burns supply every 2 hours');
       lines.push('- Carbon credits retired from every trade');
       lines.push('');
@@ -165,10 +165,10 @@ function buildStatsTweet(stats) {
       const lines = [];
       lines.push(`$${formatNum(stats.seedUSDC)} USDC seeded into unrugable tokens.`);
       lines.push('');
-      lines.push('Every dollar creates:');
-      lines.push('  1 TOKEN/MfT floor pool');
-      lines.push('  3 mftUSD sell walls (1.1x / 2x / 5x)');
-      lines.push('  1 CHAR carbon retirement pool');
+      lines.push('Every launch creates (free, just gas):');
+      lines.push('  1 TOKEN/Money pool (70%)');
+      lines.push('  1 TOKEN/Meme pool (30%)');
+      lines.push('  1 reactor (50% burned / 50% to launcher)');
       lines.push('  All locked forever. 0% to anyone.');
       lines.push('');
       lines.push('No keys. No multisig. No rug.');

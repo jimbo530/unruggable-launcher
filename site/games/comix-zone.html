@@ -23,19 +23,33 @@ canvas { display: block; margin: 0 auto; }
 "use strict";
 
 // === CONSTANTS ===
-const GW = 480, GH = 320;
-const ctx = TAS.ctx;
+var GW = 480, GH = 320;
+var ctx = TAS.ctx;
 TAS.initCanvas(GW, GH);
-TAS.input.initTouch({ buttons: ['a', 'b'], labels: { a: 'PUNCH', b: 'JUMP' } });
+TAS.input.initTouch({ buttons: ['a', 'b'], labels: { a: 'A ATK', b: 'B JMP' } });
 
-const GRAVITY = 900;
-const FLOOR_Y = 240;
-const COMBO_WINDOW = 400;
-const SPECIAL_HP_COST = 8;
-const KNIFE_HITS = 6;
+var GRAVITY = 900;
+var FLOOR_Y = 240;
+var COMBO_WINDOW = 400;
+var SPECIAL_HP_COST = 8;
+var KNIFE_HITS = 6;
+
+// === STAT B (NFT bonuses) ===
+var statB = { damage: 1, speed: 1, lives: 0, hpMult: 1, scoreMult: 1, cooldown: 1, luck: 1, str: 10, dex: 10, con: 10, int: 10, wis: 10, cha: 10, level: 0, color: '#4488cc', name: 'Sketch', icon: 'S' };
+try { if (window.NftLoader && NftLoader.getStatBonuses) statB = NftLoader.getStatBonuses(); } catch(e) { console.warn('statB load failed', e); }
+
+// Stat helper functions — Math.floor() all outputs
+function strDmgMult() { return 1 + (statB.str - 10) * 0.05; }
+function dexSpeedMult() { return 1 + (statB.dex - 10) * 0.03; }
+function dodgeChance() { return Math.min(0.3, Math.max(0, (statB.dex - 10) * 0.015)); }
+function conHpMult() { return 1 + (statB.con - 10) * 0.06; }
+function bonusLives() { return statB.lives + Math.floor(Math.max(0, statB.con - 14) / 4); }
+function intScoreMult() { return statB.scoreMult * (1 + (statB.int - 10) * 0.04); }
+function wisComboMult() { return 1 + (statB.wis - 10) * 0.03; }
+function chaDropChance() { return Math.min(0.5, 0.08 + (statB.cha - 10) * 0.02) * statB.luck; }
 
 // === SOUND EFFECTS ===
-const SFX = {
+var SFX = {
   punch()   { TAS.audio.playTone(200, 0.06, 'square', 0.1, 100); TAS.audio.playNoise(0.06, 0.1, 800); },
   punch2()  { TAS.audio.playTone(250, 0.07, 'square', 0.11, 120); TAS.audio.playNoise(0.07, 0.11, 900); },
   punch3()  { TAS.audio.playTone(300, 0.09, 'sawtooth', 0.12, 80); TAS.audio.playNoise(0.1, 0.13, 600); },
@@ -50,110 +64,137 @@ const SFX = {
   die()     { TAS.audio.playTone(400, 0.4, 'sawtooth', 0.12, 60); setTimeout(function(){ TAS.audio.playTone(200, 0.3, 'square', 0.06, 40); }, 250); },
   clear()   { [523, 659, 784, 1047].forEach(function(n, i){ setTimeout(function(){ TAS.audio.playTone(n, 0.15, 'square', 0.08); }, i * 120); }); },
   draw()    { TAS.audio.playTone(600, 0.08, 'sine', 0.04, 1200); },
-  border()  { TAS.audio.playNoise(0.12, 0.1, 300); TAS.audio.playTone(90, 0.15, 'square', 0.08, 40); }
+  border()  { TAS.audio.playNoise(0.12, 0.1, 300); TAS.audio.playTone(90, 0.15, 'square', 0.08, 40); },
+  sporeBurst() { TAS.audio.playTone(120, 0.2, 'sawtooth', 0.08, 40); TAS.audio.playNoise(0.15, 0.1, 400); },
+  reactorHum() { TAS.audio.playTone(60, 0.3, 'sine', 0.04, 20); },
+  charge()  { TAS.audio.playTone(200, 0.15, 'triangle', 0.06, 600); },
+  hazard()  { TAS.audio.playNoise(0.1, 0.06, 900); TAS.audio.playTone(400, 0.08, 'square', 0.05, 200); }
 };
 
 // === GAME STATE ===
-let state = 'title';
-let frame = 0;
-let score = 0;
-let highScore = TAS.score.load('comixzone_hi');
-let comboMult = 1;
-let comboTimer = 0;
-let pageNum = 0;
-let panelIdx = 0;
-let panelClearTimer = 0;
-let transitionTimer = 0;
-let transitionFrom = null;
-let transitionTo = null;
-let drawingEnemies = [];
-let impactTexts = [];
-let speechBubble = null;
-let speechTimer = 0;
+var state = 'title';
+var frame = 0;
+var score = 0;
+var highScore = TAS.score.load('comixzone_hi');
+var comboMult = 1;
+var comboTimer = 0;
+var pageNum = 0;
+var panelIdx = 0;
+var panelClearTimer = 0;
+var transitionTimer = 0;
+var transitionFrom = null;
+var transitionTo = null;
+var drawingEnemies = [];
+var impactTexts = [];
+var speechBubble = null;
+var speechTimer = 0;
+var hazards = [];
+var chargeTimer = 0;
+var chargeReady = false;
+var screenShakeExtra = 0;
+var lives = 0;
 
 // Player
-let player = {};
+var player = {};
 // Enemies
-let enemies = [];
+var enemies = [];
 // Items on ground
-let items = [];
+var items = [];
 
-// === PAGE/PANEL DEFINITIONS ===
-const PAGES = [
-  { name: 'City Streets', bg: '#2a2a3a', accent: '#ff6633', panels: [
-    { x: 10, y: 35, w: 225, h: 130 },
-    { x: 245, y: 35, w: 225, h: 130 },
-    { x: 10, y: 175, w: 150, h: 130 },
-    { x: 170, y: 175, w: 150, h: 130 },
-    { x: 330, y: 175, w: 140, h: 130, boss: true }
+// === PAGE/PANEL DEFINITIONS (Tasern zones) ===
+var PAGES = [
+  { name: 'Spore District', bg: '#1a2a1a', accent: '#33cc66', panels: [
+    { x: 10, y: 35, w: 225, h: 130, zone: 'Mycelia Row' },
+    { x: 245, y: 35, w: 225, h: 130, zone: 'Fungal Alley' },
+    { x: 10, y: 175, w: 150, h: 130, zone: 'Spore Market' },
+    { x: 170, y: 175, w: 150, h: 130, zone: 'Root Tunnel' },
+    { x: 330, y: 175, w: 140, h: 130, boss: true, zone: 'Hive Core' }
   ]},
-  { name: 'Sewer Depths', bg: '#1a2a1a', accent: '#33ccaa', panels: [
-    { x: 10, y: 35, w: 150, h: 130 },
-    { x: 170, y: 35, w: 150, h: 130 },
-    { x: 330, y: 35, w: 140, h: 130 },
-    { x: 10, y: 175, w: 225, h: 130 },
-    { x: 245, y: 175, w: 225, h: 130, boss: true }
+  { name: 'Reactor Depths', bg: '#2a1a2a', accent: '#cc44ff', panels: [
+    { x: 10, y: 35, w: 150, h: 130, zone: 'Coolant Pipes' },
+    { x: 170, y: 35, w: 150, h: 130, zone: 'Fuel Chamber' },
+    { x: 330, y: 35, w: 140, h: 130, zone: 'Waste Drain' },
+    { x: 10, y: 175, w: 225, h: 130, zone: 'Core Access' },
+    { x: 245, y: 175, w: 225, h: 130, boss: true, zone: 'Meltdown Zone' }
   ]},
-  { name: 'Rooftops', bg: '#1a1a3a', accent: '#ffaa33', panels: [
-    { x: 10, y: 35, w: 310, h: 100 },
-    { x: 330, y: 35, w: 140, h: 100 },
-    { x: 10, y: 145, w: 140, h: 110 },
-    { x: 160, y: 145, w: 160, h: 110 },
-    { x: 330, y: 145, w: 140, h: 110 },
-    { x: 10, y: 265, w: 460, h: 45, boss: true }
+  { name: 'Canopy Heights', bg: '#1a1a3a', accent: '#ffaa33', panels: [
+    { x: 10, y: 35, w: 310, h: 100, zone: 'Branch Walk' },
+    { x: 330, y: 35, w: 140, h: 100, zone: 'Nest Lookout' },
+    { x: 10, y: 145, w: 140, h: 110, zone: 'Vine Bridge' },
+    { x: 160, y: 145, w: 160, h: 110, zone: 'Hollow Trunk' },
+    { x: 330, y: 145, w: 140, h: 110, zone: 'Crown Plateau' },
+    { x: 10, y: 265, w: 460, h: 45, boss: true, zone: 'Elder Canopy' }
   ]},
-  { name: 'Factory', bg: '#2a1a1a', accent: '#ff4444', panels: [
-    { x: 10, y: 35, w: 225, h: 90 },
-    { x: 245, y: 35, w: 225, h: 90 },
-    { x: 10, y: 135, w: 150, h: 90 },
-    { x: 170, y: 135, w: 150, h: 90 },
-    { x: 330, y: 135, w: 140, h: 90 },
-    { x: 10, y: 235, w: 460, h: 70, boss: true }
+  { name: 'Burn Furnace', bg: '#2a1a1a', accent: '#ff4444', panels: [
+    { x: 10, y: 35, w: 225, h: 90, zone: 'Char Pit' },
+    { x: 245, y: 35, w: 225, h: 90, zone: 'Slag Corridor' },
+    { x: 10, y: 135, w: 150, h: 90, zone: 'Ember Vents' },
+    { x: 170, y: 135, w: 150, h: 90, zone: 'Ash Channel' },
+    { x: 330, y: 135, w: 140, h: 90, zone: 'Molten Core' },
+    { x: 10, y: 235, w: 460, h: 70, boss: true, zone: 'Inferno Heart' }
   ]},
-  { name: 'Fungal Lab', bg: '#1a1a2a', accent: '#aa44ff', panels: [
-    { x: 10, y: 35, w: 150, h: 130 },
-    { x: 170, y: 35, w: 300, h: 65 },
-    { x: 170, y: 110, w: 300, h: 65 },
-    { x: 10, y: 175, w: 225, h: 130 },
-    { x: 245, y: 175, w: 225, h: 130, boss: true }
+  { name: 'Mycelial Lab', bg: '#1a1a2a', accent: '#aa44ff', panels: [
+    { x: 10, y: 35, w: 150, h: 130, zone: 'Sample Vault' },
+    { x: 170, y: 35, w: 300, h: 65, zone: 'Growth Tanks' },
+    { x: 170, y: 110, w: 300, h: 65, zone: 'Spore Array' },
+    { x: 10, y: 175, w: 225, h: 130, zone: 'Mutation Bay' },
+    { x: 245, y: 175, w: 225, h: 130, boss: true, zone: 'Genesis Core' }
   ]},
   { name: "The Artist's Desk", bg: '#3a3020', accent: '#ffdd44', panels: [
-    { x: 10, y: 35, w: 225, h: 130 },
-    { x: 245, y: 35, w: 225, h: 130 },
-    { x: 10, y: 175, w: 150, h: 130 },
-    { x: 170, y: 175, w: 300, h: 130, boss: true }
+    { x: 10, y: 35, w: 225, h: 130, zone: 'Ink Well' },
+    { x: 245, y: 35, w: 225, h: 130, zone: 'Pencil Graveyard' },
+    { x: 10, y: 175, w: 150, h: 130, zone: 'Eraser Wastes' },
+    { x: 170, y: 175, w: 300, h: 130, boss: true, zone: 'The Masterpiece' }
   ]}
 ];
 
-// === ENEMY TYPES ===
+// === ENEMY TYPES (Tasern creatures) ===
 function makeEnemy(type, px, py, panelW) {
   var e = {
     type: type, x: px, y: py, vx: 0, vy: 0,
     hp: 3, maxHp: 3, w: 20, h: 36, facing: -1,
     state: 'idle', stateTimer: 0, attackCd: 0,
-    hitStun: 0, flash: 0, drawProgress: 0
+    hitStun: 0, flash: 0, drawProgress: 0,
+    sporeTimer: 0, chargeState: 0
   };
-  if (type === 'blob') { e.hp = 2; e.maxHp = 2; e.w = 18; e.h = 24; e.speed = 40; e.dmg = 5; e.color = '#555'; }
-  else if (type === 'soldier') { e.hp = 4; e.maxHp = 4; e.w = 20; e.h = 36; e.speed = 55; e.dmg = 8; e.color = '#668'; }
-  else if (type === 'pencil') { e.hp = 3; e.maxHp = 3; e.w = 14; e.h = 40; e.speed = 70; e.dmg = 10; e.color = '#cc8'; }
-  else if (type === 'eraser') { e.hp = 8; e.maxHp = 8; e.w = 28; e.h = 32; e.speed = 25; e.dmg = 12; e.color = '#a66'; }
-  else if (type === 'boss') { e.hp = 20 + pageNum * 5; e.maxHp = e.hp; e.w = 32; e.h = 44; e.speed = 35; e.dmg = 15; e.color = '#c44'; e.attackCd = 60; }
+  if (type === 'spore_creeper') {
+    e.hp = 3; e.maxHp = 3; e.w = 18; e.h = 26; e.speed = 45; e.dmg = 5; e.color = '#3a8855';
+    e.sporeTimer = 2 + Math.random() * 2;
+  }
+  else if (type === 'reactor_mutant') {
+    e.hp = 5; e.maxHp = 5; e.w = 22; e.h = 38; e.speed = 55; e.dmg = 9; e.color = '#8844aa';
+  }
+  else if (type === 'mycelial_giant') {
+    e.hp = 9; e.maxHp = 9; e.w = 28; e.h = 42; e.speed = 25; e.dmg = 14; e.color = '#aa6633';
+  }
+  else if (type === 'pencil') {
+    e.hp = 3; e.maxHp = 3; e.w = 14; e.h = 40; e.speed = 70; e.dmg = 10; e.color = '#cc8';
+  }
+  else if (type === 'eraser') {
+    e.hp = 8; e.maxHp = 8; e.w = 28; e.h = 32; e.speed = 25; e.dmg = 12; e.color = '#a66';
+  }
+  else if (type === 'boss') {
+    e.hp = 20 + pageNum * 8; e.maxHp = e.hp; e.w = 32; e.h = 44; e.speed = 35; e.dmg = 15; e.color = '#c44'; e.attackCd = 60;
+  }
   return e;
 }
 
 // === PANEL ENEMY SPAWNS ===
 function getEnemiesForPanel(pg, pi) {
   var panel = PAGES[pg].panels[pi];
-  var types = ['blob', 'soldier', 'pencil', 'eraser'];
+  var types = ['spore_creeper', 'reactor_mutant', 'mycelial_giant'];
+  // Last page uses pencil/eraser (artist themed)
+  if (pg === 5) types = ['pencil', 'eraser', 'reactor_mutant'];
   var list = [];
   if (panel.boss) {
     list.push({ type: 'boss', x: panel.w * 0.7, y: 0 });
     if (pg > 2) list.push({ type: types[TAS.math.randInt(0, 2)], x: panel.w * 0.4, y: 0 });
+    if (pg > 4) list.push({ type: types[TAS.math.randInt(0, 1)], x: panel.w * 0.25, y: 0 });
   } else {
     var count = 2 + Math.floor(pg * 0.5) + (pi > 1 ? 1 : 0);
     count = Math.min(count, 4);
     for (var i = 0; i < count; i++) {
-      var t = types[TAS.math.randInt(0, Math.min(pg + 1, 3))];
+      var t = types[TAS.math.randInt(0, Math.min(pg + 1, types.length - 1))];
       list.push({ type: t, x: panel.w * (0.4 + i * 0.15), y: 0 });
     }
   }
@@ -162,16 +203,18 @@ function getEnemiesForPanel(pg, pi) {
 
 // === PLAYER INIT ===
 function resetPlayer() {
+  var baseHp = Math.floor(100 * conHpMult());
   player = {
     x: 30, y: FLOOR_Y, vx: 0, vy: 0,
     w: 18, h: 36, facing: 1,
-    hp: 100, maxHp: 100,
+    hp: baseHp, maxHp: baseHp,
     state: 'idle', stateTimer: 0,
     comboStep: 0, comboTime: 0,
     jumpKick: false, grabbing: null,
-    knife: 0, bombs: 0,
+    knife: 0, bombs: 0, sporeShield: 0,
     invuln: 0, attackHit: false
   };
+  lives = 1 + bonusLives();
 }
 
 // === START GAME ===
@@ -182,9 +225,12 @@ function startGame() {
   comboTimer = 0;
   pageNum = 0;
   panelIdx = 0;
+  chargeTimer = 0;
+  chargeReady = false;
   resetPlayer();
   enemies = [];
   items = [];
+  hazards = [];
   impactTexts = [];
   drawingEnemies = [];
   speechBubble = null;
@@ -195,12 +241,15 @@ function startGame() {
 function enterPanel() {
   enemies = [];
   items = [];
+  hazards = [];
   drawingEnemies = [];
   player.x = 30;
   player.y = FLOOR_Y;
   player.state = 'idle';
   player.grabbing = null;
   panelClearTimer = 0;
+  chargeTimer = 0;
+  chargeReady = false;
 
   var spawns = getEnemiesForPanel(pageNum, panelIdx);
   for (var i = 0; i < spawns.length; i++) {
@@ -208,20 +257,25 @@ function enterPanel() {
     drawingEnemies.push({ type: s.type, x: s.x, y: s.y, progress: 0, delay: i * 0.6 });
   }
 
-  // Random item in background (30% chance)
-  if (Math.random() < 0.3 && !PAGES[pageNum].panels[panelIdx].boss) {
-    var itypes = ['health', 'health', 'knife', 'bomb'];
-    items.push({ type: itypes[TAS.math.randInt(0, 3)], x: TAS.math.randRange(40, getCurrentPanel().w - 40), y: FLOOR_Y - 10, hidden: true });
+  // Items — CHA-based drop chance
+  var dropRoll = Math.random();
+  var dropThresh = chaDropChance();
+  if (dropRoll < dropThresh && !PAGES[pageNum].panels[panelIdx].boss) {
+    var itypes = ['health', 'health', 'knife', 'bomb', 'spore_shield'];
+    items.push({ type: itypes[TAS.math.randInt(0, itypes.length - 1)], x: TAS.math.randRange(40, getCurrentPanel().w - 40), y: FLOOR_Y - 10, hidden: true });
   }
+
+  // Environmental hazards per zone
+  spawnHazards();
 
   // Speech bubble intro on first panel of page
   if (panelIdx === 0) {
     var msgs = [
-      "You can't escape my pages!",
-      "I'll draw your doom!",
-      "Time to get sketched out!",
-      "My ink runs deep!",
-      "Prepare for erasure!",
+      "The spores are restless...",
+      "Reactor meltdown imminent!",
+      "The canopy fights back!",
+      "This furnace never stops!",
+      "My finest mutation yet!",
       "This is MY masterpiece!"
     ];
     speechBubble = msgs[pageNum];
@@ -229,11 +283,38 @@ function enterPanel() {
   }
 }
 
+function spawnHazards() {
+  var panel = getCurrentPanel();
+  var pw = panel.w - 20;
+  hazards = [];
+  if (pageNum === 0) {
+    // Spore clouds — poison areas
+    for (var i = 0; i < 1 + Math.floor(panelIdx / 2); i++) {
+      hazards.push({ type: 'spore_cloud', x: TAS.math.randRange(60, pw - 40), y: FLOOR_Y, radius: 20, timer: 0, dmg: 2, interval: 1.5 });
+    }
+  } else if (pageNum === 1) {
+    // Reactor vents — periodic damage bursts
+    hazards.push({ type: 'reactor_vent', x: TAS.math.randRange(50, pw - 50), y: FLOOR_Y, radius: 25, timer: 0, dmg: 4, interval: 3, active: false, warmup: 0 });
+  } else if (pageNum === 2) {
+    // Wind gusts — push player
+    hazards.push({ type: 'wind_gust', x: 0, y: 0, timer: 0, interval: 4, pushForce: 60, active: false });
+  } else if (pageNum === 3) {
+    // Lava drips — falling damage zones
+    for (var j = 0; j < 2; j++) {
+      hazards.push({ type: 'lava_drip', x: TAS.math.randRange(40, pw - 40), y: 80, timer: Math.random() * 2, interval: 2.5, dmg: 6, dropping: false, dropY: 80 });
+    }
+  } else if (pageNum === 4) {
+    // Mutation field — random stat drain zone
+    hazards.push({ type: 'mutation_field', x: TAS.math.randRange(60, pw - 60), y: FLOOR_Y, radius: 30, timer: 0, dmg: 1, interval: 2 });
+  }
+  // Page 5 (desk) has no hazards
+}
+
 function getCurrentPanel() {
   return PAGES[pageNum].panels[panelIdx];
 }
 
-// === INPUT HANDLING ===
+// === INPUT HANDLING (NES-style) ===
 function inputLeft()  { return TAS.input.keys['ArrowLeft'] || TAS.input.keys['KeyA'] || TAS.input.touch.left; }
 function inputRight() { return TAS.input.keys['ArrowRight'] || TAS.input.keys['KeyD'] || TAS.input.touch.right; }
 function inputUp()    { return TAS.input.keys['ArrowUp'] || TAS.input.keys['KeyW'] || TAS.input.touch.up; }
@@ -251,11 +332,12 @@ function update(dt) {
   frame++;
   TAS.particles.update(dt);
   TAS.fx.updateEffects(dt);
+  if (screenShakeExtra > 0) screenShakeExtra = Math.max(0, screenShakeExtra - dt * 8);
 
   // Impact text decay
   for (var i = impactTexts.length - 1; i >= 0; i--) {
     impactTexts[i].life -= dt * 3;
-    impactTexts[i].y -= dt * 40;
+    impactTexts[i].y -= dt * 50;
     if (impactTexts[i].life <= 0) impactTexts.splice(i, 1);
   }
 
@@ -282,11 +364,9 @@ function update(dt) {
     if (transitionTimer <= 0) {
       panelIdx++;
       if (panelIdx >= PAGES[pageNum].panels.length) {
-        // Next page
         pageNum++;
         panelIdx = 0;
         if (pageNum >= PAGES.length) {
-          // Victory!
           state = 'victory';
           if (score > highScore) { highScore = score; TAS.score.save('comixzone_hi', score); }
           return;
@@ -312,8 +392,21 @@ function update(dt) {
   // Speech bubble
   if (speechTimer > 0) { speechTimer -= dt; if (speechTimer <= 0) speechBubble = null; }
 
-  // Combo timer
-  if (comboTimer > 0) { comboTimer -= dt; if (comboTimer <= 0) comboMult = 1; }
+  // Combo timer — WIS makes it last longer
+  if (comboTimer > 0) { comboTimer -= dt * (1 / wisComboMult()); if (comboTimer <= 0) comboMult = 1; }
+
+  // Charge attack timer (hold punch)
+  if (inputPunch() && player.state === 'idle' && !chargeReady) {
+    chargeTimer += dt;
+    if (chargeTimer >= 0.8) {
+      chargeReady = true;
+      SFX.charge();
+      TAS.particles.spawn(player.x + player.facing * 10, player.y - 20, '#ff8800', 4, 2, { gravity: -0.02 });
+    }
+  }
+  if (!inputPunch()) {
+    if (!chargeReady) chargeTimer = 0;
+  }
 
   // Drawing enemies animation
   for (var di = drawingEnemies.length - 1; di >= 0; di--) {
@@ -333,20 +426,37 @@ function update(dt) {
   var panelW = panel.w - 20;
   var panelFloor = FLOOR_Y;
 
+  // === HAZARD UPDATE ===
+  updateHazards(dt, panelW);
+
   // === PLAYER UPDATE ===
+  var speedMult = dexSpeedMult();
   player.invuln = Math.max(0, player.invuln - dt);
   player.stateTimer -= dt;
+  if (player.sporeShield > 0) player.sporeShield -= dt;
 
   if (player.state === 'idle' || player.state === 'walk') {
     var moving = false;
-    if (inputLeft()) { player.vx = -120; player.facing = -1; moving = true; }
-    else if (inputRight()) { player.vx = 120; player.facing = 1; moving = true; }
+    var walkSpeed = Math.floor(120 * speedMult);
+    if (inputLeft()) { player.vx = -walkSpeed; player.facing = -1; moving = true; }
+    else if (inputRight()) { player.vx = walkSpeed; player.facing = 1; moving = true; }
     else { player.vx = 0; }
     player.state = moving ? 'walk' : 'idle';
 
-    // Punch / combo
+    // Punch / combo / charged spore punch
     if (punchPressed()) {
-      if (player.knife > 0) {
+      if (chargeReady) {
+        // SPORE PUNCH — charged attack
+        player.state = 'spore_punch';
+        player.stateTimer = 0.4;
+        player.attackHit = false;
+        chargeReady = false;
+        chargeTimer = 0;
+        SFX.sporeBurst();
+        TAS.fx.flash('#33ff66', 0.2);
+        TAS.fx.shake(5, 0.8);
+        TAS.particles.spawn(player.x + player.facing * 20, player.y - 18, '#33ff66', 10, 4, { gravity: 0.02 });
+      } else if (player.knife > 0) {
         player.state = 'knife';
         player.stateTimer = 0.25;
         player.attackHit = false;
@@ -363,7 +473,8 @@ function update(dt) {
         if (player.hp <= 0) { playerDie(); return; }
       } else {
         var now = performance.now();
-        if (now - player.comboTime < COMBO_WINDOW && player.comboStep < 2) {
+        var comboWin = Math.floor(COMBO_WINDOW * wisComboMult());
+        if (now - player.comboTime < comboWin && player.comboStep < 2) {
           player.comboStep++;
         } else {
           player.comboStep = 0;
@@ -372,6 +483,8 @@ function update(dt) {
         player.state = 'punch';
         player.stateTimer = 0.2 + player.comboStep * 0.05;
         player.attackHit = false;
+        chargeTimer = 0;
+        chargeReady = false;
         if (player.comboStep === 0) SFX.punch();
         else if (player.comboStep === 1) SFX.punch2();
         else SFX.punch3();
@@ -385,20 +498,29 @@ function update(dt) {
       player.jumpKick = false;
       TAS.audio.playTone(300, 0.08, 'square', 0.05, 500);
     }
-
-    // Grab (down + punch near enemy)
-    // handled in punch above
   }
-  else if (player.state === 'punch' || player.state === 'knife' || player.state === 'special') {
+  else if (player.state === 'punch' || player.state === 'knife' || player.state === 'special' || player.state === 'spore_punch' || player.state === 'reactor_kick') {
     player.vx = 0;
     if (player.stateTimer <= 0) { player.state = 'idle'; }
   }
   else if (player.state === 'jump') {
-    if (inputLeft()) { player.vx = -100; player.facing = -1; }
-    else if (inputRight()) { player.vx = 100; player.facing = 1; }
+    var airSpeed = Math.floor(100 * speedMult);
+    if (inputLeft()) { player.vx = -airSpeed; player.facing = -1; }
+    else if (inputRight()) { player.vx = airSpeed; player.facing = 1; }
 
-    // Jump kick
-    if (punchPressed() && !player.jumpKick) {
+    // Reactor Kick (down + punch in air)
+    if (punchPressed() && !player.jumpKick && inputDown()) {
+      player.jumpKick = true;
+      player.state = 'reactor_kick';
+      player.stateTimer = 0.35;
+      player.attackHit = false;
+      player.vy = 200; // slam down
+      SFX.kick();
+      SFX.reactorHum();
+      TAS.particles.spawn(player.x, player.y, '#cc44ff', 6, 3, { gravity: 0.05 });
+    }
+    // Regular jump kick
+    else if (punchPressed() && !player.jumpKick) {
       player.jumpKick = true;
       player.attackHit = false;
       SFX.kick();
@@ -408,6 +530,12 @@ function update(dt) {
     if (player.y >= panelFloor) {
       player.y = panelFloor;
       player.vy = 0;
+      // Reactor kick landing shockwave
+      if (player.state === 'reactor_kick') {
+        TAS.fx.shake(8, 0.75);
+        screenShakeExtra = 1;
+        TAS.particles.spawn(player.x, player.y, '#cc44ff', 12, 3, { gravity: 0.1, shape: 'rect' });
+      }
       player.state = 'idle';
       player.jumpKick = false;
     }
@@ -432,10 +560,39 @@ function update(dt) {
     var atkX = player.x + player.facing * 20;
     var atkY = player.y - 18;
 
-    if (player.state === 'punch') { atkRange = 1; atkDmg = 4 + player.comboStep * 3; atkW = 24; }
-    else if (player.state === 'knife') { atkRange = 1; atkDmg = 12; atkW = 30; }
-    else if (player.state === 'special') { atkRange = 1; atkDmg = 20; atkW = 60; atkH = 50; atkX = player.x; atkY = player.y - 25; }
-    else if (player.jumpKick && player.state === 'jump') { atkRange = 1; atkDmg = 8; atkW = 28; atkY = player.y - 10; }
+    if (player.state === 'punch') {
+      atkRange = 1;
+      atkDmg = Math.floor((4 + player.comboStep * 3) * strDmgMult() * statB.damage);
+      atkW = 24;
+    }
+    else if (player.state === 'knife') {
+      atkRange = 1;
+      atkDmg = Math.floor(12 * strDmgMult() * statB.damage);
+      atkW = 30;
+    }
+    else if (player.state === 'special') {
+      atkRange = 1;
+      atkDmg = Math.floor(20 * strDmgMult() * statB.damage);
+      atkW = 60; atkH = 50;
+      atkX = player.x; atkY = player.y - 25;
+    }
+    else if (player.state === 'spore_punch') {
+      atkRange = 1;
+      atkDmg = Math.floor(16 * strDmgMult() * statB.damage);
+      atkW = 40; atkH = 35;
+      // Spore punch hits in a cone
+    }
+    else if (player.state === 'reactor_kick') {
+      atkRange = 1;
+      atkDmg = Math.floor(14 * strDmgMult() * statB.damage);
+      atkW = 50; atkH = 40;
+      atkX = player.x; atkY = player.y - 10;
+    }
+    else if (player.jumpKick && player.state === 'jump') {
+      atkRange = 1;
+      atkDmg = Math.floor(8 * strDmgMult() * statB.damage);
+      atkW = 28; atkY = player.y - 10;
+    }
 
     if (atkRange) {
       for (var ei = enemies.length - 1; ei >= 0; ei--) {
@@ -445,37 +602,51 @@ function update(dt) {
           en.hp -= atkDmg;
           en.hitStun = 0.3;
           en.flash = 0.15;
-          en.vx = player.facing * 100;
+          en.vx = player.facing * 120;
           player.attackHit = true;
 
           // Impact text
           var texts = ['WHAM!', 'POW!', 'BAM!', 'CRACK!', 'SMACK!', 'THUD!', 'KAPOW!'];
           if (player.comboStep === 2) texts = ['KAPOW!', 'KRAKOOM!', 'SLAM!'];
           if (player.state === 'special') texts = ['ULTRA!', 'DESTROY!', 'OBLITERATE!'];
+          if (player.state === 'spore_punch') texts = ['SPORIZE!', 'MYCOBLAST!', 'FUNGIFY!'];
+          if (player.state === 'reactor_kick') texts = ['REACTOR!', 'MELTDOWN!', 'FISSION!'];
           impactTexts.push({
             text: texts[TAS.math.randInt(0, texts.length - 1)],
             x: en.x, y: en.y - en.h - 10,
             life: 1, color: PAGES[pageNum].accent
           });
 
-          TAS.particles.spawn(en.x, en.y - en.h/2, PAGES[pageNum].accent, 6, 3, { gravity: 0.05 });
-          TAS.fx.shake(3, 0.85);
+          var particleCount = player.state === 'spore_punch' ? 10 : player.state === 'reactor_kick' ? 12 : 6;
+          var particleColor = player.state === 'spore_punch' ? '#33ff66' : player.state === 'reactor_kick' ? '#cc44ff' : PAGES[pageNum].accent;
+          TAS.particles.spawn(en.x, en.y - en.h/2, particleColor, particleCount, 3, { gravity: 0.05 });
+          TAS.fx.shake(player.state === 'reactor_kick' ? 6 : player.state === 'spore_punch' ? 5 : 3, 0.85);
 
-          // Combo scoring
+          // Combo scoring — INT boosts score
           comboTimer = 2;
           comboMult = Math.min(comboMult + 0.5, 5);
-          score += Math.floor(atkDmg * comboMult);
+          score += Math.floor(atkDmg * comboMult * intScoreMult());
 
           if (en.hp <= 0) {
-            // Enemy defeated
-            TAS.particles.spawn(en.x, en.y - en.h/2, '#fff', 12, 4, { gravity: 0.1, shape: 'rect' });
+            TAS.particles.spawn(en.x, en.y - en.h/2, '#fff', 14, 4, { gravity: 0.1, shape: 'rect' });
+            // Spore creepers burst on death
+            if (en.type === 'spore_creeper') {
+              TAS.particles.spawn(en.x, en.y - en.h/2, '#33cc66', 8, 3, { gravity: -0.02 });
+            }
             enemies.splice(ei, 1);
-            score += Math.floor(50 * comboMult);
+            score += Math.floor(50 * comboMult * intScoreMult());
             SFX.crack();
+
+            // CHA bonus: chance of item drop on kill
+            if (Math.random() < chaDropChance() * 0.3) {
+              var dropTypes = ['health', 'health', 'knife'];
+              items.push({ type: dropTypes[TAS.math.randInt(0, dropTypes.length - 1)], x: en.x, y: FLOOR_Y - 10, hidden: false });
+              SFX.item();
+            }
           } else {
             SFX.hit();
           }
-          break; // only hit one enemy per attack frame
+          break;
         }
       }
     }
@@ -495,13 +666,11 @@ function update(dt) {
       continue;
     }
 
-    // AI
     var dx = player.x - en2.x;
     var adx = Math.abs(dx);
     en2.facing = dx > 0 ? 1 : -1;
 
     if (en2.type === 'boss') {
-      // Boss pattern
       en2.stateTimer -= dt;
       if (en2.stateTimer <= 0) {
         if (adx < 40 && en2.attackCd <= 0) {
@@ -511,25 +680,90 @@ function update(dt) {
         } else if (adx > 80) {
           en2.state = 'charge';
           en2.stateTimer = 0.8;
+        } else if (en2.hp < en2.maxHp * 0.4 && Math.random() < 0.3) {
+          // Boss enraged below 40% HP — faster attacks
+          en2.state = 'enraged_attack';
+          en2.stateTimer = 0.3;
+          en2.attackCd = 0.8;
         } else {
           en2.state = 'idle';
           en2.stateTimer = 0.5;
         }
       }
-      if (en2.state === 'charge') { en2.x += en2.facing * en2.speed * 2 * dt; }
-      else if (en2.state === 'attack') {
-        if (en2.stateTimer < 0.25 && adx < 50 && player.invuln <= 0) {
-          hurtPlayer(en2.dmg, en2.facing);
+      if (en2.state === 'charge') {
+        en2.x += en2.facing * en2.speed * 2.5 * dt;
+        // Boss charge particles
+        if (frame % 3 === 0) TAS.particles.spawn(en2.x - en2.facing * 10, en2.y - en2.h/2, '#f44', 1, 2, { gravity: 0 });
+      }
+      else if (en2.state === 'attack' || en2.state === 'enraged_attack') {
+        var atkWindow = en2.state === 'enraged_attack' ? 0.15 : 0.25;
+        if (en2.stateTimer < atkWindow && adx < 50 && player.invuln <= 0) {
+          if (Math.random() > dodgeChance()) {
+            hurtPlayer(en2.dmg, en2.facing);
+            TAS.fx.shake(6, 0.8);
+          } else {
+            impactTexts.push({ text: 'DODGE!', x: player.x, y: player.y - 50, life: 0.8, color: '#44ffff' });
+          }
         }
       }
       else { en2.x += en2.facing * en2.speed * 0.3 * dt; }
-    } else {
-      // Regular AI
+    }
+    else if (en2.type === 'spore_creeper') {
+      // Spore creepers shoot spore clouds periodically
+      en2.sporeTimer -= dt;
+      if (en2.sporeTimer <= 0 && adx < 120) {
+        en2.sporeTimer = 2.5 + Math.random();
+        SFX.sporeBurst();
+        TAS.particles.spawn(en2.x + en2.facing * 10, en2.y - en2.h/2, '#33cc66', 5, 2, { gravity: -0.01 });
+        // Spore damage if near
+        if (adx < 40 && player.invuln <= 0 && player.sporeShield <= 0) {
+          if (Math.random() > dodgeChance()) {
+            hurtPlayer(3, en2.facing);
+          }
+        }
+      }
       if (adx > 35) {
         en2.x += en2.facing * en2.speed * dt;
       } else if (en2.attackCd <= 0) {
-        // Attack player
-        if (player.invuln <= 0) { hurtPlayer(en2.dmg, en2.facing); }
+        if (player.invuln <= 0) {
+          if (Math.random() > dodgeChance()) {
+            hurtPlayer(en2.dmg, en2.facing);
+          } else {
+            impactTexts.push({ text: 'DODGE!', x: player.x, y: player.y - 50, life: 0.8, color: '#44ffff' });
+          }
+        }
+        en2.attackCd = 1.0 + Math.random() * 0.5;
+      }
+    }
+    else if (en2.type === 'mycelial_giant') {
+      // Slow but hits hard, shakes screen on attack
+      if (adx > 40) {
+        en2.x += en2.facing * en2.speed * dt;
+      } else if (en2.attackCd <= 0) {
+        if (player.invuln <= 0) {
+          if (Math.random() > dodgeChance()) {
+            hurtPlayer(en2.dmg, en2.facing);
+            TAS.fx.shake(6, 0.8);
+            screenShakeExtra = 0.5;
+          } else {
+            impactTexts.push({ text: 'DODGE!', x: player.x, y: player.y - 50, life: 0.8, color: '#44ffff' });
+          }
+        }
+        en2.attackCd = 1.5 + Math.random() * 0.5;
+      }
+    }
+    else {
+      // Regular AI (reactor_mutant, pencil, eraser)
+      if (adx > 35) {
+        en2.x += en2.facing * en2.speed * dt;
+      } else if (en2.attackCd <= 0) {
+        if (player.invuln <= 0) {
+          if (Math.random() > dodgeChance()) {
+            hurtPlayer(en2.dmg, en2.facing);
+          } else {
+            impactTexts.push({ text: 'DODGE!', x: player.x, y: player.y - 50, life: 0.8, color: '#44ffff' });
+          }
+        }
         en2.attackCd = 1.0 + Math.random() * 0.5;
       }
     }
@@ -540,36 +774,38 @@ function update(dt) {
   for (var ii = items.length - 1; ii >= 0; ii--) {
     var it = items[ii];
     if (it.hidden) {
-      // Reveal by punching nearby background
       if (player.state === 'punch' && Math.abs(player.x - it.x) < 40 && !player.attackHit && enemies.length === 0) {
         it.hidden = false;
         SFX.item();
         impactTexts.push({ text: 'FOUND!', x: it.x, y: it.y - 20, life: 1, color: '#ffdd44' });
       }
     } else {
-      // Pick up
       if (TAS.hit.rectOverlap(player.x - player.w/2, player.y - player.h, player.w, player.h, it.x - 8, it.y - 8, 16, 16)) {
-        if (it.type === 'health') { player.hp = Math.min(player.maxHp, player.hp + 20); }
+        if (it.type === 'health') { player.hp = Math.min(player.maxHp, player.hp + Math.floor(20 * conHpMult())); }
         else if (it.type === 'knife') { player.knife = KNIFE_HITS; }
         else if (it.type === 'bomb') { player.bombs++; }
+        else if (it.type === 'spore_shield') { player.sporeShield = 10; impactTexts.push({ text: 'SHIELDED!', x: it.x, y: it.y - 20, life: 1, color: '#33ff66' }); }
         items.splice(ii, 1);
         SFX.item();
-        score += 25;
+        score += Math.floor(25 * intScoreMult());
       }
     }
   }
 
-  // Use bomb (down + punch when no enemies in range)
+  // Use bomb
   if (downPressed() && player.bombs > 0 && enemies.length > 0) {
     player.bombs--;
     SFX.bomb();
     TAS.fx.flash('#ff8', 0.5);
-    TAS.fx.shake(8, 0.8);
+    TAS.fx.shake(10, 0.75);
+    screenShakeExtra = 1.5;
     for (var bi = enemies.length - 1; bi >= 0; bi--) {
-      enemies[bi].hp -= 15;
-      TAS.particles.spawn(enemies[bi].x, enemies[bi].y - enemies[bi].h/2, '#ff4', 10, 5, { gravity: 0.1 });
+      var bombDmg = Math.floor(15 * strDmgMult() * statB.damage);
+      enemies[bi].hp -= bombDmg;
+      TAS.particles.spawn(enemies[bi].x, enemies[bi].y - enemies[bi].h/2, '#ff4', 12, 5, { gravity: 0.1 });
       if (enemies[bi].hp <= 0) {
-        score += Math.floor(50 * comboMult);
+        score += Math.floor(50 * comboMult * intScoreMult());
+        TAS.particles.spawn(enemies[bi].x, enemies[bi].y - enemies[bi].h/2, '#fff', 10, 3, { gravity: 0.1, shape: 'rect' });
         enemies.splice(bi, 1);
       }
     }
@@ -581,17 +817,99 @@ function update(dt) {
     panelClearTimer += dt;
     if (panelClearTimer > 0.5 && panelClearTimer < 0.6) {
       SFX.clear();
-      score += 100 + Math.floor(player.hp * 2);
+      score += Math.floor((100 + player.hp * 2) * intScoreMult());
     }
-    // Player can break border (move to right edge and punch)
     if (player.x > panelW - 25 && punchPressed()) {
       SFX.border();
-      TAS.fx.shake(5, 0.85);
-      TAS.particles.spawn(player.x + 10, player.y - player.h/2, '#fff', 15, 4, { shape: 'rect', gravity: 0.1 });
+      TAS.fx.shake(6, 0.85);
+      TAS.particles.spawn(player.x + 10, player.y - player.h/2, '#fff', 18, 4, { shape: 'rect', gravity: 0.1 });
       state = 'transition';
       transitionTimer = 1.0;
       transitionFrom = panelIdx;
       transitionTo = panelIdx + 1;
+    }
+  }
+}
+
+// === HAZARD UPDATE ===
+function updateHazards(dt, panelW) {
+  for (var hi = 0; hi < hazards.length; hi++) {
+    var h = hazards[hi];
+    h.timer += dt;
+
+    if (h.type === 'spore_cloud') {
+      // Periodic poison in area
+      if (h.timer >= h.interval) {
+        h.timer = 0;
+        var pdx = Math.abs(player.x - h.x);
+        if (pdx < h.radius && player.invuln <= 0 && player.sporeShield <= 0) {
+          hurtPlayer(h.dmg, player.x < h.x ? -1 : 1);
+          SFX.hazard();
+        }
+        TAS.particles.spawn(h.x, h.y - 10, '#33cc66', 4, 2, { gravity: -0.03 });
+      }
+    }
+    else if (h.type === 'reactor_vent') {
+      h.warmup += dt;
+      if (h.timer >= h.interval) {
+        h.active = true;
+        if (h.timer >= h.interval + 0.5) {
+          h.timer = 0;
+          h.active = false;
+        }
+        if (h.active) {
+          var pdx2 = Math.abs(player.x - h.x);
+          if (pdx2 < h.radius && player.invuln <= 0) {
+            hurtPlayer(h.dmg, player.x < h.x ? -1 : 1);
+            SFX.hazard();
+          }
+          if (frame % 2 === 0) TAS.particles.spawn(h.x + TAS.math.randRange(-10, 10), h.y - 20, '#cc44ff', 2, 2, { gravity: -0.1 });
+        }
+      }
+    }
+    else if (h.type === 'wind_gust') {
+      if (h.timer >= h.interval) {
+        h.active = true;
+        if (h.timer >= h.interval + 1.0) {
+          h.timer = 0;
+          h.active = false;
+        }
+        if (h.active) {
+          player.x += h.pushForce * dt;
+          if (frame % 4 === 0) {
+            for (var wi = 0; wi < 3; wi++) {
+              TAS.particles.spawn(TAS.math.randRange(0, panelW), TAS.math.randRange(100, FLOOR_Y), '#aaccff', 1, 1, { gravity: 0 });
+            }
+          }
+        }
+      }
+    }
+    else if (h.type === 'lava_drip') {
+      if (h.timer >= h.interval) {
+        h.dropping = true;
+        h.dropY += 300 * dt;
+        if (h.dropY >= FLOOR_Y) {
+          // Hit ground — check player
+          if (Math.abs(player.x - h.x) < 15 && player.invuln <= 0) {
+            hurtPlayer(h.dmg, player.x < h.x ? -1 : 1);
+          }
+          TAS.particles.spawn(h.x, FLOOR_Y, '#ff4400', 4, 2, { gravity: 0.1 });
+          SFX.hazard();
+          h.dropping = false;
+          h.dropY = 80;
+          h.timer = 0;
+        }
+      }
+    }
+    else if (h.type === 'mutation_field') {
+      if (h.timer >= h.interval) {
+        h.timer = 0;
+        var pdx3 = Math.abs(player.x - h.x);
+        if (pdx3 < h.radius && player.invuln <= 0) {
+          hurtPlayer(h.dmg, 1);
+          TAS.particles.spawn(h.x, h.y - 15, '#aa44ff', 6, 2, { gravity: -0.02 });
+        }
+      }
     }
   }
 }
@@ -604,15 +922,28 @@ function hurtPlayer(dmg, fromFacing) {
   player.stateTimer = 0.3;
   player.facing = -fromFacing;
   TAS.fx.flash('#f44', 0.2);
-  TAS.fx.shake(4, 0.85);
+  TAS.fx.shake(4 + screenShakeExtra, 0.85);
   SFX.hit();
-  if (player.hp <= 0) { playerDie(); }
+  if (player.hp <= 0) {
+    lives--;
+    if (lives > 0) {
+      // Respawn with reduced HP
+      player.hp = Math.floor(player.maxHp * 0.5);
+      player.invuln = 2;
+      player.state = 'idle';
+      TAS.fx.flash('#fff', 0.4);
+      impactTexts.push({ text: 'LIVES: ' + lives, x: player.x, y: player.y - 60, life: 1.5, color: '#ffdd44' });
+    } else {
+      playerDie();
+    }
+  }
 }
 
 function playerDie() {
   state = 'gameOver';
   SFX.die();
-  TAS.particles.spawn(player.x, player.y - player.h/2, '#f44', 20, 4, { gravity: 0.1 });
+  TAS.particles.spawn(player.x, player.y - player.h/2, '#f44', 24, 5, { gravity: 0.1 });
+  TAS.particles.spawn(player.x, player.y - player.h/2, '#fff', 10, 3, { gravity: 0.15, shape: 'rect' });
   if (score > highScore) { highScore = score; TAS.score.save('comixzone_hi', score); }
 }
 
@@ -656,7 +987,6 @@ function draw(dt) {
   TAS.fx.drawFlash(GW, GH);
   drawHUD();
 
-  // Transition overlay
   if (state === 'transition') {
     var t = 1 - transitionTimer;
     drawTransition(t);
@@ -666,124 +996,174 @@ function draw(dt) {
 }
 
 function drawTitleScreen() {
-  // Comic book style title
-  drawHalftone(0, 0, GW, GH, '#1a1a2a', '#222244', 8);
+  // NES-style comic book title
+  drawHalftone(0, 0, GW, GH, '#0a0a1a', '#141428', 8);
 
-  // Draw some panel outlines for style
-  ctx.strokeStyle = '#444';
+  // Scanline effect
+  ctx.fillStyle = 'rgba(0,0,0,0.08)';
+  for (var sl = 0; sl < GH; sl += 2) {
+    ctx.fillRect(0, sl, GW, 1);
+  }
+
+  // Panel outlines
+  ctx.strokeStyle = '#334';
   ctx.lineWidth = 3;
+  ctx.strokeRect(16, 16, GW - 32, GH - 32);
+  ctx.strokeStyle = '#223';
+  ctx.lineWidth = 1;
   ctx.strokeRect(20, 20, GW - 40, GH - 40);
-  ctx.strokeRect(30, 30, GW - 60, GH - 60);
 
   ctx.textAlign = 'center';
 
-  // Title with comic style
+  // Title with NES comic style
   ctx.save();
   ctx.font = 'bold 42px monospace';
-  // Shadow
-  ctx.fillStyle = '#000';
-  ctx.fillText('COMIX ZONE', GW/2 + 3, 100 + 3);
+  // Drop shadow
+  ctx.fillStyle = '#220000';
+  ctx.fillText('COMIX ZONE', GW/2 + 3, 95 + 3);
   // Outline
+  ctx.strokeStyle = '#ff8844';
+  ctx.lineWidth = 4;
+  ctx.strokeText('COMIX ZONE', GW/2, 95);
+  // Inner outline
   ctx.strokeStyle = '#fff';
-  ctx.lineWidth = 3;
-  ctx.strokeText('COMIX ZONE', GW/2, 100);
+  ctx.lineWidth = 2;
+  ctx.strokeText('COMIX ZONE', GW/2, 95);
   // Fill
   ctx.fillStyle = '#ff4444';
-  ctx.fillText('COMIX ZONE', GW/2, 100);
+  ctx.fillText('COMIX ZONE', GW/2, 95);
   ctx.restore();
 
   // Subtitle
-  ctx.fillStyle = '#aaa';
-  ctx.font = '14px monospace';
-  ctx.fillText('A Tasern Arcade Tale', GW/2, 130);
+  ctx.fillStyle = '#88aa88';
+  ctx.font = '12px monospace';
+  ctx.fillText('- A Tasern Arcade Tale -', GW/2, 118);
 
-  // Draw small player character
-  drawMiniCharacter(GW/2 - 60, 180, 1);
-  // Draw small enemy
-  drawMiniEnemy(GW/2 + 40, 180);
+  // Draw player character
+  drawMiniCharacter(GW/2 - 70, 175, 1);
+  // Draw enemy
+  drawMiniEnemy(GW/2 + 50, 175);
 
-  // Impact text decoration
+  // Impact decoration
   ctx.save();
-  ctx.translate(GW/2 + 90, 160);
+  ctx.translate(GW/2 + 100, 155);
   ctx.rotate(-0.2);
   drawImpactBurst('POW!', 0, 0, '#ffaa33', 0.7);
   ctx.restore();
 
-  // Controls
-  ctx.fillStyle = '#888';
-  ctx.font = '11px monospace';
-  ctx.fillText('ARROWS/WASD: Move | Z/J/SPACE: Punch | X/K: Jump', GW/2, 240);
-  ctx.fillText('DOWN+PUNCH: Special (costs HP!) | Combo: 3 punches', GW/2, 256);
-  ctx.fillText('Clear enemies, break panel borders, survive!', GW/2, 272);
+  // Charge indicator decoration
+  ctx.save();
+  ctx.translate(GW/2 - 110, 145);
+  ctx.rotate(0.15);
+  drawImpactBurst('ZAP!', 0, 0, '#33ff66', 0.6);
+  ctx.restore();
+
+  // NES controls
+  ctx.fillStyle = '#667766';
+  ctx.font = '10px monospace';
+  ctx.fillText('D-PAD: Move   A (Z/J/SPACE): Attack   B (X/K): Jump', GW/2, 218);
+  ctx.fillText('HOLD A: Spore Punch   DOWN+A in air: Reactor Kick', GW/2, 232);
+  ctx.fillText('DOWN+A: Special (costs HP!)   3-hit combo chain', GW/2, 246);
+  ctx.fillText('Clear enemies, smash panel borders, survive!', GW/2, 260);
+
+  // Stat display if NFT loaded
+  if (statB.level > 0) {
+    ctx.fillStyle = '#556';
+    ctx.font = '9px monospace';
+    ctx.fillText('NFT: ' + statB.name + ' Lv.' + statB.level, GW/2, 275);
+  }
 
   // Start prompt
   var pulse = Math.sin(frame * 0.06) * 0.3 + 0.7;
   ctx.globalAlpha = pulse;
   ctx.fillStyle = '#ffdd44';
-  ctx.font = 'bold 16px monospace';
-  ctx.fillText('PRESS PUNCH OR JUMP TO START', GW/2, 300);
+  ctx.font = 'bold 14px monospace';
+  ctx.fillText('>> PRESS A OR B TO START <<', GW/2, 300);
   ctx.globalAlpha = 1;
 }
 
 function drawPage() {
   var page = PAGES[pageNum];
 
-  // Page background with halftone
-  drawHalftone(0, 0, GW, GH, page.bg, shiftColor(page.bg, 20), 10);
+  drawHalftone(0, 0, GW, GH, page.bg, shiftColor(page.bg, 15), 10);
 
-  // Draw all panels as outlines
+  // Subtle scanlines
+  ctx.fillStyle = 'rgba(0,0,0,0.05)';
+  for (var sl = 0; sl < GH; sl += 2) {
+    ctx.fillRect(0, sl, GW, 1);
+  }
+
   for (var i = 0; i < page.panels.length; i++) {
     var p = page.panels[i];
-    ctx.fillStyle = i === panelIdx ? '#1a1a1a' : '#0a0a0a';
+    ctx.fillStyle = i === panelIdx ? '#111118' : '#080810';
     ctx.fillRect(p.x, p.y, p.w, p.h);
 
-    // Panel border
-    ctx.strokeStyle = i === panelIdx ? '#fff' : '#444';
-    ctx.lineWidth = i === panelIdx ? 4 : 2;
+    // Panel border — thicker for active, with accent glow
+    if (i === panelIdx) {
+      ctx.strokeStyle = page.accent;
+      ctx.lineWidth = 1;
+      ctx.strokeRect(p.x - 1, p.y - 1, p.w + 2, p.h + 2);
+      ctx.strokeStyle = '#fff';
+      ctx.lineWidth = 3;
+    } else {
+      ctx.strokeStyle = '#444';
+      ctx.lineWidth = 2;
+    }
     ctx.strokeRect(p.x, p.y, p.w, p.h);
 
-    // Cleared panels get a checkmark
+    // Cleared panels
     if (i < panelIdx) {
-      ctx.fillStyle = 'rgba(0, 200, 100, 0.15)';
+      ctx.fillStyle = 'rgba(0, 200, 100, 0.12)';
       ctx.fillRect(p.x, p.y, p.w, p.h);
       ctx.fillStyle = '#4c8';
-      ctx.font = 'bold 20px monospace';
+      ctx.font = 'bold 18px monospace';
       ctx.textAlign = 'center';
-      ctx.fillText('CLEAR', p.x + p.w/2, p.y + p.h/2 + 7);
+      ctx.fillText('CLEAR', p.x + p.w/2, p.y + p.h/2 + 6);
     }
 
-    // Boss panel indicator
+    // Boss indicator
     if (p.boss && i > panelIdx) {
       ctx.fillStyle = '#f44';
-      ctx.font = 'bold 10px monospace';
+      ctx.font = 'bold 9px monospace';
       ctx.textAlign = 'center';
-      ctx.fillText('BOSS', p.x + p.w/2, p.y + p.h/2 + 4);
+      ctx.fillText('!! BOSS !!', p.x + p.w/2, p.y + p.h/2 + 4);
+    }
+
+    // Zone name on future panels
+    if (i > panelIdx && p.zone && !p.boss) {
+      ctx.fillStyle = '#445';
+      ctx.font = '8px monospace';
+      ctx.textAlign = 'center';
+      ctx.fillText(p.zone, p.x + p.w/2, p.y + p.h/2 + 4);
     }
   }
 
-  // Page title
+  // Page title with zone info
   ctx.fillStyle = page.accent;
-  ctx.font = 'bold 12px monospace';
+  ctx.font = 'bold 11px monospace';
   ctx.textAlign = 'left';
-  ctx.fillText('PAGE ' + (pageNum + 1) + ': ' + page.name.toUpperCase(), 14, 26);
+  var zoneLabel = PAGES[pageNum].panels[panelIdx].zone || '';
+  ctx.fillText('PAGE ' + (pageNum + 1) + ': ' + page.name.toUpperCase(), 14, 22);
+  if (zoneLabel) {
+    ctx.fillStyle = '#888';
+    ctx.font = '9px monospace';
+    ctx.fillText(zoneLabel, 14, 32);
+  }
 }
 
 function drawActivePanel() {
   var panel = getCurrentPanel();
 
-  // Draw inside the active panel (use panel-local coordinates)
   ctx.save();
   ctx.beginPath();
   ctx.rect(panel.x + 2, panel.y + 2, panel.w - 4, panel.h - 4);
   ctx.clip();
 
-  // Panel interior offset
   var ox = panel.x + 5;
   var oy = panel.y + 5;
   var pw = panel.w - 10;
   var ph = panel.h - 10;
 
-  // Scale content to fit panel
   var scaleX = pw / (getCurrentPanel().w);
   var scaleY = ph / 280;
   var sc = Math.min(scaleX, scaleY);
@@ -791,22 +1171,32 @@ function drawActivePanel() {
   ctx.translate(ox, oy);
   ctx.scale(sc, sc);
 
-  // Panel background details
+  // Panel background
   drawPanelBackground(pageNum, panel);
 
-  // Floor line
+  // Hazard visuals
+  drawHazards();
+
+  // Floor line with texture
   ctx.strokeStyle = '#555';
   ctx.lineWidth = 1;
   ctx.beginPath();
   ctx.moveTo(0, FLOOR_Y + 2);
   ctx.lineTo(getCurrentPanel().w, FLOOR_Y + 2);
   ctx.stroke();
+  // Floor hash marks
+  ctx.strokeStyle = '#333';
+  for (var fi = 0; fi < getCurrentPanel().w; fi += 12) {
+    ctx.beginPath();
+    ctx.moveTo(fi, FLOOR_Y + 2);
+    ctx.lineTo(fi + 4, FLOOR_Y + 6);
+    ctx.stroke();
+  }
 
   // Items
   for (var i = 0; i < items.length; i++) {
     var it = items[i];
     if (it.hidden) {
-      // Subtle shimmer
       if (frame % 60 < 5) {
         ctx.fillStyle = 'rgba(255,255,200,0.2)';
         ctx.fillRect(it.x - 4, it.y - 4, 8, 8);
@@ -831,7 +1221,28 @@ function drawActivePanel() {
   // Player
   drawPlayer();
 
-  // Impact texts (in panel space)
+  // Charge indicator above player
+  if (chargeTimer > 0 && !chargeReady && player.state === 'idle') {
+    var chgPct = Math.min(1, chargeTimer / 0.8);
+    ctx.fillStyle = 'rgba(255,136,0,' + (chgPct * 0.5) + ')';
+    ctx.fillRect(player.x - 10, player.y - player.h - 8, Math.floor(20 * chgPct), 3);
+    ctx.strokeStyle = '#ff8800';
+    ctx.lineWidth = 0.5;
+    ctx.strokeRect(player.x - 10, player.y - player.h - 8, 20, 3);
+  }
+  if (chargeReady) {
+    ctx.fillStyle = '#ff8800';
+    ctx.font = 'bold 8px monospace';
+    ctx.textAlign = 'center';
+    var flashAlpha = Math.sin(frame * 0.2) * 0.3 + 0.7;
+    ctx.globalAlpha = flashAlpha;
+    ctx.fillText('READY!', player.x, player.y - player.h - 6);
+    ctx.globalAlpha = 1;
+    // Glow particles
+    if (frame % 6 === 0) TAS.particles.spawn(player.x + TAS.math.randRange(-8, 8), player.y - 20, '#ff8800', 1, 1, { gravity: -0.02 });
+  }
+
+  // Impact texts
   for (var ti = 0; ti < impactTexts.length; ti++) {
     var t = impactTexts[ti];
     drawImpactBurst(t.text, t.x, t.y, t.color, t.life);
@@ -842,7 +1253,7 @@ function drawActivePanel() {
 
   ctx.restore();
 
-  // Speech bubble (outside clip, in screen space)
+  // Speech bubble
   if (speechBubble && speechTimer > 0) {
     drawSpeechBubble(panel.x + panel.w - 80, panel.y - 5, speechBubble);
   }
@@ -851,9 +1262,9 @@ function drawActivePanel() {
   if (enemies.length === 0 && drawingEnemies.length === 0 && state === 'playing') {
     var arrowPulse = Math.sin(frame * 0.1) * 3;
     ctx.fillStyle = '#ffdd44';
-    ctx.font = 'bold 10px monospace';
+    ctx.font = 'bold 9px monospace';
     ctx.textAlign = 'center';
-    ctx.fillText('BREAK BORDER >>>', panel.x + panel.w - 40, panel.y + panel.h + 12 + arrowPulse);
+    ctx.fillText('>> BREAK BORDER >>', panel.x + panel.w - 50, panel.y + panel.h + 12 + arrowPulse);
   }
 }
 
@@ -864,80 +1275,130 @@ function drawPlayer() {
   var blink = player.invuln > 0 && Math.floor(frame / 3) % 2 === 0;
   if (blink) { ctx.globalAlpha = 0.4; }
 
+  // Spore shield glow
+  if (player.sporeShield > 0) {
+    ctx.fillStyle = 'rgba(51,255,102,' + (0.1 + Math.sin(frame * 0.1) * 0.05) + ')';
+    ctx.beginPath();
+    ctx.arc(px, py - 18, 22, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
   ctx.save();
   ctx.translate(px, py);
   ctx.scale(f, 1);
 
-  // Body
-  var bodyColor = player.knife > 0 ? '#55aaff' : '#4488cc';
+  // Body color — uses statB color
+  var bodyColor = statB.color || '#4488cc';
+  if (player.knife > 0) bodyColor = '#55aaff';
   if (player.state === 'hurt') bodyColor = '#ff6666';
   if (player.state === 'special') bodyColor = '#ffaa22';
+  if (player.state === 'spore_punch') bodyColor = '#33cc66';
+  if (player.state === 'reactor_kick') bodyColor = '#cc44ff';
 
-  // Torso
+  // Torso (NES-style blocky)
   ctx.fillStyle = bodyColor;
-  ctx.fillRect(-7, -32, 14, 18);
+  ctx.fillRect(-8, -33, 16, 20);
+  // Chest highlight
+  ctx.fillStyle = shiftColor(bodyColor, 30);
+  ctx.fillRect(-6, -31, 4, 6);
 
   // Head
   ctx.fillStyle = '#ffd4a0';
-  ctx.beginPath();
-  ctx.arc(0, -38, 7, 0, Math.PI * 2);
-  ctx.fill();
+  ctx.fillRect(-6, -44, 12, 12);
+  // Eyes
+  ctx.fillStyle = '#222';
+  ctx.fillRect(1, -41, 2, 2);
+  ctx.fillRect(4, -41, 2, 2);
 
-  // Hair (artist beret)
+  // Hair (artist bandana)
   ctx.fillStyle = '#663399';
-  ctx.beginPath();
-  ctx.arc(0, -42, 7, Math.PI, 0);
-  ctx.fill();
-  ctx.fillRect(-8, -43, 16, 3);
+  ctx.fillRect(-7, -46, 14, 4);
+  ctx.fillRect(-8, -44, 2, 3);
+  // Bandana tail
+  ctx.fillRect(-8, -45, 3, 8);
 
   // Arms
   ctx.fillStyle = '#ffd4a0';
   if (player.state === 'punch') {
-    var extend = player.stateTimer < 0.1 ? 14 : 8 + player.comboStep * 3;
-    ctx.fillRect(4, -28, extend, 5);
-    // Fist
+    var extend = player.stateTimer < 0.1 ? 16 : 10 + player.comboStep * 4;
+    ctx.fillRect(5, -29, extend, 5);
     ctx.fillStyle = bodyColor;
-    ctx.fillRect(4 + extend - 3, -29, 6, 7);
+    ctx.fillRect(5 + extend - 4, -30, 7, 7);
+    // Combo trail
+    if (player.comboStep > 0) {
+      ctx.fillStyle = 'rgba(255,255,255,0.3)';
+      ctx.fillRect(5, -28, extend - 4, 3);
+    }
   } else if (player.state === 'knife') {
-    ctx.fillRect(4, -28, 16, 5);
+    ctx.fillRect(5, -29, 16, 5);
     ctx.fillStyle = '#ccc';
-    ctx.fillRect(18, -30, 10, 3);
+    ctx.fillRect(19, -31, 12, 3);
+    ctx.fillStyle = '#eee';
+    ctx.fillRect(29, -32, 2, 5);
   } else if (player.state === 'special') {
-    ctx.fillRect(-5, -34, 10, 5);
-    ctx.fillRect(4, -30, 10, 5);
-    // Energy effect
-    ctx.fillStyle = 'rgba(255,200,0,0.5)';
+    ctx.fillRect(-5, -35, 10, 5);
+    ctx.fillRect(5, -31, 10, 5);
+    ctx.fillStyle = 'rgba(255,200,0,0.6)';
     ctx.beginPath();
-    ctx.arc(8, -26, 12 + Math.sin(frame * 0.5) * 3, 0, Math.PI * 2);
+    ctx.arc(8, -26, 14 + Math.sin(frame * 0.5) * 4, 0, Math.PI * 2);
     ctx.fill();
+    // Energy sparks
+    ctx.fillStyle = '#fff';
+    for (var sp = 0; sp < 4; sp++) {
+      var sa = frame * 0.3 + sp * 1.57;
+      ctx.fillRect(8 + Math.cos(sa) * 12, -26 + Math.sin(sa) * 10, 2, 2);
+    }
+  } else if (player.state === 'spore_punch') {
+    var spExt = player.stateTimer < 0.2 ? 18 : 12;
+    ctx.fillRect(5, -29, spExt, 6);
+    // Spore energy
+    ctx.fillStyle = 'rgba(51,204,102,0.7)';
+    ctx.beginPath();
+    ctx.arc(5 + spExt, -26, 8 + Math.sin(frame * 0.4) * 2, 0, Math.PI * 2);
+    ctx.fill();
+    // Spore particles
+    ctx.fillStyle = '#33ff66';
+    for (var spi = 0; spi < 3; spi++) {
+      ctx.fillRect(5 + spExt + TAS.math.randRange(-5, 10), -30 + TAS.math.randRange(-5, 5), 2, 2);
+    }
+  } else if (player.state === 'reactor_kick') {
+    ctx.fillRect(5, -27, 8, 5);
+    // Reactor glow on legs
+    ctx.fillStyle = 'rgba(204,68,255,0.5)';
+    ctx.fillRect(-8, -10, 20, 12);
   } else if (player.jumpKick) {
-    ctx.fillRect(4, -26, 8, 5);
+    ctx.fillRect(5, -27, 8, 5);
   } else {
-    ctx.fillRect(5, -26, 6, 5);
-    ctx.fillRect(-9, -26, 6, 5);
+    ctx.fillRect(6, -27, 6, 5);
+    ctx.fillRect(-10, -27, 6, 5);
   }
 
-  // Legs
+  // Legs (NES blocky)
   ctx.fillStyle = '#335';
   if (player.state === 'walk') {
-    var legAnim = Math.sin(frame * 0.3) * 4;
-    ctx.fillRect(-5, -14, 5, 14);
-    ctx.fillRect(1 + legAnim, -14, 5, 14);
+    var legAnim = Math.sin(frame * 0.3) * 5;
+    ctx.fillRect(-6, -13, 5, 13);
+    ctx.fillRect(1 + legAnim, -13, 5, 13);
+  } else if (player.state === 'reactor_kick') {
+    // Both legs extended down with glow
+    ctx.fillRect(-4, -10, 10, 12);
+    ctx.fillStyle = '#cc44ff';
+    ctx.fillRect(-6, -2, 14, 4);
   } else if (player.jumpKick) {
-    ctx.fillRect(2, -14, 14, 5);
-    ctx.fillRect(-7, -10, 5, 10);
+    ctx.fillRect(2, -13, 14, 5);
+    ctx.fillRect(-7, -9, 5, 9);
   } else if (player.state === 'jump') {
-    ctx.fillRect(-5, -14, 5, 10);
-    ctx.fillRect(1, -14, 5, 10);
+    ctx.fillRect(-5, -13, 5, 9);
+    ctx.fillRect(1, -13, 5, 9);
   } else {
-    ctx.fillRect(-5, -14, 5, 14);
-    ctx.fillRect(1, -14, 5, 14);
+    ctx.fillRect(-6, -13, 5, 13);
+    ctx.fillRect(1, -13, 5, 13);
   }
 
-  // Shoes
+  // Shoes (NES-style)
   ctx.fillStyle = '#a33';
-  if (!player.jumpKick) {
-    ctx.fillRect(-6, -1, 7, 3);
+  if (player.state !== 'reactor_kick' && !player.jumpKick) {
+    ctx.fillRect(-7, -1, 7, 3);
     ctx.fillRect(0, -1, 7, 3);
   }
 
@@ -953,136 +1414,212 @@ function drawEnemy(en) {
 
   if (blink) ctx.globalAlpha = 0.6;
 
-  // Different looks per type
-  if (en.type === 'blob') {
-    ctx.fillStyle = blink ? '#fff' : '#556';
+  if (en.type === 'spore_creeper') {
+    // Mushroom-like body
+    ctx.fillStyle = blink ? '#fff' : '#3a8855';
+    // Stalk
+    ctx.fillRect(-5, -18, 10, 18);
+    // Cap
+    ctx.fillStyle = blink ? '#fcc' : '#2a6644';
     ctx.beginPath();
-    ctx.ellipse(0, -12, 9, 12, 0, 0, Math.PI * 2);
+    ctx.arc(0, -20, 12, Math.PI, 0);
     ctx.fill();
-    // Eyes
-    ctx.fillStyle = '#f44';
-    ctx.fillRect(-4, -16, 3, 3);
-    ctx.fillRect(2, -16, 3, 3);
-    // Drip
-    ctx.fillStyle = '#334';
-    ctx.fillRect(-3, -1, 2, 4 + Math.sin(frame * 0.1) * 2);
-    ctx.fillRect(2, 0, 2, 3 + Math.cos(frame * 0.12) * 2);
+    // Spots on cap
+    ctx.fillStyle = '#55cc77';
+    ctx.fillRect(-6, -24, 3, 3);
+    ctx.fillRect(3, -22, 3, 3);
+    // Eyes (glowing)
+    ctx.fillStyle = '#aaffaa';
+    ctx.fillRect(-4, -14, 3, 3);
+    ctx.fillRect(2, -14, 3, 3);
+    // Tendrils
+    ctx.strokeStyle = '#3a8855';
+    ctx.lineWidth = 1;
+    var tendril = Math.sin(frame * 0.08) * 3;
+    ctx.beginPath();
+    ctx.moveTo(-5, -2);
+    ctx.lineTo(-8 + tendril, 4);
+    ctx.moveTo(5, -2);
+    ctx.lineTo(8 - tendril, 4);
+    ctx.stroke();
+    // Spore particles float around
+    if (en.sporeTimer < 0.5) {
+      ctx.fillStyle = 'rgba(51,204,102,0.4)';
+      for (var sp = 0; sp < 3; sp++) {
+        ctx.beginPath();
+        ctx.arc(Math.sin(frame * 0.05 + sp * 2) * 15, -15 + Math.cos(frame * 0.04 + sp) * 8, 2, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
   }
-  else if (en.type === 'soldier') {
-    // Body
-    ctx.fillStyle = blink ? '#fff' : '#668';
-    ctx.fillRect(-8, -34, 16, 22);
-    // Head
-    ctx.fillStyle = blink ? '#fcc' : '#ddb';
-    ctx.beginPath();
-    ctx.arc(0, -38, 6, 0, Math.PI * 2);
-    ctx.fill();
-    // Helmet
-    ctx.fillStyle = '#445';
-    ctx.fillRect(-7, -44, 14, 5);
+  else if (en.type === 'reactor_mutant') {
+    // Mutated humanoid with reactor glow
+    ctx.fillStyle = blink ? '#fff' : '#6633aa';
+    ctx.fillRect(-9, -35, 18, 24);
+    // Head — lumpy
+    ctx.fillStyle = blink ? '#fcc' : '#8844cc';
+    ctx.fillRect(-7, -42, 14, 9);
+    // Glowing eye
+    ctx.fillStyle = '#ff44ff';
+    ctx.fillRect(-3, -39, 4, 3);
+    ctx.fillStyle = '#cc44ff';
+    ctx.fillRect(2, -39, 3, 3);
+    // Reactor core in chest
+    ctx.fillStyle = frame % 10 < 5 ? '#ff44ff' : '#cc22cc';
+    ctx.fillRect(-3, -28, 6, 6);
+    // Arms — one oversized
+    ctx.fillStyle = blink ? '#ddd' : '#7744bb';
+    ctx.fillRect(7, -32, 8, 6);
+    ctx.fillRect(-13, -30, 6, 5);
     // Legs
-    ctx.fillStyle = '#334';
-    ctx.fillRect(-6, -12, 5, 12);
-    ctx.fillRect(1, -12, 5, 12);
-    // Weapon
-    ctx.fillStyle = '#888';
-    ctx.fillRect(6, -30, 3, 18);
+    ctx.fillStyle = '#443366';
+    ctx.fillRect(-7, -11, 6, 11);
+    ctx.fillRect(1, -11, 6, 11);
+    // Radiation glow
+    ctx.fillStyle = 'rgba(204,68,255,' + (0.1 + Math.sin(frame * 0.08) * 0.05) + ')';
+    ctx.beginPath();
+    ctx.arc(0, -22, 18, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  else if (en.type === 'mycelial_giant') {
+    // Large fungal creature
+    ctx.fillStyle = blink ? '#fff' : '#885522';
+    // Massive body
+    ctx.fillRect(-14, -38, 28, 32);
+    // Bark texture
+    ctx.fillStyle = blink ? '#eee' : '#774411';
+    ctx.fillRect(-12, -34, 4, 8);
+    ctx.fillRect(4, -30, 5, 10);
+    ctx.fillRect(-8, -22, 6, 6);
+    // Head — tree-trunk like
+    ctx.fillStyle = blink ? '#ddb' : '#996633';
+    ctx.fillRect(-10, -46, 20, 10);
+    // Eyes — deep set
+    ctx.fillStyle = '#ff8844';
+    ctx.fillRect(-6, -43, 4, 4);
+    ctx.fillRect(3, -43, 4, 4);
+    // Mushroom growths on shoulders
+    ctx.fillStyle = '#cc8844';
+    ctx.beginPath();
+    ctx.arc(-14, -35, 6, Math.PI, 0);
+    ctx.fill();
+    ctx.beginPath();
+    ctx.arc(14, -33, 5, Math.PI, 0);
+    ctx.fill();
+    // Legs — thick stumps
+    ctx.fillStyle = '#664411';
+    ctx.fillRect(-10, -6, 8, 8);
+    ctx.fillRect(2, -6, 8, 8);
+    // Root tendrils at feet
+    ctx.strokeStyle = '#553300';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.moveTo(-10, 0);
+    ctx.lineTo(-15, 4);
+    ctx.moveTo(10, 0);
+    ctx.lineTo(15, 4);
+    ctx.stroke();
   }
   else if (en.type === 'pencil') {
-    // Pencil body (vertical)
     ctx.fillStyle = blink ? '#fff' : '#cc8';
     ctx.fillRect(-4, -38, 8, 32);
-    // Tip
     ctx.fillStyle = '#333';
     ctx.beginPath();
     ctx.moveTo(-4, -38);
     ctx.lineTo(4, -38);
     ctx.lineTo(0, -44);
     ctx.fill();
-    // Eraser end
     ctx.fillStyle = '#f88';
     ctx.fillRect(-5, -6, 10, 6);
-    // Eyes on pencil
     ctx.fillStyle = '#333';
     ctx.fillRect(-2, -28, 2, 2);
     ctx.fillRect(1, -28, 2, 2);
   }
   else if (en.type === 'eraser') {
-    // Big blocky eraser
     ctx.fillStyle = blink ? '#fff' : '#a66';
     ctx.fillRect(-14, -30, 28, 30);
-    // Band
     ctx.fillStyle = '#66a';
     ctx.fillRect(-14, -20, 28, 6);
-    // Face
     ctx.fillStyle = '#333';
     ctx.fillRect(-6, -28, 4, 4);
     ctx.fillRect(3, -28, 4, 4);
     ctx.fillRect(-4, -16, 9, 3);
   }
   else if (en.type === 'boss') {
-    // Big villain artist
-    ctx.fillStyle = blink ? '#fff' : '#2a2a4a';
-    ctx.fillRect(-14, -40, 28, 28);
+    // Enhanced boss — bigger, meaner, with effects
+    var enraged = en.hp < en.maxHp * 0.4;
+    ctx.fillStyle = blink ? '#fff' : (enraged ? '#3a1a1a' : '#2a2a4a');
+    ctx.fillRect(-16, -42, 32, 30);
+    // Shoulder armor
+    ctx.fillStyle = enraged ? '#cc2222' : '#445';
+    ctx.fillRect(-18, -40, 6, 8);
+    ctx.fillRect(12, -40, 6, 8);
     // Head
     ctx.fillStyle = '#ddb';
-    ctx.beginPath();
-    ctx.arc(0, -46, 9, 0, Math.PI * 2);
-    ctx.fill();
-    // Evil beret
-    ctx.fillStyle = '#a22';
-    ctx.beginPath();
-    ctx.arc(0, -52, 9, Math.PI, 0);
-    ctx.fill();
-    ctx.fillRect(-10, -53, 20, 3);
+    ctx.fillRect(-8, -52, 16, 12);
+    // Evil crown/beret
+    ctx.fillStyle = enraged ? '#ff2222' : '#a22';
+    ctx.fillRect(-10, -56, 20, 6);
+    ctx.fillRect(-6, -58, 12, 3);
     // Cape
-    ctx.fillStyle = '#411';
+    ctx.fillStyle = enraged ? '#660000' : '#411';
     ctx.beginPath();
-    ctx.moveTo(-14, -38);
-    ctx.lineTo(-18, -5);
-    ctx.lineTo(-8, -12);
+    ctx.moveTo(-16, -38);
+    ctx.lineTo(-20, -3);
+    ctx.lineTo(-10, -12);
     ctx.fill();
     ctx.beginPath();
-    ctx.moveTo(14, -38);
-    ctx.lineTo(18, -5);
-    ctx.lineTo(8, -12);
+    ctx.moveTo(16, -38);
+    ctx.lineTo(20, -3);
+    ctx.lineTo(10, -12);
     ctx.fill();
-    // Arms with paintbrush
+    // Arms with weapon
     ctx.fillStyle = '#ddb';
-    ctx.fillRect(10, -36, 10, 5);
+    ctx.fillRect(12, -38, 12, 6);
     ctx.fillStyle = '#850';
-    ctx.fillRect(18, -38, 3, 20);
-    ctx.fillStyle = '#f44';
-    ctx.fillRect(17, -40, 5, 4);
+    ctx.fillRect(22, -40, 3, 22);
+    ctx.fillStyle = enraged ? '#ff4' : '#f44';
+    ctx.fillRect(21, -42, 5, 5);
     // Legs
     ctx.fillStyle = '#222';
-    ctx.fillRect(-8, -12, 7, 12);
-    ctx.fillRect(2, -12, 7, 12);
+    ctx.fillRect(-9, -12, 8, 14);
+    ctx.fillRect(2, -12, 8, 14);
     // Evil eyes
-    ctx.fillStyle = '#f44';
-    ctx.fillRect(-4, -48, 3, 3);
-    ctx.fillRect(2, -48, 3, 3);
+    ctx.fillStyle = enraged ? '#ffff00' : '#f44';
+    ctx.fillRect(-5, -49, 4, 3);
+    ctx.fillRect(2, -49, 4, 3);
+    // Enrage glow
+    if (enraged) {
+      ctx.fillStyle = 'rgba(255,0,0,' + (0.08 + Math.sin(frame * 0.15) * 0.04) + ')';
+      ctx.beginPath();
+      ctx.arc(0, -28, 30, 0, Math.PI * 2);
+      ctx.fill();
+    }
   }
 
   ctx.restore();
   ctx.globalAlpha = 1;
 
-  // HP bar for boss
-  if (en.type === 'boss') {
-    var barW = 40;
+  // HP bar for bosses and mycelial giants
+  if (en.type === 'boss' || en.type === 'mycelial_giant') {
+    var barW = en.type === 'boss' ? 44 : 30;
     var barX = en.x - barW/2;
-    var barY = en.y - en.h - 12;
+    var barY = en.y - en.h - 14;
     ctx.fillStyle = '#300';
     ctx.fillRect(barX, barY, barW, 4);
-    ctx.fillStyle = '#f44';
-    ctx.fillRect(barX, barY, barW * (en.hp / en.maxHp), 4);
+    var hpColor = en.type === 'boss' && en.hp < en.maxHp * 0.4 ? '#ff4' : '#f44';
+    ctx.fillStyle = hpColor;
+    ctx.fillRect(barX, barY, Math.floor(barW * (en.hp / en.maxHp)), 4);
+    ctx.strokeStyle = '#666';
+    ctx.lineWidth = 0.5;
+    ctx.strokeRect(barX, barY, barW, 4);
   }
 }
 
 function drawItem(it) {
   ctx.save();
   ctx.translate(it.x, it.y);
-  var bob = Math.sin(frame * 0.08) * 2;
+  var bob = Math.sin(frame * 0.08) * 3;
   ctx.translate(0, bob);
 
   if (it.type === 'health') {
@@ -1111,13 +1648,23 @@ function drawItem(it) {
     ctx.beginPath();
     ctx.arc(5, -17, 2, 0, Math.PI * 2);
     ctx.fill();
+  } else if (it.type === 'spore_shield') {
+    // Green mushroom shield
+    ctx.fillStyle = '#33cc66';
+    ctx.fillRect(-4, -6, 8, 10);
+    ctx.fillStyle = '#22aa44';
+    ctx.beginPath();
+    ctx.arc(0, -8, 8, Math.PI, 0);
+    ctx.fill();
+    ctx.fillStyle = '#44ff88';
+    ctx.fillRect(-2, -10, 2, 2);
+    ctx.fillRect(2, -8, 2, 2);
   }
 
   ctx.restore();
 }
 
 function drawSpawnSketch(de) {
-  // Draw enemy being "sketched" into existence
   var p = de.progress;
   ctx.save();
   ctx.globalAlpha = 0.5 + p * 0.5;
@@ -1127,15 +1674,22 @@ function drawSpawnSketch(de) {
   var cx = de.x;
   var cy = FLOOR_Y;
 
-  // Animated sketch lines
-  var lines = Math.floor(p * 12);
+  var lines = Math.floor(p * 14);
   for (var i = 0; i < lines; i++) {
-    var angle = (i / 12) * Math.PI * 2 + frame * 0.05;
+    var angle = (i / 14) * Math.PI * 2 + frame * 0.05;
     var r = 15 + Math.sin(i * 2.3) * 8;
     ctx.beginPath();
     ctx.moveTo(cx + Math.cos(angle) * r * 0.3, cy - 18 + Math.sin(angle) * r * 0.5);
     ctx.lineTo(cx + Math.cos(angle + 0.5) * r, cy - 18 + Math.sin(angle + 0.5) * r * 0.8);
     ctx.stroke();
+  }
+
+  // Ink drops
+  if (p > 0.5) {
+    ctx.fillStyle = '#666';
+    for (var d = 0; d < 3; d++) {
+      ctx.fillRect(cx + Math.sin(d * 3 + frame * 0.1) * 12, cy - 25 + d * 8, 2, 2);
+    }
   }
 
   // Pencil hovering above
@@ -1157,20 +1711,101 @@ function drawSpawnSketch(de) {
   ctx.restore();
 }
 
+function drawHazards() {
+  for (var hi = 0; hi < hazards.length; hi++) {
+    var h = hazards[hi];
+    if (h.type === 'spore_cloud') {
+      var pulse = Math.sin(frame * 0.04 + hi) * 0.1 + 0.15;
+      ctx.fillStyle = 'rgba(51,204,102,' + pulse + ')';
+      ctx.beginPath();
+      ctx.arc(h.x, h.y - 12, h.radius, 0, Math.PI * 2);
+      ctx.fill();
+      // Floating spore dots
+      for (var si = 0; si < 4; si++) {
+        var sx = h.x + Math.sin(frame * 0.02 + si * 1.5) * h.radius * 0.8;
+        var sy = h.y - 10 + Math.cos(frame * 0.03 + si) * 8;
+        ctx.fillStyle = 'rgba(51,255,102,0.4)';
+        ctx.beginPath();
+        ctx.arc(sx, sy, 1.5, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+    else if (h.type === 'reactor_vent') {
+      // Vent pipe
+      ctx.fillStyle = '#444';
+      ctx.fillRect(h.x - 6, h.y - 8, 12, 8);
+      ctx.fillStyle = '#333';
+      ctx.fillRect(h.x - 8, h.y - 10, 16, 4);
+      if (h.active) {
+        // Blast column
+        ctx.fillStyle = 'rgba(204,68,255,0.3)';
+        ctx.fillRect(h.x - 8, h.y - 60, 16, 52);
+        ctx.fillStyle = 'rgba(255,100,255,0.5)';
+        ctx.fillRect(h.x - 4, h.y - 50, 8, 42);
+      } else if (h.timer > h.interval - 0.5) {
+        // Warning glow
+        ctx.fillStyle = 'rgba(255,100,100,' + (Math.sin(frame * 0.3) * 0.2 + 0.2) + ')';
+        ctx.fillRect(h.x - 6, h.y - 8, 12, 8);
+      }
+    }
+    else if (h.type === 'wind_gust' && h.active) {
+      // Wind streaks
+      ctx.strokeStyle = 'rgba(170,200,255,0.3)';
+      ctx.lineWidth = 1;
+      for (var wi = 0; wi < 6; wi++) {
+        var wx = (frame * 3 + wi * 50) % (getCurrentPanel().w + 40) - 20;
+        var wy = 120 + wi * 20;
+        ctx.beginPath();
+        ctx.moveTo(wx, wy);
+        ctx.lineTo(wx + 30, wy);
+        ctx.stroke();
+      }
+    }
+    else if (h.type === 'lava_drip') {
+      if (h.dropping) {
+        ctx.fillStyle = '#ff4400';
+        ctx.beginPath();
+        ctx.arc(h.x, h.dropY, 4, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = '#ffaa00';
+        ctx.beginPath();
+        ctx.arc(h.x, h.dropY, 2, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      // Drip source
+      ctx.fillStyle = '#ff6600';
+      ctx.fillRect(h.x - 3, 75, 6, 6);
+    }
+    else if (h.type === 'mutation_field') {
+      var mPulse = Math.sin(frame * 0.03) * 0.05 + 0.1;
+      ctx.fillStyle = 'rgba(170,68,255,' + mPulse + ')';
+      ctx.beginPath();
+      ctx.arc(h.x, h.y - 15, h.radius, 0, Math.PI * 2);
+      ctx.fill();
+      // Swirling particles
+      for (var mi = 0; mi < 3; mi++) {
+        var ma = frame * 0.03 + mi * 2.09;
+        ctx.fillStyle = 'rgba(200,100,255,0.5)';
+        ctx.fillRect(h.x + Math.cos(ma) * h.radius * 0.6, h.y - 15 + Math.sin(ma) * h.radius * 0.4, 2, 2);
+      }
+    }
+  }
+}
+
 function drawImpactBurst(text, x, y, color, life) {
   ctx.save();
   ctx.globalAlpha = Math.min(1, life);
-  var scale = 0.8 + (1 - life) * 0.4;
+  var scale = 0.8 + (1 - life) * 0.5;
   ctx.translate(x, y);
   ctx.scale(scale, scale);
 
-  // Starburst background
+  // Starburst background — more dramatic
   ctx.fillStyle = color;
   ctx.beginPath();
-  var points = 10;
+  var points = 12;
   for (var i = 0; i < points * 2; i++) {
     var angle = (i / (points * 2)) * Math.PI * 2 - Math.PI/2;
-    var r = i % 2 === 0 ? 22 + text.length * 2 : 12;
+    var r = i % 2 === 0 ? 24 + text.length * 2.5 : 12;
     var px = Math.cos(angle) * r;
     var py = Math.sin(angle) * r;
     if (i === 0) ctx.moveTo(px, py);
@@ -1178,6 +1813,11 @@ function drawImpactBurst(text, x, y, color, life) {
   }
   ctx.closePath();
   ctx.fill();
+
+  // Outline
+  ctx.strokeStyle = '#000';
+  ctx.lineWidth = 1.5;
+  ctx.stroke();
 
   // Text
   ctx.fillStyle = '#000';
@@ -1200,7 +1840,6 @@ function drawSpeechBubble(x, y, text) {
   var bx = x - bw;
   var by = y - bh;
 
-  // Bubble
   ctx.fillStyle = '#fff';
   ctx.strokeStyle = '#000';
   ctx.lineWidth = 2;
@@ -1209,7 +1848,6 @@ function drawSpeechBubble(x, y, text) {
   ctx.fill();
   ctx.stroke();
 
-  // Tail
   ctx.fillStyle = '#fff';
   ctx.beginPath();
   ctx.moveTo(bx + bw * 0.7, by + bh);
@@ -1223,7 +1861,6 @@ function drawSpeechBubble(x, y, text) {
   ctx.lineTo(bx + bw * 0.7 + 10, by + bh);
   ctx.stroke();
 
-  // Text
   ctx.fillStyle = '#222';
   ctx.font = '9px monospace';
   ctx.textAlign = 'center';
@@ -1236,75 +1873,150 @@ function drawPanelBackground(pg, panel) {
   var w = panel.w - 10;
   var h = 280;
 
-  // Different backgrounds per page
   if (pg === 0) {
-    // City streets - buildings, graffiti
-    ctx.fillStyle = '#333';
-    ctx.fillRect(0, 80, 30, FLOOR_Y - 80);
-    ctx.fillRect(w - 40, 60, 40, FLOOR_Y - 60);
-    ctx.fillRect(w/2 - 15, 100, 25, FLOOR_Y - 100);
-    // Windows
-    ctx.fillStyle = '#554';
-    for (var i = 0; i < 3; i++) {
-      ctx.fillRect(5, 90 + i * 25, 8, 12);
-      ctx.fillRect(w - 30, 70 + i * 25, 8, 12);
+    // Spore District — mushroom buildings, glowing spores
+    ctx.fillStyle = '#1a3322';
+    ctx.fillRect(0, 0, w, FLOOR_Y);
+    // Mushroom buildings
+    ctx.fillStyle = '#2a4433';
+    ctx.fillRect(0, 90, 25, FLOOR_Y - 90);
+    ctx.fillStyle = '#1a3322';
+    ctx.beginPath();
+    ctx.arc(12, 90, 18, Math.PI, 0);
+    ctx.fill();
+    ctx.fillStyle = '#2a4433';
+    ctx.fillRect(w - 35, 70, 35, FLOOR_Y - 70);
+    ctx.fillStyle = '#1a3322';
+    ctx.beginPath();
+    ctx.arc(w - 18, 70, 22, Math.PI, 0);
+    ctx.fill();
+    // Spots on mushroom caps
+    ctx.fillStyle = '#44aa66';
+    ctx.fillRect(5, 80, 3, 3);
+    ctx.fillRect(15, 78, 3, 3);
+    ctx.fillRect(w - 28, 60, 3, 3);
+    ctx.fillRect(w - 14, 62, 3, 3);
+    // Floating spores
+    for (var sp = 0; sp < 7; sp++) {
+      var spx = (sp * 41 + frame * 0.3) % w;
+      var spy = 80 + Math.sin(frame * 0.02 + sp * 1.3) * 25;
+      ctx.fillStyle = 'rgba(51,204,102,' + (0.15 + Math.sin(frame * 0.03 + sp) * 0.1) + ')';
+      ctx.beginPath();
+      ctx.arc(spx, spy, 2, 0, Math.PI * 2);
+      ctx.fill();
     }
-    // Graffiti scratch
-    ctx.strokeStyle = '#f63';
-    ctx.lineWidth = 1;
-    ctx.beginPath();
-    ctx.moveTo(50, 200);
-    ctx.lineTo(70, 195);
-    ctx.lineTo(60, 210);
-    ctx.stroke();
+    // Mycelium network on ground
+    ctx.strokeStyle = '#335533';
+    ctx.lineWidth = 0.5;
+    for (var mi = 0; mi < 5; mi++) {
+      ctx.beginPath();
+      ctx.moveTo(mi * w/5, FLOOR_Y);
+      ctx.lineTo(mi * w/5 + 20, FLOOR_Y - 8);
+      ctx.lineTo(mi * w/5 + 35, FLOOR_Y);
+      ctx.stroke();
+    }
   } else if (pg === 1) {
-    // Sewers - pipes, water
-    ctx.strokeStyle = '#454';
-    ctx.lineWidth = 6;
+    // Reactor Depths — pipes, radiation, coolant
+    ctx.fillStyle = '#1a1a2a';
+    ctx.fillRect(0, 0, w, FLOOR_Y);
+    // Thick pipes
+    ctx.strokeStyle = '#443366';
+    ctx.lineWidth = 8;
     ctx.beginPath();
-    ctx.moveTo(0, 120);
-    ctx.lineTo(w, 130);
+    ctx.moveTo(0, 100);
+    ctx.lineTo(w, 110);
     ctx.stroke();
+    ctx.lineWidth = 5;
     ctx.beginPath();
-    ctx.moveTo(w * 0.3, 80);
-    ctx.lineTo(w * 0.3, 130);
+    ctx.moveTo(w * 0.4, 70);
+    ctx.lineTo(w * 0.4, 110);
     ctx.stroke();
-    // Water at bottom
-    ctx.fillStyle = 'rgba(30,80,60,0.3)';
-    ctx.fillRect(0, FLOOR_Y - 5, w, 10);
-    // Drips
-    var drip = (frame * 2) % 60;
-    ctx.fillStyle = '#3a8';
-    ctx.fillRect(w * 0.3, 130 + drip, 2, 4);
+    // Pipe joints
+    ctx.fillStyle = '#554488';
+    ctx.fillRect(w * 0.4 - 6, 95, 12, 8);
+    // Coolant pool
+    ctx.fillStyle = 'rgba(100,40,180,0.25)';
+    ctx.fillRect(0, FLOOR_Y - 6, w, 10);
+    // Radiation glow spots
+    for (var ri = 0; ri < 3; ri++) {
+      ctx.fillStyle = 'rgba(204,68,255,' + (0.08 + Math.sin(frame * 0.04 + ri * 2) * 0.04) + ')';
+      ctx.beginPath();
+      ctx.arc(w * (0.2 + ri * 0.3), 140, 12, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    // Dripping coolant
+    var drip = (frame * 2) % 50;
+    ctx.fillStyle = '#8844cc';
+    ctx.fillRect(w * 0.4, 110 + drip, 2, 4);
+    // Warning stripes
+    ctx.fillStyle = '#332200';
+    for (var ws = 0; ws < w; ws += 30) {
+      ctx.fillRect(ws, FLOOR_Y - 2, 15, 3);
+    }
   } else if (pg === 2) {
-    // Rooftops - sky, antennas
-    ctx.fillStyle = '#223';
+    // Canopy Heights — trees, vines, night sky
+    ctx.fillStyle = '#111133';
     ctx.fillRect(0, 0, w, FLOOR_Y);
     // Stars
-    for (var s = 0; s < 8; s++) {
-      ctx.fillStyle = '#668';
-      ctx.fillRect((s * 37 + 10) % w, (s * 23 + 20) % 100, 1, 1);
+    for (var s = 0; s < 12; s++) {
+      ctx.fillStyle = '#445588';
+      var starBright = (frame + s * 17) % 60 < 30 ? 1 : 0.5;
+      ctx.globalAlpha = starBright;
+      ctx.fillRect((s * 37 + 10) % w, (s * 19 + 15) % 80, 1, 1);
     }
-    // Antenna
-    ctx.strokeStyle = '#555';
-    ctx.lineWidth = 2;
+    ctx.globalAlpha = 1;
+    // Tree canopy
+    ctx.fillStyle = '#1a3322';
+    ctx.fillRect(0, FLOOR_Y - 5, w, 8);
+    // Branches
+    ctx.strokeStyle = '#2a4422';
+    ctx.lineWidth = 3;
     ctx.beginPath();
-    ctx.moveTo(w * 0.7, FLOOR_Y);
-    ctx.lineTo(w * 0.7, FLOOR_Y - 60);
-    ctx.moveTo(w * 0.7 - 10, FLOOR_Y - 50);
-    ctx.lineTo(w * 0.7 + 10, FLOOR_Y - 50);
+    ctx.moveTo(w * 0.2, FLOOR_Y);
+    ctx.lineTo(w * 0.15, FLOOR_Y - 40);
+    ctx.lineTo(w * 0.1, FLOOR_Y - 55);
     ctx.stroke();
-    // Blinking light
-    if (frame % 40 < 20) {
-      ctx.fillStyle = '#f44';
-      ctx.fillRect(w * 0.7 - 1, FLOOR_Y - 62, 3, 3);
+    ctx.beginPath();
+    ctx.moveTo(w * 0.8, FLOOR_Y);
+    ctx.lineTo(w * 0.85, FLOOR_Y - 50);
+    ctx.stroke();
+    // Leaves
+    ctx.fillStyle = '#224422';
+    ctx.beginPath();
+    ctx.arc(w * 0.1, FLOOR_Y - 55, 15, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.beginPath();
+    ctx.arc(w * 0.85, FLOOR_Y - 50, 12, 0, Math.PI * 2);
+    ctx.fill();
+    // Hanging vines
+    ctx.strokeStyle = '#336633';
+    ctx.lineWidth = 1;
+    for (var vi = 0; vi < 4; vi++) {
+      var vx = w * (0.15 + vi * 0.25);
+      var sway = Math.sin(frame * 0.02 + vi) * 5;
+      ctx.beginPath();
+      ctx.moveTo(vx, 60);
+      ctx.lineTo(vx + sway, 100);
+      ctx.lineTo(vx + sway * 0.5, 130);
+      ctx.stroke();
     }
+    // Moon
+    ctx.fillStyle = '#556688';
+    ctx.beginPath();
+    ctx.arc(w * 0.75, 30, 10, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = '#111133';
+    ctx.beginPath();
+    ctx.arc(w * 0.75 + 3, 28, 9, 0, Math.PI * 2);
+    ctx.fill();
   } else if (pg === 3) {
-    // Factory - gears, conveyors
-    ctx.strokeStyle = '#543';
+    // Burn Furnace — lava, gears, heat distortion
+    ctx.fillStyle = '#2a1111';
+    ctx.fillRect(0, 0, w, FLOOR_Y);
+    // Gears
+    ctx.strokeStyle = '#553322';
     ctx.lineWidth = 2;
-    // Gear
-    var gx = w * 0.8, gy = 100;
+    var gx = w * 0.8, gy = 90;
     ctx.beginPath();
     ctx.arc(gx, gy, 20, 0, Math.PI * 2);
     ctx.stroke();
@@ -1312,63 +2024,143 @@ function drawPanelBackground(pg, panel) {
       var ga = (g / 8) * Math.PI * 2 + frame * 0.02;
       ctx.beginPath();
       ctx.moveTo(gx + Math.cos(ga) * 18, gy + Math.sin(ga) * 18);
-      ctx.lineTo(gx + Math.cos(ga) * 24, gy + Math.sin(ga) * 24);
+      ctx.lineTo(gx + Math.cos(ga) * 25, gy + Math.sin(ga) * 25);
       ctx.stroke();
     }
-    // Conveyor
-    ctx.fillStyle = '#332';
-    ctx.fillRect(0, FLOOR_Y - 3, w, 5);
+    // Second gear
+    var gx2 = w * 0.2, gy2 = 110;
+    ctx.beginPath();
+    ctx.arc(gx2, gy2, 14, 0, Math.PI * 2);
+    ctx.stroke();
+    for (var g2 = 0; g2 < 6; g2++) {
+      var ga2 = (g2 / 6) * Math.PI * 2 - frame * 0.025;
+      ctx.beginPath();
+      ctx.moveTo(gx2 + Math.cos(ga2) * 12, gy2 + Math.sin(ga2) * 12);
+      ctx.lineTo(gx2 + Math.cos(ga2) * 18, gy2 + Math.sin(ga2) * 18);
+      ctx.stroke();
+    }
+    // Conveyor with more detail
+    ctx.fillStyle = '#332211';
+    ctx.fillRect(0, FLOOR_Y - 3, w, 6);
     var cvOff = (frame * 2) % 20;
-    ctx.fillStyle = '#554';
+    ctx.fillStyle = '#554422';
     for (var c = -1; c < w / 20 + 1; c++) {
-      ctx.fillRect(c * 20 + cvOff, FLOOR_Y - 2, 10, 3);
+      ctx.fillRect(c * 20 + cvOff, FLOOR_Y - 2, 10, 4);
+    }
+    // Lava glow from below
+    ctx.fillStyle = 'rgba(255,68,0,' + (0.05 + Math.sin(frame * 0.03) * 0.03) + ')';
+    ctx.fillRect(0, FLOOR_Y - 10, w, 15);
+    // Ember particles
+    for (var em = 0; em < 4; em++) {
+      var ex = (em * 53 + frame * 0.8) % w;
+      var ey = FLOOR_Y - 20 - (frame * 0.5 + em * 30) % 100;
+      ctx.fillStyle = 'rgba(255,136,0,' + (0.3 + Math.sin(frame * 0.05 + em) * 0.1) + ')';
+      ctx.fillRect(ex, ey, 1, 1);
     }
   } else if (pg === 4) {
-    // Fungal lab - beakers, spores
-    ctx.fillStyle = '#334';
-    ctx.fillRect(w * 0.6, 100, 15, 60);
-    ctx.fillRect(w * 0.6 - 5, 155, 25, 5);
-    // Beaker
-    ctx.strokeStyle = '#668';
+    // Mycelial Lab — beakers, mutation tanks, spore arrays
+    ctx.fillStyle = '#141428';
+    ctx.fillRect(0, 0, w, FLOOR_Y);
+    // Lab table
+    ctx.fillStyle = '#2a2a44';
+    ctx.fillRect(w * 0.55, 100, 20, 65);
+    ctx.fillRect(w * 0.55 - 8, 160, 36, 5);
+    // Beaker with bubbles
+    ctx.strokeStyle = '#5566aa';
     ctx.lineWidth = 1.5;
     ctx.beginPath();
-    ctx.moveTo(w * 0.15, 130);
-    ctx.lineTo(w * 0.15 - 8, 170);
-    ctx.lineTo(w * 0.15 + 8, 170);
-    ctx.lineTo(w * 0.15, 130);
+    ctx.moveTo(w * 0.15, 125);
+    ctx.lineTo(w * 0.15 - 10, 170);
+    ctx.lineTo(w * 0.15 + 10, 170);
+    ctx.lineTo(w * 0.15, 125);
     ctx.stroke();
-    ctx.fillStyle = 'rgba(100,50,200,0.3)';
-    ctx.fillRect(w * 0.15 - 6, 150, 12, 20);
+    ctx.fillStyle = 'rgba(100,50,200,0.35)';
+    ctx.fillRect(w * 0.15 - 8, 148, 16, 22);
+    // Bubbles
+    var bubY = 155 - (frame * 0.5) % 15;
+    ctx.fillStyle = 'rgba(150,80,255,0.4)';
+    ctx.beginPath();
+    ctx.arc(w * 0.15, bubY, 2, 0, Math.PI * 2);
+    ctx.fill();
+    // Mutation tanks
+    ctx.fillStyle = '#223344';
+    ctx.fillRect(w * 0.7, 90, 30, 70);
+    ctx.strokeStyle = '#445566';
+    ctx.strokeRect(w * 0.7, 90, 30, 70);
+    ctx.fillStyle = 'rgba(50,200,100,0.2)';
+    ctx.fillRect(w * 0.7 + 3, 100, 24, 55);
     // Floating spores
-    for (var sp = 0; sp < 5; sp++) {
-      var spx = (sp * 47 + frame * 0.5) % w;
-      var spy = 100 + Math.sin(frame * 0.03 + sp) * 30;
-      ctx.fillStyle = 'rgba(170,70,255,0.3)';
+    for (var sp2 = 0; sp2 < 6; sp2++) {
+      var spx2 = (sp2 * 47 + frame * 0.4) % w;
+      var spy2 = 90 + Math.sin(frame * 0.025 + sp2) * 35;
+      ctx.fillStyle = 'rgba(170,70,255,' + (0.2 + Math.sin(frame * 0.03 + sp2 * 0.7) * 0.1) + ')';
       ctx.beginPath();
-      ctx.arc(spx, spy, 3, 0, Math.PI * 2);
+      ctx.arc(spx2, spy2, 2.5, 0, Math.PI * 2);
       ctx.fill();
     }
+    // Circuit lines on walls
+    ctx.strokeStyle = '#334455';
+    ctx.lineWidth = 0.5;
+    ctx.beginPath();
+    ctx.moveTo(0, 80);
+    ctx.lineTo(w * 0.1, 80);
+    ctx.lineTo(w * 0.1, 100);
+    ctx.stroke();
   } else if (pg === 5) {
-    // Artist's desk
+    // Artist's desk — ink, paper, pencils, coffee stains
+    ctx.fillStyle = '#3a3020';
+    ctx.fillRect(0, 0, w, FLOOR_Y);
+    // Wood desk surface
     ctx.fillStyle = '#4a4030';
     ctx.fillRect(0, FLOOR_Y - 2, w, 50);
-    // Paper
+    // Wood grain
+    ctx.strokeStyle = '#3a3020';
+    ctx.lineWidth = 0.5;
+    for (var wg = 0; wg < 6; wg++) {
+      ctx.beginPath();
+      ctx.moveTo(0, FLOOR_Y + wg * 4);
+      ctx.lineTo(w, FLOOR_Y + wg * 4 + 2);
+      ctx.stroke();
+    }
+    // Paper stack
     ctx.fillStyle = '#eee';
-    ctx.fillRect(w * 0.2, FLOOR_Y - 40, 60, 40);
-    // Pencils
+    ctx.fillRect(w * 0.2, FLOOR_Y - 42, 60, 42);
+    ctx.fillStyle = '#ddd';
+    ctx.fillRect(w * 0.2 + 2, FLOOR_Y - 40, 56, 38);
+    // Sketch on paper
+    ctx.strokeStyle = '#999';
+    ctx.lineWidth = 0.5;
+    ctx.beginPath();
+    ctx.moveTo(w * 0.2 + 15, FLOOR_Y - 30);
+    ctx.lineTo(w * 0.2 + 25, FLOOR_Y - 35);
+    ctx.lineTo(w * 0.2 + 40, FLOOR_Y - 25);
+    ctx.stroke();
+    // Pencils in cup
+    ctx.fillStyle = '#665544';
+    ctx.fillRect(w * 0.72, FLOOR_Y - 22, 14, 22);
     ctx.fillStyle = '#cc8';
-    ctx.fillRect(w * 0.7, FLOOR_Y - 25, 3, 25);
-    ctx.fillRect(w * 0.75, FLOOR_Y - 20, 3, 20);
+    ctx.fillRect(w * 0.73, FLOOR_Y - 30, 3, 25);
+    ctx.fillRect(w * 0.77, FLOOR_Y - 26, 3, 22);
+    ctx.fillStyle = '#88ccff';
+    ctx.fillRect(w * 0.75, FLOOR_Y - 28, 3, 24);
     // Ink bottle
-    ctx.fillStyle = '#222';
-    ctx.fillRect(w * 0.4, FLOOR_Y - 18, 12, 18);
-    ctx.fillStyle = '#444';
-    ctx.fillRect(w * 0.4 + 2, FLOOR_Y - 22, 8, 5);
-    // Coffee stain ring
+    ctx.fillStyle = '#111';
+    ctx.fillRect(w * 0.42, FLOOR_Y - 20, 14, 20);
+    ctx.fillStyle = '#333';
+    ctx.fillRect(w * 0.42 + 3, FLOOR_Y - 24, 8, 5);
+    // Ink spill
+    ctx.fillStyle = 'rgba(0,0,0,0.4)';
+    ctx.beginPath();
+    ctx.arc(w * 0.49 + 8, FLOOR_Y - 5, 6, 0, Math.PI * 2);
+    ctx.fill();
+    // Coffee ring stains
     ctx.strokeStyle = '#654';
     ctx.lineWidth = 1;
     ctx.beginPath();
-    ctx.arc(w * 0.9, FLOOR_Y - 15, 8, 0, Math.PI * 2);
+    ctx.arc(w * 0.88, FLOOR_Y - 15, 8, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.arc(w * 0.05, FLOOR_Y - 12, 6, 0, Math.PI * 2);
     ctx.stroke();
   }
 }
@@ -1387,7 +2179,6 @@ function drawHalftone(x, y, w, h, bg, dotColor, spacing) {
 }
 
 function drawTransition(t) {
-  // Crack and shatter effect
   ctx.save();
   ctx.globalAlpha = Math.min(1, t * 2);
 
@@ -1395,12 +2186,12 @@ function drawTransition(t) {
   var cx = panel.x + panel.w;
   var cy = panel.y + panel.h / 2;
 
-  // Crack lines
+  // Crack lines — more dramatic
   ctx.strokeStyle = '#fff';
   ctx.lineWidth = 3;
-  for (var i = 0; i < 8; i++) {
-    var angle = (i / 8) * Math.PI * 2;
-    var len = t * 40;
+  for (var i = 0; i < 10; i++) {
+    var angle = (i / 10) * Math.PI * 2;
+    var len = t * 50;
     ctx.beginPath();
     ctx.moveTo(cx, cy);
     ctx.lineTo(cx + Math.cos(angle) * len, cy + Math.sin(angle) * len);
@@ -1410,13 +2201,14 @@ function drawTransition(t) {
   // Shards
   if (t > 0.3) {
     ctx.fillStyle = '#fff';
-    for (var s = 0; s < 6; s++) {
-      var sx = cx + (Math.random() - 0.5) * t * 80;
-      var sy = cy + (Math.random() - 0.5) * t * 60;
+    for (var s = 0; s < 8; s++) {
+      var sx = cx + (Math.random() - 0.5) * t * 90;
+      var sy = cy + (Math.random() - 0.5) * t * 70;
       ctx.save();
       ctx.translate(sx, sy);
-      ctx.rotate(t * s);
-      ctx.fillRect(-4, -4, 8, 8);
+      ctx.rotate(t * s * 0.8);
+      var shardSize = 3 + Math.random() * 5;
+      ctx.fillRect(-shardSize/2, -shardSize/2, shardSize, shardSize);
       ctx.restore();
     }
   }
@@ -1437,28 +2229,38 @@ function drawPageIntro() {
   ctx.fillStyle = '#111';
   ctx.fillRect(0, 0, GW, GH);
 
-  // Dramatic page reveal
-  drawHalftone(0, 0, GW, GH, page.bg, shiftColor(page.bg, 15), 12);
+  drawHalftone(0, 0, GW, GH, page.bg, shiftColor(page.bg, 12), 12);
+
+  // Scanlines
+  ctx.fillStyle = 'rgba(0,0,0,0.06)';
+  for (var sl = 0; sl < GH; sl += 2) {
+    ctx.fillRect(0, sl, GW, 1);
+  }
 
   ctx.textAlign = 'center';
 
-  // Page number
   ctx.fillStyle = page.accent;
   ctx.font = 'bold 36px monospace';
   var slideIn = Math.min(1, t * 3);
   ctx.globalAlpha = slideIn;
-  ctx.fillText('PAGE ' + (pageNum + 1), GW/2, GH/2 - 20);
+  ctx.fillText('PAGE ' + (pageNum + 1), GW/2, GH/2 - 25);
 
-  // Page name
   ctx.fillStyle = '#fff';
   ctx.font = 'bold 18px monospace';
-  ctx.fillText(page.name.toUpperCase(), GW/2, GH/2 + 15);
+  ctx.fillText(page.name.toUpperCase(), GW/2, GH/2 + 10);
+
+  // Zone hint
+  var firstZone = page.panels[0].zone || '';
+  if (firstZone) {
+    ctx.fillStyle = '#888';
+    ctx.font = '11px monospace';
+    ctx.fillText('Entering: ' + firstZone, GW/2, GH/2 + 30);
+  }
 
   ctx.globalAlpha = 1;
 
-  // Panel borders zoom in
   if (t > 0.4) {
-    ctx.strokeStyle = '#fff';
+    ctx.strokeStyle = page.accent;
     ctx.lineWidth = 2;
     var zoom = (t - 0.4) / 0.6;
     ctx.globalAlpha = zoom;
@@ -1470,44 +2272,57 @@ function drawPageIntro() {
 function drawVictoryScreen() {
   drawHalftone(0, 0, GW, GH, '#1a2a1a', '#223322', 8);
 
+  // Scanlines
+  ctx.fillStyle = 'rgba(0,0,0,0.06)';
+  for (var sl = 0; sl < GH; sl += 2) {
+    ctx.fillRect(0, sl, GW, 1);
+  }
+
   ctx.textAlign = 'center';
 
   ctx.fillStyle = '#4f4';
   ctx.font = 'bold 32px monospace';
-  ctx.fillText('VICTORY!', GW/2, 80);
+  ctx.fillText('VICTORY!', GW/2, 75);
 
   ctx.fillStyle = '#fff';
-  ctx.font = '14px monospace';
-  ctx.fillText('You escaped the comic!', GW/2, 110);
+  ctx.font = '13px monospace';
+  ctx.fillText('You escaped the comic!', GW/2, 100);
 
   ctx.fillStyle = '#ffdd44';
   ctx.font = 'bold 18px monospace';
-  ctx.fillText('SCORE: ' + score, GW/2, 160);
+  ctx.fillText('SCORE: ' + score, GW/2, 145);
 
   if (score >= highScore && score > 0) {
     var pulse = Math.sin(frame * 0.06) * 0.3 + 0.7;
     ctx.globalAlpha = pulse;
     ctx.fillStyle = '#ffdd44';
     ctx.font = 'bold 14px monospace';
-    ctx.fillText('NEW HIGH SCORE!', GW/2, 185);
+    ctx.fillText('!! NEW HIGH SCORE !!', GW/2, 170);
     ctx.globalAlpha = 1;
   }
 
   ctx.fillStyle = '#888';
-  ctx.font = '12px monospace';
-  ctx.fillText('Pages Cleared: 6 | HP Remaining: ' + player.hp, GW/2, 220);
+  ctx.font = '11px monospace';
+  ctx.fillText('Pages Cleared: 6   HP: ' + player.hp + '   Lives: ' + lives, GW/2, 205);
+
+  // Stat summary
+  if (statB.level > 0) {
+    ctx.fillStyle = '#667';
+    ctx.font = '10px monospace';
+    ctx.fillText('NFT: ' + statB.name + '   STR:' + statB.str + ' DEX:' + statB.dex + ' CON:' + statB.con + ' INT:' + statB.int + ' WIS:' + statB.wis + ' CHA:' + statB.cha, GW/2, 225);
+  }
 
   var pulse2 = Math.sin(frame * 0.05) * 0.3 + 0.7;
   ctx.globalAlpha = pulse2;
   ctx.fillStyle = '#88ccff';
   ctx.font = 'bold 14px monospace';
-  ctx.fillText('PRESS ANY KEY', GW/2, 280);
+  ctx.fillText('>> PRESS ANY BUTTON <<', GW/2, 280);
   ctx.globalAlpha = 1;
 }
 
 function drawHUD() {
   // Top bar
-  ctx.fillStyle = 'rgba(10,5,20,0.8)';
+  ctx.fillStyle = 'rgba(8,4,16,0.85)';
   ctx.fillRect(0, 0, GW, 30);
 
   // HP bar
@@ -1516,7 +2331,7 @@ function drawHUD() {
   var hpPct = player.hp / player.maxHp;
   var hpColor = hpPct > 0.5 ? '#4c4' : hpPct > 0.25 ? '#cc4' : '#c44';
   ctx.fillStyle = hpColor;
-  ctx.fillRect(8, 8, 100 * hpPct, 14);
+  ctx.fillRect(8, 8, Math.floor(100 * hpPct), 14);
   ctx.strokeStyle = '#888';
   ctx.lineWidth = 1;
   ctx.strokeRect(8, 8, 100, 14);
@@ -1524,8 +2339,21 @@ function drawHUD() {
   ctx.font = 'bold 9px monospace';
   ctx.textAlign = 'left';
   ctx.fillText('HP', 10, 18);
+  // HP number
+  ctx.fillStyle = '#ddd';
+  ctx.font = '8px monospace';
+  ctx.textAlign = 'right';
+  ctx.fillText(player.hp + '/' + player.maxHp, 106, 18);
 
-  // Score
+  // Lives
+  if (lives > 0) {
+    ctx.fillStyle = '#ff8844';
+    ctx.font = '9px monospace';
+    ctx.textAlign = 'left';
+    ctx.fillText('x' + lives, 112, 18);
+  }
+
+  // Score (INT boosted)
   ctx.fillStyle = '#ffdd44';
   ctx.font = 'bold 12px monospace';
   ctx.textAlign = 'center';
@@ -1551,6 +2379,11 @@ function drawHUD() {
   if (player.bombs > 0) {
     ctx.fillStyle = '#fa8';
     ctx.fillText('BOMB:' + player.bombs, GW - 8, itemY);
+    itemY += 12;
+  }
+  if (player.sporeShield > 0) {
+    ctx.fillStyle = '#4f8';
+    ctx.fillText('SHIELD:' + Math.ceil(player.sporeShield), GW - 8, itemY);
   }
 
   // Page/Panel indicator
@@ -1563,50 +2396,59 @@ function drawHUD() {
   ctx.textAlign = 'left';
   ctx.fillStyle = '#666';
   ctx.font = '9px monospace';
-  ctx.fillText('HI:' + highScore, 115, 18);
+  ctx.fillText('HI:' + highScore, 130, 18);
+
+  // Charge indicator on HUD
+  if (chargeReady) {
+    ctx.fillStyle = '#ff8800';
+    ctx.font = 'bold 9px monospace';
+    ctx.textAlign = 'left';
+    var chFlash = Math.sin(frame * 0.15) * 0.3 + 0.7;
+    ctx.globalAlpha = chFlash;
+    ctx.fillText('SPORE READY!', 8, 28);
+    ctx.globalAlpha = 1;
+  }
 }
 
 function drawMiniCharacter(x, y, facing) {
   ctx.save();
   ctx.translate(x, y);
   ctx.scale(facing, 1);
-  ctx.fillStyle = '#4488cc';
-  ctx.fillRect(-7, -32, 14, 18);
+  ctx.fillStyle = statB.color || '#4488cc';
+  ctx.fillRect(-8, -33, 16, 20);
   ctx.fillStyle = '#ffd4a0';
-  ctx.beginPath();
-  ctx.arc(0, -38, 7, 0, Math.PI * 2);
-  ctx.fill();
+  ctx.fillRect(-6, -44, 12, 12);
+  ctx.fillStyle = '#222';
+  ctx.fillRect(1, -41, 2, 2);
+  ctx.fillRect(4, -41, 2, 2);
   ctx.fillStyle = '#663399';
-  ctx.beginPath();
-  ctx.arc(0, -42, 7, Math.PI, 0);
-  ctx.fill();
-  ctx.fillRect(-8, -43, 16, 3);
+  ctx.fillRect(-7, -46, 14, 4);
   ctx.fillStyle = '#335';
-  ctx.fillRect(-5, -14, 5, 14);
-  ctx.fillRect(1, -14, 5, 14);
+  ctx.fillRect(-6, -13, 5, 13);
+  ctx.fillRect(1, -13, 5, 13);
   ctx.fillStyle = '#ffd4a0';
-  ctx.fillRect(5, -26, 12, 5);
-  ctx.fillStyle = '#4488cc';
-  ctx.fillRect(15, -27, 6, 7);
+  ctx.fillRect(6, -27, 14, 5);
+  ctx.fillStyle = statB.color || '#4488cc';
+  ctx.fillRect(18, -28, 7, 7);
   ctx.restore();
 }
 
 function drawMiniEnemy(x, y) {
   ctx.save();
   ctx.translate(x, y);
-  ctx.fillStyle = '#668';
-  ctx.fillRect(-8, -34, 16, 22);
-  ctx.fillStyle = '#ddb';
+  // Draw a spore creeper as the title enemy
+  ctx.fillStyle = '#3a8855';
+  ctx.fillRect(-5, -18, 10, 18);
+  ctx.fillStyle = '#2a6644';
   ctx.beginPath();
-  ctx.arc(0, -38, 6, 0, Math.PI * 2);
+  ctx.arc(0, -20, 12, Math.PI, 0);
   ctx.fill();
-  ctx.fillStyle = '#445';
-  ctx.fillRect(-7, -44, 14, 5);
-  ctx.fillStyle = '#334';
-  ctx.fillRect(-6, -12, 5, 12);
-  ctx.fillRect(1, -12, 5, 12);
-  ctx.fillStyle = '#888';
-  ctx.fillRect(6, -30, 3, 18);
+  ctx.fillStyle = '#55cc77';
+  ctx.fillRect(-6, -24, 3, 3);
+  ctx.fillRect(3, -22, 3, 3);
+  ctx.fillStyle = '#aaffaa';
+  ctx.fillRect(-4, -14, 3, 3);
+  ctx.fillRect(2, -14, 3, 3);
   ctx.restore();
 }
 

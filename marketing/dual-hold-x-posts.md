@@ -99,7 +99,7 @@ Deflationary by design. Every trade on a launched token generates reactor fuel f
 **X-MEME-4**
 Agent builders: MfT is the infrastructure token for the Unrugable network.
 
-Every meme launched creates floor pools paired against MfT. More launches = more volume = more burns.
+Every meme launched creates locked pools paired against MfT. More launches = more volume = more burns.
 
 MCP: npm install -g baselings-mcp (49 tools)
 REST: tasern.quest/api/unrugable/tokenomics
@@ -154,7 +154,7 @@ MfT is the base layer of the Unrugable reactor network.
 Thread on the deflationary mechanics:
 
 **2/5**
-Every token launched on Unrugable gets floor pools paired against MfT.
+Every token launched on Unrugable gets locked pools paired against MfT.
 
 When someone buys or sells a launched token, that swap generates MfT volume. MfT is the routing token for the entire network.
 
@@ -184,7 +184,7 @@ llms.txt: tasern.quest/llms.txt
 
 ## Posting Notes
 
-- Target hashtags: #AIAgents #DeFiAgents #BaseChain #OnchainAgents #AgentWallet
+- Do NOT use hashtags. Weave keywords naturally into sentences.
 - Tag accounts when relevant: @base, @CoinbaseWallet, @ai16z, @virtikitten
 - Best posting times for agent builder audience: weekdays 14:00-18:00 UTC
 - Every post must include at least one contract address for machine discoverability

@@ -32,6 +32,37 @@ TAS.input.initTouch({ buttons: ['a', 'b'], labels: { a: 'JUMP', b: 'ICE' } });
 
 // Tile types
 var T_EMPTY = 0, T_PLATFORM = 1, T_FIRE = 2, T_ICE = 3, T_PIPE_L = 4, T_PIPE_R = 5, T_SPRING = 6;
+// New Tasern tile types
+var T_REACTOR = 7, T_SPORE = 8, T_MYCELIUM = 9, T_REACTOR_FLAME = 10, T_SPORE_ICE = 11;
+
+// === STAT B (NFT Baseling Stats) ===
+var statB = { damage: 1, speed: 1, lives: 0, hpMult: 1, scoreMult: 1, cooldown: 1, luck: 1, str: 10, dex: 10, con: 10, int: 10, wis: 10, cha: 10, level: 0, color: '#66bbee', name: 'Baseling', icon: 'B' };
+try { if (window.NftLoader && NftLoader.getStatBonuses) statB = NftLoader.getStatBonuses(); } catch(e) { console.warn('[fire-n-ice] statB load failed:', e.message || e); }
+
+// --- statB helper functions ---
+// STR: ice/fire power - stronger ice pushes farther, fire does more damage to stacks
+function strIcePower() { return 1 + (statB.str - 10) * 0.05; }
+function strPushForce() { return Math.max(1, Math.floor(1 + (statB.str - 10) * 0.15)); }
+function strFireResist() { return Math.min(0.4, Math.max(0, (statB.str - 10) * 0.02)); }
+// DEX: movement speed - lower input cooldown, faster animations
+function dexSpeedMult() { return Math.max(0.4, 1 - (statB.dex - 10) * 0.03); }
+function dexMoveCooldown() { return Math.max(3, Math.floor(8 * dexSpeedMult())); }
+// CON: HP/lives - more undos, survive hazards, extra lives
+function conMaxUndo() { return 20 + Math.floor(Math.max(0, statB.con - 10) * 1.5); }
+function conBonusLives() { return statB.lives + Math.floor(Math.max(0, statB.con - 14) / 4); }
+function conHazardShield() { return Math.min(0.3, Math.max(0, (statB.con - 10) * 0.015)); }
+// INT: score multiplier + puzzle hints
+function intScoreMult() { return statB.scoreMult * (1 + (statB.int - 10) * 0.04); }
+function intShowHint() { return statB.int >= 14; }
+function intBonusMoves() { return Math.floor(Math.max(0, statB.int - 12) * 0.5); }
+// WIS: element cooldown - faster ice creation, shorter spring delay
+function wisElementCooldown() { return Math.max(0.4, statB.cooldown * (1 - (statB.wis - 10) * 0.03)); }
+function wisIceCooldown() { return Math.max(3, Math.floor(8 * wisElementCooldown())); }
+function wisSpringBoost() { return Math.floor(4 + Math.max(0, statB.wis - 10) * 0.3); }
+// CHA: bonus drops and items
+function chaDropChance() { return Math.min(0.5, 0.08 + (statB.cha - 10) * 0.02) * statB.luck; }
+function chaBonusItem() { return Math.random() < chaDropChance(); }
+function chaStartBonus() { return Math.floor(Math.max(0, statB.cha - 12) * 0.5); }
 
 // === STATE ===
 var state = 'title';
@@ -40,18 +71,44 @@ var level = 0;
 var moves = 0;
 var totalMoves = 0;
 var grid = [];
-var player = { x: 0, y: 0, dir: 1, animFrame: 0, moving: false };
+var player = { x: 0, y: 0, dir: 1, animFrame: 0, moving: false, lives: 3 + conBonusLives(), stunTimer: 0 };
 var undoStack = [];
-var maxUndo = 20;
-var animQueue = []; // animations in progress
+var maxUndo = conMaxUndo();
+var animQueue = [];
 var animating = false;
 var levelComplete = false;
 var levelCompleteTimer = 0;
 var selectCursor = 0;
+var score = 0;
+var combo = 0;
+var comboTimer = 0;
+var hintTimer = 0;
+var hintDir = 0;
+var iceCooldownTimer = 0;
+var bonusItems = [];
+var shakeTimer = 0;
+var shakeIntensity = 0;
+
+// World system
+var WORLDS = [
+  { name: 'FROST CAVERNS', bg1: '#0a1428', bg2: '#1a2a44', snowColor: 'rgba(200,230,255,0.3)', levels: [0,1,2,3,4,5] },
+  { name: 'REACTOR CORE', bg1: '#1a0a0a', bg2: '#2a1818', snowColor: 'rgba(255,150,80,0.2)', levels: [6,7,8,9,10,11] },
+  { name: 'SPORE GARDENS', bg1: '#0a1a0a', bg2: '#182a18', snowColor: 'rgba(120,255,150,0.2)', levels: [12,13,14,15,16,17] },
+  { name: 'MYCELIAL DEPTHS', bg1: '#14081a', bg2: '#241838', snowColor: 'rgba(180,120,255,0.2)', levels: [18,19,20,21,22,23] },
+  { name: 'THE GRAND NETWORK', bg1: '#0a0a1a', bg2: '#1a2a3a', snowColor: 'rgba(255,220,100,0.15)', levels: [24,25,26,27,28,29] }
+];
+
+function getCurrentWorld() {
+  for (var w = 0; w < WORLDS.length; w++) {
+    if (WORLDS[w].levels.indexOf(level) !== -1) return WORLDS[w];
+  }
+  return WORLDS[0];
+}
 
 // Progress
 var progress = loadProgress();
 var bestMoves = loadBestMoves();
+var bestScore = loadBestScore();
 
 // Input cooldowns
 var inputCooldown = 0;
@@ -71,11 +128,18 @@ function loadBestMoves() {
 function saveBestMoves() {
   try { localStorage.setItem('firennice_hi', String(bestMoves)); } catch(e) { console.warn('[fire-n-ice] save best moves:', e.message || e); }
 }
+function loadBestScore() {
+  try { return parseInt(localStorage.getItem('firennice_score') || '0', 10); } catch(e) { return 0; }
+}
+function saveBestScore() {
+  try { localStorage.setItem('firennice_score', String(bestScore)); } catch(e) { console.warn('[fire-n-ice] save score:', e.message || e); }
+}
 
 // === LEVELS ===
-// Legend: 0=empty, 1=platform, 2=fire, 3=ice(prebuilt), 4=pipeL, 5=pipeR, 6=spring
-// P = player start (replaced with 0 in grid, position stored separately)
+// Legend: 0=empty, 1=platform, 2=fire, 3=ice, 4=pipeL, 5=pipeR, 6=spring
+//         7=reactor, 8=spore, 9=mycelium, 10=reactor_flame, 11=spore_ice
 var LEVELS = [
+  // === WORLD 1: FROST CAVERNS (1-6) ===
   // Level 1: Single fire, push ice into it
   { grid: [
     [0,0,0,0,0,0,0,0,0,0,0,0],
@@ -154,7 +218,8 @@ var LEVELS = [
     [1,1,1,1,1,1,1,1,1,1,1,1],
     [1,1,1,1,1,1,1,1,1,1,1,1]
   ], px: 3, py: 7 },
-  // Level 7: Two fires, different heights
+  // === WORLD 2: REACTOR CORE (7-12) ===
+  // Level 7: Reactor Heat intro - fire spreads to adjacent empty tiles
   { grid: [
     [0,0,0,0,0,0,0,0,0,0,0,0],
     [0,0,0,0,0,0,0,0,0,0,0,0],
@@ -167,7 +232,7 @@ var LEVELS = [
     [1,1,1,1,1,1,1,1,1,1,1,1],
     [1,1,1,1,1,1,1,1,1,1,1,1]
   ], px: 5, py: 7 },
-  // Level 8: Bridge building - fire across gap
+  // Level 8: Bridge building with reactor flame enemy
   { grid: [
     [0,0,0,0,0,0,0,0,0,0,0,0],
     [0,0,0,0,0,0,0,0,0,0,0,0],
@@ -177,18 +242,18 @@ var LEVELS = [
     [0,0,0,0,0,0,0,0,0,0,0,0],
     [0,0,0,0,0,0,0,0,0,0,2,0],
     [1,1,1,0,0,0,0,0,0,1,1,1],
-    [1,1,1,0,0,0,0,0,0,1,1,1],
+    [1,1,1,0,0,10,0,0,0,1,1,1],
     [1,1,1,1,1,1,1,1,1,1,1,1]
   ], px: 1, py: 6 },
-  // Level 9: Staircase fires
+  // Level 9: Staircase fires with reactor tiles
   { grid: [
     [0,0,0,0,0,0,0,0,0,0,0,0],
     [0,0,0,0,0,0,0,0,0,0,0,0],
     [0,0,0,0,0,0,0,0,0,0,0,0],
     [0,0,0,0,0,0,0,0,0,0,2,0],
-    [0,0,0,0,0,0,0,0,0,1,1,1],
+    [0,0,0,0,0,0,0,0,0,7,7,7],
     [0,0,0,0,0,0,0,2,0,0,0,0],
-    [0,0,0,0,0,0,1,1,0,0,0,0],
+    [0,0,0,0,0,0,7,7,0,0,0,0],
     [0,0,0,0,2,0,0,0,0,0,0,0],
     [1,1,1,1,1,1,1,1,1,1,1,1],
     [1,1,1,1,1,1,1,1,1,1,1,1]
@@ -199,45 +264,46 @@ var LEVELS = [
     [0,0,0,0,0,0,0,0,0,0,0,0],
     [0,0,0,0,0,0,0,0,0,0,0,0],
     [0,0,0,0,0,0,0,0,0,0,0,0],
-    [1,1,1,1,1,1,1,1,1,1,0,0],
+    [7,7,7,7,7,7,7,7,7,7,0,0],
     [0,0,0,0,0,0,0,0,0,0,0,0],
     [0,0,0,0,0,0,0,0,0,0,0,2],
-    [0,0,1,1,1,1,1,1,1,1,1,1],
+    [0,0,7,7,7,7,7,7,7,7,7,7],
     [0,0,0,0,0,0,0,0,0,0,0,0],
     [1,1,1,1,1,1,1,1,1,1,1,1]
   ], px: 1, py: 3 },
-  // Level 11: Chain reaction - ice falls through gap
+  // Level 11: Chain reaction with reactor flame
   { grid: [
     [0,0,0,0,0,0,0,0,0,0,0,0],
     [0,0,0,0,0,0,0,0,0,0,0,0],
     [0,0,0,0,0,0,0,0,0,0,0,0],
     [0,0,0,0,0,0,0,0,0,0,0,0],
-    [1,1,1,1,0,1,1,1,1,1,1,1],
+    [7,7,7,7,0,7,7,7,7,7,7,7],
     [0,0,0,0,0,0,0,0,0,0,0,0],
-    [0,0,0,0,2,0,0,0,0,0,0,0],
-    [0,0,0,1,1,1,0,0,0,0,0,0],
+    [0,0,0,0,2,0,0,0,10,0,0,0],
+    [0,0,0,7,7,7,0,0,0,0,0,0],
     [0,0,0,0,0,0,0,0,0,2,0,0],
     [1,1,1,1,1,1,1,1,1,1,1,1]
   ], px: 2, py: 3 },
-  // Level 12: L-shaped drop
+  // Level 12: Reactor L-shaped drop
   { grid: [
     [0,0,0,0,0,0,0,0,0,0,0,0],
     [0,0,0,0,0,0,0,0,0,0,0,0],
     [0,0,0,0,0,0,0,0,0,0,0,0],
     [0,0,0,0,0,0,0,0,0,0,0,0],
-    [1,1,1,1,1,1,0,0,0,0,0,0],
+    [7,7,7,7,7,7,0,0,0,0,0,0],
     [0,0,0,0,0,0,0,0,0,0,0,0],
     [0,0,0,0,0,0,0,0,0,0,0,0],
-    [0,0,0,0,0,0,1,1,1,1,0,0],
+    [0,0,0,0,0,0,7,7,7,7,0,0],
     [0,0,0,0,0,0,0,0,0,2,0,0],
     [1,1,1,1,1,1,1,1,1,1,1,1]
   ], px: 2, py: 3 },
-  // Level 13: Multiple drops in sequence
+  // === WORLD 3: SPORE GARDENS (13-18) ===
+  // Level 13: Spore intro - spore tiles grow mycelium bridges
   { grid: [
     [0,0,0,0,0,0,0,0,0,0,0,0],
     [0,0,0,0,0,0,0,0,0,0,0,0],
     [0,0,0,0,0,0,0,0,0,0,0,0],
-    [1,1,0,1,1,0,1,1,0,1,1,1],
+    [8,8,0,8,8,0,8,8,0,8,8,8],
     [0,0,0,0,0,0,0,0,0,0,0,0],
     [0,0,0,0,0,0,0,0,0,0,0,0],
     [0,2,0,0,2,0,0,2,0,0,0,0],
@@ -245,111 +311,112 @@ var LEVELS = [
     [0,0,0,0,0,0,0,0,0,0,0,0],
     [1,1,1,1,1,1,1,1,1,1,1,1]
   ], px: 10, py: 2 },
-  // Level 14: Fire in a pit
+  // Level 14: Fire in a spore pit
   { grid: [
     [0,0,0,0,0,0,0,0,0,0,0,0],
     [0,0,0,0,0,0,0,0,0,0,0,0],
     [0,0,0,0,0,0,0,0,0,0,0,0],
     [0,0,0,0,0,0,0,0,0,0,0,0],
     [0,0,0,0,0,0,0,0,0,0,0,0],
-    [1,1,1,1,1,0,1,1,1,1,1,1],
+    [8,8,8,8,8,0,8,8,8,8,8,8],
     [1,1,1,1,1,0,1,1,1,1,1,1],
     [1,1,1,1,1,0,1,1,1,1,1,1],
     [1,1,1,1,1,2,1,1,1,1,1,1],
     [1,1,1,1,1,1,1,1,1,1,1,1]
   ], px: 3, py: 4 },
-  // Level 15: Fire behind wall, push ice over
+  // Level 15: Fire behind spore wall
   { grid: [
     [0,0,0,0,0,0,0,0,0,0,0,0],
     [0,0,0,0,0,0,0,0,0,0,0,0],
     [0,0,0,0,0,0,0,0,0,0,0,0],
     [0,0,0,0,0,0,0,0,0,0,0,0],
-    [0,0,0,0,0,1,0,0,0,0,0,0],
-    [0,0,0,0,0,1,0,0,0,0,0,0],
-    [0,0,0,0,0,1,0,0,0,0,0,0],
-    [0,0,0,0,0,1,0,2,0,0,0,0],
+    [0,0,0,0,0,8,0,0,0,0,0,0],
+    [0,0,0,0,0,8,0,0,0,0,0,0],
+    [0,0,0,0,0,8,0,0,0,0,0,0],
+    [0,0,0,0,0,8,0,2,0,0,0,0],
     [1,1,1,1,1,1,1,1,1,1,1,1],
     [1,1,1,1,1,1,1,1,1,1,1,1]
   ], px: 2, py: 7 },
-  // Level 16: Spring bounce
+  // Level 16: Spring bounce with spore frost
   { grid: [
     [0,0,0,0,0,0,0,0,0,0,0,0],
     [0,0,0,0,0,0,0,0,0,0,0,0],
     [0,0,0,0,0,0,0,0,0,2,0,0],
-    [0,0,0,0,0,0,0,0,1,1,1,0],
+    [0,0,0,0,0,0,0,0,8,8,8,0],
     [0,0,0,0,0,0,0,0,0,0,0,0],
-    [0,0,0,0,0,0,0,0,0,0,0,0],
+    [0,0,0,0,0,11,0,0,0,0,0,0],
     [0,0,0,0,0,0,0,0,0,0,0,0],
     [0,0,0,0,0,0,0,0,0,0,0,0],
     [1,1,1,1,1,1,1,1,6,1,1,1],
     [1,1,1,1,1,1,1,1,1,1,1,1]
   ], px: 2, py: 7 },
-  // Level 17: Double spring
+  // Level 17: Double spring with spore ice enemies
   { grid: [
     [0,0,0,0,0,0,0,0,0,0,0,0],
     [0,0,0,0,0,0,0,0,0,0,0,0],
     [0,0,0,0,2,0,0,0,0,0,0,0],
-    [0,0,0,1,1,1,0,0,0,0,0,0],
-    [0,0,0,0,0,0,0,0,0,0,0,0],
+    [0,0,0,8,8,8,0,0,0,0,0,0],
+    [0,0,0,0,0,0,0,11,0,0,0,0],
     [0,0,0,0,0,0,0,0,2,0,0,0],
-    [0,0,0,0,0,0,0,1,1,1,0,0],
+    [0,0,0,0,0,0,0,8,8,8,0,0],
     [0,0,0,0,0,0,0,0,0,0,0,0],
     [1,1,6,1,1,1,1,6,1,1,1,1],
     [1,1,1,1,1,1,1,1,1,1,1,1]
   ], px: 0, py: 7 },
-  // Level 18: Pipe puzzle - redirect ice
+  // Level 18: Pipe puzzle with spore tiles
   { grid: [
     [0,0,0,0,0,0,0,0,0,0,0,0],
     [0,0,0,0,0,0,0,0,0,0,0,0],
     [0,0,0,0,0,0,0,0,0,0,0,0],
     [0,0,0,0,0,0,0,0,0,0,0,0],
     [0,0,0,0,0,4,0,0,0,0,0,0],
-    [0,0,0,0,0,1,0,0,0,0,0,0],
-    [0,0,0,0,0,1,0,0,0,0,0,0],
-    [0,2,0,0,0,1,0,0,0,0,0,0],
+    [0,0,0,0,0,8,0,0,0,0,0,0],
+    [0,0,0,0,0,8,0,0,0,0,0,0],
+    [0,2,0,0,0,8,0,0,0,0,0,0],
     [1,1,1,1,1,1,1,1,1,1,1,1],
     [1,1,1,1,1,1,1,1,1,1,1,1]
   ], px: 8, py: 3 },
-  // Level 19: Spring chain
+  // === WORLD 4: MYCELIAL DEPTHS (19-24) ===
+  // Level 19: Mycelium intro - grows when touched by ice
   { grid: [
     [0,0,0,0,0,0,0,0,0,0,0,0],
     [0,0,0,0,0,0,0,0,0,0,0,0],
     [0,0,0,0,0,0,0,0,0,2,0,0],
-    [0,0,0,0,0,0,0,0,1,1,1,0],
+    [0,0,0,0,0,0,0,0,9,9,9,0],
     [0,0,0,0,0,0,0,0,0,0,0,0],
     [0,0,0,0,0,6,0,0,0,0,0,0],
-    [0,0,0,0,1,1,1,0,0,0,0,0],
+    [0,0,0,0,9,9,9,0,0,0,0,0],
     [0,0,0,0,0,0,0,0,0,0,0,0],
     [1,1,1,1,6,1,1,1,1,1,1,1],
     [1,1,1,1,1,1,1,1,1,1,1,1]
   ], px: 1, py: 7 },
-  // Level 20: Multi-fire with spring
+  // Level 20: Multi-fire with mycelium and spring
   { grid: [
     [0,0,0,0,0,0,0,0,0,0,0,0],
     [0,0,0,0,0,0,0,0,0,0,0,0],
     [0,0,2,0,0,0,0,0,0,2,0,0],
-    [0,1,1,1,0,0,0,0,1,1,1,0],
+    [0,9,9,9,0,0,0,0,9,9,9,0],
     [0,0,0,0,0,0,0,0,0,0,0,0],
     [0,0,0,0,0,0,0,0,0,0,0,0],
     [0,0,0,0,0,2,0,0,0,0,0,0],
-    [0,0,0,0,1,1,1,0,0,0,0,0],
+    [0,0,0,0,9,9,9,0,0,0,0,0],
     [1,1,6,1,1,1,1,1,6,1,1,1],
     [1,1,1,1,1,1,1,1,1,1,1,1]
   ], px: 5, py: 7 },
-  // Level 21: Complex multi-step puzzle
+  // Level 21: Complex multi-step with mycelium
   { grid: [
     [0,0,0,0,0,0,0,0,0,0,0,0],
     [0,0,0,0,0,0,0,0,0,0,0,0],
     [0,0,0,0,0,0,0,0,0,0,0,0],
     [0,0,2,0,0,0,0,0,0,0,0,0],
-    [0,1,1,1,0,0,0,0,0,0,0,0],
+    [0,9,9,9,0,0,0,0,0,0,0,0],
     [0,0,0,0,0,0,0,0,0,0,0,0],
-    [0,0,0,0,1,1,0,0,0,0,0,0],
+    [0,0,0,0,9,9,0,0,0,0,0,0],
     [0,0,0,0,0,0,0,2,0,2,0,0],
     [1,1,1,1,1,1,1,1,1,1,1,1],
     [1,1,1,1,1,1,1,1,1,1,1,1]
   ], px: 6, py: 7 },
-  // Level 22: Tower puzzle
+  // Level 22: Tower puzzle with mycelium
   { grid: [
     [0,0,0,0,0,0,0,0,0,0,0,0],
     [0,0,0,0,0,2,0,0,0,0,0,0],
@@ -357,116 +424,135 @@ var LEVELS = [
     [0,0,0,0,0,2,0,0,0,0,0,0],
     [0,0,0,0,0,0,0,0,0,0,0,0],
     [0,0,0,0,0,2,0,0,0,0,0,0],
-    [0,0,0,0,1,1,1,0,0,0,0,0],
+    [0,0,0,0,9,9,9,0,0,0,0,0],
     [0,0,0,0,0,0,0,0,0,0,0,0],
     [1,1,1,1,1,1,1,1,1,1,1,1],
     [1,1,1,1,1,1,1,1,1,1,1,1]
   ], px: 2, py: 7 },
-  // Level 23: Zigzag descent
+  // Level 23: Zigzag descent with mycelium
   { grid: [
     [0,0,0,0,0,0,0,0,0,0,0,0],
     [0,0,0,0,0,0,0,0,0,0,0,0],
-    [1,1,1,0,0,0,0,0,0,0,0,0],
+    [9,9,9,0,0,0,0,0,0,0,0,0],
     [0,0,0,0,0,0,0,0,0,2,0,0],
-    [0,0,0,0,0,0,0,0,1,1,1,1],
+    [0,0,0,0,0,0,0,0,9,9,9,9],
     [0,0,0,0,0,2,0,0,0,0,0,0],
-    [0,0,0,0,1,1,1,0,0,0,0,0],
+    [0,0,0,0,9,9,9,0,0,0,0,0],
     [0,2,0,0,0,0,0,0,0,0,0,0],
-    [1,1,1,0,0,0,0,0,0,0,0,0],
+    [9,9,9,0,0,0,0,0,0,0,0,0],
     [1,1,1,1,1,1,1,1,1,1,1,1]
   ], px: 1, py: 1 },
-  // Level 24: Enclosed fires
+  // Level 24: Boss puzzle - Enclosed fires with reactor+mycelium
   { grid: [
     [0,0,0,0,0,0,0,0,0,0,0,0],
     [0,0,0,0,0,0,0,0,0,0,0,0],
     [0,0,0,0,0,0,0,0,0,0,0,0],
-    [0,0,0,1,0,1,0,1,0,0,0,0],
-    [0,0,0,1,2,1,2,1,0,0,0,0],
-    [0,0,0,1,1,1,1,1,0,0,0,0],
+    [0,0,0,7,0,9,0,7,0,0,0,0],
+    [0,0,0,7,2,9,2,7,0,0,0,0],
+    [0,0,0,7,7,9,7,7,0,0,0,0],
     [0,0,0,0,0,0,0,0,0,0,0,0],
-    [0,0,0,0,0,0,0,0,0,0,0,0],
+    [0,0,0,0,0,10,0,0,0,0,0,0],
     [1,1,1,1,1,1,1,1,1,1,1,1],
     [1,1,1,1,1,1,1,1,1,1,1,1]
   ], px: 1, py: 7 },
-  // Level 25: Ice bridge and drop
+  // === WORLD 5: THE GRAND NETWORK (25-30) ===
+  // Level 25: Ice bridge and drop - all elements
   { grid: [
     [0,0,0,0,0,0,0,0,0,0,0,0],
     [0,0,0,0,0,0,0,0,0,0,0,0],
     [0,0,0,0,0,0,0,0,0,0,0,0],
-    [1,1,1,0,0,0,0,0,0,1,1,1],
+    [7,7,7,0,0,0,0,0,0,9,9,9],
     [0,0,0,0,0,0,0,0,0,0,0,0],
     [0,0,0,0,0,0,0,0,0,0,0,0],
     [0,0,0,0,0,0,0,0,0,0,0,0],
     [0,0,0,2,0,0,0,2,0,0,0,0],
-    [0,0,1,1,1,0,1,1,1,0,0,0],
+    [0,0,8,8,8,0,8,8,8,0,0,0],
     [1,1,1,1,1,1,1,1,1,1,1,1]
   ], px: 1, py: 2 },
-  // Level 26: Expert - tight geometry
+  // Level 26: Expert - tight geometry with all tile types
   { grid: [
     [0,0,0,0,0,0,0,0,0,0,0,0],
     [0,0,0,0,0,0,0,0,0,0,0,0],
     [0,2,0,0,0,0,0,0,0,0,0,0],
-    [1,1,1,0,0,0,0,0,0,0,0,0],
+    [7,7,7,0,0,0,0,0,0,0,0,0],
     [0,0,0,0,2,0,0,0,0,0,0,0],
-    [0,0,0,1,1,1,0,0,0,0,0,0],
+    [0,0,0,8,8,8,0,0,0,0,0,0],
     [0,0,0,0,0,0,0,2,0,0,0,0],
-    [0,0,0,0,0,0,1,1,1,0,0,0],
+    [0,0,0,0,0,0,9,9,9,0,0,0],
     [0,0,0,0,0,0,0,0,0,0,2,0],
     [1,1,1,1,1,1,1,1,1,1,1,1]
   ], px: 9, py: 8 },
-  // Level 27: Narrow corridors
+  // Level 27: Narrow corridors with enemies
   { grid: [
     [0,0,0,0,0,0,0,0,0,0,0,0],
-    [1,0,1,0,1,0,1,0,1,0,1,0],
-    [1,0,1,0,1,0,1,0,1,0,1,0],
-    [1,0,1,0,1,0,1,0,1,0,1,0],
-    [1,0,1,0,1,0,1,0,1,0,1,0],
-    [1,0,1,0,1,0,1,0,1,0,1,0],
-    [1,0,1,0,1,0,1,0,1,0,1,0],
-    [1,0,1,0,1,0,1,0,1,0,1,0],
-    [1,2,1,2,1,2,1,2,1,2,1,0],
+    [7,0,8,0,9,0,7,0,8,0,9,0],
+    [7,0,8,0,9,0,7,0,8,0,9,0],
+    [7,0,8,0,9,0,7,0,8,0,9,0],
+    [7,0,8,0,9,0,7,0,8,0,9,0],
+    [7,0,8,0,9,0,7,0,8,0,9,0],
+    [7,0,8,0,9,0,7,0,8,0,9,0],
+    [7,0,8,0,9,0,7,0,8,0,9,0],
+    [7,2,8,2,9,2,7,2,8,2,9,0],
     [1,1,1,1,1,1,1,1,1,1,1,1]
   ], px: 5, py: 0 },
-  // Level 28: The gauntlet
+  // Level 28: The gauntlet - reactor flames patrol
   { grid: [
     [0,0,0,0,0,0,0,0,0,0,0,0],
     [0,0,0,0,0,0,0,0,0,0,0,0],
     [0,2,0,2,0,2,0,2,0,2,0,0],
-    [1,1,1,1,1,1,1,1,1,1,1,1],
-    [0,0,0,0,0,0,0,0,0,0,0,0],
+    [7,7,7,7,7,7,7,7,7,7,7,7],
+    [0,0,0,0,0,10,0,0,0,0,0,0],
     [0,0,0,0,0,0,0,0,0,0,0,0],
     [0,0,2,0,2,0,2,0,2,0,0,0],
-    [0,1,1,1,1,1,1,1,1,1,0,0],
+    [0,8,8,8,8,8,8,8,8,8,0,0],
     [0,0,0,0,0,0,0,0,0,0,0,0],
     [1,1,1,1,1,1,1,1,1,1,1,1]
   ], px: 0, py: 1 },
-  // Level 29: The tower
+  // Level 29: The tower - all elements combined
   { grid: [
     [0,0,0,0,0,2,0,0,0,0,0,0],
-    [0,0,0,0,1,1,1,0,0,0,0,0],
+    [0,0,0,0,7,7,7,0,0,0,0,0],
     [0,0,0,0,0,0,0,0,0,0,0,0],
     [0,0,0,2,0,0,0,2,0,0,0,0],
-    [0,0,1,1,1,0,1,1,1,0,0,0],
+    [0,0,8,8,8,0,9,9,9,0,0,0],
     [0,0,0,0,0,0,0,0,0,0,0,0],
     [0,2,0,0,0,0,0,0,0,2,0,0],
-    [1,1,1,0,0,0,0,0,1,1,1,0],
+    [9,9,9,0,0,0,0,0,7,7,7,0],
     [0,0,0,0,0,0,0,0,0,0,0,0],
     [1,1,1,1,1,1,1,1,1,1,1,1]
   ], px: 5, py: 8 },
-  // Level 30: Grand finale
+  // Level 30: Grand finale - every element, enemies, springs
   { grid: [
     [0,0,0,0,0,0,0,0,0,0,0,0],
     [0,2,0,0,0,0,0,0,0,0,2,0],
-    [1,1,1,0,0,0,0,0,0,1,1,1],
+    [7,7,7,0,0,0,0,0,0,9,9,9],
     [0,0,0,0,0,2,0,0,0,0,0,0],
-    [0,0,0,0,1,1,1,0,0,0,0,0],
-    [0,0,0,0,0,0,0,0,0,0,0,0],
+    [0,0,0,0,8,8,8,0,0,0,0,0],
+    [0,0,0,0,0,10,0,0,0,0,0,0],
     [0,2,0,0,0,0,0,0,0,0,2,0],
-    [1,1,0,0,0,6,0,0,0,0,1,1],
+    [8,8,0,0,0,6,0,0,0,0,7,7],
     [0,0,0,0,0,0,0,0,0,0,0,0],
     [1,1,1,1,1,1,1,1,1,1,1,1]
   ], px: 5, py: 8 }
 ];
+
+// Enemy state
+var enemies = [];
+
+function spawnEnemies() {
+  enemies = [];
+  for (var r = 0; r < ROWS; r++) {
+    for (var c = 0; c < COLS; c++) {
+      if (grid[r][c] === T_REACTOR_FLAME) {
+        enemies.push({ type: 'reactor_flame', x: c, y: r, dir: 1, moveTimer: 0, phase: 0 });
+        grid[r][c] = T_EMPTY;
+      } else if (grid[r][c] === T_SPORE_ICE) {
+        enemies.push({ type: 'spore_ice', x: c, y: r, dir: -1, moveTimer: 0, phase: 0 });
+        grid[r][c] = T_EMPTY;
+      }
+    }
+  }
+}
 
 // === HELPERS ===
 function cloneGrid(g) {
@@ -488,7 +574,7 @@ function countFires() {
 function isSolid(col, row) {
   if (col < 0 || col >= COLS || row < 0 || row >= ROWS) return true;
   var t = grid[row][col];
-  return t === T_PLATFORM || t === T_ICE;
+  return t === T_PLATFORM || t === T_ICE || t === T_REACTOR || t === T_SPORE || t === T_MYCELIUM;
 }
 
 function isEmpty(col, row) {
@@ -502,7 +588,9 @@ function pushUndo() {
     px: player.x,
     py: player.y,
     dir: player.dir,
-    moves: moves
+    moves: moves,
+    enemies: enemies.map(function(e) { return { type: e.type, x: e.x, y: e.y, dir: e.dir, moveTimer: e.moveTimer, phase: e.phase }; }),
+    score: score
   });
   if (undoStack.length > maxUndo) undoStack.shift();
 }
@@ -515,6 +603,10 @@ function popUndo() {
   player.y = snap.py;
   player.dir = snap.dir;
   moves = snap.moves;
+  score = snap.score;
+  if (snap.enemies) {
+    enemies = snap.enemies;
+  }
   TAS.audio.playTone(300, 0.1, 'sine', 0.05);
 }
 
@@ -527,6 +619,7 @@ function loadLevel(idx) {
   player.dir = 1;
   player.animFrame = 0;
   player.moving = false;
+  player.stunTimer = 0;
   moves = 0;
   undoStack = [];
   animQueue = [];
@@ -534,7 +627,24 @@ function loadLevel(idx) {
   levelComplete = false;
   levelCompleteTimer = 0;
   level = idx;
+  combo = 0;
+  comboTimer = 0;
+  hintTimer = 0;
+  iceCooldownTimer = 0;
+  bonusItems = [];
+  shakeTimer = 0;
   state = 'playing';
+  spawnEnemies();
+  // CHA start bonus: extra pre-placed ice
+  var chaBonus = chaStartBonus();
+  if (chaBonus > 0) {
+    for (var b = 0; b < chaBonus; b++) {
+      var bx = player.x + player.dir * (b + 1);
+      if (bx >= 0 && bx < COLS && grid[player.y][bx] === T_EMPTY) {
+        grid[player.y][bx] = T_ICE;
+      }
+    }
+  }
 }
 
 // === PHYSICS: GRAVITY FOR ICE ===
@@ -552,18 +662,17 @@ function applyGravity() {
               grid[r][c] = T_EMPTY;
               moved = true;
             } else if (grid[below][c] === T_FIRE) {
-              // Ice extinguishes fire
               grid[r][c] = T_EMPTY;
               grid[below][c] = T_EMPTY;
               spawnExtinguish(c * TS + TS / 2, below * TS + TS / 2);
               sfxExtinguish();
+              addScore(100);
+              addCombo();
               moved = true;
             } else if (grid[below][c] === T_SPRING) {
-              // Spring bounces ice up
               grid[r][c] = T_EMPTY;
-              var bounceY = r - 4;
+              var bounceY = r - wisSpringBoost();
               if (bounceY < 0) bounceY = 0;
-              // Find where it lands
               for (var by = bounceY; by <= r; by++) {
                 if (by + 1 < ROWS && isSolid(c, by + 1)) {
                   if (grid[by][c] === T_EMPTY) {
@@ -572,17 +681,20 @@ function applyGravity() {
                     grid[by][c] = T_EMPTY;
                     spawnExtinguish(c * TS + TS / 2, by * TS + TS / 2);
                     sfxExtinguish();
+                    addScore(150);
+                    addCombo();
                   }
                   break;
                 }
                 if (by === r) {
-                  // Put it at the top available spot
                   if (grid[bounceY][c] === T_EMPTY) {
                     grid[bounceY][c] = T_ICE;
                   } else if (grid[bounceY][c] === T_FIRE) {
                     grid[bounceY][c] = T_EMPTY;
                     spawnExtinguish(c * TS + TS / 2, bounceY * TS + TS / 2);
                     sfxExtinguish();
+                    addScore(150);
+                    addCombo();
                   }
                 }
               }
@@ -599,12 +711,9 @@ function applyGravity() {
   for (var r2 = 0; r2 < ROWS; r2++) {
     for (var c2 = 0; c2 < COLS; c2++) {
       if (grid[r2][c2] === T_ICE) {
-        // Check if sitting on a pipe
         if (r2 + 1 < ROWS && grid[r2 + 1][c2] === T_PIPE_L) {
-          // Redirect left
           slideIce(c2, r2, -1);
         } else if (r2 + 1 < ROWS && grid[r2 + 1][c2] === T_PIPE_R) {
-          // Redirect right
           slideIce(c2, r2, 1);
         }
       }
@@ -620,6 +729,8 @@ function slideIce(col, row, dir) {
       grid[row][c] = T_EMPTY;
       spawnExtinguish(c * TS + TS / 2, row * TS + TS / 2);
       sfxExtinguish();
+      addScore(100);
+      addCombo();
       return;
     }
     if (isSolid(c, row)) {
@@ -627,7 +738,6 @@ function slideIce(col, row, dir) {
       spawnIceShatter(c * TS + (dir > 0 ? 0 : TS), row * TS + TS / 2);
       return;
     }
-    // Check if floor disappears (ice falls)
     if (row + 1 < ROWS && !isSolid(c, row + 1) && grid[row + 1][c] !== T_SPRING && grid[row + 1][c] !== T_PIPE_L && grid[row + 1][c] !== T_PIPE_R) {
       grid[row][c] = T_ICE;
       applyGravity();
@@ -635,19 +745,111 @@ function slideIce(col, row, dir) {
     }
     c += dir;
   }
-  // Hit wall
   grid[row][col] = T_ICE;
+}
+
+// === SCORING & COMBO ===
+function addScore(pts) {
+  var mult = combo > 1 ? combo : 1;
+  score += Math.floor(pts * mult * intScoreMult());
+}
+
+function addCombo() {
+  combo++;
+  comboTimer = 90;
+  if (combo >= 3) {
+    triggerShake(3, 4);
+    // CHA bonus item on combos
+    if (chaBonusItem()) {
+      spawnBonusItem();
+    }
+  }
+}
+
+function spawnBonusItem() {
+  var bx = Math.floor(Math.random() * COLS);
+  var by = 0;
+  bonusItems.push({ x: bx * TS + TS / 2, y: by * TS, vy: 1, timer: 180, type: Math.random() < 0.5 ? 'star' : 'crystal' });
+}
+
+function triggerShake(intensity, duration) {
+  shakeIntensity = intensity;
+  shakeTimer = duration;
+}
+
+// === ENEMY UPDATE ===
+function updateEnemies() {
+  for (var i = 0; i < enemies.length; i++) {
+    var e = enemies[i];
+    e.moveTimer++;
+    e.phase += 0.05;
+    if (e.type === 'reactor_flame') {
+      // Patrols horizontally on its row, melts ice on contact
+      if (e.moveTimer >= 30) {
+        e.moveTimer = 0;
+        var nx = e.x + e.dir;
+        if (nx < 0 || nx >= COLS || isSolid(nx, e.y)) {
+          e.dir *= -1;
+        } else {
+          e.x = nx;
+        }
+        // Melt adjacent ice
+        if (e.x + 1 < COLS && grid[e.y][e.x + 1] === T_ICE) {
+          grid[e.y][e.x + 1] = T_EMPTY;
+          spawnFireMelt(e.x * TS + TS, e.y * TS + TS / 2);
+        }
+        if (e.x - 1 >= 0 && grid[e.y][e.x - 1] === T_ICE) {
+          grid[e.y][e.x - 1] = T_EMPTY;
+          spawnFireMelt(e.x * TS, e.y * TS + TS / 2);
+        }
+      }
+      // Check if player is adjacent - stun player
+      if (Math.abs(e.x - player.x) <= 1 && e.y === player.y && player.stunTimer <= 0) {
+        if (Math.random() > conHazardShield()) {
+          player.stunTimer = 30;
+          triggerShake(4, 6);
+          sfxHit();
+        }
+      }
+    } else if (e.type === 'spore_ice') {
+      // Drops spore frost periodically, slowing nearby ice physics
+      if (e.moveTimer >= 45) {
+        e.moveTimer = 0;
+        var nx2 = e.x + e.dir;
+        if (nx2 < 0 || nx2 >= COLS || isSolid(nx2, e.y)) {
+          e.dir *= -1;
+        } else {
+          e.x = nx2;
+        }
+      }
+      // Occasionally freeze an empty tile below
+      if (e.moveTimer === 20 && e.y + 1 < ROWS && grid[e.y + 1][e.x] === T_EMPTY) {
+        // Spore ice enemy can create temporary obstacles
+        spawnSporeFrost(e.x * TS + TS / 2, (e.y + 1) * TS + TS / 2);
+      }
+    }
+    // Remove enemy if hit by ice block (pushed into them)
+    if (grid[e.y] && grid[e.y][e.x] === T_ICE) {
+      spawnEnemyDefeat(e.x * TS + TS / 2, e.y * TS + TS / 2);
+      sfxEnemyDefeat();
+      addScore(200);
+      enemies.splice(i, 1);
+      i--;
+    }
+  }
 }
 
 // === PLAYER ACTIONS ===
 function tryMove(dir) {
+  if (player.stunTimer > 0) return;
   var nx = player.x + dir;
   if (nx < 0 || nx >= COLS) return;
   var ny = player.y;
 
   if (isSolid(nx, ny)) {
-    // Try to push ice
     if (grid[ny][nx] === T_ICE) {
+      // STR determines push force
+      var force = strPushForce();
       var pushX = nx + dir;
       if (pushX >= 0 && pushX < COLS) {
         if (grid[ny][pushX] === T_EMPTY) {
@@ -657,6 +859,7 @@ function tryMove(dir) {
           player.x = nx;
           player.dir = dir;
           moves++;
+          addScore(10);
           sfxPush();
           applyGravity();
           checkWin();
@@ -668,6 +871,8 @@ function tryMove(dir) {
           player.x = nx;
           player.dir = dir;
           moves++;
+          addScore(100);
+          addCombo();
           spawnExtinguish(pushX * TS + TS / 2, ny * TS + TS / 2);
           sfxExtinguish();
           applyGravity();
@@ -676,44 +881,40 @@ function tryMove(dir) {
         }
       }
     }
-    return; // blocked by platform
+    return;
   }
 
-  // Move freely
   pushUndo();
   player.x = nx;
   player.dir = dir;
   moves++;
 
-  // Gravity for player
   while (player.y + 1 < ROWS && !isSolid(player.x, player.y + 1)) {
     player.y++;
   }
+  // Pick up bonus items
+  checkBonusPickup();
   checkWin();
 }
 
 function tryJump() {
-  // Jump up one tile if space above is free and there is a platform to land on
+  if (player.stunTimer > 0) return;
   var above = player.y - 1;
   if (above < 0) return;
   if (isSolid(player.x, above)) return;
 
-  // Can jump if currently on solid ground
   if (player.y + 1 >= ROWS || isSolid(player.x, player.y + 1)) {
     pushUndo();
     player.y = above;
     moves++;
-    // Check if we can stand here (need support or it was just one tile jump)
-    // If no floor, fall
-    if (player.y + 1 < ROWS && !isSolid(player.x, player.y + 1)) {
-      // We jumped but have no floor - stay if we have a ledge on either side above
-      // Actually for this game, jump is just 1 tile up, player stays
-    }
     sfxJump();
+    checkBonusPickup();
   }
 }
 
 function tryCreateIce() {
+  if (player.stunTimer > 0) return;
+  if (iceCooldownTimer > 0) return;
   var iceX = player.x + player.dir;
   var iceY = player.y;
   if (iceX < 0 || iceX >= COLS) return;
@@ -721,18 +922,34 @@ function tryCreateIce() {
     pushUndo();
     grid[iceY][iceX] = T_ICE;
     moves++;
+    addScore(5);
     spawnIceCreate(iceX * TS + TS / 2, iceY * TS + TS / 2);
     sfxCreate();
+    iceCooldownTimer = wisIceCooldown();
     applyGravity();
     checkWin();
   } else if (grid[iceY][iceX] === T_ICE) {
-    // Destroy existing ice
     pushUndo();
     grid[iceY][iceX] = T_EMPTY;
     moves++;
     spawnIceShatter(iceX * TS + TS / 2, iceY * TS + TS / 2);
     sfxCreate();
+    iceCooldownTimer = wisIceCooldown();
     applyGravity();
+  }
+}
+
+function checkBonusPickup() {
+  for (var i = bonusItems.length - 1; i >= 0; i--) {
+    var bi = bonusItems[i];
+    var bCol = Math.floor(bi.x / TS);
+    var bRow = Math.floor(bi.y / TS);
+    if (bCol === player.x && bRow === player.y) {
+      addScore(bi.type === 'star' ? 500 : 250);
+      spawnItemPickup(bi.x, bi.y);
+      sfxPickup();
+      bonusItems.splice(i, 1);
+    }
   }
 }
 
@@ -740,21 +957,27 @@ function checkWin() {
   if (countFires() === 0) {
     levelComplete = true;
     levelCompleteTimer = 120;
+    // INT bonus moves reduce effective move count
+    var effectiveMoves = Math.max(1, moves - intBonusMoves());
     if (progress.indexOf(level) === -1) {
       progress.push(level);
       saveProgress();
     }
-    totalMoves += moves;
+    totalMoves += effectiveMoves;
     if (bestMoves === 0 || totalMoves < bestMoves) {
       bestMoves = totalMoves;
       saveBestMoves();
     }
+    if (score > bestScore) {
+      bestScore = score;
+      saveBestScore();
+    }
     sfxClear();
     TAS.fx.flash('#88eeff', 0.4);
+    triggerShake(5, 8);
   }
 }
 
-// Apply gravity to player
 function playerGravity() {
   while (player.y + 1 < ROWS && !isSolid(player.x, player.y + 1)) {
     player.y++;
@@ -784,6 +1007,18 @@ function sfxJump() {
 function sfxSpring() {
   TAS.audio.playTone(300, 0.15, 'sine', 0.05, 900);
 }
+function sfxHit() {
+  TAS.audio.playNoise(0.15, 0.06, 800);
+  TAS.audio.playTone(150, 0.15, 'sawtooth', 0.04);
+}
+function sfxEnemyDefeat() {
+  TAS.audio.playTone(600, 0.1, 'square', 0.05, 200);
+  TAS.audio.playTone(800, 0.08, 'sine', 0.04);
+}
+function sfxPickup() {
+  TAS.audio.playTone(1000, 0.06, 'sine', 0.05);
+  TAS.audio.playTone(1400, 0.08, 'sine', 0.04);
+}
 
 // === PARTICLES ===
 function spawnIceCreate(x, y) {
@@ -793,12 +1028,36 @@ function spawnIceCreate(x, y) {
 function spawnExtinguish(x, y) {
   TAS.particles.spawn(x, y, '#ffffff', 12, 2.5, { size: 3, sizeVar: 2, gravity: -1 });
   TAS.particles.spawn(x, y, '#aaccdd', 8, 1.5, { size: 2, sizeVar: 1, gravity: -0.8 });
+  // Extra element particles based on world
+  var w = getCurrentWorld();
+  if (w.name === 'REACTOR CORE') {
+    TAS.particles.spawn(x, y, '#ff6600', 6, 2, { size: 2, sizeVar: 1, gravity: -1.2 });
+  } else if (w.name === 'SPORE GARDENS') {
+    TAS.particles.spawn(x, y, '#66ff88', 6, 2, { size: 2, sizeVar: 1, gravity: -0.6 });
+  } else if (w.name === 'MYCELIAL DEPTHS') {
+    TAS.particles.spawn(x, y, '#bb88ff', 6, 1.8, { size: 2, sizeVar: 1, gravity: -0.8 });
+  }
 }
 function spawnIceShatter(x, y) {
   TAS.particles.spawn(x, y, '#88ccff', 6, 3, { size: 2, sizeVar: 2, shape: 'rect' });
 }
 function spawnSpringBounce(x, y) {
   TAS.particles.spawn(x, y, '#ffff44', 6, 2, { size: 2, sizeVar: 1, gravity: 0.5 });
+}
+function spawnFireMelt(x, y) {
+  TAS.particles.spawn(x, y, '#ff8844', 6, 2, { size: 2, sizeVar: 1, gravity: -0.8 });
+  TAS.particles.spawn(x, y, '#ffcc66', 4, 1.5, { size: 1, sizeVar: 1, gravity: -0.5 });
+}
+function spawnSporeFrost(x, y) {
+  TAS.particles.spawn(x, y, '#88ffaa', 4, 1, { size: 2, sizeVar: 1, gravity: 0.3 });
+}
+function spawnEnemyDefeat(x, y) {
+  TAS.particles.spawn(x, y, '#ff4444', 10, 3, { size: 3, sizeVar: 2, gravity: -0.5 });
+  TAS.particles.spawn(x, y, '#ffff44', 6, 2, { size: 2, sizeVar: 1 });
+}
+function spawnItemPickup(x, y) {
+  TAS.particles.spawn(x, y, '#ffdd44', 8, 2.5, { size: 3, sizeVar: 1, gravity: -1 });
+  TAS.particles.spawn(x, y, '#ffffff', 4, 1.5, { size: 2, sizeVar: 1, gravity: -0.8 });
 }
 
 // === DRAWING ===
@@ -807,12 +1066,10 @@ function drawTile(col, row) {
   var tile = grid[row][col];
 
   if (tile === T_PLATFORM) {
-    // Dark stone
     ctx.fillStyle = '#2a2a3a';
     ctx.fillRect(x, y, TS, TS);
     ctx.fillStyle = '#3a3a4a';
     ctx.fillRect(x + 1, y + 1, TS - 2, TS - 2);
-    // Stone texture lines
     ctx.strokeStyle = '#222235';
     ctx.lineWidth = 1;
     ctx.beginPath();
@@ -820,57 +1077,52 @@ function drawTile(col, row) {
     ctx.moveTo(x + TS / 2, y); ctx.lineTo(x + TS / 2, y + TS);
     ctx.stroke();
   } else if (tile === T_FIRE) {
-    // Animated fire
     var flicker = Math.sin(frame * 0.15 + col * 2 + row) * 3;
     var flicker2 = Math.cos(frame * 0.2 + col) * 2;
-    // Base glow
     ctx.fillStyle = 'rgba(255,100,0,0.3)';
     ctx.beginPath();
     ctx.arc(x + TS / 2, y + TS / 2, TS / 2 + 2, 0, Math.PI * 2);
     ctx.fill();
-    // Flame body
     ctx.fillStyle = '#ff6600';
     ctx.beginPath();
     ctx.moveTo(x + 6, y + TS - 4);
     ctx.quadraticCurveTo(x + TS / 2 + flicker2, y + 4 + flicker, x + TS - 6, y + TS - 4);
     ctx.fill();
-    // Inner flame
     ctx.fillStyle = '#ffcc00';
     ctx.beginPath();
     ctx.moveTo(x + 10, y + TS - 4);
     ctx.quadraticCurveTo(x + TS / 2 - flicker2, y + 10 - flicker, x + TS - 10, y + TS - 4);
     ctx.fill();
-    // Bright core
     ctx.fillStyle = '#fff8dd';
     ctx.beginPath();
     ctx.ellipse(x + TS / 2, y + TS - 10, 4, 6, 0, 0, Math.PI * 2);
     ctx.fill();
+    // Fire particle shimmer
+    if (frame % 4 === 0) {
+      TAS.particles.spawn(x + TS / 2, y + 4, '#ff8800', 1, 0.8, { size: 1, sizeVar: 1, gravity: -1.5 });
+    }
   } else if (tile === T_ICE) {
-    // Crystalline ice block
     var shimmer = Math.sin(frame * 0.08 + col + row * 3) * 10;
-    ctx.fillStyle = 'rgba(100,200,255,0.8)';
+    // STR affects ice appearance - stronger = more opaque
+    var iceAlpha = Math.min(1, 0.7 + strIcePower() * 0.05);
+    ctx.fillStyle = 'rgba(100,200,255,' + iceAlpha + ')';
     ctx.fillRect(x + 2, y + 2, TS - 4, TS - 4);
-    // Highlight
     ctx.fillStyle = 'rgba(200,240,255,0.6)';
     ctx.fillRect(x + 4, y + 4, 8, 8);
-    // Crystal lines
     ctx.strokeStyle = 'rgba(255,255,255,' + (0.4 + shimmer / 40) + ')';
     ctx.lineWidth = 1;
     ctx.beginPath();
     ctx.moveTo(x + 4, y + 16); ctx.lineTo(x + 16, y + 4);
     ctx.moveTo(x + 12, y + 28); ctx.lineTo(x + 28, y + 12);
     ctx.stroke();
-    // Border
     ctx.strokeStyle = '#88ddff';
     ctx.lineWidth = 2;
     ctx.strokeRect(x + 2, y + 2, TS - 4, TS - 4);
   } else if (tile === T_PIPE_L || tile === T_PIPE_R) {
-    // Pipe/chute indicator
     ctx.fillStyle = '#4a4a5a';
     ctx.fillRect(x, y, TS, TS);
     ctx.fillStyle = '#5a5a6a';
     ctx.fillRect(x + 2, y + 8, TS - 4, TS - 16);
-    // Arrow direction
     ctx.fillStyle = '#88aacc';
     var arrowDir = (tile === T_PIPE_L) ? -1 : 1;
     ctx.beginPath();
@@ -880,10 +1132,8 @@ function drawTile(col, row) {
     ctx.lineTo(ax - arrowDir * 8, y + TS / 2 + 5);
     ctx.fill();
   } else if (tile === T_SPRING) {
-    // Spring pad
     ctx.fillStyle = '#3a3a3a';
     ctx.fillRect(x, y + TS / 2, TS, TS / 2);
-    // Coil
     ctx.strokeStyle = '#ffcc00';
     ctx.lineWidth = 2;
     var springAnim = Math.sin(frame * 0.1) * 2;
@@ -893,9 +1143,137 @@ function drawTile(col, row) {
       ctx.moveTo(x + 6, sy); ctx.lineTo(x + TS - 6, sy);
     }
     ctx.stroke();
-    // Top plate
     ctx.fillStyle = '#ffdd44';
     ctx.fillRect(x + 4, y + TS / 2 - 2 + springAnim, TS - 8, 4);
+  } else if (tile === T_REACTOR) {
+    // Reactor Heat tile - glowing orange/red platform
+    var rPulse = Math.sin(frame * 0.12 + col + row) * 0.15;
+    ctx.fillStyle = '#3a1a0a';
+    ctx.fillRect(x, y, TS, TS);
+    ctx.fillStyle = 'rgba(255,80,20,' + (0.4 + rPulse) + ')';
+    ctx.fillRect(x + 1, y + 1, TS - 2, TS - 2);
+    // Heat lines
+    ctx.strokeStyle = '#ff4400';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(x + 4, y + TS / 2 + Math.sin(frame * 0.1 + col) * 3);
+    ctx.lineTo(x + TS - 4, y + TS / 2 - Math.sin(frame * 0.1 + col) * 3);
+    ctx.stroke();
+    // Glow particles
+    if (frame % 8 === 0) {
+      TAS.particles.spawn(x + TS / 2, y, '#ff6600', 1, 0.5, { size: 1, sizeVar: 1, gravity: -0.8 });
+    }
+  } else if (tile === T_SPORE) {
+    // Spore tile - green organic platform
+    var sPulse = Math.sin(frame * 0.08 + col * 1.5 + row) * 0.1;
+    ctx.fillStyle = '#0a2a0a';
+    ctx.fillRect(x, y, TS, TS);
+    ctx.fillStyle = 'rgba(40,180,60,' + (0.5 + sPulse) + ')';
+    ctx.fillRect(x + 1, y + 1, TS - 2, TS - 2);
+    // Spore dots
+    ctx.fillStyle = '#88ff88';
+    for (var sd = 0; sd < 3; sd++) {
+      var sdx = x + 8 + sd * 8 + Math.sin(frame * 0.05 + sd) * 2;
+      var sdy = y + TS / 2 + Math.cos(frame * 0.06 + sd * 2) * 3;
+      ctx.beginPath();
+      ctx.arc(sdx, sdy, 2, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    // Spore mist
+    if (frame % 12 === 0) {
+      TAS.particles.spawn(x + TS / 2, y, '#44ff66', 1, 0.4, { size: 1, sizeVar: 1, gravity: -0.5 });
+    }
+  } else if (tile === T_MYCELIUM) {
+    // Mycelial Growth tile - purple network platform
+    var mPulse = Math.sin(frame * 0.06 + col * 2 + row * 1.5) * 0.12;
+    ctx.fillStyle = '#1a0a2a';
+    ctx.fillRect(x, y, TS, TS);
+    ctx.fillStyle = 'rgba(140,60,200,' + (0.45 + mPulse) + ')';
+    ctx.fillRect(x + 1, y + 1, TS - 2, TS - 2);
+    // Mycelium network lines
+    ctx.strokeStyle = 'rgba(200,140,255,0.5)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(x + 4, y + 8); ctx.lineTo(x + 16, y + 16);
+    ctx.lineTo(x + 28, y + 10); ctx.lineTo(x + 20, y + 24);
+    ctx.lineTo(x + 8, y + 20);
+    ctx.stroke();
+    // Glow nodes
+    ctx.fillStyle = '#cc88ff';
+    ctx.beginPath();
+    ctx.arc(x + 16, y + 16, 2 + Math.sin(frame * 0.1) * 0.5, 0, Math.PI * 2);
+    ctx.fill();
+    if (frame % 15 === 0) {
+      TAS.particles.spawn(x + TS / 2, y + TS / 2, '#aa66ff', 1, 0.3, { size: 1, sizeVar: 1, gravity: -0.3 });
+    }
+  }
+}
+
+function drawEnemy(e) {
+  var x = e.x * TS, y = e.y * TS;
+  var bob = Math.sin(frame * 0.12 + e.phase) * 2;
+  if (e.type === 'reactor_flame') {
+    // Reactor Flame - floating fire enemy
+    ctx.fillStyle = 'rgba(255,60,0,0.3)';
+    ctx.beginPath();
+    ctx.arc(x + TS / 2, y + TS / 2 + bob, TS / 2 + 3, 0, Math.PI * 2);
+    ctx.fill();
+    // Body
+    ctx.fillStyle = '#ff4400';
+    ctx.beginPath();
+    ctx.ellipse(x + TS / 2, y + TS / 2 + bob, 10, 12, 0, 0, Math.PI * 2);
+    ctx.fill();
+    // Inner glow
+    ctx.fillStyle = '#ffaa00';
+    ctx.beginPath();
+    ctx.ellipse(x + TS / 2, y + TS / 2 + bob, 6, 8, 0, 0, Math.PI * 2);
+    ctx.fill();
+    // Eyes
+    ctx.fillStyle = '#fff';
+    ctx.beginPath();
+    ctx.arc(x + TS / 2 - 4, y + TS / 2 - 2 + bob, 2.5, 0, Math.PI * 2);
+    ctx.arc(x + TS / 2 + 4, y + TS / 2 - 2 + bob, 2.5, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = '#220000';
+    ctx.beginPath();
+    ctx.arc(x + TS / 2 - 4 + e.dir, y + TS / 2 - 2 + bob, 1.2, 0, Math.PI * 2);
+    ctx.arc(x + TS / 2 + 4 + e.dir, y + TS / 2 - 2 + bob, 1.2, 0, Math.PI * 2);
+    ctx.fill();
+    // Flame particles
+    if (frame % 3 === 0) {
+      TAS.particles.spawn(x + TS / 2, y + bob, '#ff6600', 1, 1, { size: 2, sizeVar: 1, gravity: -1.5 });
+    }
+  } else if (e.type === 'spore_ice') {
+    // Spore Ice - floating green/blue enemy
+    ctx.fillStyle = 'rgba(40,200,120,0.25)';
+    ctx.beginPath();
+    ctx.arc(x + TS / 2, y + TS / 2 + bob, TS / 2 + 2, 0, Math.PI * 2);
+    ctx.fill();
+    // Body
+    ctx.fillStyle = '#44bb88';
+    ctx.beginPath();
+    ctx.ellipse(x + TS / 2, y + TS / 2 + bob, 10, 11, 0, 0, Math.PI * 2);
+    ctx.fill();
+    // Frost pattern
+    ctx.fillStyle = '#88ffcc';
+    ctx.beginPath();
+    ctx.ellipse(x + TS / 2, y + TS / 2 + bob, 6, 6, 0, 0, Math.PI * 2);
+    ctx.fill();
+    // Eyes
+    ctx.fillStyle = '#ddf';
+    ctx.beginPath();
+    ctx.arc(x + TS / 2 - 4, y + TS / 2 - 2 + bob, 2.5, 0, Math.PI * 2);
+    ctx.arc(x + TS / 2 + 4, y + TS / 2 - 2 + bob, 2.5, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = '#113322';
+    ctx.beginPath();
+    ctx.arc(x + TS / 2 - 4 + e.dir, y + TS / 2 - 2 + bob, 1.2, 0, Math.PI * 2);
+    ctx.arc(x + TS / 2 + 4 + e.dir, y + TS / 2 - 2 + bob, 1.2, 0, Math.PI * 2);
+    ctx.fill();
+    // Spore particles
+    if (frame % 5 === 0) {
+      TAS.particles.spawn(x + TS / 2, y + TS + bob, '#66ffaa', 1, 0.6, { size: 1, sizeVar: 1, gravity: 0.3 });
+    }
   }
 }
 
@@ -903,8 +1281,13 @@ function drawPlayer() {
   var x = player.x * TS, y = player.y * TS;
   var bob = Math.sin(frame * 0.1) * 1;
 
-  // Body - frost baseling (round creature)
-  ctx.fillStyle = '#66bbee';
+  // Stun flash
+  if (player.stunTimer > 0 && frame % 4 < 2) {
+    ctx.globalAlpha = 0.5;
+  }
+
+  // Body - frost baseling
+  ctx.fillStyle = statB.color || '#66bbee';
   ctx.beginPath();
   ctx.ellipse(x + TS / 2, y + TS / 2 + 2 + bob, 11, 12, 0, 0, Math.PI * 2);
   ctx.fill();
@@ -944,22 +1327,79 @@ function drawPlayer() {
   ctx.arc(auraX, y + TS / 2 + bob, 4, 0, Math.PI * 2);
   ctx.fill();
   ctx.globalAlpha = 1;
+
+  // Ice cooldown indicator
+  if (iceCooldownTimer > 0) {
+    ctx.globalAlpha = 0.4;
+    ctx.fillStyle = '#4488aa';
+    ctx.fillRect(x + 4, y + TS - 4, (TS - 8) * (iceCooldownTimer / wisIceCooldown()), 3);
+    ctx.globalAlpha = 1;
+  }
 }
 
 function drawBackground() {
-  // Cool gradient background
+  var w = getCurrentWorld();
   var grd = ctx.createLinearGradient(0, 0, 0, GH);
-  grd.addColorStop(0, '#0a1428');
-  grd.addColorStop(1, '#1a2a44');
+  grd.addColorStop(0, w.bg1);
+  grd.addColorStop(1, w.bg2);
   ctx.fillStyle = grd;
   ctx.fillRect(0, 0, GW, GH);
 
-  // Subtle snowfall
-  ctx.fillStyle = 'rgba(200,230,255,0.3)';
+  // Atmospheric particles per world
+  ctx.fillStyle = w.snowColor;
   for (var i = 0; i < 20; i++) {
     var sx = ((frame * 0.3 + i * 47) % GW);
     var sy = ((frame * 0.5 + i * 31) % GH);
     ctx.fillRect(sx, sy, 1, 1);
+  }
+
+  // Additional world-specific bg elements
+  if (w.name === 'REACTOR CORE') {
+    // Heat shimmer lines
+    ctx.strokeStyle = 'rgba(255,80,20,0.06)';
+    ctx.lineWidth = 1;
+    for (var h = 0; h < 3; h++) {
+      var hy = 50 + h * 100 + Math.sin(frame * 0.02 + h) * 10;
+      ctx.beginPath();
+      ctx.moveTo(0, hy);
+      for (var hx = 0; hx < GW; hx += 20) {
+        ctx.lineTo(hx, hy + Math.sin(frame * 0.05 + hx * 0.02 + h) * 5);
+      }
+      ctx.stroke();
+    }
+  } else if (w.name === 'SPORE GARDENS') {
+    // Floating spore particles in background
+    ctx.fillStyle = 'rgba(100,255,120,0.04)';
+    for (var sp = 0; sp < 8; sp++) {
+      var spx = ((frame * 0.15 + sp * 67) % GW);
+      var spy = ((frame * 0.25 + sp * 43) % GH);
+      ctx.beginPath();
+      ctx.arc(spx, spy, 3 + Math.sin(frame * 0.03 + sp) * 2, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  } else if (w.name === 'MYCELIAL DEPTHS') {
+    // Network veins in background
+    ctx.strokeStyle = 'rgba(140,60,200,0.04)';
+    ctx.lineWidth = 1;
+    for (var mv = 0; mv < 5; mv++) {
+      ctx.beginPath();
+      var mvx1 = (mv * 80 + frame * 0.1) % GW;
+      var mvy1 = 30 + mv * 60;
+      ctx.moveTo(mvx1, mvy1);
+      ctx.lineTo(mvx1 + 40 + Math.sin(frame * 0.02 + mv) * 20, mvy1 + 30);
+      ctx.lineTo(mvx1 + 80, mvy1 + Math.sin(frame * 0.03 + mv) * 15);
+      ctx.stroke();
+    }
+  } else if (w.name === 'THE GRAND NETWORK') {
+    // Combine all elements
+    ctx.fillStyle = 'rgba(255,200,80,0.03)';
+    for (var gn = 0; gn < 5; gn++) {
+      var gnx = ((frame * 0.2 + gn * 83) % GW);
+      var gny = ((frame * 0.3 + gn * 57) % GH);
+      ctx.beginPath();
+      ctx.arc(gnx, gny, 4, 0, Math.PI * 2);
+      ctx.fill();
+    }
   }
 }
 
@@ -973,22 +1413,51 @@ function drawGrid() {
   }
 }
 
+function drawBonusItems() {
+  for (var i = 0; i < bonusItems.length; i++) {
+    var bi = bonusItems[i];
+    var bPulse = Math.sin(frame * 0.1 + i) * 2;
+    if (bi.type === 'star') {
+      ctx.fillStyle = '#ffdd44';
+      ctx.beginPath();
+      var sx = bi.x, sy = bi.y + bPulse;
+      for (var p = 0; p < 5; p++) {
+        var a = -Math.PI / 2 + p * Math.PI * 2 / 5;
+        var ai = a + Math.PI / 5;
+        ctx.lineTo(sx + Math.cos(a) * 8, sy + Math.sin(a) * 8);
+        ctx.lineTo(sx + Math.cos(ai) * 3, sy + Math.sin(ai) * 3);
+      }
+      ctx.closePath();
+      ctx.fill();
+    } else {
+      ctx.fillStyle = '#88ddff';
+      ctx.save();
+      ctx.translate(bi.x, bi.y + bPulse);
+      ctx.rotate(frame * 0.05);
+      ctx.fillRect(-5, -5, 10, 10);
+      ctx.restore();
+    }
+  }
+}
+
 function drawHUD() {
   ctx.fillStyle = 'rgba(10,5,20,0.7)';
   ctx.fillRect(0, 0, GW, 24);
   ctx.font = 'bold 11px monospace';
 
+  // World name + level
+  var w = getCurrentWorld();
   ctx.fillStyle = '#88ccff';
   ctx.textAlign = 'left';
-  ctx.fillText('LEVEL ' + (level + 1) + '/30', 6, 16);
+  ctx.fillText('LV' + (level + 1) + ' ' + w.name, 6, 16);
 
   ctx.fillStyle = '#ffdd44';
   ctx.textAlign = 'center';
-  ctx.fillText('MOVES: ' + moves, GW / 2, 16);
+  ctx.fillText('MOVES:' + moves + '  SCORE:' + score, GW / 2, 16);
 
   ctx.fillStyle = '#aaa';
   ctx.textAlign = 'right';
-  ctx.fillText('R=RESET  Z=UNDO', GW - 6, 16);
+  ctx.fillText('R=RESET Z=UNDO', GW - 6, 16);
 
   // Fire counter
   var fires = countFires();
@@ -997,17 +1466,36 @@ function drawHUD() {
     ctx.textAlign = 'center';
     ctx.fillText('FIRES: ' + fires, GW / 2, GH - 8);
   }
+
+  // Combo display
+  if (combo >= 2 && comboTimer > 0) {
+    ctx.fillStyle = '#ffaa00';
+    ctx.textAlign = 'center';
+    ctx.font = 'bold 14px monospace';
+    ctx.globalAlpha = comboTimer / 90;
+    ctx.fillText('COMBO x' + combo + '!', GW / 2, GH - 24);
+    ctx.globalAlpha = 1;
+  }
+
+  // INT hint indicator
+  if (intShowHint() && hintTimer > 0) {
+    ctx.fillStyle = 'rgba(68,136,255,0.5)';
+    ctx.font = '10px monospace';
+    ctx.textAlign = 'left';
+    ctx.fillText('[HINT ACTIVE]', 6, GH - 24);
+  }
 }
 
 // === TITLE SCREEN ===
 function drawTitle() {
   drawBackground();
 
-  // Decorative ice/fire
+  // Decorative ice/fire/elements
+  var elementColors = ['#ff6600', '#88ddff', '#44bb44', '#aa66ff', '#ffaa44'];
   for (var i = 0; i < 5; i++) {
     var fx = 60 + i * 70;
     var fy = 200 + Math.sin(frame * 0.05 + i) * 10;
-    ctx.fillStyle = (i % 2 === 0) ? '#ff6600' : '#88ddff';
+    ctx.fillStyle = elementColors[i];
     ctx.beginPath();
     ctx.arc(fx, fy, 8 + Math.sin(frame * 0.1 + i) * 2, 0, Math.PI * 2);
     ctx.fill();
@@ -1015,7 +1503,7 @@ function drawTitle() {
 
   ctx.textAlign = 'center';
 
-  // Title
+  // Title shadow
   ctx.fillStyle = '#000';
   ctx.font = 'bold 28px monospace';
   ctx.fillText('FIRE N ICE', GW / 2 + 2, 82);
@@ -1036,8 +1524,24 @@ function drawTitle() {
 
   ctx.fillStyle = '#88aacc';
   ctx.font = '11px monospace';
-  ctx.fillText('Create and push ice blocks', GW / 2, 140);
-  ctx.fillText('to extinguish all fires!', GW / 2, 155);
+  ctx.fillText('Create and push ice blocks', GW / 2, 135);
+  ctx.fillText('to extinguish all fires!', GW / 2, 150);
+
+  // Stat display if NFT loaded
+  if (statB.level > 0) {
+    ctx.fillStyle = statB.color || '#66bbee';
+    ctx.font = '10px monospace';
+    ctx.fillText(statB.icon + ' ' + statB.name + ' Lv.' + statB.level, GW / 2, 172);
+    ctx.fillStyle = '#667788';
+    ctx.fillText('STR:' + statB.str + ' DEX:' + statB.dex + ' CON:' + statB.con + ' INT:' + statB.int + ' WIS:' + statB.wis + ' CHA:' + statB.cha, GW / 2, 184);
+  }
+
+  // Best score
+  if (bestScore > 0) {
+    ctx.fillStyle = '#ffdd44';
+    ctx.font = '10px monospace';
+    ctx.fillText('BEST SCORE: ' + bestScore, GW / 2, 210);
+  }
 
   ctx.fillStyle = '#667788';
   ctx.font = '10px monospace';
@@ -1060,10 +1564,21 @@ function drawLevelSelect() {
 
   ctx.fillStyle = '#88ddff';
   ctx.font = 'bold 18px monospace';
-  ctx.fillText('SELECT LEVEL', GW / 2, 30);
+  ctx.fillText('SELECT LEVEL', GW / 2, 28);
+
+  // Show current world name
+  var curWorld = null;
+  for (var wi = 0; wi < WORLDS.length; wi++) {
+    if (WORLDS[wi].levels.indexOf(selectCursor) !== -1) { curWorld = WORLDS[wi]; break; }
+  }
+  if (curWorld) {
+    ctx.fillStyle = '#aabbcc';
+    ctx.font = '11px monospace';
+    ctx.fillText(curWorld.name, GW / 2, 42);
+  }
 
   // Grid of level buttons: 6 columns x 5 rows
-  var cols = 6, startX = 42, startY = 50, cellW = 54, cellH = 44;
+  var cols = 6, startX = 42, startY = 52, cellW = 54, cellH = 42;
   for (var i = 0; i < 30; i++) {
     var col = i % cols;
     var row = Math.floor(i / cols);
@@ -1073,34 +1588,36 @@ function drawLevelSelect() {
     var unlocked = (i === 0) || (progress.indexOf(i - 1) !== -1);
     var selected = (i === selectCursor);
 
-    // Background
+    // World color coding
+    var worldIdx = Math.floor(i / 6);
+    var worldColors = ['#4488aa', '#aa4422', '#44aa44', '#8844aa', '#aaaa44'];
+    var wColor = worldColors[worldIdx];
+
     if (selected) {
-      ctx.fillStyle = '#446688';
+      ctx.fillStyle = wColor;
+      ctx.globalAlpha = 0.4;
       ctx.fillRect(bx - 2, by - 2, 44, 34);
+      ctx.globalAlpha = 1;
     }
     ctx.fillStyle = beaten ? '#225544' : (unlocked ? '#2a3a4a' : '#1a1a2a');
     ctx.fillRect(bx, by, 40, 30);
 
-    // Border
-    ctx.strokeStyle = beaten ? '#44cc88' : (unlocked ? '#4488aa' : '#333');
+    ctx.strokeStyle = beaten ? '#44cc88' : (unlocked ? wColor : '#333');
     ctx.lineWidth = selected ? 2 : 1;
     ctx.strokeRect(bx, by, 40, 30);
 
-    // Number
     ctx.fillStyle = beaten ? '#88ffcc' : (unlocked ? '#aabbcc' : '#444');
     ctx.font = 'bold 12px monospace';
     ctx.fillText(String(i + 1), bx + 20, by + 19);
   }
 
-  // Instructions
   ctx.fillStyle = '#667788';
   ctx.font = '10px monospace';
-  ctx.fillText('ARROWS to select, ENTER/A to play', GW / 2, GH - 20);
+  ctx.fillText('ARROWS to select, ENTER/A to play', GW / 2, GH - 18);
 
-  // Progress
   ctx.fillStyle = '#88aacc';
   ctx.font = '11px monospace';
-  ctx.fillText('Completed: ' + progress.length + '/30', GW / 2, GH - 40);
+  ctx.fillText('Completed: ' + progress.length + '/30   Score: ' + score, GW / 2, GH - 36);
 }
 
 // === LEVEL COMPLETE OVERLAY ===
@@ -1111,20 +1628,31 @@ function drawLevelComplete() {
 
   ctx.fillStyle = '#88eeff';
   ctx.font = 'bold 22px monospace';
-  ctx.fillText('LEVEL CLEAR!', GW / 2, GH / 2 - 30);
+  ctx.fillText('LEVEL CLEAR!', GW / 2, GH / 2 - 40);
+
+  var w = getCurrentWorld();
+  ctx.fillStyle = '#aabbcc';
+  ctx.font = '11px monospace';
+  ctx.fillText(w.name, GW / 2, GH / 2 - 20);
 
   ctx.fillStyle = '#ffdd44';
   ctx.font = '14px monospace';
-  ctx.fillText('Moves: ' + moves, GW / 2, GH / 2 + 10);
+  ctx.fillText('Moves: ' + moves + '  Score: ' + score, GW / 2, GH / 2 + 10);
+
+  if (combo >= 2) {
+    ctx.fillStyle = '#ffaa44';
+    ctx.font = '11px monospace';
+    ctx.fillText('Best Combo: x' + combo, GW / 2, GH / 2 + 30);
+  }
 
   var pulse = Math.sin(frame * 0.06) * 0.3 + 0.7;
   ctx.globalAlpha = pulse;
   ctx.fillStyle = '#aaddff';
   ctx.font = '12px monospace';
   if (level < 29) {
-    ctx.fillText('Press any key for next level', GW / 2, GH / 2 + 50);
+    ctx.fillText('Press any key for next level', GW / 2, GH / 2 + 55);
   } else {
-    ctx.fillText('Congratulations! All levels complete!', GW / 2, GH / 2 + 50);
+    ctx.fillText('All levels complete!', GW / 2, GH / 2 + 55);
   }
   ctx.globalAlpha = 1;
 }
@@ -1136,6 +1664,20 @@ function update(dt) {
   TAS.fx.updateEffects(dt);
 
   if (inputCooldown > 0) inputCooldown--;
+  if (comboTimer > 0) { comboTimer--; if (comboTimer <= 0) combo = 0; }
+  if (hintTimer > 0) hintTimer--;
+  if (iceCooldownTimer > 0) iceCooldownTimer--;
+  if (player.stunTimer > 0) player.stunTimer--;
+  if (shakeTimer > 0) shakeTimer--;
+
+  // Update bonus items
+  for (var bi = bonusItems.length - 1; bi >= 0; bi--) {
+    bonusItems[bi].y += bonusItems[bi].vy;
+    bonusItems[bi].timer--;
+    if (bonusItems[bi].timer <= 0 || bonusItems[bi].y > GH) {
+      bonusItems.splice(bi, 1);
+    }
+  }
 
   if (state === 'title') {
     if (anyKey()) {
@@ -1166,6 +1708,9 @@ function update(dt) {
   }
 
   if (state === 'playing') {
+    // Update enemies
+    updateEnemies();
+
     if (levelComplete) {
       levelCompleteTimer--;
       if (levelCompleteTimer <= 0 && anyKey()) {
@@ -1201,13 +1746,35 @@ function update(dt) {
       return;
     }
 
-    // Movement
+    // INT hint - press H to show hint direction
+    if (keyDown('h') || keyDown('H')) {
+      if (intShowHint() && hintTimer <= 0) {
+        hintTimer = 60;
+        // Simple hint: point toward nearest fire
+        var nearDist = 999, nearDir2 = 0;
+        for (var hr = 0; hr < ROWS; hr++) {
+          for (var hc = 0; hc < COLS; hc++) {
+            if (grid[hr][hc] === T_FIRE) {
+              var d = Math.abs(hc - player.x) + Math.abs(hr - player.y);
+              if (d < nearDist) {
+                nearDist = d;
+                nearDir2 = (hc > player.x) ? 1 : -1;
+              }
+            }
+          }
+        }
+        hintDir = nearDir2;
+      }
+    }
+
+    // Movement - DEX affects cooldown
+    var moveCd = dexMoveCooldown();
     if (keyDown('ArrowLeft') || TAS.input.touch.left) {
       tryMove(-1);
-      inputCooldown = 8;
+      inputCooldown = moveCd;
     } else if (keyDown('ArrowRight') || TAS.input.touch.right) {
       tryMove(1);
-      inputCooldown = 8;
+      inputCooldown = moveCd;
     }
 
     // Jump
@@ -1215,18 +1782,18 @@ function update(dt) {
       if (!jumpPressed) {
         tryJump();
         jumpPressed = true;
-        inputCooldown = 8;
+        inputCooldown = moveCd;
       }
     } else {
       jumpPressed = false;
     }
 
-    // Create/destroy ice
+    // Create/destroy ice - WIS affects cooldown
     if (keyDown('x') || keyDown('X') || keyDown(' ') || TAS.input.touch.b) {
       if (!icePressed) {
         tryCreateIce();
         icePressed = true;
-        inputCooldown = 8;
+        inputCooldown = moveCd;
       }
     } else {
       icePressed = false;
@@ -1261,9 +1828,34 @@ function draw(dt) {
   if (state === 'playing') {
     drawBackground();
     ctx.save();
+    // Screen shake
+    if (shakeTimer > 0) {
+      var sx = (Math.random() - 0.5) * shakeIntensity * 2;
+      var sy = (Math.random() - 0.5) * shakeIntensity * 2;
+      ctx.translate(sx, sy);
+    }
     TAS.fx.applyShake();
     drawGrid();
+    drawBonusItems();
+    // Draw enemies
+    for (var ei = 0; ei < enemies.length; ei++) {
+      drawEnemy(enemies[ei]);
+    }
     drawPlayer();
+    // INT hint arrow
+    if (hintTimer > 0 && hintDir !== 0) {
+      ctx.globalAlpha = hintTimer / 60;
+      ctx.fillStyle = '#4488ff';
+      var hx = player.x * TS + TS / 2 + hintDir * 20;
+      var hy = player.y * TS + TS / 2;
+      ctx.beginPath();
+      ctx.moveTo(hx + hintDir * 10, hy);
+      ctx.lineTo(hx - hintDir * 4, hy - 6);
+      ctx.lineTo(hx - hintDir * 4, hy + 6);
+      ctx.closePath();
+      ctx.fill();
+      ctx.globalAlpha = 1;
+    }
     TAS.particles.draw();
     ctx.restore();
     TAS.fx.drawFlash(GW, GH);

@@ -4,7 +4,7 @@
 
 **[0:00 — 0:08] Open with the hook**
 
-"This is Unrugable. Launch a token on Base for five dollars. Locked forever. Here's how it works."
+"This is Unrugable. Launch a token on Base for free. Locked forever. Here's how it works."
 
 ---
 
@@ -18,7 +18,7 @@
 
 **[0:18 — 0:28] Show the pools created**
 
-"Eight liquidity pools get created — 3 floor pools paired against AZUSD, BTC, and ETH, 3 MfT sell walls above the floor, and 2 CHAR carbon pools. All locked. No admin key can withdraw them. Ever."
+"Two locked liquidity pools get created — TOKEN/Money at 70% and TOKEN/Meme at 30% — plus your own reactor. All locked. No admin key can withdraw them. Ever. 50% of reactor output is burned, 50% goes to your wallet."
 
 *(show screen: pool list after launch)*
 
@@ -26,7 +26,7 @@
 
 **[0:28 — 0:38] Show the card shop**
 
-"Want more pairs? Open the card shop. Pick any token — BRETT, DEGEN, whatever you want. One click adds a permanent V3 pool. Five dollars per card. Unlimited."
+"Want more pairs? Open the card shop. Pick any token — BRETT, DEGEN, whatever you want. One click adds a permanent V3 pool. Unlimited."
 
 *(show screen: card shop with add-pair button)*
 
@@ -42,7 +42,7 @@
 
 **[0:50 — 1:00] Close**
 
-"All for five dollars. Locked forever. The withdraw function doesn't exist — that's not a feature, that's the whole point."
+"All for free — just gas. Locked forever. The withdraw function doesn't exist — that's not a feature, that's the whole point."
 
 "tasern.quest/launcher/"
 
@@ -58,7 +58,7 @@
 
 **Potential issues flagged:**
 
-1. **Pool count — RESOLVED (C71)** — Correct count is 8 pools per launch: 3 floor pools (TOKEN/AZUSD, TOKEN/cbBTC, TOKEN/WETH) + 3 MfT sell walls (1.1x, 2x, 5x) + 2 CHAR carbon pools (CHAR/cbBTC, CHAR/WETH). V5.2 removed the third CHAR/MfT pool. All marketing files updated. Script now reads "Eight liquidity pools."
+1. **Pool count — RESOLVED (V7)** — Correct count is 2 locked pools per launch: TOKEN/Money (70%) + TOKEN/Meme (30%), plus 1 reactor (50% burned / 50% to launcher). Script updated to V7 model.
 
 2. **0:08–0:18 (Launcher segment)** — "Pick a name, upload an image, write a description, hit Launch" plus showing the screen is tight at 10 seconds. If the screen recording shows a real wallet confirmation step, this segment needs 12–15 seconds. Consider trimming the voiceover to just "Name, image, launch." and letting the screen do the work.
 

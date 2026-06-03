@@ -7,7 +7,7 @@
 <style>
 * { margin: 0; padding: 0; box-sizing: border-box; }
 html, body { width: 100%; height: 100%; overflow: hidden; background: #050510; touch-action: none; }
-canvas { display: block; margin: 0 auto; }
+canvas { display: block; margin: 0 auto; image-rendering: pixelated; image-rendering: crisp-edges; }
 #back-link {
   position: fixed; bottom: 8px; left: 50%; transform: translateX(-50%);
   color: #666; font-family: monospace; font-size: 12px; text-decoration: none; z-index: 10;
@@ -26,6 +26,12 @@ canvas { display: block; margin: 0 auto; }
 "use strict";
 
 // ============================================================
+// NFT STAT BONUSES — player IS baseling
+// ============================================================
+var statB = { damage: 1, speed: 1, lives: 0, hpMult: 1, scoreMult: 1, cooldown: 1, luck: 1, str: 10, dex: 10, con: 10, int: 10, wis: 10, cha: 10, level: 0, color: '#44dd88', name: 'Baseling', icon: 'B' };
+try { if (window.NftLoader && NftLoader.getStatBonuses) statB = NftLoader.getStatBonuses(); } catch(e) { console.warn('NftLoader stat load failed:', e); }
+
+// ============================================================
 // CONSTANTS
 // ============================================================
 const GW = 480, GH = 320;
@@ -34,21 +40,44 @@ TAS.initCanvas(GW, GH);
 TAS.input.initTouch({ buttons: ['a', 'b'], labels: { a: 'FIRE', b: 'LOCK' } });
 
 const STAGE_COUNT = 7;
-const MAX_HP = 4;
-const MAX_LIVES = 3;
-const STAGE_LENGTH = 2400; // frames per stage before boss
+const BASE_MAX_HP = 4;
+const BASE_MAX_LIVES = 3;
+const STAGE_LENGTH = 2400;
 const ORB_ORBIT_RADIUS = 28;
 const ORB_ORBIT_SPEED = 0.04;
-const PLAYER_ACCEL = 0.35;
+const BASE_PLAYER_ACCEL = 0.35;
 const PLAYER_FRICTION = 0.92;
-const PLAYER_MAX_SPEED = 3.2;
-const FIRE_COOLDOWN = 8;
+const BASE_PLAYER_MAX_SPEED = 3.2;
+const BASE_FIRE_COOLDOWN = 8;
 const ORB_FIRE_COOLDOWN = 12;
-const COMBO_DECAY = 120; // frames before multiplier resets
+const COMBO_DECAY = 120;
 
+// --- Derived from statB (15+ stat references) ---
+// STR -> damage multiplier
+var DAMAGE_MULT = statB.damage;                                    // ref 1: STR
+// DEX -> movement speed
+var PLAYER_ACCEL = BASE_PLAYER_ACCEL * statB.speed;                // ref 2: DEX
+var PLAYER_MAX_SPEED = BASE_PLAYER_MAX_SPEED * statB.speed;        // ref 3: DEX
+// CON -> HP and lives
+var MAX_HP = Math.floor(BASE_MAX_HP * statB.hpMult);               // ref 4: CON
+var MAX_LIVES = BASE_MAX_LIVES + statB.lives;                      // ref 5: CON
+// INT -> score multiplier
+var SCORE_MULT = statB.scoreMult;                                  // ref 6: INT
+// WIS -> fire cooldown
+var FIRE_COOLDOWN = Math.max(3, Math.floor(BASE_FIRE_COOLDOWN * statB.cooldown)); // ref 7: WIS
+// CHA -> luck / drop rate
+var LUCK_MULT = statB.luck;                                        // ref 8: CHA
+
+// Player identity from NFT
+var PLAYER_COLOR = statB.color || '#44dd88';
+var PLAYER_NAME = statB.name || 'Baseling';
+var PLAYER_ICON = statB.icon || 'B';
+var PLAYER_LEVEL = statB.level || 0;
+
+// Tasern-themed stage names and colors
 const STAGE_NAMES = [
-  'Orbital Station', 'Atmospheric Entry', 'City Ruins',
-  'Underground Base', 'Fungal Hive', 'Ocean Platform', 'Mothership Core'
+  'Sporevoid Station', 'The Mycelium Descent', 'Ruins of Tasern',
+  'Undergrowth Warrens', 'Fungal Hive Core', 'Brine Flats', 'The Motherspore'
 ];
 const STAGE_COLORS = [
   { bg: '#050510', mid: '#0a0a2a', fg: '#111144', accent: '#4488ff' },
@@ -61,54 +90,123 @@ const STAGE_COLORS = [
 ];
 const SCROLL_SPEEDS = [1.2, 1.8, 1.0, 0.8, 1.0, 1.4, 1.6];
 
+// Tasern boss names
+const BOSS_NAMES = [
+  'Sporelord Zyx', 'Cloudrender', 'Ruin Titan', 'Rootmaw',
+  'Hivequeen Mycia', 'Brine Colossus', 'The Motherspore'
+];
+
+// ============================================================
+// SCORE POPUPS
+// ============================================================
+var scorePopups = [];
+
+function spawnScorePopup(x, y, value, color) {
+  scorePopups.push({ x: x, y: y, value: value, color: color || '#ffdd44', life: 60, maxLife: 60 });
+}
+
+function updateScorePopups(dt) {
+  var spd = dt * 60;
+  for (var i = scorePopups.length - 1; i >= 0; i--) {
+    var p = scorePopups[i];
+    p.y -= 0.8 * spd;
+    p.life -= spd;
+    if (p.life <= 0) scorePopups.splice(i, 1);
+  }
+}
+
+function drawScorePopups() {
+  for (var i = 0; i < scorePopups.length; i++) {
+    var p = scorePopups[i];
+    var alpha = Math.max(0, p.life / p.maxLife);
+    ctx.globalAlpha = alpha;
+    ctx.fillStyle = p.color;
+    ctx.font = 'bold 9px monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText('+' + p.value, p.x, p.y);
+    ctx.globalAlpha = 1;
+  }
+}
+
+// ============================================================
+// TUTORIAL OVERLAY
+// ============================================================
+var tutorialTimer = 0;
+var tutorialShown = false;
+
+function drawTutorial() {
+  if (tutorialShown || tutorialTimer > 300) { tutorialShown = true; return; }
+  var alpha = tutorialTimer < 30 ? tutorialTimer / 30 : tutorialTimer > 240 ? (300 - tutorialTimer) / 60 : 1;
+  ctx.globalAlpha = alpha * 0.85;
+  ctx.fillStyle = '#000';
+  ctx.fillRect(GW / 2 - 120, 50, 240, 100);
+  ctx.globalAlpha = alpha;
+  ctx.strokeStyle = PLAYER_COLOR;
+  ctx.lineWidth = 1;
+  ctx.strokeRect(GW / 2 - 120, 50, 240, 100);
+  ctx.fillStyle = '#fff';
+  ctx.font = 'bold 10px monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText('HOW TO PLAY', GW / 2, 68);
+  ctx.font = '8px monospace';
+  ctx.fillStyle = '#aaa';
+  ctx.fillText('ARROWS / WASD : Move', GW / 2, 84);
+  ctx.fillText('Z / SPACE : Fire main gun + orbs', GW / 2, 96);
+  ctx.fillText('X / SHIFT : Lock / Unlock orbs', GW / 2, 108);
+  ctx.fillText('Collect power-ups from defeated foes', GW / 2, 120);
+  ctx.fillStyle = '#666';
+  ctx.fillText('Destroy the Fungal Invasion!', GW / 2, 138);
+  ctx.globalAlpha = 1;
+}
+
 // ============================================================
 // GAME STATE
 // ============================================================
-let state = 'title';
-let score = 0;
-let highScore = TAS.score.load('scat_attack_hi');
-let lives = MAX_LIVES;
-let hp = MAX_HP;
-let stage = 0;
-let frame = 0;
-let stageFrame = 0;
-let combo = 1;
-let comboTimer = 0;
-let invincible = 0;
-let deathTimer = 0;
-let bossActive = false;
-let bossWarning = 0;
-let stageTransition = 0;
-let scrollX = 0;
+var state = 'title';
+var score = 0;
+var highScore = TAS.score.load('scat_attack_hi');
+var lives = MAX_LIVES;
+var hp = MAX_HP;
+var stage = 0;
+var frame = 0;
+var stageFrame = 0;
+var combo = 1;
+var comboTimer = 0;
+var invincible = 0;
+var deathTimer = 0;
+var bossActive = false;
+var bossWarning = 0;
+var stageTransition = 0;
+var scrollX = 0;
 
 // Player
-let player = { x: 60, y: GH / 2, vx: 0, vy: 0, w: 16, h: 12 };
-let mainGunLevel = 0; // 0=single, 1=double, 2=triple spread
-let fireTimer = 0;
-let orbFireTimer = 0;
+var player = { x: 60, y: GH / 2, vx: 0, vy: 0, w: 16, h: 12 };
+var mainGunLevel = 0;
+var fireTimer = 0;
+var orbFireTimer = 0;
 
 // Orbs
-let orbs = [
+var orbs = [
   { angle: 0, locked: false, lockAngle: 0, weaponType: 'normal' },
   { angle: Math.PI, locked: false, lockAngle: Math.PI, weaponType: 'normal' }
 ];
-let orbsLocked = false;
-let bPressedLast = false;
+var orbsLocked = false;
+var bPressedLast = false;
 
 // Bullets
-let playerBullets = [];
-let orbBullets = [];
-let enemyBullets = [];
+var playerBullets = [];
+var orbBullets = [];
+var enemyBullets = [];
 
 // Enemies & boss
-let enemies = [];
-let boss = null;
-let powerUps = [];
-let hazards = []; // stage hazards (walls, tentacles, etc.)
+var enemies = [];
+var boss = null;
+var powerUps = [];
+var hazards = [];
 
 // Background
-let starfield = TAS.bg.createStarfield(80, GW, GH);
-let bgElements = [];
+var starfield = TAS.bg.createStarfield(80, GW, GH);
+var bgElements = [];
 
 // ============================================================
 // HELPER FUNCTIONS
@@ -127,6 +225,24 @@ function spawnExplosion(x, y, color, count, speed) {
   TAS.particles.spawn(x, y, color, count || 8, speed || 3, { size: 2, sizeVar: 2 });
 }
 
+// Enhanced particle burst for Tasern theme
+function spawnSpores(x, y, count) {
+  var colors = ['#44ff44', '#88ff44', '#22cc44', '#66ff88'];
+  for (var i = 0; i < (count || 5); i++) {
+    var c = colors[Math.floor(Math.random() * colors.length)];
+    TAS.particles.spawn(x + TAS.math.randRange(-8, 8), y + TAS.math.randRange(-8, 8), c, 1, 0.5, { size: 2, sizeVar: 1 });
+  }
+}
+
+function spawnEmbers(x, y, count, color) {
+  for (var i = 0; i < (count || 4); i++) {
+    TAS.particles.spawn(x, y, color || '#ff8844', 1, TAS.math.randRange(1, 3), { size: 1, sizeVar: 1 });
+  }
+}
+
+// ============================================================
+// AUDIO (NES-style bleeps)
+// ============================================================
 function playShoot() { TAS.audio.playTone(800, 0.05, 'square', 0.06, 400); }
 function playOrbShoot() { TAS.audio.playTone(600, 0.04, 'triangle', 0.04, 300); }
 function playHit() { TAS.audio.playTone(200, 0.1, 'sawtooth', 0.08, 80); }
@@ -138,6 +254,41 @@ function playUnlock() { TAS.audio.playTone(600, 0.08, 'sine', 0.06, 1200); }
 function playDeath() { TAS.audio.playNoise(0.4, 0.12, 400); }
 function playLaser() { TAS.audio.playTone(1000, 0.12, 'sawtooth', 0.04, 2000); }
 function playBomb() { TAS.audio.playTone(100, 0.2, 'square', 0.07, 50); }
+function playCombo() { TAS.audio.playTone(660, 0.06, 'triangle', 0.05, 880); }
+function playBossDeath() { TAS.audio.playNoise(0.5, 0.15, 300); }
+function playHazardWarn() { TAS.audio.playTone(300, 0.15, 'square', 0.04, 200); }
+
+// ============================================================
+// NES-STYLE PIXEL DRAWING HELPERS
+// ============================================================
+function drawPixelRect(x, y, w, h, color) {
+  ctx.fillStyle = color;
+  ctx.fillRect(Math.floor(x), Math.floor(y), w, h);
+}
+
+function drawPixelCircle(x, y, r, color) {
+  ctx.fillStyle = color;
+  ctx.beginPath();
+  ctx.arc(Math.floor(x), Math.floor(y), r, 0, Math.PI * 2);
+  ctx.fill();
+}
+
+// Draw NES-style sprite from a simple pixel map (array of rows, each row is string of hex color indices)
+// palette is array of colors, '.' = transparent
+function drawPixelSprite(x, y, scale, rows, palette) {
+  var s = scale || 1;
+  for (var row = 0; row < rows.length; row++) {
+    for (var col = 0; col < rows[row].length; col++) {
+      var ch = rows[row][col];
+      if (ch === '.') continue;
+      var idx = parseInt(ch, 16);
+      if (idx < palette.length) {
+        ctx.fillStyle = palette[idx];
+        ctx.fillRect(Math.floor(x + col * s), Math.floor(y + row * s), s, s);
+      }
+    }
+  }
+}
 
 // ============================================================
 // INITIALIZATION
@@ -155,6 +306,9 @@ function startGame() {
   invincible = 60;
   mainGunLevel = 0;
   orbsLocked = false;
+  tutorialTimer = 0;
+  tutorialShown = false;
+  scorePopups = [];
   orbs = [
     { angle: 0, locked: false, lockAngle: 0, weaponType: 'normal' },
     { angle: Math.PI, locked: false, lockAngle: Math.PI, weaponType: 'normal' }
@@ -178,7 +332,7 @@ function startGame() {
 
 function generateBgElements() {
   bgElements = [];
-  for (let i = 0; i < 20; i++) {
+  for (var i = 0; i < 20; i++) {
     bgElements.push({
       x: Math.random() * GW * 3,
       y: Math.random() * GH,
@@ -190,47 +344,56 @@ function generateBgElements() {
 }
 
 // ============================================================
-// PLAYER DRAWING
+// PLAYER DRAWING (NES pixel-art baseling astronaut)
 // ============================================================
+// Baseling astronaut pixel sprite (16x12 grid at 1px per cell)
+var baselingSprite = [
+  '....0000....',
+  '...011110...',
+  '..01222110..',
+  '..01233110..',
+  '.0111111110.',
+  '.0444444440.',
+  '05044444050',
+  '05044444050',
+  '.0444444440.',
+  '..04444440..',
+  '...066660...',
+  '....0..0....'
+];
+
+function getBaselingPalette() {
+  return [
+    '#222',       // 0 = outline
+    '#4488cc',    // 1 = visor
+    '#88ccff',    // 2 = visor highlight
+    '#aaddff',    // 3 = visor bright
+    PLAYER_COLOR, // 4 = body (from NFT)
+    '#556677',    // 5 = jetpack
+    '#ff8800'     // 6 = flame
+  ];
+}
+
 function drawPlayer(px, py) {
-  const flash = invincible > 0 && Math.floor(invincible / 3) % 2 === 0;
+  var flash = invincible > 0 && Math.floor(invincible / 3) % 2 === 0;
   if (flash) return;
 
   ctx.save();
-  ctx.translate(px, py);
+  ctx.translate(Math.floor(px) - 6, Math.floor(py) - 6);
 
-  // Jetpack flame
-  const flicker = Math.sin(frame * 0.5) * 2;
-  ctx.fillStyle = '#ff8800';
-  ctx.fillRect(-12, -2, -4 - flicker, 4);
-  ctx.fillStyle = '#ffdd00';
-  ctx.fillRect(-12, -1, -2 - flicker * 0.5, 2);
+  // Jetpack flame (animated)
+  var flicker = Math.sin(frame * 0.5) * 2;
+  var flameLen = 4 + flicker;
+  drawPixelRect(-flameLen - 1, 3, flameLen, 3, '#ff8800');
+  drawPixelRect(-flameLen + 1, 4, flameLen - 2, 1, '#ffdd00');
 
-  // Body (baseling astronaut shape)
-  ctx.fillStyle = '#ddeeff';
-  ctx.beginPath();
-  ctx.ellipse(0, 0, 8, 6, 0, 0, Math.PI * 2);
-  ctx.fill();
-
-  // Helmet visor
-  ctx.fillStyle = '#4488cc';
-  ctx.beginPath();
-  ctx.arc(4, -1, 4, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.fillStyle = '#88ccff';
-  ctx.beginPath();
-  ctx.arc(5, -2, 2, 0, Math.PI * 2);
-  ctx.fill();
-
-  // Jetpack
-  ctx.fillStyle = '#556677';
-  ctx.fillRect(-8, -4, 4, 8);
-  ctx.fillStyle = '#778899';
-  ctx.fillRect(-7, -3, 2, 6);
+  // Draw baseling sprite
+  var pal = getBaselingPalette();
+  drawPixelSprite(0, 0, 1, baselingSprite, pal);
 
   // Gun barrel
-  ctx.fillStyle = '#aabbcc';
-  ctx.fillRect(6, -1, 6, 2);
+  drawPixelRect(11, 4, 5, 2, '#aabbcc');
+  drawPixelRect(15, 5, 2, 1, '#ffdd44');
 
   ctx.restore();
 }
@@ -239,8 +402,8 @@ function drawPlayer(px, py) {
 // ORB DRAWING & LOGIC
 // ============================================================
 function getOrbPosition(orbIdx) {
-  const orb = orbs[orbIdx];
-  const a = orbsLocked ? orb.lockAngle : orb.angle;
+  var orb = orbs[orbIdx];
+  var a = orbsLocked ? orb.lockAngle : orb.angle;
   return {
     x: player.x + Math.cos(a) * ORB_ORBIT_RADIUS,
     y: player.y + Math.sin(a) * ORB_ORBIT_RADIUS
@@ -248,51 +411,36 @@ function getOrbPosition(orbIdx) {
 }
 
 function drawOrb(x, y, weaponType, locked) {
-  // Outer glow
-  const glowColor = locked ? 'rgba(255,100,100,0.3)' : 'rgba(100,200,255,0.3)';
-  ctx.fillStyle = glowColor;
-  ctx.beginPath();
-  ctx.arc(x, y, 8, 0, Math.PI * 2);
-  ctx.fill();
+  var glowColor = locked ? 'rgba(255,100,100,0.3)' : 'rgba(100,200,255,0.3)';
+  drawPixelCircle(x, y, 8, glowColor);
 
-  // Core
-  let coreColor = '#88ddff';
+  var coreColor = '#88ddff';
   if (weaponType === 'laser') coreColor = '#ff4444';
   else if (weaponType === 'bomb') coreColor = '#ffaa22';
   else if (weaponType === 'wave') coreColor = '#44ff88';
 
-  ctx.fillStyle = coreColor;
-  ctx.beginPath();
-  ctx.arc(x, y, 5, 0, Math.PI * 2);
-  ctx.fill();
+  drawPixelCircle(x, y, 5, coreColor);
+  drawPixelCircle(x - 1, y - 1, 2, '#ffffff');
 
-  // Inner bright spot
-  ctx.fillStyle = '#ffffff';
-  ctx.beginPath();
-  ctx.arc(x - 1, y - 1, 2, 0, Math.PI * 2);
-  ctx.fill();
-
-  // Lock indicator
   if (locked) {
     ctx.strokeStyle = '#ff6666';
     ctx.lineWidth = 1;
     ctx.beginPath();
-    ctx.arc(x, y, 7, 0, Math.PI * 2);
+    ctx.arc(Math.floor(x), Math.floor(y), 7, 0, Math.PI * 2);
     ctx.stroke();
   }
 
-  // Connection line to player
   ctx.strokeStyle = locked ? 'rgba(255,100,100,0.2)' : 'rgba(100,200,255,0.2)';
   ctx.lineWidth = 1;
   ctx.beginPath();
-  ctx.moveTo(player.x, player.y);
-  ctx.lineTo(x, y);
+  ctx.moveTo(Math.floor(player.x), Math.floor(player.y));
+  ctx.lineTo(Math.floor(x), Math.floor(y));
   ctx.stroke();
 }
 
 function updateOrbs(dt) {
-  const spd = dt * 60;
-  for (let i = 0; i < orbs.length; i++) {
+  var spd = dt * 60;
+  for (var i = 0; i < orbs.length; i++) {
     if (!orbsLocked) {
       orbs[i].angle += ORB_ORBIT_SPEED * spd;
       orbs[i].lockAngle = orbs[i].angle;
@@ -308,41 +456,41 @@ function fireMainGun() {
   fireTimer = FIRE_COOLDOWN;
   playShoot();
 
-  const bx = player.x + 10;
-  const by = player.y;
+  var bx = player.x + 10;
+  var by = player.y;
+  var dmg = Math.ceil(1 * DAMAGE_MULT);                              // ref 9: STR damage
 
   if (mainGunLevel === 0) {
-    playerBullets.push({ x: bx, y: by, vx: 7, vy: 0, w: 8, h: 2, dmg: 1, color: '#ffdd44' });
+    playerBullets.push({ x: bx, y: by, vx: 7, vy: 0, w: 8, h: 2, dmg: dmg, color: '#ffdd44' });
   } else if (mainGunLevel === 1) {
-    playerBullets.push({ x: bx, y: by - 3, vx: 7, vy: 0, w: 8, h: 2, dmg: 1, color: '#ffdd44' });
-    playerBullets.push({ x: bx, y: by + 3, vx: 7, vy: 0, w: 8, h: 2, dmg: 1, color: '#ffdd44' });
+    playerBullets.push({ x: bx, y: by - 3, vx: 7, vy: 0, w: 8, h: 2, dmg: dmg, color: '#ffdd44' });
+    playerBullets.push({ x: bx, y: by + 3, vx: 7, vy: 0, w: 8, h: 2, dmg: dmg, color: '#ffdd44' });
   } else {
-    playerBullets.push({ x: bx, y: by, vx: 7, vy: 0, w: 8, h: 2, dmg: 1, color: '#ffdd44' });
-    playerBullets.push({ x: bx, y: by - 2, vx: 6.8, vy: -1.2, w: 6, h: 2, dmg: 1, color: '#ffdd44' });
-    playerBullets.push({ x: bx, y: by + 2, vx: 6.8, vy: 1.2, w: 6, h: 2, dmg: 1, color: '#ffdd44' });
+    playerBullets.push({ x: bx, y: by, vx: 7, vy: 0, w: 8, h: 2, dmg: dmg, color: '#ffdd44' });
+    playerBullets.push({ x: bx, y: by - 2, vx: 6.8, vy: -1.2, w: 6, h: 2, dmg: dmg, color: '#ffdd44' });
+    playerBullets.push({ x: bx, y: by + 2, vx: 6.8, vy: 1.2, w: 6, h: 2, dmg: dmg, color: '#ffdd44' });
   }
 }
 
 function fireOrbs() {
   if (orbFireTimer > 0) return;
-  orbFireTimer = ORB_FIRE_COOLDOWN;
+  orbFireTimer = Math.max(6, Math.floor(ORB_FIRE_COOLDOWN * statB.cooldown)); // ref 10: WIS cooldown
 
-  for (let i = 0; i < orbs.length; i++) {
-    const pos = getOrbPosition(i);
-    const orb = orbs[i];
-    const a = orbsLocked ? orb.lockAngle : orb.angle;
-
-    // Fire direction: when locked, fire outward from lock angle; when orbiting, fire forward
-    let fireAngle = orbsLocked ? a : 0;
+  for (var i = 0; i < orbs.length; i++) {
+    var pos = getOrbPosition(i);
+    var orb = orbs[i];
+    var a = orbsLocked ? orb.lockAngle : orb.angle;
+    var fireAngle = orbsLocked ? a : 0;
+    var orbDmg = Math.ceil(1 * DAMAGE_MULT);                          // ref 11: STR orb damage
 
     if (orb.weaponType === 'normal') {
       playOrbShoot();
-      const speed = 6;
+      var speed = 6;
       orbBullets.push({
         x: pos.x, y: pos.y,
         vx: Math.cos(fireAngle) * speed,
         vy: Math.sin(fireAngle) * speed,
-        w: 6, h: 3, dmg: 1, life: 80,
+        w: 6, h: 3, dmg: orbDmg, life: 80,
         type: 'normal', color: '#88ddff'
       });
     } else if (orb.weaponType === 'laser') {
@@ -351,7 +499,7 @@ function fireOrbs() {
         x: pos.x, y: pos.y,
         vx: Math.cos(fireAngle) * 12,
         vy: Math.sin(fireAngle) * 12,
-        w: 20, h: 3, dmg: 2, life: 30,
+        w: 20, h: 3, dmg: Math.ceil(2 * DAMAGE_MULT), life: 30,       // ref 12: STR laser
         type: 'laser', color: '#ff4444', pierce: true
       });
     } else if (orb.weaponType === 'bomb') {
@@ -360,7 +508,7 @@ function fireOrbs() {
         x: pos.x, y: pos.y,
         vx: Math.cos(fireAngle) * 4,
         vy: Math.sin(fireAngle) * 4 - 1,
-        w: 6, h: 6, dmg: 3, life: 60,
+        w: 6, h: 6, dmg: Math.ceil(3 * DAMAGE_MULT), life: 60,        // ref 13: STR bomb
         type: 'bomb', color: '#ffaa22', gravity: 0.08
       });
     } else if (orb.weaponType === 'wave') {
@@ -368,7 +516,7 @@ function fireOrbs() {
         x: pos.x, y: pos.y,
         vx: Math.cos(fireAngle) * 5,
         vy: Math.sin(fireAngle) * 5,
-        w: 6, h: 6, dmg: 1, life: 90,
+        w: 6, h: 6, dmg: orbDmg, life: 90,
         type: 'wave', color: '#44ff88',
         waveAmp: 3, waveFreq: 0.15, wavePhase: 0, baseVy: Math.sin(fireAngle) * 5
       });
@@ -377,11 +525,10 @@ function fireOrbs() {
 }
 
 function updateBullets(dt) {
-  const spd = dt * 60;
+  var spd = dt * 60;
 
-  // Player bullets
-  for (let i = playerBullets.length - 1; i >= 0; i--) {
-    const b = playerBullets[i];
+  for (var i = playerBullets.length - 1; i >= 0; i--) {
+    var b = playerBullets[i];
     b.x += b.vx * spd;
     b.y += b.vy * spd;
     if (b.x > GW + 20 || b.x < -20 || b.y < -20 || b.y > GH + 20) {
@@ -389,9 +536,8 @@ function updateBullets(dt) {
     }
   }
 
-  // Orb bullets
-  for (let i = orbBullets.length - 1; i >= 0; i--) {
-    const b = orbBullets[i];
+  for (var i = orbBullets.length - 1; i >= 0; i--) {
+    var b = orbBullets[i];
     b.x += b.vx * spd;
     b.y += b.vy * spd;
     if (b.gravity) b.vy += b.gravity * spd;
@@ -403,10 +549,10 @@ function updateBullets(dt) {
     if (b.life <= 0 || b.x > GW + 20 || b.x < -20 || b.y < -20 || b.y > GH + 20) {
       if (b.type === 'bomb') {
         spawnExplosion(b.x, b.y, '#ffaa22', 12, 4);
-        // Bomb splash damage
-        for (let e = enemies.length - 1; e >= 0; e--) {
+        TAS.fx.shake(3, 0.92);
+        for (var e = enemies.length - 1; e >= 0; e--) {
           if (TAS.math.dist(b.x, b.y, enemies[e].x, enemies[e].y) < 30) {
-            damageEnemy(e, 2);
+            damageEnemy(e, Math.ceil(2 * DAMAGE_MULT));               // ref 14: STR splash
           }
         }
       }
@@ -414,9 +560,8 @@ function updateBullets(dt) {
     }
   }
 
-  // Enemy bullets
-  for (let i = enemyBullets.length - 1; i >= 0; i--) {
-    const b = enemyBullets[i];
+  for (var i = enemyBullets.length - 1; i >= 0; i--) {
+    var b = enemyBullets[i];
     b.x += b.vx * spd;
     b.y += b.vy * spd;
     if (b.x > GW + 20 || b.x < -40 || b.y < -20 || b.y > GH + 20) {
@@ -426,67 +571,46 @@ function updateBullets(dt) {
 }
 
 function drawBullets() {
-  // Player bullets
-  for (const b of playerBullets) {
-    ctx.fillStyle = b.color;
-    ctx.fillRect(b.x - b.w / 2, b.y - b.h / 2, b.w, b.h);
-    ctx.fillStyle = '#fff';
-    ctx.fillRect(b.x - b.w / 2 + 1, b.y - b.h / 2, b.w - 3, 1);
+  for (var i = 0; i < playerBullets.length; i++) {
+    var b = playerBullets[i];
+    drawPixelRect(b.x - b.w / 2, b.y - b.h / 2, b.w, b.h, b.color);
+    drawPixelRect(b.x - b.w / 2 + 1, b.y - b.h / 2, b.w - 3, 1, '#fff');
   }
 
-  // Orb bullets
-  for (const b of orbBullets) {
-    ctx.fillStyle = b.color;
+  for (var i = 0; i < orbBullets.length; i++) {
+    var b = orbBullets[i];
     if (b.type === 'laser') {
       ctx.globalAlpha = 0.8;
-      ctx.fillRect(b.x - b.w / 2, b.y - b.h / 2, b.w, b.h);
-      ctx.fillStyle = '#fff';
-      ctx.fillRect(b.x - b.w / 2, b.y, b.w, 1);
+      drawPixelRect(b.x - b.w / 2, b.y - b.h / 2, b.w, b.h, b.color);
+      drawPixelRect(b.x - b.w / 2, b.y, b.w, 1, '#fff');
       ctx.globalAlpha = 1;
     } else if (b.type === 'bomb') {
-      ctx.beginPath();
-      ctx.arc(b.x, b.y, b.w / 2, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.fillStyle = '#ffdd00';
-      ctx.beginPath();
-      ctx.arc(b.x - 1, b.y - 1, 2, 0, Math.PI * 2);
-      ctx.fill();
+      drawPixelCircle(b.x, b.y, b.w / 2, b.color);
+      drawPixelCircle(b.x - 1, b.y - 1, 2, '#ffdd00');
     } else if (b.type === 'wave') {
-      ctx.beginPath();
-      ctx.arc(b.x, b.y, 4, 0, Math.PI * 2);
-      ctx.fill();
+      drawPixelCircle(b.x, b.y, 4, b.color);
       ctx.globalAlpha = 0.4;
-      ctx.beginPath();
-      ctx.arc(b.x, b.y, 6, 0, Math.PI * 2);
-      ctx.fill();
+      drawPixelCircle(b.x, b.y, 6, b.color);
       ctx.globalAlpha = 1;
     } else {
-      ctx.beginPath();
-      ctx.arc(b.x, b.y, 3, 0, Math.PI * 2);
-      ctx.fill();
+      drawPixelCircle(b.x, b.y, 3, b.color);
     }
   }
 
-  // Enemy bullets
-  for (const b of enemyBullets) {
-    ctx.fillStyle = b.color || '#ff4466';
-    ctx.beginPath();
-    ctx.arc(b.x, b.y, b.r || 3, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.fillStyle = '#fff';
-    ctx.beginPath();
-    ctx.arc(b.x, b.y, 1, 0, Math.PI * 2);
-    ctx.fill();
+  for (var i = 0; i < enemyBullets.length; i++) {
+    var b = enemyBullets[i];
+    drawPixelCircle(b.x, b.y, b.r || 3, b.color || '#ff4466');
+    drawPixelCircle(b.x, b.y, 1, '#fff');
   }
 }
 
 // ============================================================
-// ENEMY SYSTEM
+// ENEMY SYSTEM (Tasern-themed creatures)
 // ============================================================
 function spawnEnemy(type, x, y, opts) {
   opts = opts || {};
-  const e = {
-    type, x, y,
+  var e = {
+    type: type, x: x, y: y,
     vx: opts.vx || -2, vy: opts.vy || 0,
     hp: opts.hp || 2, maxHp: opts.hp || 2,
     w: opts.w || 16, h: opts.h || 12,
@@ -502,7 +626,7 @@ function spawnEnemy(type, x, y, opts) {
 }
 
 function damageEnemy(idx, dmg) {
-  const e = enemies[idx];
+  var e = enemies[idx];
   e.hp -= dmg;
   TAS.particles.spawn(e.x, e.y, '#fff', 3, 2);
 
@@ -512,15 +636,19 @@ function damageEnemy(idx, dmg) {
 }
 
 function killEnemy(idx) {
-  const e = enemies[idx];
+  var e = enemies[idx];
   spawnExplosion(e.x, e.y, e.color, 10, 3);
+  spawnSpores(e.x, e.y, 3);
   playExplosion();
-  score += e.score * combo;
+  var points = Math.floor(e.score * combo * SCORE_MULT);               // ref 15: INT score
+  score += points;
+  spawnScorePopup(e.x, e.y - 10, points, combo > 1 ? '#ffaa00' : '#ffdd44');
   comboTimer = COMBO_DECAY;
-  combo = Math.min(combo + 1, 8);
+  if (combo < 8) { combo++; playCombo(); }
 
-  // Drop power-up chance
-  if (Math.random() < 0.12) {
+  // Drop power-up with CHA luck                                       // ref 16: CHA drops
+  var dropChance = 0.12 * LUCK_MULT;
+  if (Math.random() < dropChance) {
     spawnPowerUp(e.x, e.y);
   }
 
@@ -528,14 +656,14 @@ function killEnemy(idx) {
 }
 
 function updateEnemies(dt) {
-  const spd = dt * 60;
+  var spd = dt * 60;
 
-  for (let i = enemies.length - 1; i >= 0; i--) {
-    const e = enemies[i];
+  for (var i = enemies.length - 1; i >= 0; i--) {
+    var e = enemies[i];
     e.timer += spd;
 
     switch (e.type) {
-      case 'drone':
+      case 'spore_drone':
         e.x += e.vx * spd;
         e.y += Math.sin(e.timer * 0.05) * 0.8 * spd;
         if (e.timer % e.fireRate < spd && Math.random() < 0.3) {
@@ -543,7 +671,7 @@ function updateEnemies(dt) {
         }
         break;
 
-      case 'swooper':
+      case 'mycelium_swooper':
         e.x += e.vx * spd;
         e.y += Math.sin(e.timer * 0.03) * 2 * spd;
         break;
@@ -552,12 +680,12 @@ function updateEnemies(dt) {
       case 'turret_ceil':
         e.x += (SCROLL_SPEEDS[stage] * -0.5) * spd;
         if (e.timer % e.fireRate < spd) {
-          const angle = TAS.math.angle(e.x, e.y, player.x, player.y);
+          var angle = TAS.math.angle(e.x, e.y, player.x, player.y);
           enemyShoot(e, Math.cos(angle) * 3, Math.sin(angle) * 3);
         }
         break;
 
-      case 'turret_wall':
+      case 'fungal_turret':
         e.x += (SCROLL_SPEEDS[stage] * -0.3) * spd;
         if (e.timer % e.fireRate < spd) {
           enemyShoot(e, -3, 0);
@@ -566,15 +694,15 @@ function updateEnemies(dt) {
         }
         break;
 
-      case 'snake_head':
+      case 'tendril_head':
         e.x += e.vx * spd;
         e.y += Math.sin(e.timer * 0.04) * 1.5 * spd;
         if (e.chain) {
-          for (let c = 0; c < e.chain.length; c++) {
-            const prev = c === 0 ? e : e.chain[c - 1];
-            const seg = e.chain[c];
-            const dx = prev.x - seg.x, dy = prev.y - seg.y;
-            const d = Math.sqrt(dx * dx + dy * dy);
+          for (var c = 0; c < e.chain.length; c++) {
+            var prev = c === 0 ? e : e.chain[c - 1];
+            var seg = e.chain[c];
+            var dx = prev.x - seg.x, dy = prev.y - seg.y;
+            var d = Math.sqrt(dx * dx + dy * dy);
             if (d > 12) {
               seg.x += (dx / d) * (d - 12) * 0.5 * spd;
               seg.y += (dy / d) * (d - 12) * 0.5 * spd;
@@ -583,7 +711,7 @@ function updateEnemies(dt) {
         }
         break;
 
-      case 'shield_carrier':
+      case 'shroom_shield':
         e.x += e.vx * spd;
         e.phase += 0.02 * spd;
         if (e.timer % (e.fireRate * 2) < spd) {
@@ -591,10 +719,11 @@ function updateEnemies(dt) {
         }
         break;
 
-      case 'bomber':
+      case 'sporebomber':
         e.x += e.vx * spd;
         if (e.timer % e.fireRate < spd) {
           enemyBullets.push({ x: e.x, y: e.y + 8, vx: 0, vy: 3, r: 5, color: '#ff8800' });
+          spawnSpores(e.x, e.y + 8, 2);
         }
         break;
 
@@ -606,27 +735,53 @@ function updateEnemies(dt) {
         }
         break;
 
-      case 'submarine':
+      case 'brinewalker':
         e.x += e.vx * spd;
         e.y += Math.sin(e.timer * 0.015) * 0.8 * spd;
         if (e.timer % e.fireRate < spd) {
-          const angle = TAS.math.angle(e.x, e.y, player.x, player.y);
+          var angle = TAS.math.angle(e.x, e.y, player.x, player.y);
           enemyBullets.push({ x: e.x, y: e.y, vx: Math.cos(angle) * 3.5, vy: Math.sin(angle) * 3.5, r: 4, color: '#44ddff' });
         }
         break;
 
-      case 'mini_boss':
+      case 'rootmaw':
         e.x += Math.sin(e.timer * 0.015) * 0.8 * spd;
         e.y += Math.sin(e.timer * 0.025) * 1.2 * spd;
         if (e.x > GW - 80) e.x = GW - 80;
         if (e.timer % 30 < spd) {
-          const angle = TAS.math.angle(e.x, e.y, player.x, player.y);
+          var angle = TAS.math.angle(e.x, e.y, player.x, player.y);
           enemyShoot(e, Math.cos(angle) * 4, Math.sin(angle) * 4);
+        }
+        break;
+
+      // Tasern unique enemies
+      case 'sporeling':
+        e.x += e.vx * spd;
+        e.y += Math.cos(e.timer * 0.06) * 0.6 * spd;
+        // Splits on death (handled in killEnemy override)
+        break;
+
+      case 'toxin_jelly':
+        e.x += e.vx * 0.7 * spd;
+        e.y += Math.sin(e.timer * 0.025) * 1.5 * spd;
+        // Leaves trail hazards
+        if (e.timer % 50 < spd) {
+          hazards.push({ x: e.x, y: e.y, r: 10, life: 180, color: '#88ff00', type: 'toxin' });
+        }
+        break;
+
+      case 'fungal_eye':
+        // Hovers and tracks player, fires aimed shot
+        var trackSpeed = 0.015;
+        e.y += (player.y - e.y) * trackSpeed * spd;
+        e.x += e.vx * 0.5 * spd;
+        if (e.timer % e.fireRate < spd) {
+          var angle = TAS.math.angle(e.x, e.y, player.x, player.y);
+          enemyBullets.push({ x: e.x, y: e.y, vx: Math.cos(angle) * 4, vy: Math.sin(angle) * 4, r: 3, color: '#ff00ff' });
         }
         break;
     }
 
-    // Remove if off-screen left
     if (e.x < -40) {
       enemies.splice(i, 1);
     }
@@ -634,127 +789,172 @@ function updateEnemies(dt) {
 }
 
 function enemyShoot(e, vx, vy) {
-  enemyBullets.push({ x: e.x, y: e.y, vx, vy, r: 3, color: '#ff4466' });
+  enemyBullets.push({ x: e.x, y: e.y, vx: vx, vy: vy, r: 3, color: '#ff4466' });
 }
 
+// ============================================================
+// ENEMY DRAWING (NES pixel art style)
+// ============================================================
+// Spore drone sprite
+var sporeDroneSprite = [
+  '..0110..',
+  '.012210.',
+  '01233210',
+  '01233210',
+  '.012210.',
+  '..0110..'
+];
+var sporeDronePal = ['#222', '#446644', '#66aa66', '#88ff44'];
+
+// Mycelium swooper sprite
+var swooperSprite = [
+  '0.......',
+  '01......',
+  '0120....',
+  '012210..',
+  '01233210',
+  '012210..',
+  '0120....',
+  '01......',
+  '0.......'
+];
+var swooperPal = ['#222', '#884422', '#ffaa44', '#ffdd88'];
+
+// Fungal eye sprite
+var fungalEyeSprite = [
+  '..0000..',
+  '.011110.',
+  '01222210',
+  '01233210',
+  '01222210',
+  '.011110.',
+  '..0000..'
+];
+var fungalEyePal = ['#222', '#662266', '#aa44aa', '#ff00ff'];
+
 function drawEnemies() {
-  for (const e of enemies) {
+  for (var ei = 0; ei < enemies.length; ei++) {
+    var e = enemies[ei];
     ctx.save();
-    ctx.translate(e.x, e.y);
+    ctx.translate(Math.floor(e.x), Math.floor(e.y));
 
     switch (e.type) {
-      case 'drone':
-        ctx.fillStyle = e.color;
-        ctx.fillRect(-8, -6, 16, 12);
-        ctx.fillStyle = '#ff4444';
-        ctx.beginPath();
-        ctx.arc(0, 0, 3, 0, Math.PI * 2);
-        ctx.fill();
-        // Wings
-        ctx.fillStyle = e.color;
-        ctx.fillRect(-6, -10, 4, 4);
-        ctx.fillRect(-6, 6, 4, 4);
+      case 'spore_drone':
+        drawPixelSprite(-4, -3, 1, sporeDroneSprite, sporeDronePal);
+        // Antennae
+        drawPixelRect(-2, -5, 1, 2, '#88ff44');
+        drawPixelRect(2, -5, 1, 2, '#88ff44');
         break;
 
-      case 'swooper':
-        ctx.fillStyle = e.color;
-        ctx.beginPath();
-        ctx.moveTo(-10, 0);
-        ctx.lineTo(8, -6);
-        ctx.lineTo(8, 6);
-        ctx.closePath();
-        ctx.fill();
+      case 'mycelium_swooper':
+        drawPixelSprite(-4, -4, 1, swooperSprite, swooperPal);
         break;
 
       case 'turret_floor':
       case 'turret_ceil':
-        ctx.fillStyle = '#666';
-        ctx.fillRect(-8, -8, 16, 16);
-        ctx.fillStyle = '#ff4444';
-        const tAngle = TAS.math.angle(e.x, e.y, player.x, player.y);
+        drawPixelRect(-8, -8, 16, 16, '#555');
+        drawPixelRect(-6, -6, 12, 12, '#777');
+        var tAngle = TAS.math.angle(e.x, e.y, player.x, player.y);
         ctx.save();
         ctx.rotate(tAngle);
-        ctx.fillRect(0, -2, 12, 4);
+        drawPixelRect(0, -2, 12, 4, '#ff4444');
+        drawPixelRect(10, -1, 3, 2, '#ff8844');
         ctx.restore();
         break;
 
-      case 'turret_wall':
-        ctx.fillStyle = '#888';
-        ctx.fillRect(-6, -10, 12, 20);
-        ctx.fillStyle = '#ff6644';
-        ctx.fillRect(-10, -3, 8, 6);
+      case 'fungal_turret':
+        drawPixelRect(-6, -10, 12, 20, '#556633');
+        drawPixelRect(-10, -3, 8, 6, '#88aa44');
+        // Mushroom cap on top
+        drawPixelCircle(0, -12, 6, '#aa6633');
+        drawPixelCircle(0, -13, 4, '#cc8844');
         break;
 
-      case 'snake_head':
-        ctx.fillStyle = '#88ff44';
-        ctx.beginPath();
-        ctx.arc(0, 0, 8, 0, Math.PI * 2);
-        ctx.fill();
-        ctx.fillStyle = '#ff0000';
-        ctx.beginPath();
-        ctx.arc(3, -2, 2, 0, Math.PI * 2);
-        ctx.fill();
+      case 'tendril_head':
+        drawPixelCircle(0, 0, 8, '#88ff44');
+        drawPixelCircle(3, -2, 2, '#ff0000');
+        drawPixelCircle(-2, -2, 2, '#ff0000');
         // Draw chain
         if (e.chain) {
-          for (let c = 0; c < e.chain.length; c++) {
-            const seg = e.chain[c];
-            ctx.fillStyle = '#66cc33';
-            ctx.beginPath();
-            ctx.arc(seg.x - e.x, seg.y - e.y, 6 - c * 0.5, 0, Math.PI * 2);
-            ctx.fill();
+          for (var c = 0; c < e.chain.length; c++) {
+            var seg = e.chain[c];
+            drawPixelCircle(seg.x - e.x, seg.y - e.y, 6 - c * 0.5, '#66cc33');
           }
         }
         break;
 
-      case 'shield_carrier':
-        ctx.fillStyle = e.color;
-        ctx.fillRect(-10, -8, 20, 16);
-        // Shield (front)
-        ctx.fillStyle = 'rgba(100,200,255,0.5)';
-        ctx.fillRect(-14, -12, 4, 24);
+      case 'shroom_shield':
+        // Mushroom body
+        drawPixelRect(-8, -4, 16, 10, e.color);
+        drawPixelRect(-6, -2, 12, 6, '#336688');
+        // Shield cap (front)
+        drawPixelRect(-12, -10, 6, 22, 'rgba(100,200,255,0.5)');
+        drawPixelRect(-11, -8, 4, 18, 'rgba(150,220,255,0.4)');
+        // Cap on top
+        drawPixelCircle(0, -8, 8, '#445588');
         break;
 
-      case 'bomber':
-        ctx.fillStyle = e.color;
-        ctx.fillRect(-12, -6, 24, 12);
-        ctx.fillStyle = '#ffaa00';
-        ctx.fillRect(-4, 6, 8, 4);
+      case 'sporebomber':
+        drawPixelRect(-12, -6, 24, 12, e.color);
+        drawPixelRect(-10, -4, 20, 8, '#aa8844');
+        drawPixelRect(-4, 6, 8, 4, '#ffaa00');
+        // Spore sac
+        drawPixelCircle(0, 8, 3, '#88ff00');
         break;
 
       case 'spore_cloud':
         ctx.globalAlpha = 0.6;
-        ctx.fillStyle = '#44ff44';
-        ctx.beginPath();
-        ctx.arc(0, 0, e.w / 2, 0, Math.PI * 2);
-        ctx.fill();
+        drawPixelCircle(0, 0, e.w / 2, '#44ff44');
+        ctx.globalAlpha = 0.3;
+        drawPixelCircle(-3, 2, e.w / 3, '#88ff44');
+        drawPixelCircle(4, -1, e.w / 3, '#66ff66');
         ctx.globalAlpha = 1;
         break;
 
-      case 'submarine':
-        ctx.fillStyle = '#335566';
-        ctx.fillRect(-14, -6, 28, 12);
-        ctx.fillStyle = '#557788';
-        ctx.beginPath();
-        ctx.arc(-6, -6, 4, Math.PI, 0);
-        ctx.fill();
+      case 'brinewalker':
+        drawPixelRect(-14, -6, 28, 12, '#335566');
+        drawPixelRect(-12, -4, 24, 8, '#446677');
+        drawPixelCircle(-6, -8, 4, '#557788');
+        // Periscope
+        drawPixelRect(-6, -12, 2, 4, '#557788');
         break;
 
-      case 'mini_boss':
-        ctx.fillStyle = e.color;
-        ctx.fillRect(-16, -12, 32, 24);
-        ctx.fillStyle = '#ff4444';
-        ctx.beginPath();
-        ctx.arc(-8, 0, 4, 0, Math.PI * 2);
-        ctx.fill();
-        ctx.beginPath();
-        ctx.arc(8, 0, 4, 0, Math.PI * 2);
-        ctx.fill();
+      case 'rootmaw':
+        drawPixelRect(-16, -12, 32, 24, e.color);
+        drawPixelRect(-14, -10, 28, 20, '#334433');
+        // Mouth
+        drawPixelRect(-10, -2, 4, 4, '#ff4444');
+        drawPixelRect(6, -2, 4, 4, '#ff4444');
+        // Teeth
+        drawPixelRect(-8, 2, 2, 3, '#fff');
+        drawPixelRect(-4, 2, 2, 3, '#fff');
+        drawPixelRect(4, 2, 2, 3, '#fff');
+        drawPixelRect(8, 2, 2, 3, '#fff');
         // Health bar
-        const hpRatio = e.hp / e.maxHp;
-        ctx.fillStyle = '#333';
-        ctx.fillRect(-16, -16, 32, 3);
-        ctx.fillStyle = hpRatio > 0.5 ? '#44ff44' : '#ff4444';
-        ctx.fillRect(-16, -16, 32 * hpRatio, 3);
+        var hpRatio = e.hp / e.maxHp;
+        drawPixelRect(-16, -16, 32, 3, '#333');
+        drawPixelRect(-16, -16, Math.floor(32 * hpRatio), 3, hpRatio > 0.5 ? '#44ff44' : '#ff4444');
+        break;
+
+      case 'sporeling':
+        drawPixelCircle(0, 0, 5, '#aaff44');
+        drawPixelCircle(0, -3, 3, '#ccff88');
+        drawPixelRect(-1, 3, 2, 3, '#667744');
+        break;
+
+      case 'toxin_jelly':
+        ctx.globalAlpha = 0.7;
+        drawPixelCircle(0, 0, 8, '#88ff00');
+        ctx.globalAlpha = 0.4;
+        drawPixelCircle(0, -2, 5, '#bbff44');
+        ctx.globalAlpha = 1;
+        // Eyes
+        drawPixelCircle(-3, -1, 2, '#000');
+        drawPixelCircle(3, -1, 2, '#000');
+        break;
+
+      case 'fungal_eye':
+        drawPixelSprite(-4, -3, 1, fungalEyeSprite, fungalEyePal);
         break;
     }
 
@@ -763,11 +963,47 @@ function drawEnemies() {
 }
 
 // ============================================================
-// BOSS SYSTEM
+// HAZARD SYSTEM
+// ============================================================
+function updateHazards(dt) {
+  var spd = dt * 60;
+  for (var i = hazards.length - 1; i >= 0; i--) {
+    var h = hazards[i];
+    h.life -= spd;
+    h.x -= SCROLL_SPEEDS[stage] * 0.3 * spd;
+    if (h.life <= 0 || h.x < -20) {
+      hazards.splice(i, 1);
+      continue;
+    }
+    // Toxin hazard damages player
+    if (h.type === 'toxin' && invincible <= 0) {
+      if (TAS.math.dist(player.x, player.y, h.x, h.y) < h.r + 6) {
+        playerHit();
+      }
+    }
+  }
+}
+
+function drawHazards() {
+  for (var i = 0; i < hazards.length; i++) {
+    var h = hazards[i];
+    var alpha = Math.min(1, h.life / 60);
+    ctx.globalAlpha = alpha * 0.4;
+    drawPixelCircle(h.x, h.y, h.r, h.color);
+    ctx.globalAlpha = alpha * 0.2;
+    drawPixelCircle(h.x, h.y, h.r + 3, h.color);
+    ctx.globalAlpha = 1;
+  }
+}
+
+// ============================================================
+// BOSS SYSTEM (Tasern themed)
 // ============================================================
 function spawnBoss() {
   bossActive = true;
-  const bossHp = 40 + stage * 15;
+  // CON affects effective boss HP scaling (lower CON = slightly less boss HP)
+  var conScale = 0.8 + (statB.con / 50);                              // ref 17: CON boss scaling
+  var bossHp = Math.floor((40 + stage * 15) * conScale);
   boss = {
     x: GW + 40, y: GH / 2,
     targetX: GW - 60, targetY: GH / 2,
@@ -776,12 +1012,12 @@ function spawnBoss() {
     timer: 0, phase: 0, pattern: 0,
     score: 5000 + stage * 2000,
     color: STAGE_COLORS[stage].accent,
+    name: BOSS_NAMES[stage],
     parts: [],
     defeated: false
   };
 
-  // Boss parts (destructible segments)
-  for (let i = 0; i < 2 + stage; i++) {
+  for (var i = 0; i < 2 + stage; i++) {
     boss.parts.push({
       x: 0, y: 0, angle: (i / (2 + stage)) * Math.PI * 2,
       hp: 8, maxHp: 8, radius: 20 + stage * 3,
@@ -792,36 +1028,33 @@ function spawnBoss() {
 
 function updateBoss(dt) {
   if (!boss || boss.defeated) return;
-  const spd = dt * 60;
+  var spd = dt * 60;
   boss.timer += spd;
 
-  // Move to position
   boss.x += (boss.targetX - boss.x) * 0.02 * spd;
   boss.y += (boss.targetY - boss.y) * 0.02 * spd;
-
-  // Movement pattern
   boss.targetY = GH / 2 + Math.sin(boss.timer * 0.015) * 80;
 
-  // Attack patterns based on phase
-  const phaseTime = 180;
+  var phaseTime = 180;
   boss.phase = Math.floor(boss.timer / phaseTime) % 4;
 
   switch (boss.phase) {
-    case 0: // Spread shot
+    case 0: // Spore spread
       if (boss.timer % 30 < spd) {
-        for (let i = -2; i <= 2; i++) {
-          const angle = Math.PI + i * 0.25;
+        for (var i = -2; i <= 2; i++) {
+          var angle = Math.PI + i * 0.25;
           enemyBullets.push({
             x: boss.x - 20, y: boss.y,
             vx: Math.cos(angle) * 3, vy: Math.sin(angle) * 3,
             r: 4, color: boss.color
           });
         }
+        spawnSpores(boss.x - 20, boss.y, 2);
       }
       break;
-    case 1: // Aimed shots
+    case 1: // Aimed mycelium shots
       if (boss.timer % 20 < spd) {
-        const angle = TAS.math.angle(boss.x, boss.y, player.x, player.y);
+        var angle = TAS.math.angle(boss.x, boss.y, player.x, player.y);
         enemyBullets.push({
           x: boss.x - 20, y: boss.y,
           vx: Math.cos(angle) * 4, vy: Math.sin(angle) * 4,
@@ -829,9 +1062,9 @@ function updateBoss(dt) {
         });
       }
       break;
-    case 2: // Spiral
+    case 2: // Fungal spiral
       if (boss.timer % 6 < spd) {
-        const angle = boss.timer * 0.1;
+        var angle = boss.timer * 0.1;
         enemyBullets.push({
           x: boss.x, y: boss.y,
           vx: Math.cos(angle) * 3, vy: Math.sin(angle) * 3,
@@ -839,45 +1072,52 @@ function updateBoss(dt) {
         });
       }
       break;
-    case 3: // Rest + laser sweep
+    case 3: // Spore burst
       if (boss.timer % 45 < spd) {
-        for (let i = 0; i < 8; i++) {
-          const a = (i / 8) * Math.PI * 2;
+        for (var i = 0; i < 8; i++) {
+          var a = (i / 8) * Math.PI * 2;
           enemyBullets.push({
             x: boss.x + Math.cos(a) * 20, y: boss.y + Math.sin(a) * 20,
             vx: Math.cos(a) * 2.5, vy: Math.sin(a) * 2.5,
             r: 3, color: '#ffdd44'
           });
         }
+        spawnSpores(boss.x, boss.y, 8);
       }
       break;
   }
 
-  // Update parts
-  for (const part of boss.parts) {
+  for (var pi = 0; pi < boss.parts.length; pi++) {
+    var part = boss.parts[pi];
     if (!part.active) continue;
     part.angle += 0.02 * spd;
     part.x = boss.x + Math.cos(part.angle) * part.radius;
     part.y = boss.y + Math.sin(part.angle) * part.radius;
   }
 
-  // Check boss death
   if (boss.hp <= 0) {
     boss.defeated = true;
-    score += boss.score * combo;
-    for (let i = 0; i < 30; i++) {
-      setTimeout(function() {
-        spawnExplosion(
-          boss.x + TAS.math.randRange(-30, 30),
-          boss.y + TAS.math.randRange(-20, 20),
-          boss.color, 8, 4
-        );
-        playExplosion();
-      }, i * 80);
+    var bossPoints = Math.floor(boss.score * combo * SCORE_MULT);      // ref 18: INT boss score
+    score += bossPoints;
+    spawnScorePopup(boss.x, boss.y - 20, bossPoints, '#ff44ff');
+    playBossDeath();
+    for (var i = 0; i < 30; i++) {
+      (function(idx) {
+        setTimeout(function() {
+          if (boss) {
+            spawnExplosion(
+              boss.x + TAS.math.randRange(-30, 30),
+              boss.y + TAS.math.randRange(-20, 20),
+              boss.color, 8, 4
+            );
+            spawnSpores(boss.x + TAS.math.randRange(-20, 20), boss.y + TAS.math.randRange(-15, 15), 3);
+            playExplosion();
+          }
+        }, idx * 80);
+      })(i);
     }
-    TAS.fx.shake(10, 0.92);
+    TAS.fx.shake(12, 0.90);
     TAS.fx.flash(boss.color, 0.5);
-    // Advance stage after delay
     stageTransition = 180;
   }
 }
@@ -886,89 +1126,95 @@ function drawBoss() {
   if (!boss || boss.defeated) return;
 
   ctx.save();
-  ctx.translate(boss.x, boss.y);
+  ctx.translate(Math.floor(boss.x), Math.floor(boss.y));
 
-  // Main body
-  ctx.fillStyle = boss.color;
-  ctx.globalAlpha = 0.3;
-  ctx.beginPath();
-  ctx.arc(0, 0, boss.w, 0, Math.PI * 2);
-  ctx.fill();
+  // Pulsing spore aura
+  var auraPulse = Math.sin(boss.timer * 0.03) * 5;
+  ctx.globalAlpha = 0.15;
+  drawPixelCircle(0, 0, boss.w + auraPulse + 8, boss.color);
+  ctx.globalAlpha = 0.25;
+  drawPixelCircle(0, 0, boss.w + auraPulse, boss.color);
   ctx.globalAlpha = 1;
 
-  // Core
-  ctx.fillStyle = '#222';
-  ctx.beginPath();
-  ctx.arc(0, 0, boss.w * 0.6, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.fillStyle = boss.color;
-  ctx.beginPath();
-  ctx.arc(0, 0, boss.w * 0.4, 0, Math.PI * 2);
-  ctx.fill();
+  // Core body
+  drawPixelCircle(0, 0, boss.w * 0.6, '#222');
+  drawPixelCircle(0, 0, boss.w * 0.5, '#333');
+  drawPixelCircle(0, 0, boss.w * 0.4, boss.color);
 
   // Eye/core detail
-  const pulse = Math.sin(boss.timer * 0.05) * 0.3 + 0.7;
-  ctx.fillStyle = '#fff';
+  var pulse = Math.sin(boss.timer * 0.05) * 0.3 + 0.7;
   ctx.globalAlpha = pulse;
-  ctx.beginPath();
-  ctx.arc(0, 0, boss.w * 0.15, 0, Math.PI * 2);
-  ctx.fill();
+  drawPixelCircle(0, 0, boss.w * 0.15, '#fff');
+  drawPixelCircle(-3, -2, boss.w * 0.08, '#ff0000');
   ctx.globalAlpha = 1;
+
+  // Tendrils
+  for (var t = 0; t < 6; t++) {
+    var ta = boss.timer * 0.02 + (t / 6) * Math.PI * 2;
+    var tx = Math.cos(ta) * (boss.w * 0.7);
+    var ty = Math.sin(ta) * (boss.w * 0.7);
+    drawPixelCircle(tx, ty, 3, boss.color);
+  }
 
   ctx.restore();
 
   // Draw parts
-  for (const part of boss.parts) {
+  for (var pi = 0; pi < boss.parts.length; pi++) {
+    var part = boss.parts[pi];
     if (!part.active) continue;
-    ctx.fillStyle = boss.color;
-    ctx.beginPath();
-    ctx.arc(part.x, part.y, 8, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.fillStyle = '#fff';
-    ctx.beginPath();
-    ctx.arc(part.x, part.y, 3, 0, Math.PI * 2);
-    ctx.fill();
+    drawPixelCircle(part.x, part.y, 8, boss.color);
+    drawPixelCircle(part.x, part.y, 4, '#ddd');
+    drawPixelCircle(part.x - 1, part.y - 1, 2, '#fff');
   }
 
-  // Health bar
-  const hpRatio = boss.hp / boss.maxHp;
-  ctx.fillStyle = '#333';
-  ctx.fillRect(GW / 2 - 80, GH - 16, 160, 6);
-  ctx.fillStyle = hpRatio > 0.3 ? boss.color : '#ff4444';
-  ctx.fillRect(GW / 2 - 80, GH - 16, 160 * hpRatio, 6);
+  // Boss name
   ctx.fillStyle = '#fff';
-  ctx.font = '8px monospace';
+  ctx.font = 'bold 8px monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText(boss.name, GW / 2, GH - 22);
+
+  // Health bar
+  var hpRatio = boss.hp / boss.maxHp;
+  drawPixelRect(GW / 2 - 80, GH - 16, 160, 6, '#333');
+  drawPixelRect(GW / 2 - 80, GH - 16, Math.floor(160 * hpRatio), 6, hpRatio > 0.3 ? boss.color : '#ff4444');
+  ctx.fillStyle = '#fff';
+  ctx.font = '7px monospace';
   ctx.textAlign = 'center';
   ctx.fillText('BOSS', GW / 2, GH - 8);
 }
 
 // ============================================================
-// POWER-UP SYSTEM
+// POWER-UP SYSTEM (Tasern items)
 // ============================================================
+var POWERUP_NAMES = {
+  gun: 'Sharpshroom', laser: 'Beam Spore', bomb: 'Blast Cap',
+  wave: 'Ripple Moss', health: 'Vitacap', shield: 'Bark Shield'
+};
+
 function spawnPowerUp(x, y) {
-  const types = ['gun', 'laser', 'bomb', 'wave', 'health'];
-  const weights = [30, 20, 20, 20, 10];
-  let total = weights.reduce(function(a, b) { return a + b; }, 0);
-  let r = Math.random() * total;
-  let type = types[0];
-  for (let i = 0; i < weights.length; i++) {
-    r -= weights[i];
-    if (r <= 0) { type = types[i]; break; }
+  var types = ['gun', 'laser', 'bomb', 'wave', 'health', 'shield'];
+  var weights = [25, 18, 18, 18, 12, 9];
+  var total = 0;
+  for (var w = 0; w < weights.length; w++) total += weights[w];
+  var r = Math.random() * total;
+  var type = types[0];
+  for (var j = 0; j < weights.length; j++) {
+    r -= weights[j];
+    if (r <= 0) { type = types[j]; break; }
   }
-  powerUps.push({ x, y, type, timer: 0, w: 12, h: 12 });
+  powerUps.push({ x: x, y: y, type: type, timer: 0, w: 12, h: 12 });
 }
 
 function updatePowerUps(dt) {
-  const spd = dt * 60;
-  for (let i = powerUps.length - 1; i >= 0; i--) {
-    const p = powerUps[i];
+  var spd = dt * 60;
+  for (var i = powerUps.length - 1; i >= 0; i--) {
+    var p = powerUps[i];
     p.x -= SCROLL_SPEEDS[stage] * 0.5 * spd;
     p.timer += spd;
     if (p.x < -20) {
       powerUps.splice(i, 1);
       continue;
     }
-    // Collect
     if (TAS.hit.rectOverlap(
       player.x - player.w / 2, player.y - player.h / 2, player.w, player.h,
       p.x - p.w / 2, p.y - p.h / 2, p.w, p.h
@@ -982,6 +1228,7 @@ function updatePowerUps(dt) {
 function applyPowerUp(type) {
   playPowerUp();
   TAS.particles.spawn(player.x, player.y, '#ffdd44', 8, 3);
+  spawnScorePopup(player.x, player.y - 16, POWERUP_NAMES[type] || type, '#88ffaa');
 
   switch (type) {
     case 'gun':
@@ -1002,121 +1249,151 @@ function applyPowerUp(type) {
     case 'health':
       hp = Math.min(hp + 1, MAX_HP);
       break;
+    case 'shield':
+      invincible = Math.max(invincible, 180);
+      TAS.fx.flash('#44ddff', 0.2);
+      break;
   }
 }
 
 function drawPowerUps() {
-  for (const p of powerUps) {
-    const bob = Math.sin(p.timer * 0.08) * 2;
+  for (var i = 0; i < powerUps.length; i++) {
+    var p = powerUps[i];
+    var bob = Math.sin(p.timer * 0.08) * 2;
     ctx.save();
-    ctx.translate(p.x, p.y + bob);
+    ctx.translate(Math.floor(p.x), Math.floor(p.y + bob));
 
     // Glow
-    ctx.fillStyle = 'rgba(255,255,100,0.3)';
-    ctx.beginPath();
-    ctx.arc(0, 0, 10, 0, Math.PI * 2);
-    ctx.fill();
+    ctx.globalAlpha = 0.4;
+    drawPixelCircle(0, 0, 10, '#ffff66');
+    ctx.globalAlpha = 1;
 
-    // Box
-    ctx.fillStyle = '#333';
-    ctx.fillRect(-6, -6, 12, 12);
+    // Box (mushroom shaped)
+    drawPixelRect(-5, -2, 10, 8, '#333');
+    drawPixelCircle(0, -4, 6, '#555');
 
     // Letter
     ctx.fillStyle = '#ffdd44';
-    ctx.font = 'bold 9px monospace';
+    ctx.font = 'bold 8px monospace';
     ctx.textAlign = 'center';
-    let label = 'P';
+    var label = 'P';
     if (p.type === 'gun') label = 'G';
     else if (p.type === 'laser') label = 'L';
     else if (p.type === 'bomb') label = 'B';
     else if (p.type === 'wave') label = 'W';
     else if (p.type === 'health') label = '+';
-    ctx.fillText(label, 0, 3);
+    else if (p.type === 'shield') label = 'S';
+    ctx.fillText(label, 0, 5);
 
     ctx.restore();
   }
 }
 
 // ============================================================
-// WAVE SPAWNER
+// WAVE SPAWNER (Tasern enemies)
 // ============================================================
 function spawnWave() {
-  const progress = stageFrame / STAGE_LENGTH;
-  const difficulty = stage + progress * 2;
+  var progress = stageFrame / STAGE_LENGTH;
+  var difficulty = stage + progress * 2;
 
-  // Different spawn patterns based on stage and progress
-  const roll = Math.random();
+  var roll = Math.random();
 
-  if (roll < 0.25) {
-    // Drone formation
-    const count = 3 + Math.floor(difficulty * 0.5);
-    for (let i = 0; i < count; i++) {
-      spawnEnemy('drone', GW + 20 + i * 30, 40 + Math.random() * (GH - 80), {
+  if (roll < 0.2) {
+    // Spore drone formation
+    var count = 3 + Math.floor(difficulty * 0.5);
+    for (var i = 0; i < count; i++) {
+      spawnEnemy('spore_drone', GW + 20 + i * 30, 40 + Math.random() * (GH - 80), {
         hp: 2 + Math.floor(stage * 0.5),
         vx: -1.5 - Math.random() * 1,
         color: STAGE_COLORS[stage].accent,
         fireRate: 100 - stage * 8
       });
     }
-  } else if (roll < 0.4) {
-    // Swooper wave (sine pattern)
-    const count = 4 + stage;
-    for (let i = 0; i < count; i++) {
-      spawnEnemy('swooper', GW + 20 + i * 25, GH / 2, {
+  } else if (roll < 0.32) {
+    // Mycelium swooper wave
+    var count = 4 + stage;
+    for (var i = 0; i < count; i++) {
+      spawnEnemy('mycelium_swooper', GW + 20 + i * 25, GH / 2, {
         hp: 1, vx: -3, vy: 0,
         color: '#ffaa44', score: 80
       });
     }
-  } else if (roll < 0.55) {
-    // Turrets
-    if (stage >= 2) {
-      const ty = Math.random() < 0.5 ? 20 : GH - 20;
+  } else if (roll < 0.44) {
+    // Floor/ceiling turrets
+    if (stage >= 1) {
+      var ty = Math.random() < 0.5 ? 20 : GH - 20;
       spawnEnemy(ty < GH / 2 ? 'turret_ceil' : 'turret_floor', GW + 10, ty, {
         hp: 5 + stage, vx: 0,
         color: '#888', w: 16, h: 16, fireRate: 60 - stage * 5,
         score: 200
       });
     }
-  } else if (roll < 0.65) {
-    // Snake chain
+  } else if (roll < 0.52) {
+    // Tendril chain
     if (stage >= 1) {
-      const head = spawnEnemy('snake_head', GW + 20, GH / 4 + Math.random() * GH / 2, {
+      var head = spawnEnemy('tendril_head', GW + 20, GH / 4 + Math.random() * GH / 2, {
         hp: 6 + stage * 2, vx: -1.2, color: '#88ff44', w: 16, h: 16, score: 500
       });
       head.chain = [];
-      for (let c = 0; c < 4 + stage; c++) {
+      for (var c = 0; c < 4 + stage; c++) {
         head.chain.push({ x: head.x + (c + 1) * 12, y: head.y, hp: 1 });
       }
     }
-  } else if (roll < 0.75) {
-    // Shield carriers
+  } else if (roll < 0.60) {
+    // Shroom shield carriers
     if (stage >= 2) {
-      spawnEnemy('shield_carrier', GW + 20, GH / 3 + Math.random() * GH / 3, {
+      spawnEnemy('shroom_shield', GW + 20, GH / 3 + Math.random() * GH / 3, {
         hp: 8 + stage * 2, vx: -1, color: '#4488cc', w: 20, h: 16, score: 300,
         fireRate: 80
       });
     }
-  } else if (roll < 0.85) {
-    // Bombers
-    spawnEnemy('bomber', GW + 20, 30 + Math.random() * 40, {
+  } else if (roll < 0.68) {
+    // Sporebombers
+    spawnEnemy('sporebomber', GW + 20, 30 + Math.random() * 40, {
       hp: 4 + stage, vx: -1.5, color: '#886644', w: 24, h: 12,
       fireRate: 45, score: 250
     });
-  } else if (roll < 0.92) {
+  } else if (roll < 0.76) {
+    // Sporelings (split on death)
+    for (var i = 0; i < 3; i++) {
+      spawnEnemy('sporeling', GW + 20 + i * 20, GH / 3 + Math.random() * GH / 3, {
+        hp: 1, vx: -2, color: '#aaff44', w: 10, h: 10, score: 60
+      });
+    }
+  } else if (roll < 0.84) {
     // Stage-specific enemies
-    if (stage === 4) { // Fungal Hive
+    if (stage === 4 || stage === 3) {
       spawnEnemy('spore_cloud', GW + 20, 40 + Math.random() * (GH - 80), {
         hp: 3, vx: -0.5, color: '#44ff44', w: 24, h: 24, score: 50
       });
-    } else if (stage === 5) { // Ocean
-      spawnEnemy('submarine', GW + 20, GH - 60 + Math.random() * 40, {
+    } else if (stage === 5) {
+      spawnEnemy('brinewalker', GW + 20, GH - 60 + Math.random() * 40, {
         hp: 6, vx: -1, color: '#335566', w: 28, h: 12, fireRate: 70, score: 300
+      });
+    } else if (stage >= 2) {
+      // Fungal eye
+      spawnEnemy('fungal_eye', GW + 20, 60 + Math.random() * (GH - 120), {
+        hp: 4 + stage, vx: -0.8, color: '#aa44aa', w: 14, h: 14, fireRate: 50, score: 250
+      });
+    }
+  } else if (roll < 0.90) {
+    // Toxin jellies
+    if (stage >= 3) {
+      spawnEnemy('toxin_jelly', GW + 20, 80 + Math.random() * (GH - 160), {
+        hp: 5, vx: -0.6, color: '#88ff00', w: 16, h: 16, score: 200
+      });
+    }
+  } else if (roll < 0.95) {
+    // Fungal turret wall
+    if (stage >= 2) {
+      spawnEnemy('fungal_turret', GW + 10, Math.random() < 0.5 ? 30 : GH - 30, {
+        hp: 6 + stage, vx: 0, color: '#556633', w: 12, h: 20, fireRate: 50, score: 250
       });
     }
   } else {
-    // Mini-boss (rare, mid-stage)
+    // Rootmaw mini-boss (rare)
     if (progress > 0.4 && progress < 0.6 && Math.random() < 0.3) {
-      spawnEnemy('mini_boss', GW + 30, GH / 2, {
+      spawnEnemy('rootmaw', GW + 30, GH / 2, {
         hp: 15 + stage * 5, vx: -0.5,
         color: STAGE_COLORS[stage].accent,
         w: 32, h: 24, score: 2000, fireRate: 30
@@ -1130,10 +1407,10 @@ function spawnWave() {
 // ============================================================
 function checkCollisions() {
   // Player bullets vs enemies
-  for (let bi = playerBullets.length - 1; bi >= 0; bi--) {
-    const b = playerBullets[bi];
-    for (let ei = enemies.length - 1; ei >= 0; ei--) {
-      const e = enemies[ei];
+  for (var bi = playerBullets.length - 1; bi >= 0; bi--) {
+    var b = playerBullets[bi];
+    for (var ei = enemies.length - 1; ei >= 0; ei--) {
+      var e = enemies[ei];
       if (TAS.hit.rectOverlap(
         b.x - b.w / 2, b.y - b.h / 2, b.w, b.h,
         e.x - e.w / 2, e.y - e.h / 2, e.w, e.h
@@ -1146,11 +1423,11 @@ function checkCollisions() {
   }
 
   // Orb bullets vs enemies
-  for (let bi = orbBullets.length - 1; bi >= 0; bi--) {
-    const b = orbBullets[bi];
-    let hit = false;
-    for (let ei = enemies.length - 1; ei >= 0; ei--) {
-      const e = enemies[ei];
+  for (var bi = orbBullets.length - 1; bi >= 0; bi--) {
+    var b = orbBullets[bi];
+    var hit = false;
+    for (var ei = enemies.length - 1; ei >= 0; ei--) {
+      var e = enemies[ei];
       if (TAS.hit.rectOverlap(
         b.x - b.w / 2, b.y - b.h / 2, b.w, b.h,
         e.x - e.w / 2, e.y - e.h / 2, e.w, e.h
@@ -1164,18 +1441,20 @@ function checkCollisions() {
 
   // Player bullets vs boss
   if (boss && !boss.defeated) {
-    for (let bi = playerBullets.length - 1; bi >= 0; bi--) {
-      const b = playerBullets[bi];
-      // Hit parts first
-      let hitPart = false;
-      for (const part of boss.parts) {
+    for (var bi = playerBullets.length - 1; bi >= 0; bi--) {
+      var b = playerBullets[bi];
+      var hitPart = false;
+      for (var pi = 0; pi < boss.parts.length; pi++) {
+        var part = boss.parts[pi];
         if (!part.active) continue;
         if (TAS.hit.circleOverlap(b.x, b.y, 4, part.x, part.y, 8)) {
           part.hp -= b.dmg;
           if (part.hp <= 0) {
             part.active = false;
             spawnExplosion(part.x, part.y, boss.color, 8, 3);
-            score += 500;
+            var partPts = Math.floor(500 * SCORE_MULT);
+            score += partPts;
+            spawnScorePopup(part.x, part.y - 8, partPts, boss.color);
           }
           playerBullets.splice(bi, 1);
           hitPart = true;
@@ -1183,7 +1462,6 @@ function checkCollisions() {
         }
       }
       if (hitPart) continue;
-      // Hit core
       if (TAS.hit.circleOverlap(b.x, b.y, 4, boss.x, boss.y, boss.w * 0.6)) {
         boss.hp -= b.dmg;
         TAS.particles.spawn(b.x, b.y, '#fff', 2, 2);
@@ -1192,8 +1470,8 @@ function checkCollisions() {
     }
 
     // Orb bullets vs boss
-    for (let bi = orbBullets.length - 1; bi >= 0; bi--) {
-      const b = orbBullets[bi];
+    for (var bi = orbBullets.length - 1; bi >= 0; bi--) {
+      var b = orbBullets[bi];
       if (TAS.hit.circleOverlap(b.x, b.y, b.w / 2, boss.x, boss.y, boss.w * 0.6)) {
         boss.hp -= b.dmg;
         TAS.particles.spawn(b.x, b.y, '#fff', 2, 2);
@@ -1202,19 +1480,27 @@ function checkCollisions() {
     }
   }
 
-  // Enemy bullets vs player
+  // Enemy bullets vs player — DEX dodge chance                        // ref 19: DEX dodge
   if (invincible <= 0) {
-    for (let bi = enemyBullets.length - 1; bi >= 0; bi--) {
-      const b = enemyBullets[bi];
+    var dodgeChance = Math.min(0.25, (statB.dex - 10) * 0.01);
+    for (var bi = enemyBullets.length - 1; bi >= 0; bi--) {
+      var b = enemyBullets[bi];
       if (TAS.hit.circleOverlap(b.x, b.y, b.r || 3, player.x, player.y, 6)) {
+        if (dodgeChance > 0 && Math.random() < dodgeChance) {
+          // Dodge! DEX saves you
+          spawnScorePopup(player.x, player.y - 12, 'DODGE!', '#44ff44');
+          enemyBullets.splice(bi, 1);
+          continue;
+        }
         playerHit();
         enemyBullets.splice(bi, 1);
         break;
       }
     }
 
-    // Enemies vs player (collision)
-    for (const e of enemies) {
+    // Enemies vs player collision
+    for (var ei = 0; ei < enemies.length; ei++) {
+      var e = enemies[ei];
       if (TAS.hit.rectOverlap(
         player.x - player.w / 2, player.y - player.h / 2, player.w, player.h,
         e.x - e.w / 2, e.y - e.h / 2, e.w, e.h
@@ -1226,7 +1512,8 @@ function checkCollisions() {
 
     // Boss parts vs player
     if (boss && !boss.defeated) {
-      for (const part of boss.parts) {
+      for (var pi = 0; pi < boss.parts.length; pi++) {
+        var part = boss.parts[pi];
         if (!part.active) continue;
         if (TAS.hit.circleOverlap(player.x, player.y, 6, part.x, part.y, 8)) {
           playerHit();
@@ -1243,17 +1530,18 @@ function playerHit() {
   combo = 1;
   comboTimer = 0;
   playHit();
-  TAS.fx.shake(6, 0.9);
+  TAS.fx.shake(8, 0.88);
   TAS.fx.flash('#ff0000', 0.3);
-  TAS.particles.spawn(player.x, player.y, '#ff8844', 10, 3);
+  TAS.particles.spawn(player.x, player.y, '#ff8844', 12, 3);
+  spawnEmbers(player.x, player.y, 6, '#ff4444');
 
   if (hp <= 0) {
     lives--;
     playDeath();
+    TAS.fx.shake(12, 0.85);
     if (lives <= 0) {
       gameOver();
     } else {
-      // Respawn
       hp = MAX_HP;
       invincible = 120;
       player.x = 60;
@@ -1275,35 +1563,31 @@ function gameOver() {
 }
 
 // ============================================================
-// STAGE BACKGROUNDS
+// STAGE BACKGROUNDS (themed zones with parallax)
 // ============================================================
 function drawBackground() {
-  const colors = STAGE_COLORS[stage];
+  var colors = STAGE_COLORS[stage];
   ctx.fillStyle = colors.bg;
   ctx.fillRect(0, 0, GW, GH);
 
-  // Stage-specific background layers
   switch (stage) {
-    case 0: // Orbital Station — stars, distant planets
+    case 0: // Sporevoid Station — stars, distant spore planet
       starfield.update(SCROLL_SPEEDS[stage]);
       starfield.draw();
-      // Distant planet
-      ctx.fillStyle = '#1a2244';
-      ctx.beginPath();
-      ctx.arc(GW * 0.7, GH * 0.8, 60, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.fillStyle = '#223355';
-      ctx.beginPath();
-      ctx.arc(GW * 0.7, GH * 0.8, 55, 0, Math.PI * 2);
-      ctx.fill();
+      drawPixelCircle(GW * 0.7, GH * 0.8, 60, '#1a2244');
+      drawPixelCircle(GW * 0.7, GH * 0.8, 55, '#223355');
+      // Spore dust
+      for (var i = 0; i < 4; i++) {
+        var sx = ((frame * 0.5 + i * 120) % GW);
+        drawPixelCircle(sx, 50 + i * 70, 1, 'rgba(68,136,255,0.3)');
+      }
       break;
 
-    case 1: // Atmospheric Entry — clouds, streaks
+    case 1: // Mycelium Descent — heat streaks, spore clouds
       starfield.update(SCROLL_SPEEDS[stage] * 0.5);
       starfield.draw();
-      // Heat streaks
-      for (let i = 0; i < 5; i++) {
-        const sy = ((frame * 3 + i * 67) % GH);
+      for (var i = 0; i < 5; i++) {
+        var sy = ((frame * 3 + i * 67) % GH);
         ctx.strokeStyle = 'rgba(255,136,0,0.2)';
         ctx.lineWidth = 2;
         ctx.beginPath();
@@ -1311,76 +1595,116 @@ function drawBackground() {
         ctx.lineTo(GW, sy + 20);
         ctx.stroke();
       }
+      // Floating spore particles
+      for (var i = 0; i < 6; i++) {
+        var px = ((frame * 0.8 + i * 80) % (GW + 20)) - 10;
+        var py = GH * 0.3 + Math.sin(frame * 0.01 + i) * 40;
+        ctx.globalAlpha = 0.15;
+        drawPixelCircle(px, py, 8 + i * 2, '#ff8844');
+        ctx.globalAlpha = 1;
+      }
       break;
 
-    case 2: // City Ruins — buildings
-      for (const el of bgElements) {
+    case 2: // Ruins of Tasern — broken buildings, mushrooms
+      for (var i = 0; i < bgElements.length; i++) {
+        var el = bgElements[i];
         el.x -= el.speed * SCROLL_SPEEDS[stage];
         if (el.x < -el.size * 3) el.x = GW + el.size;
-        ctx.fillStyle = colors.mid;
-        ctx.fillRect(el.x, GH - el.size * 3, el.size, el.size * 3);
-        ctx.fillStyle = colors.fg;
-        ctx.fillRect(el.x + 2, GH - el.size * 3 + 2, el.size - 4, el.size * 3 - 2);
+        drawPixelRect(el.x, GH - el.size * 3, el.size, el.size * 3, colors.mid);
+        drawPixelRect(el.x + 2, GH - el.size * 3 + 2, el.size - 4, el.size * 3 - 2, colors.fg);
+        // Mushrooms on buildings
+        if (el.type === 1) {
+          drawPixelCircle(el.x + el.size / 2, GH - el.size * 3 - 4, 5, '#446644');
+          drawPixelRect(el.x + el.size / 2 - 1, GH - el.size * 3 - 2, 2, 4, '#335533');
+        }
       }
-      ctx.fillStyle = colors.fg;
-      ctx.fillRect(0, GH - 15, GW, 15);
+      drawPixelRect(0, GH - 15, GW, 15, colors.fg);
       break;
 
-    case 3: // Underground Base — ceiling/floor
-      ctx.fillStyle = colors.mid;
-      ctx.fillRect(0, 0, GW, 30);
-      ctx.fillRect(0, GH - 30, GW, 30);
-      ctx.fillStyle = colors.fg;
-      for (let i = 0; i < 16; i++) {
-        const ox = ((i * 32) - (frame * SCROLL_SPEEDS[stage]) % 32);
-        ctx.fillRect(ox, 26, 2, 6);
-        ctx.fillRect(ox, GH - 32, 2, 6);
+    case 3: // Undergrowth Warrens — ceiling/floor with roots
+      drawPixelRect(0, 0, GW, 30, colors.mid);
+      drawPixelRect(0, GH - 30, GW, 30, colors.mid);
+      for (var i = 0; i < 16; i++) {
+        var ox = ((i * 32) - (frame * SCROLL_SPEEDS[stage]) % 32);
+        drawPixelRect(ox, 26, 2, 6, colors.fg);
+        drawPixelRect(ox, GH - 32, 2, 6, colors.fg);
+        // Hanging roots
+        if (i % 3 === 0) {
+          var rootLen = 10 + Math.sin(i * 2.1) * 8;
+          drawPixelRect(ox + 1, 30, 1, rootLen, '#334422');
+        }
+        // Floor mushrooms
+        if (i % 4 === 1) {
+          drawPixelCircle(ox + 8, GH - 34, 4, '#445533');
+        }
       }
       break;
 
-    case 4: // Fungal Hive — organic walls, tendrils
+    case 4: // Fungal Hive Core — organic walls, glowing tendrils
       ctx.fillStyle = colors.mid;
-      for (let i = 0; i < 10; i++) {
-        const ox = ((i * 50) - (frame * SCROLL_SPEEDS[stage] * 0.8) % 50);
-        const h1 = 20 + Math.sin(i * 1.3) * 15;
+      for (var i = 0; i < 10; i++) {
+        var ox = ((i * 50) - (frame * SCROLL_SPEEDS[stage] * 0.8) % 50);
+        var h1 = 20 + Math.sin(i * 1.3) * 15;
         ctx.beginPath();
-        ctx.arc(ox, 0, h1, 0, Math.PI);
+        ctx.arc(Math.floor(ox), 0, h1, 0, Math.PI);
         ctx.fill();
         ctx.beginPath();
-        ctx.arc(ox, GH, h1, Math.PI, 0);
+        ctx.arc(Math.floor(ox), GH, h1, Math.PI, 0);
         ctx.fill();
       }
-      break;
-
-    case 5: // Ocean Platform — waves
-      ctx.fillStyle = '#0a2030';
-      ctx.fillRect(0, GH * 0.7, GW, GH * 0.3);
-      for (let i = 0; i < GW; i += 4) {
-        const wy = GH * 0.7 + Math.sin((i + frame * 2) * 0.03) * 5;
-        ctx.fillStyle = '#153040';
-        ctx.fillRect(i, wy, 4, 2);
+      // Glowing spore veins
+      ctx.strokeStyle = 'rgba(68,255,136,0.15)';
+      ctx.lineWidth = 2;
+      for (var i = 0; i < 5; i++) {
+        var vx = ((frame * 0.3 + i * 100) % GW);
+        ctx.beginPath();
+        ctx.moveTo(vx, 0);
+        ctx.quadraticCurveTo(vx + 20, GH / 2, vx - 10, GH);
+        ctx.stroke();
       }
       break;
 
-    case 6: // Mothership Core — alien tech
+    case 5: // Brine Flats — waves, salt crystals
+      drawPixelRect(0, GH * 0.7, GW, GH * 0.3, '#0a2030');
+      for (var i = 0; i < GW; i += 4) {
+        var wy = GH * 0.7 + Math.sin((i + frame * 2) * 0.03) * 5;
+        drawPixelRect(i, wy, 4, 2, '#153040');
+      }
+      // Salt crystals
+      for (var i = 0; i < 4; i++) {
+        var cx = ((frame * 0.4 + i * 120) % (GW + 40)) - 20;
+        drawPixelRect(cx, GH * 0.65, 3, 12, 'rgba(200,220,240,0.15)');
+        drawPixelRect(cx + 1, GH * 0.63, 1, 4, 'rgba(200,220,240,0.1)');
+      }
+      break;
+
+    case 6: // The Motherspore — alien fungal tech
       starfield.update(SCROLL_SPEEDS[stage]);
       starfield.draw();
-      // Pulsing grid
-      ctx.strokeStyle = 'rgba(255,68,255,0.1)';
+      // Pulsing mycelium grid
+      ctx.strokeStyle = 'rgba(255,68,255,0.12)';
       ctx.lineWidth = 1;
-      for (let i = 0; i < 10; i++) {
-        const gx = ((i * 50) - (frame * 2) % 50);
+      for (var i = 0; i < 10; i++) {
+        var gx = ((i * 50) - (frame * 2) % 50);
         ctx.beginPath();
-        ctx.moveTo(gx, 0);
-        ctx.lineTo(gx, GH);
+        ctx.moveTo(Math.floor(gx), 0);
+        ctx.lineTo(Math.floor(gx), GH);
         ctx.stroke();
       }
-      for (let i = 0; i < 7; i++) {
-        const gy = ((i * 50) - (frame) % 50);
+      for (var i = 0; i < 7; i++) {
+        var gy = ((i * 50) - (frame) % 50);
         ctx.beginPath();
-        ctx.moveTo(0, gy);
-        ctx.lineTo(GW, gy);
+        ctx.moveTo(0, Math.floor(gy));
+        ctx.lineTo(GW, Math.floor(gy));
         ctx.stroke();
+      }
+      // Floating spore orbs
+      for (var i = 0; i < 3; i++) {
+        var ox = ((frame * 0.6 + i * 160) % GW);
+        var oy = GH * 0.3 + Math.sin(frame * 0.02 + i * 2) * 50;
+        ctx.globalAlpha = 0.1;
+        drawPixelCircle(ox, oy, 12, '#ff44ff');
+        ctx.globalAlpha = 1;
       }
       break;
   }
@@ -1393,13 +1717,17 @@ function drawHUD() {
   TAS.ui.drawHUD(score, stage + 1, lives, GW);
 
   // HP bar
-  const barW = 50, barH = 5;
-  const bx = 6, by = 22;
-  ctx.fillStyle = '#333';
-  ctx.fillRect(bx, by, barW, barH);
-  const hpColor = hp > 2 ? '#44ff44' : hp > 1 ? '#ffdd00' : '#ff4444';
-  ctx.fillStyle = hpColor;
-  ctx.fillRect(bx, by, barW * (hp / MAX_HP), barH);
+  var barW = 50, barH = 5;
+  var bx = 6, by = 22;
+  drawPixelRect(bx, by, barW, barH, '#333');
+  var hpColor = hp > 2 ? '#44ff44' : hp > 1 ? '#ffdd00' : '#ff4444';
+  drawPixelRect(bx, by, Math.floor(barW * (hp / MAX_HP)), barH, hpColor);
+
+  // HP pips
+  ctx.fillStyle = '#000';
+  for (var p = 1; p < MAX_HP; p++) {
+    ctx.fillRect(bx + Math.floor(barW * (p / MAX_HP)), by, 1, barH);
+  }
 
   // Combo display
   if (combo > 1) {
@@ -1407,6 +1735,14 @@ function drawHUD() {
     ctx.font = 'bold 10px monospace';
     ctx.textAlign = 'left';
     ctx.fillText('x' + combo, 60, 27);
+  }
+
+  // Player name and level
+  if (PLAYER_NAME) {
+    ctx.fillStyle = PLAYER_COLOR;
+    ctx.font = '7px monospace';
+    ctx.textAlign = 'left';
+    ctx.fillText(PLAYER_NAME + (PLAYER_LEVEL > 0 ? ' LV' + PLAYER_LEVEL : ''), 6, 37);
   }
 
   // Orb lock indicator
@@ -1417,18 +1753,18 @@ function drawHUD() {
     ctx.fillText('LOCKED', GW - 6, 27);
   }
 
-  // Orb weapon type display
+  // Orb weapon type
   ctx.fillStyle = '#88ddff';
   ctx.font = '8px monospace';
   ctx.textAlign = 'center';
-  const wName = orbs[0].weaponType === 'normal' ? 'ORB' :
+  var wName = orbs[0].weaponType === 'normal' ? 'ORB' :
     orbs[0].weaponType === 'laser' ? 'LASER' :
     orbs[0].weaponType === 'bomb' ? 'BOMB' : 'WAVE';
   ctx.fillText(wName, GW / 2, 27);
 
   // Stage name (briefly at start)
   if (stageFrame < 120) {
-    const alpha = stageFrame < 60 ? stageFrame / 60 : (120 - stageFrame) / 60;
+    var alpha = stageFrame < 60 ? stageFrame / 60 : (120 - stageFrame) / 60;
     ctx.globalAlpha = alpha;
     ctx.fillStyle = STAGE_COLORS[stage].accent;
     ctx.font = 'bold 14px monospace';
@@ -1439,9 +1775,9 @@ function drawHUD() {
     ctx.globalAlpha = 1;
   }
 
-  // Boss warning
+  // Boss warning with shake
   if (bossWarning > 0) {
-    const pulse = Math.sin(frame * 0.15) * 0.4 + 0.6;
+    var pulse = Math.sin(frame * 0.15) * 0.4 + 0.6;
     ctx.globalAlpha = pulse;
     ctx.fillStyle = '#ff4444';
     ctx.font = 'bold 16px monospace';
@@ -1460,6 +1796,7 @@ function update(dt) {
   frame++;
   TAS.particles.update(dt);
   TAS.fx.updateEffects(dt);
+  updateScorePopups(dt);
 
   if (state === 'title') {
     starfield.update(0.5);
@@ -1480,8 +1817,9 @@ function update(dt) {
 
   if (state !== 'playing') return;
 
-  const spd = dt * 60;
+  var spd = dt * 60;
   stageFrame++;
+  tutorialTimer++;
 
   // Stage transition
   if (stageTransition > 0) {
@@ -1489,8 +1827,7 @@ function update(dt) {
     if (stageTransition <= 0) {
       stage++;
       if (stage >= STAGE_COUNT) {
-        // Game complete!
-        score += 50000;
+        score += Math.floor(50000 * SCORE_MULT);                       // ref 20: INT end bonus
         gameOver();
         return;
       }
@@ -1507,7 +1844,8 @@ function update(dt) {
     return;
   }
 
-  // Combo decay
+  // Combo decay — WIS extends combo window slightly
+  var comboDecayRate = COMBO_DECAY + Math.floor(statB.wis * 1.5);      // ref 21: WIS combo
   if (comboTimer > 0) {
     comboTimer -= spd;
     if (comboTimer <= 0) {
@@ -1515,15 +1853,13 @@ function update(dt) {
     }
   }
 
-  // Invincibility
   if (invincible > 0) invincible -= spd;
 
-  // ---- PLAYER INPUT ----
-  const keys = TAS.input.keys;
-  const touch = TAS.input.touch;
+  // ---- PLAYER INPUT (NES controls: arrows/WASD + Z/X) ----
+  var keys = TAS.input.keys;
+  var touch = TAS.input.touch;
 
-  // Movement (jetpack with momentum)
-  let ax = 0, ay = 0;
+  var ax = 0, ay = 0;
   if (keys['ArrowLeft'] || keys['KeyA'] || touch.left) ax -= PLAYER_ACCEL;
   if (keys['ArrowRight'] || keys['KeyD'] || touch.right) ax += PLAYER_ACCEL;
   if (keys['ArrowUp'] || keys['KeyW'] || touch.up) ay -= PLAYER_ACCEL;
@@ -1534,8 +1870,7 @@ function update(dt) {
   player.vx *= PLAYER_FRICTION;
   player.vy *= PLAYER_FRICTION;
 
-  // Speed cap
-  const speed = Math.sqrt(player.vx * player.vx + player.vy * player.vy);
+  var speed = Math.sqrt(player.vx * player.vx + player.vy * player.vy);
   if (speed > PLAYER_MAX_SPEED) {
     player.vx = (player.vx / speed) * PLAYER_MAX_SPEED;
     player.vy = (player.vy / speed) * PLAYER_MAX_SPEED;
@@ -1544,17 +1879,15 @@ function update(dt) {
   player.x += player.vx * spd;
   player.y += player.vy * spd;
 
-  // Bounds
   player.x = TAS.math.clamp(player.x, 16, GW - 16);
   player.y = TAS.math.clamp(player.y, 16, GH - 16);
 
-  // ---- ORB LOCK/UNLOCK (B button) ----
-  const bPressed = keys['KeyX'] || keys['ShiftRight'] || touch.b;
+  // ---- ORB LOCK/UNLOCK (X / RShift = NES B button) ----
+  var bPressed = keys['KeyX'] || keys['ShiftRight'] || touch.b;
   if (bPressed && !bPressedLast) {
     orbsLocked = !orbsLocked;
     if (orbsLocked) {
-      // Lock orbs at current angles
-      for (let i = 0; i < orbs.length; i++) {
+      for (var i = 0; i < orbs.length; i++) {
         orbs[i].lockAngle = orbs[i].angle;
       }
       playLock();
@@ -1564,8 +1897,8 @@ function update(dt) {
   }
   bPressedLast = bPressed;
 
-  // ---- FIRING ----
-  const firePressed = keys['KeyZ'] || keys['Space'] || touch.a;
+  // ---- FIRING (Z / Space = NES A button) ----
+  var firePressed = keys['KeyZ'] || keys['Space'] || touch.a;
   if (fireTimer > 0) fireTimer -= spd;
   if (orbFireTimer > 0) orbFireTimer -= spd;
 
@@ -1574,46 +1907,36 @@ function update(dt) {
     fireOrbs();
   }
 
-  // Update orbs
   updateOrbs(dt);
-
-  // Update bullets
   updateBullets(dt);
+  updateHazards(dt);
 
   // ---- ENEMY SPAWNING ----
   if (!bossActive) {
-    const spawnRate = Math.max(30, 90 - stage * 8 - stageFrame * 0.01);
+    var spawnRate = Math.max(30, 90 - stage * 8 - stageFrame * 0.01);
     if (stageFrame % Math.floor(spawnRate) === 0) {
       spawnWave();
     }
 
-    // Boss trigger
     if (stageFrame >= STAGE_LENGTH) {
       bossWarning = 120;
+      TAS.fx.shake(2, 0.95);
     }
     if (bossWarning > 0) {
       bossWarning -= spd;
       if (bossWarning <= 0 && !bossActive) {
         spawnBoss();
         playBossWarn();
-        enemies = []; // Clear remaining enemies for boss fight
+        enemies = [];
       }
     }
   }
 
-  // Update enemies
   updateEnemies(dt);
-
-  // Update boss
   updateBoss(dt);
-
-  // Update power-ups
   updatePowerUps(dt);
-
-  // Collisions
   checkCollisions();
 
-  // Scroll
   scrollX += SCROLL_SPEEDS[stage] * spd;
 }
 
@@ -1632,7 +1955,7 @@ function draw(dt) {
 
   if (state === 'gameOver') {
     TAS.ui.drawGameOver(score, highScore, GW, GH, {
-      frame, extra: 'Stage: ' + (stage + 1) + ' | Combo: x' + combo
+      frame: frame, extra: 'Stage: ' + (stage + 1) + ' | Combo: x' + combo
     });
     TAS.input.drawTouchControls(GW, GH);
     return;
@@ -1642,47 +1965,37 @@ function draw(dt) {
   ctx.save();
   TAS.fx.applyShake();
 
-  // Background
   drawBackground();
-
-  // Power-ups
+  drawForegroundDetails();
+  drawHazards();
   drawPowerUps();
-
-  // Enemies
   drawEnemies();
-
-  // Boss
   drawBoss();
-
-  // Player
+  drawBossDetails();
   drawPlayer(player.x, player.y);
 
-  // Orbs
-  for (let i = 0; i < orbs.length; i++) {
-    const pos = getOrbPosition(i);
+  for (var i = 0; i < orbs.length; i++) {
+    var pos = getOrbPosition(i);
     drawOrb(pos.x, pos.y, orbs[i].weaponType, orbsLocked);
   }
 
-  // Bullets
   drawBullets();
-
-  // Particles
   TAS.particles.draw();
+  drawScorePopups();
 
   ctx.restore();
 
-  // Screen effects
   TAS.fx.drawFlash(GW, GH);
-
-  // HUD
   drawHUD();
 
-  // Touch controls
+  // Tutorial overlay (first 5 seconds)
+  if (!tutorialShown) drawTutorial();
+
   TAS.input.drawTouchControls(GW, GH);
 
   // Stage transition overlay
   if (stageTransition > 0) {
-    const alpha = Math.min(1, stageTransition / 60);
+    var alpha = Math.min(1, stageTransition / 60);
     ctx.globalAlpha = alpha;
     ctx.fillStyle = '#000';
     ctx.fillRect(0, 0, GW, GH);
@@ -1694,6 +2007,10 @@ function draw(dt) {
       ctx.fillText('STAGE CLEAR', GW / 2, GH / 2 - 10);
       ctx.font = '10px monospace';
       ctx.fillText('Entering: ' + STAGE_NAMES[stage + 1], GW / 2, GH / 2 + 10);
+      // Stage clear bonus
+      var stageBonus = Math.floor((stage + 1) * 1000 * SCORE_MULT);    // ref 22: INT stage bonus
+      ctx.fillStyle = '#ffdd44';
+      ctx.fillText('BONUS: +' + stageBonus, GW / 2, GH / 2 + 28);
     } else {
       ctx.fillText('MISSION COMPLETE', GW / 2, GH / 2);
     }
@@ -1701,95 +2018,325 @@ function draw(dt) {
 }
 
 // ============================================================
-// TITLE SCREEN
+// TITLE SCREEN (NES-style with stat bars)
 // ============================================================
 function drawTitleScreen() {
   starfield.update(0.5);
   starfield.draw();
 
-  // Logo: S.C.A.T.
   ctx.textAlign = 'center';
 
   // Shadow
   ctx.fillStyle = '#000';
   ctx.font = 'bold 28px monospace';
-  ctx.fillText('S.C.A.T.', GW / 2 + 2, 62);
+  ctx.fillText('S.C.A.T.', GW / 2 + 2, 52);
 
-  // Main title with glow
+  // Main title
   ctx.fillStyle = '#44ddff';
   ctx.font = 'bold 28px monospace';
-  ctx.fillText('S.C.A.T.', GW / 2, 60);
+  ctx.fillText('S.C.A.T.', GW / 2, 50);
 
   // Subtitle
   ctx.fillStyle = '#88aacc';
   ctx.font = '9px monospace';
-  ctx.fillText('SPECIAL CYBERNETIC ATTACK TEAM', GW / 2, 80);
+  ctx.fillText('SPECIAL CYBERNETIC ATTACK TEAM', GW / 2, 68);
 
-  // Subtitle line 2
   ctx.fillStyle = '#667788';
   ctx.font = '8px monospace';
-  ctx.fillText('Baseling Astronauts vs. The Fungal Invasion', GW / 2, 96);
+  ctx.fillText('Baselings vs. The Fungal Invasion of Tasern', GW / 2, 82);
 
-  // Draw a demo baseling astronaut
+  // Draw player baseling (NES pixel art, scaled up)
   ctx.save();
-  ctx.translate(GW / 2, 150);
-  ctx.scale(2, 2);
-  // Body
-  ctx.fillStyle = '#ddeeff';
-  ctx.beginPath();
-  ctx.ellipse(0, 0, 8, 6, 0, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.fillStyle = '#4488cc';
-  ctx.beginPath();
-  ctx.arc(4, -1, 4, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.fillStyle = '#556677';
-  ctx.fillRect(-8, -4, 4, 8);
+  ctx.translate(GW / 2 - 6, 110);
+  var pal = getBaselingPalette();
+  drawPixelSprite(0, 0, 2, baselingSprite, pal);
   // Flame
-  const flicker = Math.sin(frame * 0.4) * 2;
-  ctx.fillStyle = '#ff8800';
-  ctx.fillRect(-12, -2, -4 - flicker, 4);
+  var flicker = Math.sin(frame * 0.4) * 2;
+  drawPixelRect(-flicker * 2 - 4, 6, 4 + flicker, 4, '#ff8800');
+  drawPixelRect(-flicker - 2, 7, 3, 2, '#ffdd00');
   ctx.restore();
 
   // Draw orbiting orbs on title
-  const orbAngle1 = frame * 0.03;
-  const orbAngle2 = frame * 0.03 + Math.PI;
-  const orbRadius = 35;
-  const ox1 = GW / 2 + Math.cos(orbAngle1) * orbRadius;
-  const oy1 = 150 + Math.sin(orbAngle1) * orbRadius;
-  const ox2 = GW / 2 + Math.cos(orbAngle2) * orbRadius;
-  const oy2 = 150 + Math.sin(orbAngle2) * orbRadius;
+  var orbAngle1 = frame * 0.03;
+  var orbAngle2 = frame * 0.03 + Math.PI;
+  var orbRadius = 35;
+  var ox1 = GW / 2 + Math.cos(orbAngle1) * orbRadius;
+  var oy1 = 122 + Math.sin(orbAngle1) * orbRadius;
+  var ox2 = GW / 2 + Math.cos(orbAngle2) * orbRadius;
+  var oy2 = 122 + Math.sin(orbAngle2) * orbRadius;
 
-  ctx.fillStyle = 'rgba(100,200,255,0.3)';
-  ctx.beginPath(); ctx.arc(ox1, oy1, 8, 0, Math.PI * 2); ctx.fill();
-  ctx.fillStyle = '#88ddff';
-  ctx.beginPath(); ctx.arc(ox1, oy1, 5, 0, Math.PI * 2); ctx.fill();
+  drawPixelCircle(ox1, oy1, 8, 'rgba(100,200,255,0.3)');
+  drawPixelCircle(ox1, oy1, 5, '#88ddff');
+  drawPixelCircle(ox2, oy2, 8, 'rgba(100,200,255,0.3)');
+  drawPixelCircle(ox2, oy2, 5, '#88ddff');
 
-  ctx.fillStyle = 'rgba(100,200,255,0.3)';
-  ctx.beginPath(); ctx.arc(ox2, oy2, 8, 0, Math.PI * 2); ctx.fill();
-  ctx.fillStyle = '#88ddff';
-  ctx.beginPath(); ctx.arc(ox2, oy2, 5, 0, Math.PI * 2); ctx.fill();
+  // Player stat bar (from NftLoader)
+  if (window.NftLoader && NftLoader.drawStatBar && PLAYER_LEVEL > 0) {
+    NftLoader.drawStatBar(ctx, GW / 2 - 70, 168, 140);
+  }
 
   // Controls info
+  var controlY = PLAYER_LEVEL > 0 ? 246 : 180;
   ctx.fillStyle = '#556677';
   ctx.font = '8px monospace';
-  ctx.fillText('ARROWS/WASD: Move  |  Z/SPACE: Fire  |  X: Lock/Unlock Orbs', GW / 2, 210);
-  ctx.fillText('Orb weapons: [L]aser  [B]omb  [W]ave', GW / 2, 224);
+  ctx.textAlign = 'center';
+  ctx.fillText('ARROWS/WASD: Move  |  Z/SPACE: Fire  |  X: Lock Orbs', GW / 2, controlY);
+  ctx.fillText('[G]un  [L]aser  [B]omb  [W]ave  [+]HP  [S]hield', GW / 2, controlY + 14);
+
+  // Character name
+  if (PLAYER_NAME && PLAYER_NAME !== 'Baseling') {
+    ctx.fillStyle = PLAYER_COLOR;
+    ctx.font = 'bold 9px monospace';
+    ctx.fillText('PILOT: ' + PLAYER_NAME, GW / 2, controlY + 30);
+  }
 
   // High score
   if (highScore > 0) {
     ctx.fillStyle = '#ffdd44';
     ctx.font = '10px monospace';
-    ctx.fillText('HIGH SCORE: ' + highScore, GW / 2, 250);
+    ctx.textAlign = 'center';
+    ctx.fillText('HIGH SCORE: ' + highScore, GW / 2, controlY + 46);
   }
 
   // Start prompt
-  const pulse = Math.sin(frame * 0.05) * 0.3 + 0.7;
+  var promptY = controlY + 62;
+  var pulse = Math.sin(frame * 0.05) * 0.3 + 0.7;
   ctx.globalAlpha = pulse;
   ctx.fillStyle = '#ffdd44';
   ctx.font = 'bold 12px monospace';
-  ctx.fillText('PRESS ANY KEY TO START', GW / 2, 290);
+  ctx.fillText('PRESS ANY KEY TO START', GW / 2, promptY);
   ctx.globalAlpha = 1;
+}
+
+// ============================================================
+// ADDITIONAL PIXEL SPRITES (Tasern creatures)
+// ============================================================
+// Shroom shield sprite
+var shroomShieldSprite = [
+  '..0000..',
+  '.012210.',
+  '01233210',
+  '01233210',
+  '.012210.',
+  '..0440..',
+  '..0440..',
+  '..0440..'
+];
+var shroomShieldPal = ['#222', '#445588', '#6688aa', '#88aacc', '#335533'];
+
+// Sporebomber sprite
+var sporebomberSprite = [
+  '...0000...',
+  '..012210..',
+  '.01233210.',
+  '012333210.',
+  '012333210.',
+  '.01233210.',
+  '..012210..',
+  '...0440...',
+  '...0550...'
+];
+var sporebomberPal = ['#222', '#886644', '#aa8844', '#ccaa66', '#88ff00', '#ffaa00'];
+
+// Toxin jelly sprite
+var toxinJellySprite = [
+  '..0000..',
+  '.011110.',
+  '01122110',
+  '01133110',
+  '01122110',
+  '.011110.',
+  '..0..0..',
+  '..0..0..'
+];
+var toxinJellyPal = ['#222', '#448800', '#88ff00', '#000'];
+
+// Tendril segment sprite
+var tendrilSegSprite = [
+  '.000.',
+  '01110',
+  '01210',
+  '01110',
+  '.000.'
+];
+var tendrilSegPal = ['#222', '#66cc33', '#88ff44'];
+
+// Brinewalker sprite
+var brinewalkerSprite = [
+  '...00....',
+  '..0110...',
+  '.011110..',
+  '01111110.',
+  '011221110',
+  '01111110.',
+  '.011110..',
+  '..0000...'
+];
+var brinewalkerPal = ['#222', '#446677', '#88aacc'];
+
+// ============================================================
+// STAGE-SPECIFIC FOREGROUND DETAILS
+// ============================================================
+function drawForegroundDetails() {
+  switch (stage) {
+    case 0: // Sporevoid Station — floating debris
+      for (var i = 0; i < 3; i++) {
+        var dx = ((frame * 0.3 + i * 160) % (GW + 30)) - 15;
+        var dy = 20 + i * 90 + Math.sin(frame * 0.01 + i * 3) * 10;
+        ctx.globalAlpha = 0.15;
+        drawPixelRect(dx, dy, 8, 4, '#4488ff');
+        drawPixelRect(dx + 2, dy + 1, 4, 2, '#6699ff');
+        ctx.globalAlpha = 1;
+      }
+      break;
+
+    case 1: // Mycelium Descent — ash particles
+      for (var i = 0; i < 8; i++) {
+        var ax = ((frame * 1.2 + i * 60) % GW);
+        var ay = ((frame * 0.4 + i * 40) % GH);
+        ctx.globalAlpha = 0.2;
+        drawPixelRect(ax, ay, 2, 2, '#997766');
+        ctx.globalAlpha = 1;
+      }
+      break;
+
+    case 2: // Ruins of Tasern — dust motes
+      for (var i = 0; i < 6; i++) {
+        var mx = ((frame * 0.2 + i * 80) % GW);
+        var my = GH - 30 + Math.sin(frame * 0.03 + i) * 8;
+        ctx.globalAlpha = 0.12;
+        drawPixelCircle(mx, my, 1, '#aaa');
+        ctx.globalAlpha = 1;
+      }
+      break;
+
+    case 3: // Undergrowth — dripping water
+      for (var i = 0; i < 4; i++) {
+        var wx = 40 + i * 110;
+        var wy = 30 + ((frame * 0.8 + i * 50) % 40);
+        ctx.globalAlpha = 0.3;
+        drawPixelRect(wx, wy, 1, 3, '#4488aa');
+        ctx.globalAlpha = 1;
+      }
+      break;
+
+    case 4: // Fungal Hive — floating spore motes
+      for (var i = 0; i < 10; i++) {
+        var sx = ((frame * 0.15 + i * 48) % GW);
+        var sy = ((frame * 0.1 + i * 32) % GH);
+        ctx.globalAlpha = 0.15 + Math.sin(frame * 0.04 + i) * 0.1;
+        drawPixelCircle(sx, sy, 1, '#44ff44');
+        ctx.globalAlpha = 1;
+      }
+      break;
+
+    case 5: // Brine Flats — sea foam
+      for (var i = 0; i < 6; i++) {
+        var fx = ((frame * 1.5 + i * 80) % GW);
+        var fy = GH * 0.68 + Math.sin(frame * 0.05 + i * 2) * 3;
+        ctx.globalAlpha = 0.2;
+        drawPixelCircle(fx, fy, 2, '#aaddee');
+        ctx.globalAlpha = 1;
+      }
+      break;
+
+    case 6: // Motherspore — energy sparks
+      for (var i = 0; i < 5; i++) {
+        var ex = ((frame * 2 + i * 96) % GW);
+        var ey = ((frame * 0.5 + i * 64) % GH);
+        ctx.globalAlpha = 0.3 * (0.5 + Math.sin(frame * 0.1 + i) * 0.5);
+        drawPixelCircle(ex, ey, 1, '#ff88ff');
+        ctx.globalAlpha = 1;
+      }
+      break;
+  }
+}
+
+// ============================================================
+// ENHANCED BOSS DRAWING PER STAGE
+// ============================================================
+function drawBossDetails() {
+  if (!boss || boss.defeated) return;
+
+  ctx.save();
+  ctx.translate(Math.floor(boss.x), Math.floor(boss.y));
+
+  switch (stage) {
+    case 0: // Sporelord Zyx — mechanical spore core
+      // Rotating armor plates
+      for (var i = 0; i < 4; i++) {
+        var pa = boss.timer * 0.015 + (i / 4) * Math.PI * 2;
+        var px = Math.cos(pa) * (boss.w * 0.55);
+        var py = Math.sin(pa) * (boss.w * 0.55);
+        drawPixelRect(px - 4, py - 2, 8, 4, '#4488ff');
+      }
+      break;
+
+    case 1: // Cloudrender — trailing smoke
+      for (var i = 0; i < 5; i++) {
+        var sx = -10 - i * 8 - Math.sin(boss.timer * 0.03 + i) * 4;
+        var sy = Math.sin(boss.timer * 0.02 + i * 1.5) * 12;
+        ctx.globalAlpha = 0.15 - i * 0.02;
+        drawPixelCircle(sx, sy, 6 + i * 2, '#ff8844');
+        ctx.globalAlpha = 1;
+      }
+      break;
+
+    case 2: // Ruin Titan — crumbling armor
+      drawPixelRect(-boss.w * 0.5, -boss.w * 0.3, boss.w, 3, '#444');
+      drawPixelRect(-boss.w * 0.5, boss.w * 0.3, boss.w, 3, '#444');
+      break;
+
+    case 3: // Rootmaw — tangling roots
+      for (var i = 0; i < 6; i++) {
+        var ra = boss.timer * 0.01 + (i / 6) * Math.PI * 2;
+        var rx = Math.cos(ra) * (boss.w * 0.8);
+        var ry = Math.sin(ra) * (boss.w * 0.8);
+        ctx.strokeStyle = '#445522';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(0, 0);
+        ctx.quadraticCurveTo(rx * 0.5, ry * 0.5 + 5, rx, ry);
+        ctx.stroke();
+      }
+      break;
+
+    case 4: // Hivequeen — pulsing egg sacs
+      for (var i = 0; i < 3; i++) {
+        var ea = (i / 3) * Math.PI * 2 + boss.timer * 0.008;
+        var ex = Math.cos(ea) * (boss.w * 0.45);
+        var ey = Math.sin(ea) * (boss.w * 0.45);
+        var ep = Math.sin(boss.timer * 0.05 + i) * 2;
+        drawPixelCircle(ex, ey, 5 + ep, 'rgba(68,255,68,0.4)');
+        drawPixelCircle(ex, ey, 3 + ep, '#88ff44');
+      }
+      break;
+
+    case 5: // Brine Colossus — water jets
+      for (var i = 0; i < 2; i++) {
+        var jx = -20 - i * 5;
+        var jy = -8 + i * 16;
+        for (var j = 0; j < 4; j++) {
+          ctx.globalAlpha = 0.2 - j * 0.04;
+          drawPixelCircle(jx - j * 6, jy + Math.sin(boss.timer * 0.1 + j) * 2, 3, '#44ddff');
+        }
+        ctx.globalAlpha = 1;
+      }
+      break;
+
+    case 6: // The Motherspore — energy rings
+      ctx.strokeStyle = 'rgba(255,68,255,0.25)';
+      ctx.lineWidth = 2;
+      for (var i = 0; i < 3; i++) {
+        var rr = boss.w * 0.6 + i * 10 + Math.sin(boss.timer * 0.03 + i) * 5;
+        ctx.beginPath();
+        ctx.arc(0, 0, rr, 0, Math.PI * 2);
+        ctx.stroke();
+      }
+      break;
+  }
+
+  ctx.restore();
 }
 
 // ============================================================

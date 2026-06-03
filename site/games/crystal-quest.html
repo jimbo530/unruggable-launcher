@@ -23,6 +23,12 @@ canvas { display: block; margin: 0 auto; }
 "use strict";
 
 // ============================================================
+// BASELING STAT INTEGRATION (Pass 1)
+// ============================================================
+var statB = { damage: 1, speed: 1, lives: 0, hpMult: 1, scoreMult: 1, cooldown: 1, luck: 1, str: 10, dex: 10, con: 10, int: 10, wis: 10, cha: 10, level: 0, color: '#44dd88', name: 'Baseling', icon: 'B' };
+try { if (window.NftLoader && NftLoader.getStatBonuses) statB = NftLoader.getStatBonuses(); } catch(e) {}
+
+// ============================================================
 // CONSTANTS
 // ============================================================
 const GW = 320, GH = 288;
@@ -50,7 +56,14 @@ const PAL = {
   wall: '#444', wallL: '#666', floor: '#222', floorL: '#333',
   wind: '#44cc66', fire: '#ff4422', ice: '#44aaff', earth: '#aa7733',
   crystal: ['#44cc66', '#ff4422', '#44aaff', '#aa7733'],
-  hud: '#111', hudBorder: '#444'
+  hud: '#111', hudBorder: '#444',
+  // Pass 3: Zone-specific palettes
+  forestAmbient: '#1a3a0e',
+  desertAmbient: '#aa8844',
+  volcanoAmbient: '#441100',
+  snowAmbient: '#aabbcc',
+  swampAmbient: '#223311',
+  dungeonAmbient: '#110022'
 };
 
 // ============================================================
@@ -62,7 +75,8 @@ const T = {
   BARRIER_WIND: 12, BARRIER_FIRE: 13, BARRIER_WATER: 14, BARRIER_EARTH: 15,
   CHEST: 16, NPC: 17, STAIRS_DOWN: 18, STAIRS_UP: 19, HOUSE: 20,
   DUNGEON_ENTRANCE: 21, SHOP: 22, SAVE_POINT: 23, CAVE_WALL: 24,
-  BRIDGE: 25, FLOWER: 26, SIGN: 27, VOLCANO: 28
+  BRIDGE: 25, FLOWER: 26, SIGN: 27, VOLCANO: 28, POISON_POOL: 29,
+  MUSHROOM_CLUSTER: 30, SPORE_VENT: 31
 };
 
 const SOLID = new Set([T.TREE, T.WATER, T.MOUNTAIN, T.WALL, T.LAVA,
@@ -98,33 +112,145 @@ let menuCursor = 0;
 let deathTimer = 0;
 let bossActive = null;
 let victoryTimer = 0;
+let totalScore = 0; // Pass 2: score tracking
+let comboCount = 0; // Pass 2: combo kills
+let comboTimer = 0;
+let scorePopups = []; // Pass 2: floating score text
+let screensExplored = 0; // Pass 2: overworld boss trigger
+let showTutorial = true; // Pass 3: first-play tutorial
+let tutorialStep = 0;
+let tutorialTimer = 0;
+let ambientParticles = []; // Pass 3: biome ambient effects
+let bonusLives = 0; // Pass 1: CON bonus lives (statB.lives)
+let overworldBoss = null; // Pass 2: overworld mini-boss
 
 // ============================================================
-// PLAYER
+// PLAYER (Pass 1: statB wired into base stats)
 // ============================================================
 function createPlayer() {
+  // STR -> base attack (*statB.damage)
+  // DEX -> speed (*statB.speed)
+  // CON -> HP (*statB.hpMult), bonus lives (statB.lives)
+  // INT -> score multiplier (*statB.scoreMult)
+  // WIS -> charge/cooldown reduction (*statB.cooldown)
+  // CHA -> drop rate (*statB.luck)
+  const baseHp = Math.floor(6 * statB.hpMult); // ref 1: CON -> HP
+  const baseSpeed = Math.floor(80 * statB.speed); // ref 2: DEX -> speed
+  const baseMp = 20 + (statB.wis > 12 ? Math.floor((statB.wis - 10) * 2) : 0); // ref 3: WIS -> MP pool
+  bonusLives = statB.lives; // ref 4: CON -> bonus lives
+
   return {
     x: 160, y: 128, w: 14, h: 14,
-    dir: DIR_DOWN, speed: 80,
-    hp: 6, maxHp: 6, // hearts * 2 (half hearts)
-    mp: 20, maxMp: 20,
+    dir: DIR_DOWN, speed: baseSpeed,
+    hp: baseHp, maxHp: baseHp,
+    mp: baseMp, maxMp: baseMp,
     xp: 0, level: 1, xpToNext: 20,
-    attack: 1, defense: 0,
-    crystals: [false, false, false, false], // wind, fire, water, earth
-    activeCrystal: -1, // -1 = sword only
+    attack: Math.max(1, Math.floor(1 * statB.damage)), // ref 5: STR -> base attack
+    defense: 0,
+    crystals: [false, false, false, false],
+    activeCrystal: -1,
     chargeLevel: 0, charging: false, chargeTime: 0,
     swinging: false, swingTimer: 0, swingDir: 0,
-    invincible: 0, // i-frames
+    invincible: 0,
     gold: 0,
-    armor: 0, // 0=cloth, 1=chain, 2=plate
-    shield: 0, // 0=none, 1=wood, 2=iron
-    boots: false,
+    armor: 0, shield: 0, boots: false,
     potions: 2,
     keys: 0,
     moveTimer: 0,
     animFrame: 0,
-    stepTimer: 0
+    stepTimer: 0,
+    poisonTimer: 0, // Pass 2: poison hazard
+    poisonDamageTimer: 0
   };
+}
+
+// ============================================================
+// SCORE POPUP SYSTEM (Pass 2)
+// ============================================================
+function addScorePopup(x, y, text, color) {
+  scorePopups.push({ x: x, y: y, text: text, color: color || '#ff0', life: 1.2, vy: -40 });
+}
+
+function updateScorePopups(dt) {
+  for (let i = scorePopups.length - 1; i >= 0; i--) {
+    var sp = scorePopups[i];
+    sp.y += sp.vy * dt;
+    sp.life -= dt;
+    if (sp.life <= 0) scorePopups.splice(i, 1);
+  }
+}
+
+function drawScorePopups() {
+  for (var i = 0; i < scorePopups.length; i++) {
+    var sp = scorePopups[i];
+    ctx.globalAlpha = Math.min(1, sp.life * 2);
+    ctx.fillStyle = sp.color;
+    ctx.font = 'bold 9px monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText(sp.text, sp.x, sp.y);
+  }
+  ctx.globalAlpha = 1;
+}
+
+// ============================================================
+// AMBIENT PARTICLE SYSTEM (Pass 3)
+// ============================================================
+function spawnAmbientParticles(biome) {
+  ambientParticles = [];
+  var count = 0;
+  var color = '#fff';
+  var speedMult = 1;
+
+  switch (biome) {
+    case 'forest':
+      count = 8; color = '#4a4'; speedMult = 0.3; break;
+    case 'snow':
+      count = 15; color = '#ddf'; speedMult = 0.5; break;
+    case 'volcano':
+      count = 10; color = '#f84'; speedMult = 1.2; break;
+    case 'swamp':
+      count = 6; color = '#8a8'; speedMult = 0.2; break;
+    case 'desert':
+      count = 5; color = '#dc9'; speedMult = 0.8; break;
+    case 'coast':
+      count = 7; color = '#8cf'; speedMult = 0.4; break;
+    default:
+      count = 3; color = '#888'; speedMult = 0.3;
+  }
+
+  for (var i = 0; i < count; i++) {
+    ambientParticles.push({
+      x: Math.random() * GW,
+      y: Math.random() * PLAY_H,
+      vx: (Math.random() - 0.5) * 20 * speedMult,
+      vy: (Math.random() - 0.5) * 15 * speedMult + (biome === 'snow' ? 15 : 0),
+      color: color,
+      size: 1 + Math.random() * 2,
+      alpha: 0.2 + Math.random() * 0.4
+    });
+  }
+}
+
+function updateAmbientParticles(dt) {
+  for (var i = 0; i < ambientParticles.length; i++) {
+    var p = ambientParticles[i];
+    p.x += p.vx * dt;
+    p.y += p.vy * dt;
+    if (p.x < 0) p.x = GW;
+    if (p.x > GW) p.x = 0;
+    if (p.y < 0) p.y = PLAY_H;
+    if (p.y > PLAY_H) p.y = 0;
+  }
+}
+
+function drawAmbientParticles() {
+  for (var i = 0; i < ambientParticles.length; i++) {
+    var p = ambientParticles[i];
+    ctx.globalAlpha = p.alpha * (0.5 + Math.sin(frame * 0.03 + i) * 0.3);
+    ctx.fillStyle = p.color;
+    ctx.fillRect(p.x, p.y, p.size, p.size);
+  }
+  ctx.globalAlpha = 1;
 }
 
 // ============================================================
@@ -178,6 +304,7 @@ function generateTile(biome, c, r, sx, sy) {
     case 'forest':
       if (rng < 0.35) return T.TREE;
       if (rng < 0.05 + 0.35) return T.FLOWER;
+      if (rng < 0.42) return T.MUSHROOM_CLUSTER; // Pass 2: mushroom clusters
       return T.GRASS;
     case 'plains':
       if (rng < 0.08) return T.TREE;
@@ -195,7 +322,8 @@ function generateTile(biome, c, r, sx, sy) {
       return T.SAND;
     case 'swamp':
       if (rng < 0.25) return T.WATER;
-      if (rng < 0.35) return T.TREE;
+      if (rng < 0.30) return T.POISON_POOL; // Pass 2: poison pools
+      if (rng < 0.40) return T.TREE;
       return T.SWAMP;
     case 'coast':
       if (r > 10 || (r > 6 && rng < 0.3 + (r - 6) * 0.1)) return T.WATER;
@@ -204,6 +332,7 @@ function generateTile(biome, c, r, sx, sy) {
     case 'volcano':
       if (rng < 0.35) return T.MOUNTAIN;
       if (rng < 0.15 + 0.35) return T.LAVA;
+      if (rng < 0.52) return T.SPORE_VENT; // Pass 2: spore vents
       return T.GRASS;
     case 'town': case 'town_start':
       return T.PATH;
@@ -371,6 +500,12 @@ function addDungeonObstacles(tiles, dIdx, rIdx, seed) {
       tiles[py][px] = T.CAVE_WALL;
       if (px + 1 < COLS - 1) tiles[py][px + 1] = T.CAVE_WALL;
     }
+    // Pass 2: add spore vents in wind dungeon
+    if (rIdx > 2) {
+      const vx = 5 + Math.floor(rng(99) * 10);
+      const vy = 5 + Math.floor(rng(98) * 6);
+      tiles[vy][vx] = T.SPORE_VENT;
+    }
   } else if (dIdx === 1) { // Fire - lava pools
     for (let i = 0; i < 5; i++) {
       const px = 3 + Math.floor(rng(i * 7) * 13);
@@ -392,6 +527,12 @@ function addDungeonObstacles(tiles, dIdx, rIdx, seed) {
       const py = 2 + Math.floor(rng(i * 3 + 1) * 11);
       tiles[py][px] = T.CAVE_WALL;
     }
+    // Pass 2: mushroom clusters in earth dungeon
+    if (rIdx > 1) {
+      const mx = 4 + Math.floor(rng(77) * 10);
+      const my = 4 + Math.floor(rng(78) * 7);
+      tiles[my][mx] = T.MUSHROOM_CLUSTER;
+    }
   } else { // Spore Tower - mixed
     for (let i = 0; i < 3; i++) {
       const px = 3 + Math.floor(rng(i * 4) * 13);
@@ -400,23 +541,37 @@ function addDungeonObstacles(tiles, dIdx, rIdx, seed) {
       tiles[py][px] = t;
       if (px + 1 < COLS - 1) tiles[py][px + 1] = t;
     }
+    // Pass 2: poison pools in Spore Tower
+    if (rIdx > 3) {
+      const ppx = 6 + Math.floor(rng(55) * 8);
+      const ppy = 5 + Math.floor(rng(56) * 5);
+      tiles[ppy][ppx] = T.POISON_POOL;
+      if (ppx + 1 < COLS - 1) tiles[ppy][ppx + 1] = T.POISON_POOL;
+    }
   }
 }
 
 // ============================================================
-// ENEMIES
+// ENEMIES (Pass 2: expanded roster with Tasern creatures)
 // ============================================================
 const ENEMY_DEFS = {
-  slime:    { hp: 3, speed: 30, damage: 1, xp: 3, color: '#4a4', w: 12, h: 12, pattern: 'wander' },
-  bat:      { hp: 2, speed: 60, damage: 1, xp: 2, color: '#644', w: 10, h: 10, pattern: 'swoop' },
-  skeleton: { hp: 5, speed: 40, damage: 2, xp: 5, color: '#ddd', w: 14, h: 14, pattern: 'chase' },
-  wizard:   { hp: 4, speed: 25, damage: 2, xp: 6, color: '#a4f', w: 12, h: 14, pattern: 'shoot' },
-  golem:    { hp: 10, speed: 20, damage: 3, xp: 10, color: '#865', w: 16, h: 16, pattern: 'charge' },
-  fireImp:  { hp: 4, speed: 50, damage: 2, xp: 5, color: '#f64', w: 10, h: 10, pattern: 'swoop', element: 1 },
-  waterNymph: { hp: 5, speed: 35, damage: 2, xp: 6, color: '#4af', w: 12, h: 12, pattern: 'shoot', element: 2 },
-  windSprite: { hp: 3, speed: 70, damage: 1, xp: 4, color: '#6e6', w: 8, h: 8, pattern: 'swoop', element: 0 },
-  rockBeast: { hp: 8, speed: 25, damage: 3, xp: 8, color: '#976', w: 16, h: 16, pattern: 'charge', element: 3 },
-  sporeling: { hp: 6, speed: 45, damage: 2, xp: 7, color: '#c6f', w: 12, h: 12, pattern: 'chase' }
+  slime:          { hp: 3, speed: 30, damage: 1, xp: 3, color: '#4a4', w: 12, h: 12, pattern: 'wander' },
+  bat:            { hp: 2, speed: 60, damage: 1, xp: 2, color: '#644', w: 10, h: 10, pattern: 'swoop' },
+  skeleton:       { hp: 5, speed: 40, damage: 2, xp: 5, color: '#ddd', w: 14, h: 14, pattern: 'chase' },
+  wizard:         { hp: 4, speed: 25, damage: 2, xp: 6, color: '#a4f', w: 12, h: 14, pattern: 'shoot' },
+  golem:          { hp: 10, speed: 20, damage: 3, xp: 10, color: '#865', w: 16, h: 16, pattern: 'charge' },
+  fireImp:        { hp: 4, speed: 50, damage: 2, xp: 5, color: '#f64', w: 10, h: 10, pattern: 'swoop', element: 1 },
+  waterNymph:     { hp: 5, speed: 35, damage: 2, xp: 6, color: '#4af', w: 12, h: 12, pattern: 'shoot', element: 2 },
+  windSprite:     { hp: 3, speed: 70, damage: 1, xp: 4, color: '#6e6', w: 8, h: 8, pattern: 'swoop', element: 0 },
+  rockBeast:      { hp: 8, speed: 25, damage: 3, xp: 8, color: '#976', w: 16, h: 16, pattern: 'charge', element: 3 },
+  sporeling:      { hp: 6, speed: 45, damage: 2, xp: 7, color: '#c6f', w: 12, h: 12, pattern: 'chase' },
+  // Pass 2: new Tasern enemies
+  mushroomKnight: { hp: 7, speed: 35, damage: 2, xp: 8, color: '#c84', w: 14, h: 14, pattern: 'chase' },
+  sporeHound:     { hp: 4, speed: 65, damage: 2, xp: 6, color: '#8c4', w: 12, h: 10, pattern: 'swoop' },
+  moldWraith:     { hp: 6, speed: 30, damage: 3, xp: 9, color: '#696', w: 14, h: 16, pattern: 'shoot' },
+  fungalTitan:    { hp: 12, speed: 18, damage: 4, xp: 14, color: '#a86', w: 18, h: 18, pattern: 'charge' },
+  toxicSlug:      { hp: 5, speed: 20, damage: 1, xp: 4, color: '#6a4', w: 14, h: 10, pattern: 'wander', poisonous: true },
+  myceliumMage:   { hp: 5, speed: 28, damage: 3, xp: 10, color: '#c4f', w: 12, h: 14, pattern: 'shoot' }
 };
 
 function spawnEnemiesForScreen() {
@@ -434,17 +589,23 @@ function spawnEnemiesForScreen() {
     const type = types[TAS.math.randInt(0, types.length - 1)];
     spawnEnemy(type);
   }
+
+  // Pass 2: overworld boss every 5 screens explored
+  screensExplored++;
+  if (screensExplored % 5 === 0 && !overworldBoss) {
+    spawnOverworldBoss(biome);
+  }
 }
 
 function getEnemyTypesForBiome(biome) {
   switch (biome) {
-    case 'forest': return ['slime', 'bat', 'skeleton'];
-    case 'plains': return ['slime', 'bat'];
-    case 'mountain': case 'snow': return ['golem', 'bat', 'skeleton'];
-    case 'desert': return ['skeleton', 'fireImp', 'wizard'];
-    case 'swamp': return ['slime', 'waterNymph', 'skeleton'];
-    case 'coast': return ['waterNymph', 'bat'];
-    case 'volcano': return ['fireImp', 'golem', 'wizard'];
+    case 'forest': return ['slime', 'bat', 'skeleton', 'mushroomKnight', 'sporeHound'];
+    case 'plains': return ['slime', 'bat', 'toxicSlug'];
+    case 'mountain': case 'snow': return ['golem', 'bat', 'skeleton', 'fungalTitan'];
+    case 'desert': return ['skeleton', 'fireImp', 'wizard', 'moldWraith'];
+    case 'swamp': return ['slime', 'waterNymph', 'skeleton', 'toxicSlug', 'moldWraith'];
+    case 'coast': return ['waterNymph', 'bat', 'sporeHound'];
+    case 'volcano': return ['fireImp', 'golem', 'wizard', 'myceliumMage'];
     default: return ['slime'];
   }
 }
@@ -465,11 +626,11 @@ function spawnDungeonEnemies() {
 
 function getDungeonEnemyTypes(dIdx) {
   switch (dIdx) {
-    case 0: return ['windSprite', 'bat', 'slime'];
-    case 1: return ['fireImp', 'skeleton', 'wizard'];
-    case 2: return ['waterNymph', 'slime', 'bat'];
-    case 3: return ['rockBeast', 'golem', 'skeleton'];
-    case 4: return ['sporeling', 'wizard', 'golem', 'fireImp'];
+    case 0: return ['windSprite', 'bat', 'slime', 'sporeHound'];
+    case 1: return ['fireImp', 'skeleton', 'wizard', 'mushroomKnight'];
+    case 2: return ['waterNymph', 'slime', 'bat', 'moldWraith'];
+    case 3: return ['rockBeast', 'golem', 'skeleton', 'fungalTitan'];
+    case 4: return ['sporeling', 'wizard', 'golem', 'fireImp', 'myceliumMage', 'toxicSlug'];
     default: return ['slime'];
   }
 }
@@ -489,10 +650,174 @@ function spawnEnemy(type) {
     hp: def.hp, maxHp: def.hp, speed: def.speed,
     damage: def.damage, xp: def.xp, color: def.color,
     pattern: def.pattern, element: def.element || -1,
+    poisonous: def.poisonous || false,
     dir: TAS.math.randInt(0, 3), moveTimer: 0,
     shootTimer: 0, chargeTimer: 0, stunTimer: 0,
     animFrame: 0, flash: 0
   });
+}
+
+// ============================================================
+// OVERWORLD BOSS (Pass 2)
+// ============================================================
+function spawnOverworldBoss(biome) {
+  var bossTypes = {
+    'forest': { name: 'Fungal Guardian', hp: 25, color: '#4c4', damage: 3, speed: 35 },
+    'plains': { name: 'Baseling Alpha', hp: 20, color: statB.color, damage: 2, speed: 45 },
+    'mountain': { name: 'Stone Warden', hp: 35, color: '#888', damage: 4, speed: 20 },
+    'desert': { name: 'Sand Wyrm', hp: 28, color: '#ca8', damage: 3, speed: 40 },
+    'swamp': { name: 'Rot Mother', hp: 30, color: '#585', damage: 3, speed: 25 },
+    'coast': { name: 'Tidewalker', hp: 22, color: '#48c', damage: 2, speed: 50 },
+    'volcano': { name: 'Ember Beast', hp: 35, color: '#f44', damage: 4, speed: 30 },
+    'snow': { name: 'Frost Stalker', hp: 28, color: '#ccf', damage: 3, speed: 38 }
+  };
+  var def = bossTypes[biome] || bossTypes['plains'];
+
+  overworldBoss = {
+    x: GW / 2 - 12, y: 60, w: 24, h: 24,
+    hp: def.hp, maxHp: def.hp,
+    damage: def.damage, speed: def.speed,
+    color: def.color, name: def.name,
+    pattern: 'boss', phase: 0, phaseTimer: 0,
+    moveTimer: 0, shootTimer: 0, dir: DIR_DOWN,
+    flash: 0, invincible: 0
+  };
+  showDialog('A ' + def.name + ' appears!');
+  TAS.fx.shake(5, 0.9);
+  TAS.audio.playMelody([[196, 0.2], [175, 0.2], [165, 0.3]], 200);
+}
+
+function updateOverworldBoss(dt) {
+  if (!overworldBoss) return;
+  var b = overworldBoss;
+  if (b.flash > 0) b.flash -= dt;
+  if (b.invincible > 0) b.invincible -= dt;
+  b.phaseTimer += dt;
+  b.moveTimer += dt;
+  b.shootTimer += dt;
+
+  if (b.hp < b.maxHp * 0.5 && b.phase === 0) {
+    b.phase = 1;
+    b.speed *= 1.3;
+    TAS.fx.flash(b.color, 0.4);
+  }
+
+  // Chase player
+  var dx = player.x - b.x;
+  var dy = player.y - b.y;
+  var dist = Math.sqrt(dx * dx + dy * dy) || 1;
+  var spd = b.speed * dt;
+  b.x += (dx / dist) * spd * 0.6;
+  b.y += (dy / dist) * spd * 0.6;
+  b.x = TAS.math.clamp(b.x, TILE, (COLS - 2) * TILE);
+  b.y = TAS.math.clamp(b.y, TILE, (ROWS - 3) * TILE);
+
+  // Shoot at player
+  if (b.shootTimer > (b.phase === 0 ? 2.0 : 1.2)) {
+    b.shootTimer = 0;
+    var angle = TAS.math.angle(b.x + b.w/2, b.y + b.h/2, player.x + player.w/2, player.y + player.h/2);
+    var shots = b.phase === 0 ? 1 : 3;
+    for (var i = 0; i < shots; i++) {
+      var a = angle + (i - Math.floor(shots/2)) * 0.4;
+      projectiles.push({
+        x: b.x + b.w/2, y: b.y + b.h/2,
+        vx: Math.cos(a) * 90, vy: Math.sin(a) * 90,
+        damage: b.damage, color: b.color, element: -1,
+        size: 5, life: 2.0, friendly: false
+      });
+    }
+    TAS.audio.playTone(180, 0.08, 'sawtooth', 0.06);
+  }
+
+  // Contact damage
+  if (player.invincible <= 0 && TAS.hit.rectOverlap(b.x, b.y, b.w, b.h,
+      player.x, player.y, player.w, player.h)) {
+    damagePlayer(b.damage);
+  }
+}
+
+function damageOverworldBoss(damage) {
+  if (!overworldBoss || overworldBoss.invincible > 0) return;
+  overworldBoss.hp -= damage;
+  overworldBoss.flash = 0.2;
+  overworldBoss.invincible = 0.3;
+  TAS.fx.shake(3, 0.85);
+  TAS.audio.playTone(220, 0.08, 'sawtooth', 0.1, 100);
+  TAS.particles.spawn(overworldBoss.x + overworldBoss.w/2, overworldBoss.y + overworldBoss.h/2, '#fff', 6, 4);
+
+  if (overworldBoss.hp <= 0) {
+    var xpReward = 20 + player.level * 5;
+    var goldReward = TAS.math.randInt(15, 35);
+    var scoreReward = 500;
+
+    TAS.fx.flash('#fff', 0.6);
+    TAS.fx.shake(6, 0.9);
+    TAS.particles.spawn(overworldBoss.x + 12, overworldBoss.y + 12, overworldBoss.color, 25, 6);
+    TAS.audio.playMelody([[440, 0.12], [554, 0.12], [659, 0.12], [880, 0.2]], 120);
+
+    player.xp += Math.floor(xpReward * statB.scoreMult); // ref 6: INT -> boss XP
+    player.gold += goldReward;
+    totalScore += Math.floor(scoreReward * statB.scoreMult); // ref 7: INT -> boss score
+    addScorePopup(overworldBoss.x + 12, overworldBoss.y, '+' + Math.floor(scoreReward * statB.scoreMult), '#ff0');
+    addScorePopup(overworldBoss.x + 12, overworldBoss.y - 14, overworldBoss.name + ' defeated!', '#fff');
+
+    checkLevelUp();
+    overworldBoss = null;
+  }
+}
+
+function drawOverworldBoss() {
+  if (!overworldBoss) return;
+  var b = overworldBoss;
+  var bx = Math.floor(b.x);
+  var by = Math.floor(b.y);
+
+  if (b.invincible > 0 && Math.floor(frame * 0.3) % 2 === 0) return;
+
+  // Aura (Pass 3)
+  ctx.globalAlpha = 0.15 + Math.sin(frame * 0.06) * 0.08;
+  ctx.fillStyle = b.color;
+  ctx.beginPath();
+  ctx.arc(bx + b.w/2, by + b.h/2, b.w + 6 + Math.sin(frame * 0.04) * 3, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.globalAlpha = 1;
+
+  ctx.fillStyle = b.flash > 0 ? '#fff' : b.color;
+  ctx.fillRect(bx + 2, by + 3, b.w - 4, b.h - 3);
+  // Eyes
+  ctx.fillStyle = b.flash > 0 ? '#fff' : '#200';
+  ctx.fillRect(bx + 5, by + 8, 3, 3);
+  ctx.fillRect(bx + b.w - 8, by + 8, 3, 3);
+  // Crown marks
+  ctx.fillStyle = '#ff0';
+  ctx.fillRect(bx + 4, by, 3, 4);
+  ctx.fillRect(bx + b.w - 7, by, 3, 4);
+  ctx.fillRect(bx + b.w/2 - 1, by - 2, 3, 5);
+
+  // Phase 2 aura ring
+  if (b.phase > 0) {
+    ctx.globalAlpha = 0.25 + Math.sin(frame * 0.08) * 0.1;
+    ctx.strokeStyle = b.color;
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.arc(bx + b.w/2, by + b.h/2, b.w/2 + 8 + Math.sin(frame * 0.05) * 3, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.lineWidth = 1;
+    ctx.globalAlpha = 1;
+  }
+
+  // HP bar
+  ctx.fillStyle = '#400';
+  ctx.fillRect(bx - 6, by - 10, b.w + 12, 5);
+  ctx.fillStyle = b.color;
+  ctx.fillRect(bx - 6, by - 10, (b.w + 12) * (b.hp / b.maxHp), 5);
+  ctx.strokeStyle = '#fff';
+  ctx.strokeRect(bx - 6, by - 10, b.w + 12, 5);
+  // Name
+  ctx.fillStyle = '#fff';
+  ctx.font = '7px monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText(b.name, bx + b.w/2, by - 14);
 }
 
 function spawnBoss() {
@@ -509,7 +834,7 @@ function spawnBoss() {
 }
 
 // ============================================================
-// ITEMS / PICKUPS
+// ITEMS / PICKUPS (Pass 2: new pickup types)
 // ============================================================
 function spawnPickup(x, y, type) {
   pickups.push({ x, y, type, timer: 300 }); // disappear after 5 sec
@@ -580,6 +905,12 @@ function getTileAt(px, py) {
 function startGame(loadSave) {
   player = createPlayer();
   overworldData = generateOverworld();
+  totalScore = 0;
+  comboCount = 0;
+  comboTimer = 0;
+  screensExplored = 0;
+  overworldBoss = null;
+  bonusLives = statB.lives; // ref 4 (init)
 
   if (loadSave) {
     loadGameState();
@@ -597,9 +928,16 @@ function startGame(loadSave) {
   pickups = [];
   bossActive = null;
   spawnEnemiesForScreen();
+  spawnAmbientParticles(getBiome(screenX, screenY));
   state = 'playing';
   dialogText = '';
   dialogTimer = 0;
+
+  // Pass 3: Show tutorial on first play
+  if (!loadSave && showTutorial) {
+    tutorialStep = 0;
+    tutorialTimer = 6;
+  }
 }
 
 // ============================================================
@@ -612,7 +950,8 @@ function saveGameState() {
     crystals: player.crystals, activeCrystal: player.activeCrystal,
     armor: player.armor, shield: player.shield, boots: player.boots,
     potions: player.potions, keys: player.keys,
-    screenX, screenY, attack: player.attack, defense: player.defense
+    screenX, screenY, attack: player.attack, defense: player.defense,
+    totalScore: totalScore, bonusLives: bonusLives
   };
   try { localStorage.setItem(SAVE_KEY, JSON.stringify(data)); }
   catch (e) { console.error('Save failed:', e); }
@@ -642,6 +981,8 @@ function loadGameState() {
     screenX = data.screenX || 2;
     screenY = data.screenY || 4;
     player.xpToNext = 20 + (player.level - 1) * 15;
+    totalScore = data.totalScore || 0;
+    bonusLives = data.bonusLives !== undefined ? data.bonusLives : statB.lives;
   } catch (e) { console.error('Load failed:', e); }
 }
 
@@ -660,12 +1001,31 @@ function updatePlayer(dt) {
     if (player.swingTimer <= 0) player.swinging = false;
   }
 
-  // MP regen
+  // MP regen (ref 8: WIS -> faster MP regen)
   if (player.mp < player.maxMp) {
-    player.mp = Math.min(player.maxMp, player.mp + dt * 2);
+    var regenRate = 2 * (1 + (statB.wis > 12 ? (statB.wis - 10) * 0.1 : 0));
+    player.mp = Math.min(player.maxMp, player.mp + dt * regenRate);
   }
 
-  // Movement
+  // Pass 2: Poison damage over time
+  if (player.poisonTimer > 0) {
+    player.poisonTimer -= dt;
+    player.poisonDamageTimer -= dt;
+    if (player.poisonDamageTimer <= 0) {
+      player.poisonDamageTimer = 1.0;
+      player.hp -= 1;
+      TAS.particles.spawn(player.x + 7, player.y + 7, '#6a4', 3, 2);
+      addScorePopup(player.x + 7, player.y, '-1 POISON', '#6a4');
+      if (player.hp <= 0) {
+        player.hp = 0;
+        deathTimer = 2;
+        state = 'death';
+        TAS.audio.playMelody([[440, 0.2], [392, 0.2], [349, 0.2], [330, 0.4]], 250);
+      }
+    }
+  }
+
+  // Movement (ref 2: DEX -> speed already applied in createPlayer)
   let dx = 0, dy = 0;
   const keys = TAS.input.keys;
   const touch = TAS.input.touch;
@@ -710,14 +1070,14 @@ function updatePlayer(dt) {
     }
   }
 
-  // Charging
+  // Charging (ref 9: WIS -> faster charge via statB.cooldown)
   if (keys['KeyX'] || keys['Space'] || touch.a) {
     if (!player.swinging && !player.charging) {
       player.charging = true;
       player.chargeTime = 0;
     }
     if (player.charging) {
-      player.chargeTime += dt;
+      player.chargeTime += dt * (1 / statB.cooldown); // WIS reduces charge time
       if (player.chargeTime >= 2.0) player.chargeLevel = 3;
       else if (player.chargeTime >= 1.0) player.chargeLevel = 2;
       else if (player.chargeTime >= 0.3) player.chargeLevel = 1;
@@ -727,11 +1087,6 @@ function updatePlayer(dt) {
     // Release - attack!
     player.charging = false;
     performAttack();
-  }
-
-  // Quick attack (tap)
-  if ((keys['KeyX'] || keys['Space'] || touch.a) && !player.charging && !player.swinging) {
-    // handled above by charge start
   }
 
   // Use item (B button)
@@ -777,7 +1132,7 @@ function updatePlayer(dt) {
 
 function performAttack() {
   if (player.chargeLevel === 0) {
-    // Quick sword swing
+    // Quick sword swing (ref 5: STR -> damage already on player.attack)
     player.swinging = true;
     player.swingTimer = 0.2;
     player.swingDir = player.dir;
@@ -816,17 +1171,28 @@ function checkSwordHit(power) {
   const sy = player.y + player.h / 2 + DY[player.dir] * range;
   const hitW = 20, hitH = 20;
 
+  // ref 10: STR -> sword damage multiplied by statB.damage
+  var totalDmg = Math.floor((power + player.attack) * statB.damage);
+
   for (let i = enemies.length - 1; i >= 0; i--) {
     const e = enemies[i];
     if (TAS.hit.rectOverlap(sx - hitW/2, sy - hitH/2, hitW, hitH, e.x, e.y, e.w, e.h)) {
-      damageEnemy(i, power + player.attack);
+      damageEnemy(i, totalDmg);
     }
   }
 
   if (bossActive) {
     if (TAS.hit.rectOverlap(sx - hitW/2, sy - hitH/2, hitW, hitH,
         bossActive.x, bossActive.y, bossActive.w, bossActive.h)) {
-      damageBoss(power + player.attack);
+      damageBoss(totalDmg);
+    }
+  }
+
+  // Pass 2: hit overworld boss
+  if (overworldBoss) {
+    if (TAS.hit.rectOverlap(sx - hitW/2, sy - hitH/2, hitW, hitH,
+        overworldBoss.x, overworldBoss.y, overworldBoss.w, overworldBoss.h)) {
+      damageOverworldBoss(totalDmg);
     }
   }
 }
@@ -837,6 +1203,8 @@ function fireCrystalShot(power) {
   const speed = 150 + power * 30;
   const colors = PAL.crystal;
   const crystal = player.activeCrystal;
+  // ref 11: STR -> crystal projectile damage
+  var projDmg = Math.floor((power + player.attack) * statB.damage) + (crystal === 1 ? 1 : 0);
 
   if (crystal === 2 && power >= 2) {
     // Water spread shot
@@ -844,16 +1212,15 @@ function fireCrystalShot(power) {
       const angle = Math.atan2(DY[player.dir], DX[player.dir]) + a * 0.3;
       projectiles.push({
         x: cx, y: cy, vx: Math.cos(angle) * speed, vy: Math.sin(angle) * speed,
-        damage: power + player.attack, color: colors[crystal], element: crystal,
+        damage: projDmg, color: colors[crystal], element: crystal,
         size: 4 + power, life: 1.5, friendly: true
       });
     }
   } else {
     projectiles.push({
       x: cx, y: cy, vx: DX[player.dir] * speed, vy: DY[player.dir] * speed,
-      damage: power + player.attack + (crystal === 1 ? 1 : 0), // fire bonus
-      color: colors[crystal], element: crystal,
-      size: 4 + power * 2, life: crystal === 0 ? 2.0 : 1.5, // wind faster/farther
+      damage: projDmg, color: colors[crystal], element: crystal,
+      size: 4 + power * 2, life: crystal === 0 ? 2.0 : 1.5,
       friendly: true
     });
   }
@@ -865,6 +1232,7 @@ function useItem() {
     player.hp = Math.min(player.maxHp, player.hp + 6);
     TAS.audio.playMelody([[523, 0.1], [659, 0.1], [784, 0.15]], 100);
     showDialog('Used potion! HP restored.');
+    addScorePopup(player.x + 7, player.y - 5, '+HP', '#f88');
   } else if (player.potions <= 0) {
     showDialog('No potions left!');
   } else {
@@ -922,11 +1290,35 @@ function checkTileInteraction() {
     case T.SIGN:
       showDialog('Welcome to Crystal Village! Find the 4 elemental crystals to save the world.');
       break;
+    // Pass 2: hazard tile interactions
+    case T.POISON_POOL:
+      if (player.poisonTimer <= 0) {
+        player.poisonTimer = 3;
+        player.poisonDamageTimer = 1.0;
+        addScorePopup(player.x + 7, player.y - 5, 'POISONED!', '#6a4');
+        TAS.audio.playTone(120, 0.15, 'sawtooth', 0.08, 80);
+      }
+      break;
+    case T.SPORE_VENT:
+      if (Math.random() < 0.02) {
+        TAS.particles.spawn(tcx * TILE + 8, tcy * TILE + 4, '#c6f', 5, 3);
+        damagePlayer(1);
+        addScorePopup(player.x + 7, player.y - 5, 'SPORE BURST!', '#c6f');
+      }
+      break;
+    case T.MUSHROOM_CLUSTER:
+      // Small heal chance
+      if (Math.random() < 0.01 && player.hp < player.maxHp) {
+        player.hp = Math.min(player.maxHp, player.hp + 1);
+        addScorePopup(player.x + 7, player.y - 5, '+1 HEAL', '#4c4');
+        TAS.audio.playTone(600, 0.05, 'sine', 0.05);
+      }
+      break;
   }
 }
 
 // ============================================================
-// SCREEN TRANSITIONS
+// SCREEN TRANSITIONS (Pass 3: enhanced transition)
 // ============================================================
 function transitionScreen(dir) {
   transitionDir = dir;
@@ -956,7 +1348,9 @@ function transitionScreen(dir) {
   projectiles = [];
   pickups = [];
   bossActive = null;
+  overworldBoss = null;
   spawnEnemiesForScreen();
+  spawnAmbientParticles(getBiome(screenX, screenY)); // Pass 3
 }
 
 function advanceDungeonRoom(direction) {
@@ -1005,7 +1399,9 @@ function enterDungeon() {
   projectiles = [];
   pickups = [];
   bossActive = null;
+  overworldBoss = null;
   spawnEnemiesForScreen();
+  spawnAmbientParticles('dungeon'); // Pass 3
   showDialog('Entering ' + DUNGEONS[dungeonId].name + '...');
   TAS.audio.playMelody([[220, 0.2], [196, 0.2], [175, 0.3]], 200);
 }
@@ -1021,12 +1417,14 @@ function exitDungeon() {
   projectiles = [];
   pickups = [];
   bossActive = null;
+  overworldBoss = null;
   spawnEnemiesForScreen();
+  spawnAmbientParticles(getBiome(screenX, screenY)); // Pass 3
   showDialog('Left the dungeon.');
 }
 
 // ============================================================
-// COMBAT
+// COMBAT (Pass 1: statB wired into damage/drops/score)
 // ============================================================
 function damageEnemy(idx, damage) {
   const e = enemies[idx];
@@ -1034,7 +1432,7 @@ function damageEnemy(idx, damage) {
 
   // Element weakness bonus
   if (player.activeCrystal >= 0) {
-    const weakness = (player.activeCrystal + 2) % 4; // fire beats earth's stuff etc
+    const weakness = (player.activeCrystal + 2) % 4;
     if (e.element === weakness) damage = Math.floor(damage * 1.5);
   }
 
@@ -1044,6 +1442,9 @@ function damageEnemy(idx, damage) {
   TAS.audio.playTone(300, 0.05, 'square', 0.08, 100);
   TAS.particles.spawn(e.x + e.w/2, e.y + e.h/2, '#fff', 4, 3);
 
+  // Pass 2: damage popup
+  addScorePopup(e.x + e.w/2, e.y - 5, '-' + damage, '#f88');
+
   if (e.hp <= 0) {
     killEnemy(idx);
   }
@@ -1051,19 +1452,53 @@ function damageEnemy(idx, damage) {
 
 function killEnemy(idx) {
   const e = enemies[idx];
-  TAS.particles.spawn(e.x + e.w/2, e.y + e.h/2, e.color, 10, 4);
+  // Pass 3: bigger kill particles
+  TAS.particles.spawn(e.x + e.w/2, e.y + e.h/2, e.color, 14, 5);
+  TAS.particles.spawn(e.x + e.w/2, e.y + e.h/2, '#fff', 6, 3);
   TAS.audio.playTone(500, 0.1, 'sine', 0.08, 200);
 
-  player.xp += e.xp;
+  // ref 12: INT -> XP multiplier
+  var xpGain = Math.floor(e.xp * statB.scoreMult);
+  player.xp += xpGain;
+
+  // Pass 2: score and combo
+  comboCount++;
+  comboTimer = 2.0;
+  var killScore = Math.floor((e.xp * 10 + comboCount * 5) * statB.scoreMult); // ref 13: INT -> kill score
+  totalScore += killScore;
+  if (comboCount > 1) {
+    addScorePopup(e.x + e.w/2, e.y - 10, '+' + killScore + ' x' + comboCount, '#ff0');
+  } else {
+    addScorePopup(e.x + e.w/2, e.y - 10, '+' + killScore, '#ff0');
+  }
+
   checkLevelUp();
 
-  // Drop chance
-  if (Math.random() < 0.2) {
+  // ref 14: CHA -> drop rate multiplied by statB.luck
+  var dropChance = Math.random();
+  var heartChance = 0.2 * statB.luck;
+  var goldChance = 0.15 * statB.luck;
+  var mpChance = 0.1 * statB.luck;
+  var xpOrbChance = 0.08 * statB.luck;
+  var sporeGemChance = 0.05 * statB.luck;
+
+  if (dropChance < heartChance) {
     spawnPickup(e.x, e.y, 'heart');
-  } else if (Math.random() < 0.15) {
+  } else if (dropChance < heartChance + goldChance) {
     spawnPickup(e.x, e.y, 'gold');
-  } else if (Math.random() < 0.1) {
+  } else if (dropChance < heartChance + goldChance + mpChance) {
     spawnPickup(e.x, e.y, 'mp');
+  } else if (dropChance < heartChance + goldChance + mpChance + xpOrbChance) {
+    spawnPickup(e.x, e.y, 'xpOrb'); // Pass 2: new pickup
+  } else if (dropChance < heartChance + goldChance + mpChance + xpOrbChance + sporeGemChance) {
+    spawnPickup(e.x, e.y, 'sporeGem'); // Pass 2: new pickup
+  }
+
+  // Pass 2: poisonous enemies leave poison on death
+  if (e.poisonous) {
+    player.poisonTimer = 2;
+    player.poisonDamageTimer = 1.0;
+    addScorePopup(player.x + 7, player.y - 5, 'TOXIC SPLASH!', '#6a4');
   }
 
   enemies.splice(idx, 1);
@@ -1083,6 +1518,9 @@ function damageBoss(damage) {
   TAS.audio.playTone(200, 0.1, 'sawtooth', 0.12, 100);
   TAS.particles.spawn(bossActive.x + bossActive.w/2, bossActive.y + bossActive.h/2, '#fff', 8, 5);
 
+  // Pass 2: boss damage popup
+  addScorePopup(bossActive.x + bossActive.w/2, bossActive.y - 10, '-' + damage, '#f44');
+
   if (bossActive.hp <= 0) {
     defeatBoss();
   }
@@ -1094,13 +1532,18 @@ function defeatBoss() {
   TAS.audio.playMelody([[523, 0.15], [659, 0.15], [784, 0.15], [1047, 0.3]], 150);
   TAS.particles.spawn(bossActive.x + 16, bossActive.y + 16, bossActive.color, 30, 6);
 
+  // Pass 2: boss score
+  var bossScore = Math.floor(1000 * (1 + dungeonId * 0.5) * statB.scoreMult); // ref 15: INT -> boss score
+  totalScore += bossScore;
+  addScorePopup(bossActive.x + 16, bossActive.y - 20, '+' + bossScore + ' BOSS!', '#ff0');
+
   if (dungeonId < 4) {
     // Grant crystal
     player.crystals[dungeonId] = true;
     player.activeCrystal = dungeonId;
     const names = ['Wind', 'Fire', 'Water', 'Earth'];
     showDialog('You found the ' + names[dungeonId] + ' Crystal! Its power flows through you.');
-    player.xp += 30 + dungeonId * 10;
+    player.xp += Math.floor((30 + dungeonId * 10) * statB.scoreMult); // ref 6 again
     checkLevelUp();
   } else {
     // Final boss defeated!
@@ -1121,9 +1564,21 @@ function damagePlayer(amount) {
   TAS.fx.flash('#f00', 0.3);
   TAS.fx.shake(4, 0.85);
   TAS.audio.playTone(100, 0.15, 'sawtooth', 0.12, 50);
+  addScorePopup(player.x + 7, player.y - 10, '-' + finalDmg, '#f44');
 
   if (player.hp <= 0) {
     player.hp = 0;
+    // Pass 1: bonus lives from CON (statB.lives)
+    if (bonusLives > 0) {
+      bonusLives--;
+      player.hp = Math.floor(player.maxHp * 0.3);
+      player.invincible = 2.0;
+      TAS.fx.flash('#ff0', 0.6);
+      TAS.audio.playMelody([[440, 0.1], [554, 0.1], [659, 0.15]], 100);
+      showDialog('Baseling resilience! ' + bonusLives + ' lives remaining.');
+      addScorePopup(player.x + 7, player.y - 20, 'EXTRA LIFE!', '#ff0');
+      return;
+    }
     deathTimer = 2;
     state = 'death';
     TAS.audio.playMelody([[440, 0.2], [392, 0.2], [349, 0.2], [330, 0.4]], 250);
@@ -1143,6 +1598,10 @@ function checkLevelUp() {
     TAS.audio.playMelody([[523, 0.1], [659, 0.1], [784, 0.1], [1047, 0.2]], 100);
     TAS.fx.flash('#ff0', 0.4);
     showDialog('Level up! Now level ' + player.level + '!');
+    addScorePopup(player.x + 7, player.y - 20, 'LEVEL ' + player.level + '!', '#ff0');
+    // Pass 3: level up particle burst
+    TAS.particles.spawn(player.x + 7, player.y + 7, '#ff0', 15, 5);
+    TAS.particles.spawn(player.x + 7, player.y + 7, '#fff', 8, 3);
   }
 }
 
@@ -1380,6 +1839,15 @@ function updateProjectiles(dt) {
           projectiles.splice(i, 1);
         }
       }
+      // Hit overworld boss
+      if (overworldBoss && projectiles[i]) {
+        if (TAS.hit.circleOverlap(p.x, p.y, p.size, overworldBoss.x + overworldBoss.w/2,
+            overworldBoss.y + overworldBoss.h/2, overworldBoss.w/2)) {
+          damageOverworldBoss(p.damage);
+          TAS.particles.spawn(p.x, p.y, p.color, 4, 2);
+          projectiles.splice(i, 1);
+        }
+      }
     } else {
       // Hit player
       if (player.invincible <= 0 && TAS.hit.circleOverlap(p.x, p.y, p.size,
@@ -1393,7 +1861,7 @@ function updateProjectiles(dt) {
 }
 
 // ============================================================
-// PICKUPS
+// PICKUPS (Pass 2: new pickup types)
 // ============================================================
 function updatePickups(dt) {
   for (let i = pickups.length - 1; i >= 0; i--) {
@@ -1406,14 +1874,33 @@ function updatePickups(dt) {
         case 'heart':
           player.hp = Math.min(player.maxHp, player.hp + 2);
           TAS.audio.playTone(600, 0.08, 'sine', 0.08);
+          addScorePopup(p.x + 6, p.y, '+HP', '#f88');
           break;
         case 'gold':
-          player.gold += TAS.math.randInt(3, 8);
+          var goldAmt = TAS.math.randInt(3, 8);
+          player.gold += goldAmt;
           TAS.audio.playTone(800, 0.05, 'sine', 0.06);
+          addScorePopup(p.x + 6, p.y, '+' + goldAmt + 'G', '#ff0');
           break;
         case 'mp':
           player.mp = Math.min(player.maxMp, player.mp + 8);
           TAS.audio.playTone(700, 0.08, 'triangle', 0.07);
+          addScorePopup(p.x + 6, p.y, '+MP', '#88f');
+          break;
+        case 'xpOrb': // Pass 2
+          var xpAmt = Math.floor(TAS.math.randInt(5, 12) * statB.scoreMult);
+          player.xp += xpAmt;
+          TAS.audio.playMelody([[400, 0.05], [600, 0.08]], 60);
+          addScorePopup(p.x + 6, p.y, '+' + xpAmt + ' XP', '#af4');
+          checkLevelUp();
+          break;
+        case 'sporeGem': // Pass 2
+          var gemScore = Math.floor(100 * statB.scoreMult);
+          totalScore += gemScore;
+          player.mp = Math.min(player.maxMp, player.mp + 4);
+          TAS.audio.playMelody([[523, 0.06], [784, 0.1]], 80);
+          addScorePopup(p.x + 6, p.y, '+' + gemScore + ' GEM', '#c4f');
+          TAS.particles.spawn(p.x + 6, p.y + 6, '#c4f', 8, 3);
           break;
       }
       TAS.particles.spawn(p.x + 6, p.y + 6, '#ff0', 5, 2);
@@ -1423,7 +1910,7 @@ function updatePickups(dt) {
 }
 
 // ============================================================
-// NPC / SHOP / DIALOG
+// NPC / SHOP / DIALOG (Pass 2: Tasern lore NPCs)
 // ============================================================
 function showDialog(text) {
   dialogText = text;
@@ -1442,7 +1929,18 @@ function talkToNPC() {
     'The shop sells potions and armor. Save your gold!',
     'Press B to use a potion when you are hurt.',
     'Each crystal gives you a different type of projectile attack.',
-    'Bosses are weak to the opposing element!'
+    'Bosses are weak to the opposing element!',
+    // Pass 2: Tasern lore NPCs
+    'The mycelium network connects all living things in Tasern.',
+    'Beware the Mushroom Knights -- they guard the forest passages.',
+    'Spore Hounds track by scent. Keep moving or they will surround you.',
+    'The old ones say the crystals were forged from baseling tears.',
+    'Toxic slugs leave poison pools when they die. Watch your step!',
+    'Mold Wraiths phase in and out. Strike when they solidify!',
+    'The Fungal Titans are slow but devastating. Use ranged attacks.',
+    'Every baseling carries the potential to become something greater.',
+    'The spore vents in the volcano are unstable. Do not linger.',
+    'Strong baselings find better loot. Train your charisma!'
   ];
   showDialog(hints[TAS.math.randInt(0, hints.length - 1)]);
 }
@@ -1457,7 +1955,10 @@ function openShop() {
     { name: 'Plate Armor', cost: 120, action: () => { player.armor = 2; player.defense = 2; }, req: () => player.armor < 2 },
     { name: 'Wood Shield', cost: 30, action: () => { player.shield = 1; }, req: () => player.shield < 1 },
     { name: 'Iron Shield', cost: 80, action: () => { player.shield = 2; }, req: () => player.shield < 2 },
-    { name: 'Speed Boots', cost: 60, action: () => { player.boots = true; }, req: () => !player.boots }
+    { name: 'Speed Boots', cost: 60, action: () => { player.boots = true; }, req: () => !player.boots },
+    // Pass 2: new shop items
+    { name: 'Antidote', cost: 10, action: () => { player.poisonTimer = 0; showDialog('Poison cured!'); } },
+    { name: 'Spore Ward', cost: 40, action: () => { player.invincible = 5; showDialog('Temporary invincibility!'); } }
   ].filter(item => !item.req || item.req());
 }
 
@@ -1498,23 +1999,32 @@ function openChest(cx, cy) {
   currentMap[cy][cx] = T.FLOOR; // remove chest
   TAS.audio.playMelody([[440, 0.1], [554, 0.1], [659, 0.15]], 120);
   TAS.particles.spawn(cx * TILE + 8, cy * TILE + 8, '#ff0', 10, 3);
+  // Pass 3: extra chest particles
+  TAS.particles.spawn(cx * TILE + 8, cy * TILE + 8, '#fff', 6, 2);
 
-  // Random reward
+  // Random reward (ref 14: CHA -> better chest loot via statB.luck)
   const roll = Math.random();
-  if (roll < 0.3) {
-    player.potions += 2;
-    showDialog('Found 2 potions!');
-  } else if (roll < 0.6) {
-    const gold = TAS.math.randInt(15, 40);
+  var luckBonus = statB.luck > 1 ? 0.1 : 0;
+  if (roll < 0.3 + luckBonus) {
+    var potCount = statB.luck > 1.2 ? 3 : 2;
+    player.potions += potCount;
+    showDialog('Found ' + potCount + ' potions!');
+    addScorePopup(cx * TILE + 8, cy * TILE, '+' + potCount + ' POT', '#f88');
+  } else if (roll < 0.6 + luckBonus) {
+    const gold = TAS.math.randInt(15, Math.floor(40 * statB.luck));
     player.gold += gold;
     showDialog('Found ' + gold + ' gold!');
+    addScorePopup(cx * TILE + 8, cy * TILE, '+' + gold + 'G', '#ff0');
   } else if (roll < 0.8) {
     player.keys++;
     showDialog('Found a key!');
+    addScorePopup(cx * TILE + 8, cy * TILE, '+KEY', '#ff0');
   } else {
     player.hp = player.maxHp;
     player.mp = player.maxMp;
     showDialog('Found a full restore crystal!');
+    addScorePopup(cx * TILE + 8, cy * TILE, 'FULL RESTORE!', '#4ff');
+    TAS.particles.spawn(cx * TILE + 8, cy * TILE + 8, '#4ff', 12, 4);
   }
 }
 
@@ -1551,12 +2061,71 @@ function updateMenu(dt) {
 }
 
 // ============================================================
+// TUTORIAL (Pass 3)
+// ============================================================
+function updateTutorial(dt) {
+  if (!showTutorial || tutorialTimer <= 0) return;
+  tutorialTimer -= dt;
+  if (tutorialTimer <= 0) {
+    tutorialStep++;
+    if (tutorialStep >= 4) {
+      showTutorial = false;
+    } else {
+      tutorialTimer = 5;
+    }
+  }
+  // Skip tutorial on any button press
+  if (TAS.input.keys['Space'] || TAS.input.keys['KeyX'] || TAS.input.touch.a) {
+    showTutorial = false;
+    tutorialTimer = 0;
+  }
+}
+
+function drawTutorial() {
+  if (!showTutorial || tutorialTimer <= 0) return;
+
+  ctx.fillStyle = 'rgba(0,0,20,0.85)';
+  ctx.fillRect(20, 20, GW - 40, 60);
+  ctx.strokeStyle = '#4af';
+  ctx.strokeRect(20, 20, GW - 40, 60);
+
+  ctx.fillStyle = '#fff';
+  ctx.font = 'bold 9px monospace';
+  ctx.textAlign = 'center';
+
+  var messages = [
+    ['MOVE with Arrow Keys or WASD', 'Explore the world of Tasern!'],
+    ['ATTACK with X/Space (hold to charge)', 'Defeat enemies to earn XP and gold!'],
+    ['USE POTION with Z/C when hurt', 'Open MENU with M or Escape'],
+    ['Find all 4 CRYSTALS to unlock', 'the final Spore Tower dungeon!']
+  ];
+
+  var step = Math.min(tutorialStep, messages.length - 1);
+  ctx.fillText(messages[step][0], GW / 2, 42);
+  ctx.fillStyle = '#aaa';
+  ctx.font = '8px monospace';
+  ctx.fillText(messages[step][1], GW / 2, 58);
+
+  ctx.fillStyle = '#666';
+  ctx.font = '7px monospace';
+  ctx.fillText('Press A to skip tutorial', GW / 2, 74);
+}
+
+// ============================================================
 // MAIN UPDATE
 // ============================================================
 function update(dt) {
   frame++;
   TAS.particles.update(dt);
   TAS.fx.updateEffects(dt);
+  updateScorePopups(dt);
+  updateAmbientParticles(dt);
+
+  // Pass 2: combo timer
+  if (comboTimer > 0) {
+    comboTimer -= dt;
+    if (comboTimer <= 0) comboCount = 0;
+  }
 
   if (state === 'title') {
     if (TAS.input.keys['Space'] || TAS.input.keys['Enter'] || TAS.input.keys['KeyX'] || TAS.input.touch.a) {
@@ -1580,7 +2149,9 @@ function update(dt) {
       loadScreen(screenX, screenY);
       player.x = 10 * TILE; player.y = 12 * TILE;
       enemies = []; projectiles = []; pickups = [];
+      overworldBoss = null;
       spawnEnemiesForScreen();
+      spawnAmbientParticles(getBiome(screenX, screenY));
       state = 'playing';
     }
     return;
@@ -1603,6 +2174,9 @@ function update(dt) {
   }
 
   if (state !== 'playing') return;
+
+  // Pass 3: tutorial
+  updateTutorial(dt);
 
   // Dialog
   if (dialogTimer > 0) {
@@ -1638,6 +2212,7 @@ function update(dt) {
   updatePlayer(dt);
   updateEnemies(dt);
   updateBoss(dt);
+  updateOverworldBoss(dt);
   updateProjectiles(dt);
   updatePickups(dt);
 }
@@ -1665,6 +2240,9 @@ function draw(dt) {
   // Draw map
   drawMap();
 
+  // Pass 3: ambient particles behind entities
+  drawAmbientParticles();
+
   // Draw pickups
   drawPickups();
 
@@ -1674,14 +2252,20 @@ function draw(dt) {
   // Draw boss
   if (bossActive) drawBoss();
 
+  // Draw overworld boss
+  drawOverworldBoss();
+
   // Draw projectiles
   drawProjectiles();
 
-  // Draw player
+  // Draw player (Pass 1: baseling appearance)
   drawPlayer();
 
   // Particles
   TAS.particles.draw();
+
+  // Pass 2: score popups
+  drawScorePopups();
 
   ctx.restore();
 
@@ -1700,40 +2284,70 @@ function draw(dt) {
   // Menu
   if (menuOpen) drawMenu();
 
-  // Death overlay
+  // Pass 3: Tutorial overlay
+  drawTutorial();
+
+  // Death overlay (Pass 3: enhanced)
   if (state === 'death') {
-    ctx.fillStyle = 'rgba(80,0,0,' + (1 - deathTimer / 2) * 0.7 + ')';
+    var deathAlpha = (1 - deathTimer / 2) * 0.7;
+    ctx.fillStyle = 'rgba(80,0,0,' + deathAlpha + ')';
     ctx.fillRect(0, 0, GW, GH);
     ctx.textAlign = 'center';
     ctx.fillStyle = '#f44';
     ctx.font = 'bold 16px monospace';
-    ctx.fillText('YOU DIED', GW/2, GH/2 - 10);
+    ctx.fillText('YOU DIED', GW/2, GH/2 - 20);
     ctx.fillStyle = '#aaa';
     ctx.font = '10px monospace';
-    ctx.fillText('Returning to village...', GW/2, GH/2 + 10);
+    ctx.fillText('Returning to village...', GW/2, GH/2 + 5);
+    if (bonusLives <= 0) {
+      ctx.fillStyle = '#888';
+      ctx.font = '8px monospace';
+      ctx.fillText('Score: ' + totalScore, GW/2, GH/2 + 25);
+    }
   }
 
-  // Victory
+  // Victory (Pass 3: enhanced)
   if (state === 'victory') {
-    ctx.fillStyle = 'rgba(255,255,255,' + (1 - victoryTimer / 5) * 0.8 + ')';
+    var vicAlpha = (1 - victoryTimer / 5) * 0.8;
+    ctx.fillStyle = 'rgba(255,255,255,' + vicAlpha + ')';
     ctx.fillRect(0, 0, GW, GH);
     ctx.textAlign = 'center';
     ctx.fillStyle = '#ff0';
     ctx.font = 'bold 16px monospace';
-    ctx.fillText('VICTORY!', GW/2, GH/2 - 20);
+    ctx.fillText('VICTORY!', GW/2, GH/2 - 30);
     ctx.fillStyle = '#fff';
     ctx.font = '10px monospace';
-    ctx.fillText('The Spore Tower crumbles...', GW/2, GH/2);
-    ctx.fillText('Peace returns to the land.', GW/2, GH/2 + 15);
+    ctx.fillText('The Spore Tower crumbles...', GW/2, GH/2 - 5);
+    ctx.fillText('Peace returns to the land.', GW/2, GH/2 + 12);
+    ctx.fillStyle = '#ff0';
+    ctx.font = '9px monospace';
+    ctx.fillText('Final Score: ' + totalScore, GW/2, GH/2 + 35);
+    // Pass 3: victory sparkles
+    for (var vs = 0; vs < 8; vs++) {
+      ctx.globalAlpha = 0.4 + Math.sin(frame * 0.04 + vs) * 0.3;
+      ctx.fillStyle = PAL.crystal[vs % 4];
+      var vsx = GW/2 + Math.cos(frame * 0.02 + vs * 0.8) * 80;
+      var vsy = GH/2 + Math.sin(frame * 0.025 + vs * 0.8) * 50;
+      ctx.fillRect(vsx, vsy, 3, 3);
+    }
+    ctx.globalAlpha = 1;
   }
 
-  // Transition wipe
+  // Transition wipe (Pass 3: directional wipe)
   if (transitionTimer > 0) {
     const progress = transitionTimer / 0.3;
     ctx.fillStyle = '#000';
-    ctx.globalAlpha = progress;
-    ctx.fillRect(0, 0, GW, GH);
-    ctx.globalAlpha = 1;
+    if (transitionDir === DIR_LEFT || transitionDir === DIR_RIGHT) {
+      var wipeW = GW * progress;
+      ctx.fillRect(transitionDir === DIR_RIGHT ? 0 : GW - wipeW, 0, wipeW, GH);
+    } else if (transitionDir === DIR_UP || transitionDir === DIR_DOWN) {
+      var wipeH = GH * progress;
+      ctx.fillRect(0, transitionDir === DIR_DOWN ? 0 : GH - wipeH, GW, wipeH);
+    } else {
+      ctx.globalAlpha = progress;
+      ctx.fillRect(0, 0, GW, GH);
+      ctx.globalAlpha = 1;
+    }
   }
 
   // Touch controls
@@ -1741,10 +2355,21 @@ function draw(dt) {
 }
 
 // ============================================================
-// DRAW MAP
+// DRAW MAP (Pass 3: zone-tinted backgrounds)
 // ============================================================
 function drawMap() {
   if (!currentMap) return;
+
+  // Pass 3: subtle zone tint overlay
+  var biome = inDungeon ? 'dungeon' : getBiome(screenX, screenY);
+  var tint = null;
+  switch (biome) {
+    case 'volcano': tint = 'rgba(255,40,0,0.04)'; break;
+    case 'snow': tint = 'rgba(180,200,240,0.06)'; break;
+    case 'swamp': tint = 'rgba(40,80,20,0.05)'; break;
+    case 'dungeon': tint = 'rgba(30,0,60,0.06)'; break;
+  }
+
   for (let r = 0; r < ROWS; r++) {
     for (let c = 0; c < COLS; c++) {
       const tile = currentMap[r][c];
@@ -1752,6 +2377,12 @@ function drawMap() {
       const y = r * TILE;
       drawTile(tile, x, y, c, r);
     }
+  }
+
+  // Apply zone tint over map
+  if (tint) {
+    ctx.fillStyle = tint;
+    ctx.fillRect(0, 0, GW, PLAY_H);
   }
 }
 
@@ -1786,6 +2417,12 @@ function drawTile(tile, x, y, c, r) {
     case T.SAND:
       ctx.fillStyle = ((c + r) % 2 === 0) ? PAL.sand : PAL.sandL;
       ctx.fillRect(x, y, TILE, TILE);
+      // Pass 3: sand grain detail
+      if ((c * 7 + r * 3) % 5 === 0) {
+        ctx.fillStyle = 'rgba(0,0,0,0.08)';
+        ctx.fillRect(x + 5, y + 5, 1, 1);
+        ctx.fillRect(x + 10, y + 11, 1, 1);
+      }
       break;
     case T.MOUNTAIN:
       ctx.fillStyle = PAL.grass;
@@ -1822,6 +2459,11 @@ function drawTile(tile, x, y, c, r) {
       ctx.fillRect(x, y, TILE, TILE);
       ctx.fillStyle = '#ff' + (Math.floor(Math.sin(frame * 0.1 + c * r) * 30 + 60)).toString(16) + '00';
       ctx.fillRect(x + 2, y + 2, 12, 12);
+      // Pass 3: lava glow
+      ctx.globalAlpha = 0.1 + Math.sin(frame * 0.08 + c) * 0.05;
+      ctx.fillStyle = '#f80';
+      ctx.fillRect(x - 1, y - 1, TILE + 2, TILE + 2);
+      ctx.globalAlpha = 1;
       break;
     case T.WALL: case T.CAVE_WALL:
       ctx.fillStyle = PAL.wall;
@@ -1879,6 +2521,11 @@ function drawTile(tile, x, y, c, r) {
       ctx.fillRect(x + 2, y + 5, 12, 9);
       ctx.fillStyle = '#ffcc00';
       ctx.fillRect(x + 6, y + 8, 4, 3);
+      // Pass 3: chest sparkle
+      if (Math.floor(frame * 0.04) % 3 === 0) {
+        ctx.fillStyle = '#ff0';
+        ctx.fillRect(x + 3 + (frame % 8), y + 4, 2, 2);
+      }
       break;
     case T.NPC:
       ctx.fillStyle = PAL.path;
@@ -1968,6 +2615,60 @@ function drawTile(tile, x, y, c, r) {
       ctx.fillStyle = '#f40';
       ctx.fillRect(x + 6, y + 1, 4, 3);
       break;
+    // Pass 2: new hazard tiles
+    case T.POISON_POOL:
+      ctx.fillStyle = '#2a3a15';
+      ctx.fillRect(x, y, TILE, TILE);
+      ctx.fillStyle = '#4a6';
+      ctx.globalAlpha = 0.5 + Math.sin(frame * 0.06 + c * 2) * 0.2;
+      ctx.beginPath();
+      ctx.arc(x + 8, y + 8, 6, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.globalAlpha = 1;
+      // Bubble
+      if (Math.floor(frame * 0.02 + c) % 5 === 0) {
+        ctx.fillStyle = '#8c8';
+        ctx.beginPath();
+        ctx.arc(x + 5 + (frame % 6), y + 5, 1.5, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      break;
+    case T.MUSHROOM_CLUSTER:
+      ctx.fillStyle = ((c + r) % 2 === 0) ? PAL.grass : PAL.grassL;
+      ctx.fillRect(x, y, TILE, TILE);
+      // Mushroom caps
+      ctx.fillStyle = '#c84';
+      ctx.beginPath();
+      ctx.arc(x + 5, y + 8, 4, Math.PI, 0);
+      ctx.fill();
+      ctx.fillStyle = '#a64';
+      ctx.beginPath();
+      ctx.arc(x + 11, y + 10, 3, Math.PI, 0);
+      ctx.fill();
+      // Stems
+      ctx.fillStyle = '#eec';
+      ctx.fillRect(x + 4, y + 8, 2, 5);
+      ctx.fillRect(x + 10, y + 10, 2, 4);
+      // Spots
+      ctx.fillStyle = '#fff';
+      ctx.fillRect(x + 4, y + 6, 1, 1);
+      ctx.fillRect(x + 6, y + 7, 1, 1);
+      break;
+    case T.SPORE_VENT:
+      ctx.fillStyle = PAL.grass;
+      ctx.fillRect(x, y, TILE, TILE);
+      ctx.fillStyle = '#333';
+      ctx.beginPath();
+      ctx.arc(x + 8, y + 10, 4, 0, Math.PI * 2);
+      ctx.fill();
+      // Spore puff
+      ctx.globalAlpha = 0.3 + Math.sin(frame * 0.08 + r) * 0.15;
+      ctx.fillStyle = '#c6f';
+      ctx.beginPath();
+      ctx.arc(x + 8, y + 4 - Math.sin(frame * 0.04) * 3, 3, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.globalAlpha = 1;
+      break;
     default:
       ctx.fillStyle = '#111';
       ctx.fillRect(x, y, TILE, TILE);
@@ -1984,7 +2685,7 @@ function getDungeonAtScreen() {
 }
 
 // ============================================================
-// DRAW PLAYER
+// DRAW PLAYER (Pass 1: player IS a baseling)
 // ============================================================
 function drawPlayer() {
   if (!player) return;
@@ -1994,13 +2695,28 @@ function drawPlayer() {
   // Blink during invincibility
   if (player.invincible > 0 && Math.floor(frame * 0.3) % 2 === 0) return;
 
-  // Body
-  ctx.fillStyle = '#4488cc';
+  // Pass 2: poison visual
+  if (player.poisonTimer > 0) {
+    ctx.globalAlpha = 0.3;
+    ctx.fillStyle = '#6a4';
+    ctx.beginPath();
+    ctx.arc(px + 7, py + 7, 10, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.globalAlpha = 1;
+  }
+
+  // Body - baseling color from statB
+  ctx.fillStyle = statB.color;
   ctx.fillRect(px + 2, py + 4, 10, 10);
 
-  // Head
-  ctx.fillStyle = '#eecc88';
+  // Head - slightly lighter baseling
+  ctx.fillStyle = statB.color;
   ctx.fillRect(px + 3, py, 8, 6);
+  // Highlight on head
+  ctx.fillStyle = '#fff';
+  ctx.globalAlpha = 0.15;
+  ctx.fillRect(px + 4, py + 1, 4, 2);
+  ctx.globalAlpha = 1;
 
   // Eyes
   ctx.fillStyle = '#222';
@@ -2010,9 +2726,21 @@ function drawPlayer() {
     ctx.fillRect(px + 4, py + 1, 2, 2);
     ctx.fillRect(px + 8, py + 1, 2, 2);
   }
+  // Eye shine
+  ctx.fillStyle = '#fff';
+  if (player.dir === DIR_DOWN || player.dir === DIR_LEFT) ctx.fillRect(px + 4, py + 2, 1, 1);
+  if (player.dir === DIR_DOWN || player.dir === DIR_RIGHT) ctx.fillRect(px + 8, py + 2, 1, 1);
+
+  // Baseling icon letter on body
+  ctx.fillStyle = '#fff';
+  ctx.globalAlpha = 0.5;
+  ctx.font = '7px monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText(statB.icon, px + 7, py + 12);
+  ctx.globalAlpha = 1;
 
   // Legs (animate)
-  ctx.fillStyle = '#336';
+  ctx.fillStyle = statB.color;
   const legOff = player.animFrame % 2 === 0 ? 0 : 2;
   ctx.fillRect(px + 3, py + 12, 3, 3 - legOff);
   ctx.fillRect(px + 8, py + 12, 3, 1 + legOff);
@@ -2058,7 +2786,7 @@ function drawPlayer() {
 }
 
 // ============================================================
-// DRAW ENEMIES
+// DRAW ENEMIES (Pass 2: new enemy sprites, Pass 3: enhanced visuals)
 // ============================================================
 function drawEnemies() {
   for (const e of enemies) {
@@ -2110,6 +2838,110 @@ function drawEnemies() {
         ctx.fillRect(ex + 3, ey + 5, 3, 3);
         ctx.fillRect(ex + 10, ey + 5, 3, 3);
         break;
+      // Pass 2: new enemy sprites
+      case 'mushroomKnight':
+        // Cap
+        ctx.beginPath();
+        ctx.arc(ex + e.w/2, ey + 4, 7, Math.PI, 0);
+        ctx.fill();
+        // Body
+        ctx.fillStyle = e.flash > 0 ? '#fff' : '#eec';
+        ctx.fillRect(ex + 4, ey + 4, e.w - 8, e.h - 4);
+        // Shield
+        ctx.fillStyle = e.flash > 0 ? '#fff' : '#886';
+        ctx.fillRect(ex, ey + 6, 4, 6);
+        // Spots on cap
+        ctx.fillStyle = '#fff';
+        ctx.fillRect(ex + 5, ey + 1, 2, 2);
+        ctx.fillRect(ex + 9, ey + 2, 2, 2);
+        break;
+      case 'sporeHound':
+        // Body
+        ctx.fillRect(ex + 2, ey + 3, e.w - 4, e.h - 5);
+        // Head
+        ctx.fillRect(ex + e.w - 5, ey + 1, 5, 5);
+        // Legs (animated)
+        var legA = Math.sin(frame * 0.15) * 2;
+        ctx.fillRect(ex + 3, ey + e.h - 3 + legA, 2, 3);
+        ctx.fillRect(ex + e.w - 5, ey + e.h - 3 - legA, 2, 3);
+        // Eyes
+        ctx.fillStyle = '#ff0';
+        ctx.fillRect(ex + e.w - 4, ey + 2, 1, 1);
+        break;
+      case 'moldWraith':
+        // Ghostly body
+        ctx.globalAlpha = 0.7 + Math.sin(frame * 0.08) * 0.2;
+        ctx.fillRect(ex + 3, ey + 2, e.w - 6, e.h - 2);
+        // Hood
+        ctx.beginPath();
+        ctx.arc(ex + e.w/2, ey + 4, 5, Math.PI, 0);
+        ctx.fill();
+        ctx.globalAlpha = 1;
+        // Eyes
+        ctx.fillStyle = '#f44';
+        ctx.fillRect(ex + 5, ey + 5, 2, 2);
+        ctx.fillRect(ex + e.w - 7, ey + 5, 2, 2);
+        // Trailing wisps
+        ctx.globalAlpha = 0.3;
+        ctx.fillStyle = e.color;
+        ctx.fillRect(ex + 4, ey + e.h - 2, 2, 3 + Math.sin(frame * 0.1) * 2);
+        ctx.fillRect(ex + e.w - 6, ey + e.h - 2, 2, 3 + Math.cos(frame * 0.1) * 2);
+        ctx.globalAlpha = 1;
+        break;
+      case 'fungalTitan':
+        // Massive body
+        ctx.fillRect(ex + 1, ey + 4, e.w - 2, e.h - 4);
+        // Mushroom head
+        ctx.beginPath();
+        ctx.arc(ex + e.w/2, ey + 5, e.w/2 - 1, Math.PI, 0);
+        ctx.fill();
+        // Eyes
+        ctx.fillStyle = e.flash > 0 ? '#fff' : '#300';
+        ctx.fillRect(ex + 4, ey + 7, 3, 3);
+        ctx.fillRect(ex + e.w - 7, ey + 7, 3, 3);
+        // Spots
+        ctx.fillStyle = '#fff';
+        ctx.fillRect(ex + 5, ey + 1, 2, 2);
+        ctx.fillRect(ex + e.w/2, ey, 2, 2);
+        ctx.fillRect(ex + e.w - 7, ey + 2, 2, 2);
+        break;
+      case 'toxicSlug':
+        // Body
+        ctx.beginPath();
+        ctx.arc(ex + e.w/2, ey + e.h/2 + 1, e.w/2 - 1, 0, Math.PI);
+        ctx.fill();
+        ctx.fillRect(ex + 2, ey + e.h/2 - 1, e.w - 4, e.h/2 + 1);
+        // Antennae
+        ctx.fillRect(ex + 3, ey + 1, 1, 3);
+        ctx.fillRect(ex + e.w - 4, ey + 1, 1, 3);
+        // Eyes
+        ctx.fillStyle = '#ff0';
+        ctx.fillRect(ex + 4, ey + 3, 2, 2);
+        ctx.fillRect(ex + e.w - 6, ey + 3, 2, 2);
+        // Trail
+        ctx.globalAlpha = 0.3;
+        ctx.fillStyle = '#6a4';
+        ctx.fillRect(ex + 2, ey + e.h - 1, e.w - 4, 2);
+        ctx.globalAlpha = 1;
+        break;
+      case 'myceliumMage':
+        // Robe
+        ctx.fillRect(ex + 3, ey + 4, e.w - 6, e.h - 4);
+        // Tall mushroom hat
+        ctx.beginPath();
+        ctx.arc(ex + e.w/2, ey + 3, 5, Math.PI, 0);
+        ctx.fill();
+        ctx.fillRect(ex + e.w/2 - 2, ey - 2, 4, 5);
+        // Staff
+        ctx.fillStyle = e.flash > 0 ? '#fff' : '#a86';
+        ctx.fillRect(ex - 1, ey + 2, 2, e.h - 2);
+        ctx.fillStyle = '#c4f';
+        ctx.fillRect(ex - 2, ey, 4, 3);
+        // Eyes
+        ctx.fillStyle = '#ff0';
+        ctx.fillRect(ex + 4, ey + 5, 2, 2);
+        ctx.fillRect(ex + e.w - 6, ey + 5, 2, 2);
+        break;
       default:
         ctx.fillRect(ex, ey, e.w, e.h);
         break;
@@ -2126,7 +2958,7 @@ function drawEnemies() {
 }
 
 // ============================================================
-// DRAW BOSS
+// DRAW BOSS (Pass 3: enhanced boss visuals)
 // ============================================================
 function drawBoss() {
   const b = bossActive;
@@ -2135,6 +2967,20 @@ function drawBoss() {
 
   if (b.invincible > 0 && Math.floor(frame * 0.3) % 2 === 0) return;
 
+  // Pass 3: ground shadow
+  ctx.fillStyle = 'rgba(0,0,0,0.3)';
+  ctx.beginPath();
+  ctx.ellipse(bx + 16, by + 34, 18, 6, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Pass 3: outer aura
+  ctx.globalAlpha = 0.1 + Math.sin(frame * 0.05) * 0.05;
+  ctx.fillStyle = b.color;
+  ctx.beginPath();
+  ctx.arc(bx + 16, by + 16, 28 + Math.sin(frame * 0.03) * 4, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.globalAlpha = 1;
+
   ctx.fillStyle = b.flash > 0 ? '#fff' : b.color;
   // Large body
   ctx.fillRect(bx + 2, by + 4, 28, 24);
@@ -2142,6 +2988,10 @@ function drawBoss() {
   ctx.fillStyle = b.flash > 0 ? '#fff' : '#222';
   ctx.fillRect(bx + 7, by + 10, 5, 5);
   ctx.fillRect(bx + 20, by + 10, 5, 5);
+  // Eye glow (Pass 3)
+  ctx.fillStyle = '#f44';
+  ctx.fillRect(bx + 8, by + 11, 3, 3);
+  ctx.fillRect(bx + 21, by + 11, 3, 3);
   // Crown/horns
   ctx.fillStyle = b.flash > 0 ? '#fff' : '#ff0';
   ctx.fillRect(bx + 6, by, 4, 6);
@@ -2156,17 +3006,31 @@ function drawBoss() {
     ctx.beginPath();
     ctx.arc(bx + 16, by + 16, 22 + Math.sin(frame * 0.05) * 4, 0, Math.PI * 2);
     ctx.stroke();
+    // Pass 3: phase 2 sparks
+    for (var sp = 0; sp < 4; sp++) {
+      var sparkAngle = frame * 0.03 + sp * Math.PI / 2;
+      var sparkR = 24 + Math.sin(frame * 0.05 + sp) * 4;
+      ctx.fillStyle = b.color;
+      ctx.fillRect(bx + 16 + Math.cos(sparkAngle) * sparkR, by + 16 + Math.sin(sparkAngle) * sparkR, 3, 3);
+    }
     ctx.lineWidth = 1;
     ctx.globalAlpha = 1;
   }
 
   // HP bar
   ctx.fillStyle = '#400';
-  ctx.fillRect(bx - 10, by - 10, 52, 5);
+  ctx.fillRect(bx - 10, by - 14, 52, 5);
   ctx.fillStyle = b.color;
-  ctx.fillRect(bx - 10, by - 10, 52 * (b.hp / b.maxHp), 5);
+  ctx.fillRect(bx - 10, by - 14, 52 * (b.hp / b.maxHp), 5);
   ctx.strokeStyle = '#fff';
-  ctx.strokeRect(bx - 10, by - 10, 52, 5);
+  ctx.strokeRect(bx - 10, by - 14, 52, 5);
+  // Boss name (Pass 3)
+  if (dungeonId >= 0 && dungeonId < DUNGEONS.length) {
+    ctx.fillStyle = '#fff';
+    ctx.font = '7px monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText(DUNGEONS[dungeonId].name + ' Boss', bx + 16, by - 18);
+  }
 }
 
 // ============================================================
@@ -2184,12 +3048,17 @@ function drawProjectiles() {
     ctx.beginPath();
     ctx.arc(p.x - p.vx * 0.02, p.y - p.vy * 0.02, p.size * 0.7, 0, Math.PI * 2);
     ctx.fill();
+    // Pass 3: second trail
+    ctx.globalAlpha = 0.15;
+    ctx.beginPath();
+    ctx.arc(p.x - p.vx * 0.04, p.y - p.vy * 0.04, p.size * 0.4, 0, Math.PI * 2);
+    ctx.fill();
     ctx.globalAlpha = 1;
   }
 }
 
 // ============================================================
-// DRAW PICKUPS
+// DRAW PICKUPS (Pass 2: new pickup sprites)
 // ============================================================
 function drawPickups() {
   for (const p of pickups) {
@@ -2221,12 +3090,40 @@ function drawPickups() {
         ctx.fillStyle = '#aaf';
         ctx.fillRect(p.x + 4, p.y + 4 + bob, 4, 4);
         break;
+      case 'xpOrb': // Pass 2
+        ctx.fillStyle = '#af4';
+        ctx.globalAlpha = 0.7 + Math.sin(frame * 0.1 + p.x) * 0.3;
+        ctx.beginPath();
+        ctx.arc(p.x + 6, p.y + 6 + bob, 4, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.globalAlpha = 1;
+        ctx.fillStyle = '#fff';
+        ctx.font = '6px monospace';
+        ctx.textAlign = 'center';
+        ctx.fillText('XP', p.x + 6, p.y + 8 + bob);
+        break;
+      case 'sporeGem': // Pass 2
+        // Diamond shape
+        ctx.fillStyle = '#c4f';
+        ctx.globalAlpha = 0.8 + Math.sin(frame * 0.12 + p.y) * 0.2;
+        ctx.beginPath();
+        ctx.moveTo(p.x + 6, p.y + 1 + bob);
+        ctx.lineTo(p.x + 10, p.y + 6 + bob);
+        ctx.lineTo(p.x + 6, p.y + 11 + bob);
+        ctx.lineTo(p.x + 2, p.y + 6 + bob);
+        ctx.closePath();
+        ctx.fill();
+        ctx.globalAlpha = 1;
+        // Sparkle
+        ctx.fillStyle = '#fff';
+        ctx.fillRect(p.x + 5, p.y + 4 + bob, 2, 2);
+        break;
     }
   }
 }
 
 // ============================================================
-// HUD
+// HUD (Pass 1: baseling stats display, Pass 2: score/combo)
 // ============================================================
 function drawHUD() {
   const hudY = PLAY_H;
@@ -2292,6 +3189,11 @@ function drawHUD() {
   ctx.fillStyle = '#ff0';
   ctx.fillText(player.gold + 'G', 90, hudY + 22);
 
+  // Pass 2: Score display
+  ctx.fillStyle = '#aaf';
+  ctx.font = '7px monospace';
+  ctx.fillText(totalScore + 'pts', 90, hudY + 30);
+
   // Active crystal / equipment
   ctx.fillStyle = '#aaa';
   ctx.font = '8px monospace';
@@ -2322,6 +3224,27 @@ function drawHUD() {
   ctx.fillStyle = '#ff0';
   ctx.fillText('KEY:' + player.keys, 180, hudY + 22);
 
+  // Pass 1: bonus lives indicator
+  if (bonusLives > 0) {
+    ctx.fillStyle = statB.color;
+    ctx.fillText('x' + bonusLives, 218, hudY + 10);
+  }
+
+  // Pass 2: combo indicator
+  if (comboCount > 1) {
+    ctx.fillStyle = '#ff0';
+    ctx.font = 'bold 8px monospace';
+    ctx.textAlign = 'left';
+    ctx.fillText('x' + comboCount, 218, hudY + 22);
+  }
+
+  // Pass 2: poison indicator
+  if (player.poisonTimer > 0) {
+    ctx.fillStyle = '#6a4';
+    ctx.font = '7px monospace';
+    ctx.fillText('PSN', 218, hudY + 30);
+  }
+
   // Location
   ctx.fillStyle = '#888';
   ctx.font = '7px monospace';
@@ -2346,6 +3269,12 @@ function drawHUD() {
     ctx.textAlign = 'center';
     ctx.fillText('CHG:' + player.chargeLevel, GW / 2, hudY + 28);
   }
+
+  // Pass 1: baseling name/level in corner
+  ctx.fillStyle = statB.color;
+  ctx.font = '6px monospace';
+  ctx.textAlign = 'right';
+  ctx.fillText(statB.name + ' L' + statB.level, GW - 4, hudY + 30);
 }
 
 function drawHeart(x, y, size) {
@@ -2423,11 +3352,11 @@ function drawShop() {
   ctx.textAlign = 'left';
   for (let i = 0; i < shopItems.length; i++) {
     const item = shopItems[i];
-    const iy = 58 + i * 22;
+    const iy = 58 + i * 18;
 
     if (i === shopCursor) {
       ctx.fillStyle = 'rgba(100,100,0,0.3)';
-      ctx.fillRect(36, iy - 10, GW - 72, 18);
+      ctx.fillRect(36, iy - 10, GW - 72, 16);
       ctx.fillStyle = '#ff0';
       ctx.fillText('>', 40, iy);
     }
@@ -2483,10 +3412,16 @@ function drawMenu() {
   ctx.fillText('Armor: ' + ['Cloth', 'Chain', 'Plate'][player.armor], 140, statsY);
   ctx.fillText('Shield: ' + ['None', 'Wood', 'Iron'][player.shield], 140, statsY + 12);
   if (player.boots) ctx.fillText('Boots: Speed+', 60, statsY + 24);
+  // Pass 1: baseling stats in menu
+  ctx.fillStyle = statB.color;
+  ctx.fillText(statB.name + ' (L' + statB.level + ')', 60, statsY + 36);
+  ctx.fillStyle = '#aaa';
+  ctx.fillText('Lives: ' + bonusLives, 140, statsY + 36);
+  ctx.fillText('Score: ' + totalScore, 60, statsY + 48);
 }
 
 // ============================================================
-// TITLE SCREEN
+// TITLE SCREEN (Pass 1: NES controls, Pass 3: baseling on title)
 // ============================================================
 function drawTitleScreen() {
   // Background - dark with crystal particles
@@ -2507,16 +3442,38 @@ function drawTitleScreen() {
   ctx.textAlign = 'center';
   ctx.fillStyle = '#000';
   ctx.font = 'bold 22px monospace';
-  ctx.fillText('CRYSTAL QUEST', GW/2 + 2, 72);
+  ctx.fillText('CRYSTAL QUEST', GW/2 + 2, 52);
 
   // Gradient-ish title
   ctx.fillStyle = '#88ddff';
-  ctx.fillText('CRYSTAL QUEST', GW/2, 70);
+  ctx.fillText('CRYSTAL QUEST', GW/2, 50);
 
   // Subtitle
   ctx.fillStyle = '#668';
   ctx.font = '10px monospace';
-  ctx.fillText('A Tasern Tale', GW/2, 92);
+  ctx.fillText('A Tasern Tale', GW/2, 68);
+
+  // Pass 3: Baseling character on title screen
+  var titleBx = GW/2 - 7;
+  var titleBy = 80;
+  ctx.fillStyle = statB.color;
+  ctx.fillRect(titleBx + 2, titleBy + 4, 10, 10);
+  ctx.fillRect(titleBx + 3, titleBy, 8, 6);
+  ctx.fillStyle = '#222';
+  ctx.fillRect(titleBx + 4, titleBy + 2, 2, 2);
+  ctx.fillRect(titleBx + 8, titleBy + 2, 2, 2);
+  ctx.fillStyle = '#fff';
+  ctx.fillRect(titleBx + 4, titleBy + 2, 1, 1);
+  ctx.fillRect(titleBx + 8, titleBy + 2, 1, 1);
+  ctx.fillStyle = '#fff';
+  ctx.globalAlpha = 0.5;
+  ctx.font = '7px monospace';
+  ctx.fillText(statB.icon, titleBx + 7, titleBy + 12);
+  ctx.globalAlpha = 1;
+  // Baseling name
+  ctx.fillStyle = statB.color;
+  ctx.font = '8px monospace';
+  ctx.fillText(statB.name, GW/2, titleBy + 24);
 
   // 4 crystals
   const crystalY = 130;
@@ -2545,25 +3502,30 @@ function drawTitleScreen() {
   ctx.globalAlpha = pulse;
   ctx.fillStyle = '#ffdd44';
   ctx.font = 'bold 11px monospace';
-  ctx.fillText('PRESS START', GW/2, 200);
+  ctx.fillText('PRESS START', GW/2, 185);
   ctx.globalAlpha = 1;
 
   // Continue indicator
   if (hasSave()) {
     ctx.fillStyle = '#888';
     ctx.font = '9px monospace';
-    ctx.fillText('(Save data found - will continue)', GW/2, 220);
+    ctx.fillText('(Save data found - will continue)', GW/2, 200);
   }
 
-  // Controls
-  ctx.fillStyle = '#556';
+  // Pass 1: NES-style controls display
+  ctx.fillStyle = '#445';
   ctx.font = '8px monospace';
-  ctx.fillText('Arrows: Move   X/Space: Attack (hold to charge)', GW/2, 248);
-  ctx.fillText('Z/C: Use Potion   M/Esc: Menu', GW/2, 260);
+  ctx.fillText('- - - CONTROLS - - -', GW/2, 222);
+  ctx.fillStyle = '#889';
+  ctx.font = '7px monospace';
+  ctx.fillText('D-Pad/Arrows/WASD .... Move', GW/2, 236);
+  ctx.fillText('A / X / Space ........ Attack', GW/2, 248);
+  ctx.fillText('B / Z / C ............ Potion', GW/2, 260);
+  ctx.fillText('Start / M / Esc ...... Menu', GW/2, 272);
 }
 
 // ============================================================
-// CREDITS
+// CREDITS (Pass 3: enhanced with baseling + score)
 // ============================================================
 function drawCredits() {
   ctx.fillStyle = '#0a0a1a';
@@ -2572,33 +3534,59 @@ function drawCredits() {
   ctx.textAlign = 'center';
   ctx.fillStyle = '#88ddff';
   ctx.font = 'bold 16px monospace';
-  ctx.fillText('CRYSTAL QUEST', GW/2, 40);
+  ctx.fillText('CRYSTAL QUEST', GW/2, 30);
 
   ctx.fillStyle = '#ff0';
   ctx.font = 'bold 12px monospace';
-  ctx.fillText('CONGRATULATIONS!', GW/2, 70);
+  ctx.fillText('CONGRATULATIONS!', GW/2, 55);
+
+  // Pass 3: baseling on credits
+  var credBx = GW/2 - 7;
+  var credBy = 65;
+  ctx.fillStyle = statB.color;
+  ctx.fillRect(credBx + 2, credBy + 4, 10, 10);
+  ctx.fillRect(credBx + 3, credBy, 8, 6);
+  ctx.fillStyle = '#222';
+  ctx.fillRect(credBx + 4, credBy + 2, 2, 2);
+  ctx.fillRect(credBx + 8, credBy + 2, 2, 2);
 
   ctx.fillStyle = '#fff';
   ctx.font = '9px monospace';
-  ctx.fillText('You have defeated the Spore Tower', GW/2, 100);
-  ctx.fillText('and restored peace to the land.', GW/2, 115);
-  ctx.fillText('The four elemental crystals shine', GW/2, 140);
-  ctx.fillText('with renewed power.', GW/2, 155);
+  ctx.fillText('You have defeated the Spore Tower', GW/2, 95);
+  ctx.fillText('and restored peace to the land.', GW/2, 110);
+  ctx.fillText('The four elemental crystals shine', GW/2, 130);
+  ctx.fillText('with renewed power.', GW/2, 145);
 
   ctx.fillStyle = '#888';
-  ctx.fillText('A MfT Arcade Game', GW/2, 190);
-  ctx.fillText('Tales of Tasern Universe', GW/2, 205);
+  ctx.fillText('A MfT Arcade Game', GW/2, 170);
+  ctx.fillText('Tales of Tasern Universe', GW/2, 185);
 
   ctx.fillStyle = '#ff0';
   ctx.font = '9px monospace';
-  ctx.fillText('Final Level: ' + player.level, GW/2, 235);
-  ctx.fillText('Gold Earned: ' + player.gold, GW/2, 250);
+  ctx.fillText('Final Level: ' + player.level, GW/2, 210);
+  ctx.fillText('Gold Earned: ' + player.gold, GW/2, 225);
+  ctx.fillText('Final Score: ' + totalScore, GW/2, 240);
 
-  const pulse = Math.sin(frame * 0.05) * 0.3 + 0.7;
-  ctx.globalAlpha = pulse;
+  // Pass 3: baseling stat summary
+  ctx.fillStyle = statB.color;
+  ctx.font = '8px monospace';
+  ctx.fillText(statB.name + ' - Hero of Tasern', GW/2, 258);
+
+  const pulse2 = Math.sin(frame * 0.05) * 0.3 + 0.7;
+  ctx.globalAlpha = pulse2;
   ctx.fillStyle = '#4af';
   ctx.font = '10px monospace';
-  ctx.fillText('Press any key', GW/2, 275);
+  ctx.fillText('Press any key', GW/2, 278);
+  ctx.globalAlpha = 1;
+
+  // Pass 3: victory sparkles on credits
+  for (var ci = 0; ci < 12; ci++) {
+    ctx.globalAlpha = 0.3 + Math.sin(frame * 0.03 + ci * 0.5) * 0.2;
+    ctx.fillStyle = PAL.crystal[ci % 4];
+    var cpx = (Math.sin(frame * 0.012 + ci * 1.1) * 0.5 + 0.5) * GW;
+    var cpy = (Math.cos(frame * 0.009 + ci * 1.4) * 0.5 + 0.5) * GH;
+    ctx.fillRect(cpx, cpy, 2, 2);
+  }
   ctx.globalAlpha = 1;
 }
 

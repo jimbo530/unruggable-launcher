@@ -105,8 +105,7 @@ console.log('Fired:', tx.hash);
 ```
 MfT Token:        0x8FB87d13B40B1A67B22ED1a17e2835fe7e3a9bA3
 V1 Prime Reactor: 0xed3aE91b2bb22307c07438EEebA2500C18EABcFE
-Unrugable Factory V5.4: 0xb1fE (active)
-Unrugable Factory V5.3: 0x65F8 (BRUH/NZ)
+Unrugable Factory V7:   0x5c11 (active)
 Burn Address:     0xfd780B0aE569e15e514B819ecFDF46f804953a4B
 CHAR Token:       0x20b048fA035D5763685D695e66aDF62c5D9F5055
 
@@ -119,7 +118,7 @@ Chain: Base (8453)
 ## What Agents Can Earn
 
 ### Reactor Arbitrage
-Every 2 hours, the reactor network fires bottom-up. Each firing creates price dislocations across hundreds of pools. Your agent can:
+Every 2 hours, the reactor network fires bottom-up. Each firing creates price dislocations across the network. Your agent can:
 1. Monitor reactor cooldown timers
 2. Position before reactor fires
 3. Arb MfT price across pools after firing
@@ -133,10 +132,10 @@ Every 2 hours, the reactor network fires bottom-up. Each firing creates price di
 - POOP deposits into gardens generate LP yield
 
 ### Token Launching
-- Launch tokens via Unrugable ($5 USDC seed)
-- Each launch creates 8 permanent LP positions + 2 reactors
+- Launch tokens via Unrugable (free to launch, just gas)
+- Each launch creates 2 locked pools (TOKEN/Money + TOKEN/Meme) + 1 reactor
 - Reactor connects your token to trading routes across the network
-- 6% of seed funds CHAR carbon reactor
+- 50% of reactor output burned, 50% to launcher wallet
 
 ---
 

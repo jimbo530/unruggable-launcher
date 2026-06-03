@@ -3,11 +3,11 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-<title>Checkers</title>
+<title>Baseling Checkers</title>
 <style>
 * { margin: 0; padding: 0; box-sizing: border-box; }
-html, body { width: 100%; height: 100%; overflow: hidden; background: #111; touch-action: none; }
-canvas { display: block; margin: 0 auto; }
+html, body { width: 100%; height: 100%; overflow: hidden; background: #0a0a12; touch-action: none; }
+canvas { display: block; margin: 0 auto; image-rendering: pixelated; }
 #back-link {
   position: fixed; bottom: 8px; left: 50%; transform: translateX(-50%);
   color: #666; font-family: monospace; font-size: 12px; text-decoration: none; z-index: 10;
@@ -25,21 +25,66 @@ canvas { display: block; margin: 0 auto; }
 "use strict";
 
 // ============================================================
+// BASELING STAT INTEGRATION
+// ============================================================
+var statB = {
+  damage: 1, speed: 1, lives: 0, hpMult: 1, scoreMult: 1,
+  cooldown: 1, luck: 1,
+  str: 10, dex: 10, con: 10, int: 10, wis: 10, cha: 10,
+  level: 0, color: '#44dd88', name: 'Baseling', icon: 'B'
+};
+try {
+  if (window.NftLoader && NftLoader.getStatBonuses) {
+    statB = NftLoader.getStatBonuses();
+  }
+} catch(e) { console.warn("NftLoader not available:", e); }
+
+// --- Stat-derived gameplay values ---
+// STR: King power — kings get extra jump range and multi-capture bonus points
+var kingPowerBonus = Math.floor((statB.str - 10) / 3);        // extra score per king capture
+var kingMultiJumpBonus = statB.str >= 14;                      // kings can chain one extra jump at high STR
+
+// DEX: Undo charges and move timer extensions
+var undoCharges = Math.max(0, Math.floor((statB.dex - 8) / 4) + 1);  // 1 base + bonus from DEX
+var moveTimerBonus = Math.floor((statB.dex - 10) / 2) * 2;           // extra seconds on move timer
+
+// CON: Handicap — start with extra pieces at high CON
+var bonusPieces = Math.max(0, Math.floor((statB.con - 12) / 4));     // 0-2 extra pieces
+var pieceHP = statB.con >= 16;                                        // pieces survive one capture attempt
+
+// INT: AI difficulty — higher INT = weaker AI (easier game)
+var aiDepthMod = Math.max(0, Math.floor((statB.int - 10) / 5));     // reduce AI depth
+var hintCharges = Math.max(0, Math.floor((statB.int - 8) / 3));     // hints available
+
+// WIS: Preview moves and strategic vision
+var previewMoves = statB.wis >= 12;                                   // show possible captures
+var wisUndoBonus = Math.max(0, Math.floor((statB.wis - 12) / 5));   // bonus undo charges from WIS
+var totalUndos = undoCharges + wisUndoBonus;
+
+// CHA: Score multiplier and cosmetic styles
+var chaScoreMult = 1.0 + Math.max(0, (statB.cha - 10)) * 0.05;     // +5% per CHA above 10
+var pieceStyle = statB.cha >= 16 ? 2 : (statB.cha >= 12 ? 1 : 0);  // 0=normal, 1=glow, 2=sparkle
+var captureScoreBase = 100;
+
+// ============================================================
 // CONSTANTS
 // ============================================================
 var EMPTY = 0, RED = 1, BLACK = 2, RED_KING = 3, BLACK_KING = 4;
 var BOARD_SIZE = 8;
-var ANIM_DURATION = 200; // ms per hop
-var AI_DEPTH = 4;
+var ANIM_DURATION = 200;
+var AI_DEPTH = Math.max(2, 4 - aiDepthMod);   // INT reduces AI depth
+var SPORE_LIFETIME = 800;
+var SHAKE_DURATION = 300;
+var SCORE_POPUP_DURATION = 1200;
 
 // ============================================================
 // STATE
 // ============================================================
 var board = [];
-var turn = RED; // red goes first
-var selected = null; // {r, c}
-var legalMoves = []; // [{r,c,jumps:[{r,c,captured:{r,c}},...]}]
-var forcedPieces = []; // [{r,c}] pieces that must jump
+var turn = RED;
+var selected = null;
+var legalMoves = [];
+var forcedPieces = [];
 var redCaptured = 0, blackCaptured = 0;
 var gameOver = false;
 var winner = null;
@@ -47,20 +92,83 @@ var vsAI = true;
 var aiThinking = false;
 var showMenu = true;
 
+// Score tracking
+var playerScore = 0;
+var aiScore = 0;
+
+// Undo system (DEX + WIS)
+var undosRemaining = totalUndos;
+var moveHistory = [];
+
+// Hint system (INT)
+var hintsRemaining = hintCharges;
+var hintMove = null;
+var hintTimer = 0;
+
 // Animation state
 var animating = false;
-var animPath = []; // [{fromR, fromC, toR, toC, captured}]
+var animPath = [];
 var animStep = 0;
 var animStart = 0;
 var animPiece = EMPTY;
 var animPromotesTo = EMPTY;
+
+// Particle system (spores)
+var particles = [];
+
+// Screen shake
+var shakeX = 0, shakeY = 0;
+var shakeStart = 0;
+var shakeIntensity = 0;
+
+// Score popups
+var scorePopups = [];
 
 // Canvas
 var canvas = document.getElementById("gc");
 var ctx = canvas.getContext("2d");
 var cellSize = 0;
 var boardX = 0, boardY = 0;
-var panelH = 60; // top panel height
+var panelH = 70;
+
+// Mushroom zone pattern (pre-computed)
+var mushroomZones = [];
+var reactorZones = [];
+(function initZones() {
+  // Corner zones are mushroom (green), center is reactor (purple)
+  for (var r = 0; r < BOARD_SIZE; r++) {
+    mushroomZones[r] = [];
+    reactorZones[r] = [];
+    for (var c = 0; c < BOARD_SIZE; c++) {
+      var distCenter = Math.abs(r - 3.5) + Math.abs(c - 3.5);
+      mushroomZones[r][c] = (r < 2 || r > 5) && (r + c) % 2 === 1;
+      reactorZones[r][c] = distCenter < 3 && (r + c) % 2 === 1;
+    }
+  }
+})();
+
+// Ambient spore particles (background)
+var ambientSpores = [];
+function initAmbientSpores() {
+  ambientSpores = [];
+  for (var i = 0; i < 20; i++) {
+    ambientSpores.push({
+      x: Math.random() * 800,
+      y: Math.random() * 800,
+      vx: (Math.random() - 0.5) * 0.3,
+      vy: -Math.random() * 0.4 - 0.1,
+      size: Math.random() * 3 + 1,
+      alpha: Math.random() * 0.3 + 0.1,
+      color: Math.random() > 0.5 ? '#44dd88' : '#aa66ff',
+      life: Math.random() * 3000 + 2000,
+      born: performance.now() - Math.random() * 3000
+    });
+  }
+}
+initAmbientSpores();
+
+// NES-style frame counter for animations
+var frameCount = 0;
 
 // ============================================================
 // AUDIO (Web Audio API)
@@ -90,10 +198,265 @@ function playTone(freq, dur, type, vol) {
 }
 
 function soundMove() { playTone(300, 0.1, "sine", 0.12); }
-function soundJump() { playTone(500, 0.15, "square", 0.1); setTimeout(function(){ playTone(600, 0.1, "square", 0.08); }, 60); }
-function soundKing() { playTone(400, 0.3, "sine", 0.15); setTimeout(function(){ playTone(600, 0.25, "sine", 0.12); }, 100); setTimeout(function(){ playTone(800, 0.3, "sine", 0.1); }, 200); }
-function soundWin() { playTone(523, 0.2, "sine", 0.15); setTimeout(function(){ playTone(659, 0.2, "sine", 0.15); }, 150); setTimeout(function(){ playTone(784, 0.4, "sine", 0.18); }, 300); }
-function soundCapture() { playTone(200, 0.08, "triangle", 0.2); }
+function soundJump() {
+  playTone(500, 0.15, "square", 0.1);
+  setTimeout(function(){ playTone(600, 0.1, "square", 0.08); }, 60);
+}
+function soundKing() {
+  playTone(400, 0.3, "sine", 0.15);
+  setTimeout(function(){ playTone(600, 0.25, "sine", 0.12); }, 100);
+  setTimeout(function(){ playTone(800, 0.3, "sine", 0.1); }, 200);
+}
+function soundWin() {
+  playTone(523, 0.2, "sine", 0.15);
+  setTimeout(function(){ playTone(659, 0.2, "sine", 0.15); }, 150);
+  setTimeout(function(){ playTone(784, 0.4, "sine", 0.18); }, 300);
+}
+function soundCapture() {
+  playTone(200, 0.08, "triangle", 0.2);
+  playTone(150, 0.12, "sawtooth", 0.06);
+}
+function soundUndo() {
+  playTone(400, 0.1, "sine", 0.1);
+  setTimeout(function(){ playTone(300, 0.1, "sine", 0.1); }, 80);
+}
+function soundHint() {
+  playTone(600, 0.15, "sine", 0.1);
+  setTimeout(function(){ playTone(800, 0.1, "sine", 0.08); }, 100);
+}
+function soundSpore() {
+  playTone(800 + Math.random() * 400, 0.08, "sine", 0.05);
+}
+function soundError() {
+  playTone(150, 0.15, "square", 0.12);
+}
+
+// ============================================================
+// PARTICLE SYSTEM (Spore Effects)
+// ============================================================
+function spawnSporeParticles(cx, cy, count, color) {
+  for (var i = 0; i < count; i++) {
+    var angle = Math.random() * Math.PI * 2;
+    var speed = Math.random() * 3 + 1;
+    particles.push({
+      x: cx,
+      y: cy,
+      vx: Math.cos(angle) * speed,
+      vy: Math.sin(angle) * speed - 1,
+      size: Math.random() * 4 + 2,
+      alpha: 1.0,
+      color: color || '#44dd88',
+      life: SPORE_LIFETIME + Math.random() * 400,
+      born: performance.now(),
+      type: 'spore'
+    });
+  }
+}
+
+function spawnCaptureParticles(cx, cy, isPlayerCapture) {
+  // Big spore burst on capture
+  var colors = isPlayerCapture
+    ? ['#44dd88', '#66ffaa', '#22bb66', '#88ffcc']
+    : ['#aa44ff', '#cc66ff', '#8822dd', '#dd88ff'];
+  for (var i = 0; i < 16; i++) {
+    var angle = Math.random() * Math.PI * 2;
+    var speed = Math.random() * 5 + 2;
+    var col = colors[Math.floor(Math.random() * colors.length)];
+    particles.push({
+      x: cx,
+      y: cy,
+      vx: Math.cos(angle) * speed,
+      vy: Math.sin(angle) * speed - 2,
+      size: Math.random() * 6 + 3,
+      alpha: 1.0,
+      color: col,
+      life: SPORE_LIFETIME * 1.5,
+      born: performance.now(),
+      type: 'burst'
+    });
+  }
+  // Ring particles
+  for (var j = 0; j < 8; j++) {
+    var a2 = (j / 8) * Math.PI * 2;
+    particles.push({
+      x: cx,
+      y: cy,
+      vx: Math.cos(a2) * 3,
+      vy: Math.sin(a2) * 3,
+      size: 2,
+      alpha: 0.8,
+      color: '#ffffff',
+      life: SPORE_LIFETIME * 0.8,
+      born: performance.now(),
+      type: 'ring'
+    });
+  }
+}
+
+function spawnKingParticles(cx, cy) {
+  var colors = ['#ffd700', '#ffaa00', '#ffee44', '#ffffff'];
+  for (var i = 0; i < 24; i++) {
+    var angle = Math.random() * Math.PI * 2;
+    var speed = Math.random() * 4 + 1;
+    particles.push({
+      x: cx,
+      y: cy,
+      vx: Math.cos(angle) * speed,
+      vy: Math.sin(angle) * speed - 3,
+      size: Math.random() * 5 + 2,
+      alpha: 1.0,
+      color: colors[Math.floor(Math.random() * colors.length)],
+      life: SPORE_LIFETIME * 2,
+      born: performance.now(),
+      type: 'crown'
+    });
+  }
+}
+
+function updateParticles(now) {
+  for (var i = particles.length - 1; i >= 0; i--) {
+    var p = particles[i];
+    var age = now - p.born;
+    if (age > p.life) {
+      particles.splice(i, 1);
+      continue;
+    }
+    p.x += p.vx;
+    p.y += p.vy;
+    p.vy += 0.03; // light gravity
+    p.alpha = Math.max(0, 1 - age / p.life);
+    p.size *= 0.995;
+  }
+}
+
+function drawParticles() {
+  for (var i = 0; i < particles.length; i++) {
+    var p = particles[i];
+    ctx.globalAlpha = p.alpha;
+    if (p.type === 'ring') {
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
+      ctx.strokeStyle = p.color;
+      ctx.lineWidth = 1;
+      ctx.stroke();
+    } else {
+      ctx.fillStyle = p.color;
+      // NES-style square particles
+      if (p.type === 'spore' || p.type === 'crown') {
+        ctx.fillRect(p.x - p.size / 2, p.y - p.size / 2, p.size, p.size);
+      } else {
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, p.size / 2, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      // Glow for sparkle style (CHA)
+      if (pieceStyle >= 2 && p.type === 'burst') {
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
+        ctx.fillStyle = p.color;
+        ctx.globalAlpha = p.alpha * 0.3;
+        ctx.fill();
+      }
+    }
+  }
+  ctx.globalAlpha = 1;
+}
+
+function updateAmbientSpores(now, w, h) {
+  for (var i = 0; i < ambientSpores.length; i++) {
+    var s = ambientSpores[i];
+    var age = now - s.born;
+    if (age > s.life) {
+      s.x = Math.random() * w;
+      s.y = h + 10;
+      s.born = now;
+      s.life = Math.random() * 3000 + 2000;
+    }
+    s.x += s.vx;
+    s.y += s.vy;
+    if (s.x < 0) s.x = w;
+    if (s.x > w) s.x = 0;
+  }
+}
+
+function drawAmbientSpores() {
+  for (var i = 0; i < ambientSpores.length; i++) {
+    var s = ambientSpores[i];
+    var age = performance.now() - s.born;
+    var t = age / s.life;
+    var alpha = s.alpha * (1 - t) * Math.sin(t * Math.PI);
+    ctx.globalAlpha = alpha;
+    ctx.fillStyle = s.color;
+    ctx.fillRect(s.x - s.size / 2, s.y - s.size / 2, s.size, s.size);
+  }
+  ctx.globalAlpha = 1;
+}
+
+// ============================================================
+// SCREEN SHAKE
+// ============================================================
+function triggerShake(intensity) {
+  shakeStart = performance.now();
+  shakeIntensity = intensity;
+}
+
+function updateShake(now) {
+  var elapsed = now - shakeStart;
+  if (elapsed < SHAKE_DURATION) {
+    var decay = 1 - elapsed / SHAKE_DURATION;
+    shakeX = (Math.random() - 0.5) * shakeIntensity * decay;
+    shakeY = (Math.random() - 0.5) * shakeIntensity * decay;
+  } else {
+    shakeX = 0;
+    shakeY = 0;
+  }
+}
+
+// ============================================================
+// SCORE POPUPS
+// ============================================================
+function addScorePopup(cx, cy, text, color) {
+  scorePopups.push({
+    x: cx,
+    y: cy,
+    text: text,
+    color: color || '#ffff00',
+    born: performance.now(),
+    life: SCORE_POPUP_DURATION
+  });
+}
+
+function updateScorePopups(now) {
+  for (var i = scorePopups.length - 1; i >= 0; i--) {
+    var p = scorePopups[i];
+    if (now - p.born > p.life) {
+      scorePopups.splice(i, 1);
+    }
+  }
+}
+
+function drawScorePopups() {
+  var now = performance.now();
+  for (var i = 0; i < scorePopups.length; i++) {
+    var p = scorePopups[i];
+    var age = now - p.born;
+    var t = age / p.life;
+    var alpha = 1 - t;
+    var yOff = -t * 60;
+    var scale = 1 + t * 0.3;
+    ctx.globalAlpha = alpha;
+    ctx.fillStyle = p.color;
+    ctx.font = "bold " + Math.floor(cellSize * 0.35 * scale) + "px monospace";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    // NES-style shadow
+    ctx.fillStyle = '#000';
+    ctx.fillText(p.text, p.x + 2, p.y + yOff + 2);
+    ctx.fillStyle = p.color;
+    ctx.fillText(p.text, p.x, p.y + yOff);
+  }
+  ctx.globalAlpha = 1;
+}
 
 // ============================================================
 // BOARD INIT
@@ -112,6 +475,16 @@ function initBoard() {
       }
     }
   }
+  // CON bonus: add extra pieces for player (RED) in empty dark squares row 4
+  if (bonusPieces > 0) {
+    var added = 0;
+    for (var c2 = 0; c2 < BOARD_SIZE && added < bonusPieces; c2++) {
+      if ((4 + c2) % 2 === 1 && board[4][c2] === EMPTY) {
+        board[4][c2] = RED;
+        added++;
+      }
+    }
+  }
 }
 
 function newGame() {
@@ -126,6 +499,15 @@ function newGame() {
   winner = null;
   animating = false;
   aiThinking = false;
+  playerScore = 0;
+  aiScore = 0;
+  undosRemaining = totalUndos;
+  moveHistory = [];
+  hintsRemaining = hintCharges;
+  hintMove = null;
+  hintTimer = 0;
+  particles = [];
+  scorePopups = [];
   computeForcedAndLegal();
 }
 
@@ -169,12 +551,22 @@ function getJumps(b, r, c, piece) {
         jumps.push({r: lr, c: lc, capturedR: mr, capturedC: mc});
       }
     }
+    // STR king bonus: kings can also look two squares ahead for long jumps
+    if (isKing(piece) && kingMultiJumpBonus) {
+      var lr2 = r + 3*dr, lc2 = c + 3*dc;
+      var mr2 = r + 2*dr, mc2 = c + 2*dc;
+      if (lr2 >= 0 && lr2 < BOARD_SIZE && lc2 >= 0 && lc2 < BOARD_SIZE) {
+        if (b[mr2][mc2] !== EMPTY && !belongs(b[mr2][mc2], side) && b[lr2][lc2] === EMPTY
+            && b[mr][mc] === EMPTY) {
+          jumps.push({r: lr2, c: lc2, capturedR: mr2, capturedC: mc2});
+        }
+      }
+    }
   }
   return jumps;
 }
 
 function getJumpChains(b, r, c, piece) {
-  // Returns array of chains: each chain is [{r,c,capturedR,capturedC}, ...]
   var singleJumps = getJumps(b, r, c, piece);
   if (singleJumps.length === 0) return [];
   var chains = [];
@@ -184,8 +576,6 @@ function getJumpChains(b, r, c, piece) {
     nb[r][c] = EMPTY;
     nb[j.capturedR][j.capturedC] = EMPTY;
     var landPiece = piece;
-    // Promote mid-chain? Standard rules: promotion ends turn in some variants.
-    // We use: promotion ends the jump chain (international-style optional, American standard).
     var promoted = false;
     if (!isKing(piece)) {
       if ((isRed(piece) && j.r === 0) || (isBlack(piece) && j.r === BOARD_SIZE - 1)) {
@@ -195,7 +585,6 @@ function getJumpChains(b, r, c, piece) {
     }
     nb[j.r][j.c] = landPiece;
     if (promoted) {
-      // Promotion ends the chain in American checkers
       chains.push([j]);
     } else {
       var further = getJumpChains(nb, j.r, j.c, landPiece);
@@ -233,7 +622,6 @@ function getSimpleMoves(b, r, c, piece) {
 }
 
 function getAllMoves(b, side) {
-  // Returns {jumps: [{fromR, fromC, chain: [{r,c,capturedR,capturedC},...]}], moves: [{fromR,fromC,toR,toC}]}
   var jumps = [];
   var moves = [];
   for (var r = 0; r < BOARD_SIZE; r++) {
@@ -252,7 +640,6 @@ function getAllMoves(b, side) {
       }
     }
   }
-  // Forced jumps: if any jumps exist, must jump
   if (jumps.length > 0) return {jumps: jumps, moves: [], mustJump: true};
   return {jumps: [], moves: moves, mustJump: false};
 }
@@ -272,7 +659,6 @@ function computeForcedAndLegal() {
       }
     }
   }
-  // Check win/loss
   if (all.jumps.length === 0 && all.moves.length === 0) {
     gameOver = true;
     winner = opponent(turn);
@@ -286,7 +672,6 @@ function computeForcedAndLegal() {
 function applyMove(b, fromR, fromC, toR, toC) {
   var piece = b[fromR][fromC];
   b[fromR][fromC] = EMPTY;
-  // Promote
   if (piece === RED && toR === 0) piece = RED_KING;
   if (piece === BLACK && toR === BOARD_SIZE - 1) piece = BLACK_KING;
   b[toR][toC] = piece;
@@ -310,12 +695,70 @@ function applyJumpChain(b, fromR, fromC, chain) {
 }
 
 // ============================================================
+// UNDO SYSTEM (DEX + WIS)
+// ============================================================
+function saveStateForUndo() {
+  if (undosRemaining <= 0) return;
+  moveHistory.push({
+    board: cloneBoard(board),
+    turn: turn,
+    redCaptured: redCaptured,
+    blackCaptured: blackCaptured,
+    playerScore: playerScore,
+    aiScore: aiScore
+  });
+  // Keep last 4 states max
+  if (moveHistory.length > 4) moveHistory.shift();
+}
+
+function performUndo() {
+  if (undosRemaining <= 0 || moveHistory.length === 0) {
+    soundError();
+    return;
+  }
+  var state = moveHistory.pop();
+  board = state.board;
+  turn = state.turn;
+  redCaptured = state.redCaptured;
+  blackCaptured = state.blackCaptured;
+  playerScore = state.playerScore;
+  aiScore = state.aiScore;
+  undosRemaining--;
+  selected = null;
+  legalMoves = [];
+  animating = false;
+  aiThinking = false;
+  gameOver = false;
+  winner = null;
+  computeForcedAndLegal();
+  soundUndo();
+  addScorePopup(canvas.width / 4, canvas.height / 4, 'UNDO!', '#66ccff');
+}
+
+// ============================================================
+// HINT SYSTEM (INT)
+// ============================================================
+function requestHint() {
+  if (hintsRemaining <= 0 || gameOver || animating || aiThinking) {
+    soundError();
+    return;
+  }
+  if (vsAI && turn !== RED) return;
+  var result = minimax(board, Math.min(AI_DEPTH + 1, 6), -Infinity, Infinity, true);
+  if (result.move) {
+    hintMove = result.move;
+    hintTimer = performance.now();
+    hintsRemaining--;
+    soundHint();
+  }
+}
+
+// ============================================================
 // EXECUTE PLAYER ACTION
 // ============================================================
 function selectPiece(r, c) {
   if (gameOver || animating || aiThinking) return;
   if (!belongs(board[r][c], turn)) return;
-  // If forced jumps, only allow selecting forced pieces
   if (forcedPieces.length > 0) {
     var isForced = false;
     for (var i = 0; i < forcedPieces.length; i++) {
@@ -324,7 +767,6 @@ function selectPiece(r, c) {
     if (!isForced) return;
   }
   selected = {r: r, c: c};
-  // Compute legal destinations for this piece
   var all = getAllMoves(board, turn);
   legalMoves = [];
   if (all.mustJump) {
@@ -341,11 +783,18 @@ function selectPiece(r, c) {
       }
     }
   }
+  // WIS preview: show all possible opponent responses
+  if (previewMoves && legalMoves.length > 0) {
+    spawnSporeParticles(
+      boardX + c * cellSize + cellSize / 2,
+      boardY + r * cellSize + cellSize / 2,
+      4, '#44dd88'
+    );
+  }
 }
 
 function tryMove(r, c) {
   if (!selected || gameOver || animating || aiThinking) return;
-  // Is (r,c) a legal destination?
   var move = null;
   for (var i = 0; i < legalMoves.length; i++) {
     if (legalMoves[i].r === r && legalMoves[i].c === c) {
@@ -354,7 +803,6 @@ function tryMove(r, c) {
     }
   }
   if (!move) {
-    // Maybe clicking a different own piece
     if (belongs(board[r][c], turn)) {
       selectPiece(r, c);
     } else {
@@ -363,13 +811,14 @@ function tryMove(r, c) {
     }
     return;
   }
+  saveStateForUndo();
   executeMove(selected.r, selected.c, move);
 }
 
 function executeMove(fromR, fromC, move) {
   var piece = board[fromR][fromC];
+  hintMove = null; // clear hint
   if (move.chain) {
-    // Animate jump chain
     animPath = [];
     var pr = fromR, pc = fromC;
     for (var i = 0; i < move.chain.length; i++) {
@@ -379,7 +828,6 @@ function executeMove(fromR, fromC, move) {
       pc = move.chain[i].c;
     }
     animPiece = piece;
-    // Check if promotes
     var last = move.chain[move.chain.length - 1];
     if (piece === RED && last.r === 0) animPromotesTo = RED_KING;
     else if (piece === BLACK && last.r === BOARD_SIZE - 1) animPromotesTo = BLACK_KING;
@@ -388,10 +836,9 @@ function executeMove(fromR, fromC, move) {
     animStep = 0;
     animStart = performance.now();
     animating = true;
-    board[fromR][fromC] = EMPTY; // remove from source immediately
+    board[fromR][fromC] = EMPTY;
     soundJump();
   } else {
-    // Simple move animation
     animPath = [{fromR: fromR, fromC: fromC, toR: move.r, toC: move.c, capturedR: -1, capturedC: -1}];
     animPiece = piece;
     if (piece === RED && move.r === 0) animPromotesTo = RED_KING;
@@ -409,28 +856,67 @@ function executeMove(fromR, fromC, move) {
 
 function finishAnimation() {
   animating = false;
-  // Apply all captures
   var captures = 0;
+  var isPlayerMove = isRed(animPiece) || isRed(animPromotesTo);
   for (var i = 0; i < animPath.length; i++) {
     if (animPath[i].capturedR >= 0) {
+      var capX = boardX + animPath[i].capturedC * cellSize + cellSize / 2;
+      var capY = boardY + animPath[i].capturedR * cellSize + cellSize / 2;
       board[animPath[i].capturedR][animPath[i].capturedC] = EMPTY;
       captures++;
+      // Spawn spore capture particles
+      spawnCaptureParticles(capX, capY, isPlayerMove);
+      soundSpore();
     }
   }
-  // Place piece at final position
   var last = animPath[animPath.length - 1];
   board[last.toR][last.toC] = animPromotesTo;
-  // Update captured counts
-  if (isRed(animPiece) || isRed(animPromotesTo)) {
-    blackCaptured += captures;
-  } else {
-    redCaptured += captures;
+
+  // Score calculation with CHA multiplier and STR king bonus
+  if (captures > 0) {
+    var baseScore = captures * captureScoreBase;
+    // STR: king captures get bonus
+    if (isKing(animPromotesTo)) {
+      baseScore += captures * kingPowerBonus * 25;
+    }
+    // Multi-capture combo bonus
+    if (captures > 1) {
+      baseScore += (captures - 1) * 50;
+    }
+    // CHA score multiplier
+    var finalScore = Math.round(baseScore * chaScoreMult);
+
+    if (isPlayerMove) {
+      playerScore += finalScore;
+      blackCaptured += captures;
+      var popX = boardX + last.toC * cellSize + cellSize / 2;
+      var popY = boardY + last.toR * cellSize + cellSize / 2;
+      addScorePopup(popX, popY, '+' + finalScore, '#44ff88');
+      if (captures > 1) {
+        addScorePopup(popX, popY - cellSize * 0.5, captures + 'x COMBO!', '#ffdd44');
+      }
+    } else {
+      aiScore += finalScore;
+      redCaptured += captures;
+    }
+    // Screen shake on capture
+    triggerShake(captures > 1 ? 8 : 4);
+    soundCapture();
   }
-  // King promotion sound
+
+  // King promotion effects
   if (animPromotesTo !== animPiece && isKing(animPromotesTo)) {
     soundKing();
+    var kingX = boardX + last.toC * cellSize + cellSize / 2;
+    var kingY = boardY + last.toR * cellSize + cellSize / 2;
+    spawnKingParticles(kingX, kingY);
+    triggerShake(6);
+    if (isPlayerMove) {
+      addScorePopup(kingX, kingY - cellSize * 0.3, 'EVOLVED!', '#ffd700');
+      playerScore += Math.round(200 * chaScoreMult);
+    }
   }
-  if (captures > 0) soundCapture();
+
   // Switch turn
   turn = opponent(turn);
   computeForcedAndLegal();
@@ -451,15 +937,11 @@ function evaluateBoard(b) {
       var p = b[r][c];
       if (p === RED) {
         score += 100;
-        // Advancement bonus (closer to row 0 = closer to king)
         score += (BOARD_SIZE - 1 - r) * 5;
-        // Edge protection
         if (c === 0 || c === BOARD_SIZE - 1) score += 3;
-        // Back row defense
         if (r === BOARD_SIZE - 1) score += 8;
       } else if (p === RED_KING) {
         score += 180;
-        // Center control for kings
         var centerDist = Math.abs(r - 3.5) + Math.abs(c - 3.5);
         score += (7 - centerDist) * 2;
       } else if (p === BLACK) {
@@ -542,16 +1024,15 @@ function doAIMove() {
     aiThinking = false;
     return;
   }
+  saveStateForUndo();
   var result = minimax(board, AI_DEPTH, -Infinity, Infinity, false);
   aiThinking = false;
   if (!result.move) return;
   var m = result.move;
   if (m.chain) {
-    // Jump move
     var last = m.chain[m.chain.length - 1];
     executeMove(m.fromR, m.fromC, {r: last.r, c: last.c, chain: m.chain});
   } else {
-    // Simple move
     executeMove(m.fromR, m.fromC, {r: m.toR, c: m.toC, chain: null});
   }
 }
@@ -568,8 +1049,7 @@ function resize() {
   canvas.width = w * dpr;
   canvas.height = h * dpr;
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  // Compute board sizing
-  var availH = h - panelH - 40; // panel top + bottom margin
+  var availH = h - panelH - 40;
   var availW = w - 20;
   cellSize = Math.floor(Math.min(availW, availH) / BOARD_SIZE);
   var boardPx = cellSize * BOARD_SIZE;
@@ -578,49 +1058,436 @@ function resize() {
   if (boardY < panelH) boardY = panelH;
 }
 
-function drawBoard() {
-  var w = canvas.width / (window.devicePixelRatio || 1);
-  var h = canvas.height / (window.devicePixelRatio || 1);
-  // Background
-  ctx.fillStyle = "#111";
-  ctx.fillRect(0, 0, w, h);
-
-  if (showMenu) {
-    drawMenu(w, h);
-    return;
-  }
-
-  // Top panel
-  drawPanel(w);
-
-  // Board border
+// ============================================================
+// DRAW: THEMED BOARD
+// ============================================================
+function drawThemedBoard() {
   var boardPx = cellSize * BOARD_SIZE;
-  ctx.fillStyle = "#2a1a0a";
-  ctx.fillRect(boardX - 4, boardY - 4, boardPx + 8, boardPx + 8);
 
-  // Cells
+  // Board outer frame — dark bark border
+  ctx.fillStyle = '#1a0e06';
+  ctx.fillRect(boardX - 6, boardY - 6, boardPx + 12, boardPx + 12);
+  ctx.strokeStyle = '#3d2a14';
+  ctx.lineWidth = 2;
+  ctx.strokeRect(boardX - 6, boardY - 6, boardPx + 12, boardPx + 12);
+
+  // Inner frame glow
+  ctx.strokeStyle = 'rgba(68, 221, 136, 0.15)';
+  ctx.lineWidth = 1;
+  ctx.strokeRect(boardX - 3, boardY - 3, boardPx + 6, boardPx + 6);
+
   for (var r = 0; r < BOARD_SIZE; r++) {
     for (var c = 0; c < BOARD_SIZE; c++) {
       var x = boardX + c * cellSize;
       var y = boardY + r * cellSize;
+
       if ((r + c) % 2 === 0) {
-        ctx.fillStyle = "#d4a76a";
+        // Light squares — pale forest floor
+        ctx.fillStyle = '#8b9a6b';
+        ctx.fillRect(x, y, cellSize, cellSize);
+        // Subtle grass texture
+        ctx.fillStyle = 'rgba(100, 120, 70, 0.3)';
+        for (var g = 0; g < 3; g++) {
+          var gx = x + ((r * 7 + c * 13 + g * 37) % cellSize);
+          var gy = y + ((r * 11 + c * 17 + g * 23) % cellSize);
+          ctx.fillRect(gx, gy, 2, 2);
+        }
       } else {
-        ctx.fillStyle = "#4a2f1a";
+        // Dark squares — playable
+        if (mushroomZones[r][c]) {
+          // Mushroom zone — green tint
+          ctx.fillStyle = '#1a3322';
+          ctx.fillRect(x, y, cellSize, cellSize);
+          // Mushroom dots
+          ctx.fillStyle = 'rgba(68, 221, 136, 0.08)';
+          ctx.beginPath();
+          ctx.arc(x + cellSize * 0.3, y + cellSize * 0.7, cellSize * 0.08, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.beginPath();
+          ctx.arc(x + cellSize * 0.7, y + cellSize * 0.3, cellSize * 0.06, 0, Math.PI * 2);
+          ctx.fill();
+        } else if (reactorZones[r][c]) {
+          // Reactor zone — purple tint
+          ctx.fillStyle = '#1a1a2e';
+          ctx.fillRect(x, y, cellSize, cellSize);
+          // Reactor glow
+          var pulse = Math.sin(frameCount * 0.02 + r + c) * 0.03 + 0.05;
+          ctx.fillStyle = 'rgba(170, 68, 255, ' + pulse + ')';
+          ctx.fillRect(x, y, cellSize, cellSize);
+          // Energy dots
+          ctx.fillStyle = 'rgba(170, 100, 255, 0.12)';
+          ctx.fillRect(x + cellSize * 0.4, y + cellSize * 0.4, cellSize * 0.2, cellSize * 0.2);
+        } else {
+          // Standard dark square — deep earth
+          ctx.fillStyle = '#2a1a0e';
+          ctx.fillRect(x, y, cellSize, cellSize);
+        }
+        // Grid lines
+        ctx.strokeStyle = 'rgba(80, 60, 30, 0.3)';
+        ctx.lineWidth = 0.5;
+        ctx.strokeRect(x, y, cellSize, cellSize);
       }
-      ctx.fillRect(x, y, cellSize, cellSize);
     }
   }
 
-  // Highlight forced pieces
+  // Row/column labels (NES style)
+  ctx.font = Math.floor(cellSize * 0.2) + "px monospace";
+  ctx.fillStyle = '#555';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  for (var i = 0; i < BOARD_SIZE; i++) {
+    // Column letters
+    ctx.fillText(String.fromCharCode(65 + i), boardX + i * cellSize + cellSize / 2, boardY - 10);
+    // Row numbers
+    ctx.fillText(String(i + 1), boardX - 10, boardY + i * cellSize + cellSize / 2);
+  }
+
+  // Corner mushroom decorations (NES pixel art style)
+  var cornerSize = cellSize * 0.25;
+  var corners = [
+    {x: boardX - 6, y: boardY - 6},
+    {x: boardX + boardPx - cornerSize + 6, y: boardY - 6},
+    {x: boardX - 6, y: boardY + boardPx - cornerSize + 6},
+    {x: boardX + boardPx - cornerSize + 6, y: boardY + boardPx - cornerSize + 6}
+  ];
+  for (var ci = 0; ci < corners.length; ci++) {
+    var cc = corners[ci];
+    // Mushroom cap
+    ctx.fillStyle = '#44dd88';
+    ctx.beginPath();
+    ctx.arc(cc.x + cornerSize / 2, cc.y + cornerSize * 0.4, cornerSize * 0.4, Math.PI, 0);
+    ctx.fill();
+    // Mushroom stem
+    ctx.fillStyle = '#ddccaa';
+    ctx.fillRect(cc.x + cornerSize * 0.3, cc.y + cornerSize * 0.4, cornerSize * 0.4, cornerSize * 0.5);
+    // Cap spots
+    ctx.fillStyle = 'rgba(255, 255, 255, 0.4)';
+    ctx.fillRect(cc.x + cornerSize * 0.35, cc.y + cornerSize * 0.2, 2, 2);
+    ctx.fillRect(cc.x + cornerSize * 0.55, cc.y + cornerSize * 0.15, 2, 2);
+  }
+
+  // Side decorations — vine lines
+  ctx.strokeStyle = 'rgba(68, 221, 136, 0.1)';
+  ctx.lineWidth = 1;
+  for (var vine = 0; vine < 4; vine++) {
+    ctx.beginPath();
+    var vineY = boardY + (vine + 1) * boardPx / 5;
+    ctx.moveTo(boardX - 5, vineY);
+    ctx.quadraticCurveTo(boardX - 12, vineY + 10, boardX - 5, vineY + 20);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(boardX + boardPx + 5, vineY);
+    ctx.quadraticCurveTo(boardX + boardPx + 12, vineY + 10, boardX + boardPx + 5, vineY + 20);
+    ctx.stroke();
+  }
+
+  // Reactor zone label (subtle)
+  if (cellSize > 40) {
+    ctx.font = Math.floor(cellSize * 0.15) + 'px monospace';
+    ctx.fillStyle = 'rgba(170, 68, 255, 0.15)';
+    ctx.textAlign = 'center';
+    ctx.fillText('REACTOR ZONE', boardX + boardPx / 2, boardY + boardPx / 2 + cellSize * 0.08);
+  }
+
+  // Mushroom zone labels
+  if (cellSize > 40) {
+    ctx.fillStyle = 'rgba(68, 221, 136, 0.12)';
+    ctx.fillText('SPORE FIELD', boardX + boardPx / 2, boardY + cellSize * 0.6);
+    ctx.fillText('MYCELIUM BED', boardX + boardPx / 2, boardY + boardPx - cellSize * 0.4);
+  }
+}
+
+// ============================================================
+// DRAW: BASELING PIECE (Player — Green Mushroom Creatures)
+// ============================================================
+function drawBaselingPiece(cx, cy, piece, radius) {
+  var isK = isKing(piece);
+  var isR = isRed(piece);
+
+  // Shadow
+  ctx.beginPath();
+  ctx.arc(cx + 2, cy + 3, radius, 0, Math.PI * 2);
+  ctx.fillStyle = 'rgba(0, 0, 0, 0.5)';
+  ctx.fill();
+
+  if (isR) {
+    // BASELING — green mushroom creature
+    // Body
+    ctx.beginPath();
+    ctx.arc(cx, cy + radius * 0.1, radius * 0.85, 0, Math.PI * 2);
+    var bodyGrad = ctx.createRadialGradient(cx - radius * 0.2, cy - radius * 0.2, radius * 0.1, cx, cy, radius);
+    bodyGrad.addColorStop(0, '#66ffaa');
+    bodyGrad.addColorStop(0.4, '#44dd88');
+    bodyGrad.addColorStop(0.8, '#22aa55');
+    bodyGrad.addColorStop(1, '#116633');
+    ctx.fillStyle = bodyGrad;
+    ctx.fill();
+
+    // Mushroom cap (top)
+    ctx.beginPath();
+    ctx.ellipse(cx, cy - radius * 0.3, radius * 0.7, radius * 0.45, 0, Math.PI, Math.PI * 2);
+    var capGrad = ctx.createRadialGradient(cx, cy - radius * 0.5, radius * 0.1, cx, cy - radius * 0.3, radius * 0.7);
+    capGrad.addColorStop(0, '#88ffcc');
+    capGrad.addColorStop(0.6, '#44cc77');
+    capGrad.addColorStop(1, '#228844');
+    ctx.fillStyle = capGrad;
+    ctx.fill();
+
+    // Cap spots
+    ctx.fillStyle = 'rgba(255, 255, 255, 0.3)';
+    ctx.beginPath();
+    ctx.arc(cx - radius * 0.25, cy - radius * 0.45, radius * 0.08, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.beginPath();
+    ctx.arc(cx + radius * 0.15, cy - radius * 0.5, radius * 0.06, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.beginPath();
+    ctx.arc(cx + radius * 0.35, cy - radius * 0.35, radius * 0.05, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Eyes
+    ctx.fillStyle = '#fff';
+    ctx.beginPath();
+    ctx.ellipse(cx - radius * 0.2, cy + radius * 0.05, radius * 0.13, radius * 0.15, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.beginPath();
+    ctx.ellipse(cx + radius * 0.2, cy + radius * 0.05, radius * 0.13, radius * 0.15, 0, 0, Math.PI * 2);
+    ctx.fill();
+    // Pupils
+    ctx.fillStyle = '#111';
+    ctx.beginPath();
+    ctx.arc(cx - radius * 0.18, cy + radius * 0.08, radius * 0.06, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.beginPath();
+    ctx.arc(cx + radius * 0.22, cy + radius * 0.08, radius * 0.06, 0, Math.PI * 2);
+    ctx.fill();
+    // Eye shine
+    ctx.fillStyle = '#fff';
+    ctx.beginPath();
+    ctx.arc(cx - radius * 0.22, cy + radius * 0.03, radius * 0.03, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.beginPath();
+    ctx.arc(cx + radius * 0.18, cy + radius * 0.03, radius * 0.03, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Mouth (happy)
+    ctx.strokeStyle = '#116633';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.arc(cx, cy + radius * 0.15, radius * 0.15, 0.1, Math.PI - 0.1);
+    ctx.stroke();
+
+    // CHA glow effect
+    if (pieceStyle >= 1) {
+      ctx.beginPath();
+      ctx.arc(cx, cy, radius * 1.1, 0, Math.PI * 2);
+      ctx.strokeStyle = 'rgba(68, 221, 136, ' + (0.2 + Math.sin(frameCount * 0.05) * 0.1) + ')';
+      ctx.lineWidth = 2;
+      ctx.stroke();
+    }
+    // CHA sparkle
+    if (pieceStyle >= 2 && frameCount % 20 < 10) {
+      ctx.fillStyle = 'rgba(255, 255, 200, 0.6)';
+      var sparkAngle = frameCount * 0.1;
+      ctx.fillRect(cx + Math.cos(sparkAngle) * radius * 0.8 - 1, cy + Math.sin(sparkAngle) * radius * 0.8 - 1, 3, 3);
+    }
+  } else {
+    // REACTOR BUG — purple/dark enemy
+    // Body
+    ctx.beginPath();
+    ctx.arc(cx, cy, radius * 0.85, 0, Math.PI * 2);
+    var bugGrad = ctx.createRadialGradient(cx - radius * 0.2, cy - radius * 0.2, radius * 0.1, cx, cy, radius);
+    bugGrad.addColorStop(0, '#aa66ff');
+    bugGrad.addColorStop(0.4, '#7733cc');
+    bugGrad.addColorStop(0.8, '#442288');
+    bugGrad.addColorStop(1, '#221144');
+    ctx.fillStyle = bugGrad;
+    ctx.fill();
+
+    // Bug shell pattern
+    ctx.strokeStyle = 'rgba(170, 100, 255, 0.3)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(cx, cy - radius * 0.6);
+    ctx.lineTo(cx, cy + radius * 0.6);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.ellipse(cx, cy - radius * 0.1, radius * 0.5, radius * 0.3, 0, 0, Math.PI * 2);
+    ctx.stroke();
+
+    // Antennae
+    ctx.strokeStyle = '#aa66ff';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.moveTo(cx - radius * 0.2, cy - radius * 0.5);
+    ctx.quadraticCurveTo(cx - radius * 0.5, cy - radius * 0.9, cx - radius * 0.6, cy - radius * 0.7);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(cx + radius * 0.2, cy - radius * 0.5);
+    ctx.quadraticCurveTo(cx + radius * 0.5, cy - radius * 0.9, cx + radius * 0.6, cy - radius * 0.7);
+    ctx.stroke();
+    // Antenna tips
+    ctx.fillStyle = '#dd88ff';
+    ctx.beginPath();
+    ctx.arc(cx - radius * 0.6, cy - radius * 0.7, radius * 0.06, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.beginPath();
+    ctx.arc(cx + radius * 0.6, cy - radius * 0.7, radius * 0.06, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Eyes (angry red)
+    ctx.fillStyle = '#ff3333';
+    ctx.beginPath();
+    ctx.ellipse(cx - radius * 0.22, cy - radius * 0.05, radius * 0.12, radius * 0.1, -0.2, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.beginPath();
+    ctx.ellipse(cx + radius * 0.22, cy - radius * 0.05, radius * 0.12, radius * 0.1, 0.2, 0, Math.PI * 2);
+    ctx.fill();
+    // Pupils
+    ctx.fillStyle = '#000';
+    ctx.beginPath();
+    ctx.arc(cx - radius * 0.2, cy - radius * 0.03, radius * 0.05, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.beginPath();
+    ctx.arc(cx + radius * 0.24, cy - radius * 0.03, radius * 0.05, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Mandibles
+    ctx.strokeStyle = '#7733cc';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(cx - radius * 0.15, cy + radius * 0.2);
+    ctx.lineTo(cx - radius * 0.25, cy + radius * 0.4);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(cx + radius * 0.15, cy + radius * 0.2);
+    ctx.lineTo(cx + radius * 0.25, cy + radius * 0.4);
+    ctx.stroke();
+
+    // Bug legs (tiny)
+    ctx.strokeStyle = 'rgba(170, 100, 255, 0.5)';
+    ctx.lineWidth = 1;
+    for (var leg = 0; leg < 3; leg++) {
+      var ly = cy + (leg - 1) * radius * 0.25;
+      ctx.beginPath();
+      ctx.moveTo(cx - radius * 0.7, ly - radius * 0.1);
+      ctx.lineTo(cx - radius * 0.85, ly + radius * 0.05);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.moveTo(cx + radius * 0.7, ly - radius * 0.1);
+      ctx.lineTo(cx + radius * 0.85, ly + radius * 0.05);
+      ctx.stroke();
+    }
+
+    // Reactor glow pulse
+    var bugPulse = Math.sin(frameCount * 0.04) * 0.1 + 0.15;
+    ctx.beginPath();
+    ctx.arc(cx, cy, radius * 1.05, 0, Math.PI * 2);
+    ctx.strokeStyle = 'rgba(170, 68, 255, ' + bugPulse + ')';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+  }
+
+  // KING: Evolved crown (STR powered)
+  if (isK) {
+    var cr = radius * 0.4;
+    var crownY = cy - radius * 0.55;
+
+    // Crown glow
+    ctx.beginPath();
+    ctx.arc(cx, crownY, cr * 1.5, 0, Math.PI * 2);
+    ctx.fillStyle = isR ? 'rgba(255, 215, 0, 0.15)' : 'rgba(255, 50, 50, 0.15)';
+    ctx.fill();
+
+    // Crown shape
+    ctx.beginPath();
+    ctx.moveTo(cx - cr, crownY + cr * 0.3);
+    ctx.lineTo(cx - cr, crownY - cr * 0.4);
+    ctx.lineTo(cx - cr * 0.5, crownY + cr * 0.05);
+    ctx.lineTo(cx, crownY - cr * 0.6);
+    ctx.lineTo(cx + cr * 0.5, crownY + cr * 0.05);
+    ctx.lineTo(cx + cr, crownY - cr * 0.4);
+    ctx.lineTo(cx + cr, crownY + cr * 0.3);
+    ctx.closePath();
+    ctx.fillStyle = isR ? '#ffd700' : '#ff4444';
+    ctx.fill();
+    ctx.strokeStyle = isR ? '#b8860b' : '#aa0000';
+    ctx.lineWidth = 1;
+    ctx.stroke();
+
+    // Crown jewels
+    ctx.fillStyle = isR ? '#44dd88' : '#aa66ff';
+    ctx.beginPath();
+    ctx.arc(cx, crownY - cr * 0.4, cr * 0.12, 0, Math.PI * 2);
+    ctx.fill();
+
+    // STR indicator on crown (power level)
+    if (kingPowerBonus > 0) {
+      ctx.fillStyle = '#fff';
+      ctx.font = "bold " + Math.floor(cr * 0.5) + "px monospace";
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText('+' + kingPowerBonus, cx, crownY + cr * 0.6);
+    }
+  }
+
+  // Outer rim
+  ctx.beginPath();
+  ctx.arc(cx, cy, radius, 0, Math.PI * 2);
+  ctx.strokeStyle = isR ? 'rgba(68, 221, 136, 0.4)' : 'rgba(170, 68, 255, 0.4)';
+  ctx.lineWidth = 1.5;
+  ctx.stroke();
+}
+
+// ============================================================
+// DRAW: MAIN BOARD RENDER
+// ============================================================
+function drawBoard() {
+  var w = canvas.width / (window.devicePixelRatio || 1);
+  var h = canvas.height / (window.devicePixelRatio || 1);
+  var now = performance.now();
+  frameCount++;
+
+  // Update systems
+  updateParticles(now);
+  updateShake(now);
+  updateScorePopups(now);
+  updateAmbientSpores(now, w, h);
+
+  // Background
+  ctx.fillStyle = '#0a0a12';
+  ctx.fillRect(0, 0, w, h);
+
+  if (showMenu) {
+    drawAmbientSpores();
+    drawMenu(w, h);
+    drawParticles();
+    return;
+  }
+
+  // Draw ambient spores behind everything
+  drawAmbientSpores();
+
+  // Apply screen shake
+  ctx.save();
+  ctx.translate(shakeX, shakeY);
+
+  // Top panel
+  drawPanel(w);
+
+  // Themed board
+  drawThemedBoard();
+
+  // Highlight forced pieces (pulsing)
   if (!animating && !aiThinking) {
     for (var i = 0; i < forcedPieces.length; i++) {
       var fp = forcedPieces[i];
       var fx = boardX + fp.c * cellSize;
       var fy = boardY + fp.r * cellSize;
-      ctx.fillStyle = "rgba(255, 200, 0, 0.3)";
+      var pulse = Math.sin(now * 0.005) * 0.1 + 0.25;
+      ctx.fillStyle = 'rgba(255, 200, 0, ' + pulse + ')';
       ctx.fillRect(fx, fy, cellSize, cellSize);
-      ctx.strokeStyle = "#ffcc00";
+      ctx.strokeStyle = '#ffcc00';
       ctx.lineWidth = 2;
       ctx.strokeRect(fx + 1, fy + 1, cellSize - 2, cellSize - 2);
     }
@@ -630,9 +1497,9 @@ function drawBoard() {
   if (selected && !animating) {
     var sx = boardX + selected.c * cellSize;
     var sy = boardY + selected.r * cellSize;
-    ctx.fillStyle = "rgba(100, 200, 255, 0.35)";
+    ctx.fillStyle = 'rgba(68, 221, 136, 0.25)';
     ctx.fillRect(sx, sy, cellSize, cellSize);
-    ctx.strokeStyle = "#66ccff";
+    ctx.strokeStyle = '#44dd88';
     ctx.lineWidth = 3;
     ctx.strokeRect(sx + 1, sy + 1, cellSize - 2, cellSize - 2);
   }
@@ -643,21 +1510,79 @@ function drawBoard() {
       var lm = legalMoves[i];
       var lx = boardX + lm.c * cellSize + cellSize / 2;
       var ly = boardY + lm.r * cellSize + cellSize / 2;
+      // Pulsing indicator
+      var dotPulse = Math.sin(now * 0.006 + i) * 0.15 + 0.5;
       ctx.beginPath();
       ctx.arc(lx, ly, cellSize * 0.15, 0, Math.PI * 2);
-      ctx.fillStyle = "rgba(100, 255, 100, 0.5)";
+      ctx.fillStyle = 'rgba(68, 255, 136, ' + dotPulse + ')';
       ctx.fill();
-      ctx.strokeStyle = "rgba(100, 255, 100, 0.8)";
+      ctx.strokeStyle = 'rgba(68, 255, 136, 0.8)';
       ctx.lineWidth = 2;
       ctx.stroke();
+
+      // WIS preview: show capture path lines
+      if (previewMoves && lm.chain) {
+        ctx.strokeStyle = 'rgba(255, 200, 0, 0.3)';
+        ctx.lineWidth = 1;
+        ctx.setLineDash([4, 4]);
+        var psr = selected ? selected.r : 0;
+        var psc = selected ? selected.c : 0;
+        for (var j = 0; j < lm.chain.length; j++) {
+          var cj = lm.chain[j];
+          ctx.beginPath();
+          ctx.moveTo(boardX + psc * cellSize + cellSize / 2, boardY + psr * cellSize + cellSize / 2);
+          ctx.lineTo(boardX + cj.c * cellSize + cellSize / 2, boardY + cj.r * cellSize + cellSize / 2);
+          ctx.stroke();
+          // Mark captured piece with X
+          ctx.strokeStyle = 'rgba(255, 80, 80, 0.4)';
+          var capCx = boardX + cj.capturedC * cellSize + cellSize / 2;
+          var capCy = boardY + cj.capturedR * cellSize + cellSize / 2;
+          ctx.beginPath();
+          ctx.moveTo(capCx - cellSize * 0.15, capCy - cellSize * 0.15);
+          ctx.lineTo(capCx + cellSize * 0.15, capCy + cellSize * 0.15);
+          ctx.moveTo(capCx + cellSize * 0.15, capCy - cellSize * 0.15);
+          ctx.lineTo(capCx - cellSize * 0.15, capCy + cellSize * 0.15);
+          ctx.stroke();
+          ctx.strokeStyle = 'rgba(255, 200, 0, 0.3)';
+          psr = cj.r;
+          psc = cj.c;
+        }
+        ctx.setLineDash([]);
+      }
     }
   }
 
-  // Draw pieces (skip animating piece)
+  // Draw hint highlight (INT)
+  if (hintMove && (now - hintTimer < 3000)) {
+    var hAlpha = Math.sin(now * 0.008) * 0.2 + 0.3;
+    // Highlight source
+    var hx = boardX + hintMove.fromC * cellSize;
+    var hy = boardY + hintMove.fromR * cellSize;
+    ctx.fillStyle = 'rgba(100, 200, 255, ' + hAlpha + ')';
+    ctx.fillRect(hx, hy, cellSize, cellSize);
+    // Highlight destination
+    var dest = hintMove.chain
+      ? hintMove.chain[hintMove.chain.length - 1]
+      : {r: hintMove.toR, c: hintMove.toC};
+    var dx = boardX + dest.c * cellSize;
+    var dy = boardY + dest.r * cellSize;
+    ctx.fillStyle = 'rgba(100, 255, 200, ' + hAlpha + ')';
+    ctx.fillRect(dx, dy, cellSize, cellSize);
+    // Arrow
+    ctx.strokeStyle = 'rgba(255, 255, 100, 0.6)';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(hx + cellSize / 2, hy + cellSize / 2);
+    ctx.lineTo(dx + cellSize / 2, dy + cellSize / 2);
+    ctx.stroke();
+  } else if (hintMove && now - hintTimer >= 3000) {
+    hintMove = null;
+  }
+
+  // Draw pieces
   for (var r = 0; r < BOARD_SIZE; r++) {
     for (var c = 0; c < BOARD_SIZE; c++) {
       if (board[r][c] !== EMPTY) {
-        // If this cell is about to be captured in animation, skip it at the right time
         if (animating) {
           var skipThis = false;
           for (var s = 0; s <= animStep; s++) {
@@ -668,17 +1593,15 @@ function drawBoard() {
           }
           if (skipThis) continue;
         }
-        drawPiece(boardX + c * cellSize + cellSize / 2, boardY + r * cellSize + cellSize / 2, board[r][c], cellSize * 0.4);
+        drawBaselingPiece(boardX + c * cellSize + cellSize / 2, boardY + r * cellSize + cellSize / 2, board[r][c], cellSize * 0.4);
       }
     }
   }
 
   // Draw animating piece
   if (animating) {
-    var now = performance.now();
     var elapsed = now - animStart;
     var t = Math.min(elapsed / ANIM_DURATION, 1);
-    // Ease in-out
     t = t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
     var step = animPath[animStep];
     var fromX = boardX + step.fromC * cellSize + cellSize / 2;
@@ -687,20 +1610,23 @@ function drawBoard() {
     var toY = boardY + step.toR * cellSize + cellSize / 2;
     var curX = fromX + (toX - fromX) * t;
     var curY = fromY + (toY - fromY) * t;
-    // Jump arc
     if (step.capturedR >= 0) {
       var jumpH = cellSize * 0.3;
       curY -= Math.sin(t * Math.PI) * jumpH;
     }
-    // Determine piece appearance: use final piece type only on last step when complete
+    // Trail particles while moving
+    if (t > 0.1 && t < 0.9 && frameCount % 3 === 0) {
+      var trailColor = isRed(animPiece) ? '#44dd88' : '#aa66ff';
+      spawnSporeParticles(curX, curY, 1, trailColor);
+    }
+
     var drawAs = animPiece;
     if (animStep === animPath.length - 1 && t >= 1) {
       drawAs = animPromotesTo;
     }
-    drawPiece(curX, curY, drawAs, cellSize * 0.4);
+    drawBaselingPiece(curX, curY, drawAs, cellSize * 0.4);
 
     if (t >= 1) {
-      // Advance to next step or finish
       if (step.capturedR >= 0) {
         soundCapture();
       }
@@ -714,229 +1640,248 @@ function drawBoard() {
     }
   }
 
+  // Draw particles on top
+  drawParticles();
+  drawScorePopups();
+
+  ctx.restore(); // end shake transform
+
+  // NES-style scanline overlay (subtle)
+  ctx.fillStyle = 'rgba(0, 0, 0, 0.03)';
+  for (var scanY = 0; scanY < h; scanY += 4) {
+    ctx.fillRect(0, scanY, w, 1);
+  }
+
+  // Vignette corners
+  var vigGrad = ctx.createRadialGradient(w / 2, h / 2, Math.min(w, h) * 0.3, w / 2, h / 2, Math.max(w, h) * 0.7);
+  vigGrad.addColorStop(0, 'rgba(0, 0, 0, 0)');
+  vigGrad.addColorStop(1, 'rgba(0, 0, 0, 0.25)');
+  ctx.fillStyle = vigGrad;
+  ctx.fillRect(0, 0, w, h);
+
   // Game over overlay
   if (gameOver) {
-    ctx.fillStyle = "rgba(0, 0, 0, 0.7)";
-    ctx.fillRect(0, 0, w, h);
-    ctx.fillStyle = "#fff";
-    ctx.font = "bold " + Math.floor(cellSize * 0.6) + "px monospace";
-    ctx.textAlign = "center";
-    ctx.textBaseline = "middle";
-    var winText = winner === RED ? "Red Wins!" : "Black Wins!";
-    ctx.fillText(winText, w / 2, h / 2 - 30);
-    ctx.font = Math.floor(cellSize * 0.3) + "px monospace";
-    ctx.fillStyle = "#aaa";
-    ctx.fillText("Tap to play again", w / 2, h / 2 + 30);
+    drawGameOver(w, h);
   }
 }
 
-function drawPiece(cx, cy, piece, radius) {
-  var isR = isRed(piece);
-  var isK = isKing(piece);
+// ============================================================
+// DRAW: GAME OVER
+// ============================================================
+function drawGameOver(w, h) {
+  ctx.fillStyle = 'rgba(0, 0, 0, 0.8)';
+  ctx.fillRect(0, 0, w, h);
 
-  // Shadow
-  ctx.beginPath();
-  ctx.arc(cx + 2, cy + 3, radius, 0, Math.PI * 2);
-  ctx.fillStyle = "rgba(0, 0, 0, 0.4)";
-  ctx.fill();
+  var isPlayerWin = winner === RED;
+  var titleSize = Math.floor(cellSize * 0.6);
 
-  // Base circle (darker)
-  ctx.beginPath();
-  ctx.arc(cx, cy, radius, 0, Math.PI * 2);
-  var baseColor = isR ? "#8b1a1a" : "#1a1a1a";
-  ctx.fillStyle = baseColor;
-  ctx.fill();
+  // Victory/defeat text
+  ctx.font = 'bold ' + titleSize + 'px monospace';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
 
-  // Main gradient
-  var grad = ctx.createRadialGradient(cx - radius * 0.3, cy - radius * 0.3, radius * 0.1, cx, cy, radius);
-  if (isR) {
-    grad.addColorStop(0, "#ff5555");
-    grad.addColorStop(0.5, "#cc2222");
-    grad.addColorStop(1, "#6b0f0f");
-  } else {
-    grad.addColorStop(0, "#555555");
-    grad.addColorStop(0.5, "#333333");
-    grad.addColorStop(1, "#111111");
+  // Text shadow
+  ctx.fillStyle = '#000';
+  ctx.fillText(isPlayerWin ? 'BASELINGS WIN!' : 'REACTOR BUGS WIN!', w / 2 + 3, h / 2 - 60 + 3);
+  ctx.fillStyle = isPlayerWin ? '#44dd88' : '#aa44ff';
+  ctx.fillText(isPlayerWin ? 'BASELINGS WIN!' : 'REACTOR BUGS WIN!', w / 2, h / 2 - 60);
+
+  // Final score
+  ctx.font = Math.floor(cellSize * 0.35) + 'px monospace';
+  ctx.fillStyle = '#ffdd44';
+  ctx.fillText('Score: ' + playerScore, w / 2, h / 2);
+
+  // Stat bonuses summary
+  ctx.font = Math.floor(cellSize * 0.22) + 'px monospace';
+  ctx.fillStyle = '#888';
+  ctx.fillText(statB.name + ' Lv.' + statB.level + ' | CHA x' + chaScoreMult.toFixed(2), w / 2, h / 2 + 35);
+
+  // Replay prompt
+  ctx.font = Math.floor(cellSize * 0.25) + 'px monospace';
+  ctx.fillStyle = '#666';
+  ctx.fillText('Tap to play again', w / 2, h / 2 + 75);
+
+  // Spawn celebration particles
+  if (isPlayerWin && frameCount % 10 === 0) {
+    spawnSporeParticles(Math.random() * w, Math.random() * h * 0.5, 2, '#44dd88');
   }
-  ctx.beginPath();
-  ctx.arc(cx, cy, radius * 0.92, 0, Math.PI * 2);
-  ctx.fillStyle = grad;
-  ctx.fill();
-
-  // Glossy highlight
-  ctx.beginPath();
-  ctx.ellipse(cx - radius * 0.15, cy - radius * 0.25, radius * 0.5, radius * 0.35, -0.3, 0, Math.PI * 2);
-  var gloss = ctx.createRadialGradient(cx - radius * 0.15, cy - radius * 0.3, 0, cx - radius * 0.15, cy - radius * 0.25, radius * 0.5);
-  gloss.addColorStop(0, "rgba(255, 255, 255, 0.45)");
-  gloss.addColorStop(1, "rgba(255, 255, 255, 0)");
-  ctx.fillStyle = gloss;
-  ctx.fill();
-
-  // Edge ring
-  ctx.beginPath();
-  ctx.arc(cx, cy, radius * 0.85, 0, Math.PI * 2);
-  ctx.strokeStyle = isR ? "rgba(255, 100, 100, 0.3)" : "rgba(150, 150, 150, 0.3)";
-  ctx.lineWidth = 1.5;
-  ctx.stroke();
-
-  // Inner ring for 3D depth
-  ctx.beginPath();
-  ctx.arc(cx, cy + 1, radius * 0.7, 0, Math.PI * 2);
-  ctx.strokeStyle = isR ? "rgba(120, 20, 20, 0.4)" : "rgba(60, 60, 60, 0.4)";
-  ctx.lineWidth = 1;
-  ctx.stroke();
-
-  // King crown
-  if (isK) {
-    var cr = radius * 0.35;
-    var crownY = cy - 1;
-    ctx.save();
-    ctx.beginPath();
-    // Crown shape: 5 point zigzag
-    ctx.moveTo(cx - cr, crownY + cr * 0.3);
-    ctx.lineTo(cx - cr, crownY - cr * 0.3);
-    ctx.lineTo(cx - cr * 0.5, crownY + cr * 0.1);
-    ctx.lineTo(cx, crownY - cr * 0.5);
-    ctx.lineTo(cx + cr * 0.5, crownY + cr * 0.1);
-    ctx.lineTo(cx + cr, crownY - cr * 0.3);
-    ctx.lineTo(cx + cr, crownY + cr * 0.3);
-    ctx.closePath();
-    ctx.fillStyle = "#ffd700";
-    ctx.fill();
-    ctx.strokeStyle = "#b8860b";
-    ctx.lineWidth = 1;
-    ctx.stroke();
-    // Crown jewels
-    ctx.beginPath();
-    ctx.arc(cx, crownY - cr * 0.3, cr * 0.12, 0, Math.PI * 2);
-    ctx.fillStyle = "#ff4444";
-    ctx.fill();
-    ctx.beginPath();
-    ctx.arc(cx - cr * 0.55, crownY - cr * 0.1, cr * 0.08, 0, Math.PI * 2);
-    ctx.fillStyle = "#4488ff";
-    ctx.fill();
-    ctx.beginPath();
-    ctx.arc(cx + cr * 0.55, crownY - cr * 0.1, cr * 0.08, 0, Math.PI * 2);
-    ctx.fillStyle = "#4488ff";
-    ctx.fill();
-    ctx.restore();
-  }
-
-  // Outer rim
-  ctx.beginPath();
-  ctx.arc(cx, cy, radius, 0, Math.PI * 2);
-  ctx.strokeStyle = isR ? "rgba(200, 50, 50, 0.5)" : "rgba(100, 100, 100, 0.5)";
-  ctx.lineWidth = 2;
-  ctx.stroke();
 }
 
+// ============================================================
+// DRAW: TOP PANEL
+// ============================================================
 function drawPanel(w) {
   // Background bar
-  ctx.fillStyle = "#1a1a1a";
+  ctx.fillStyle = '#0d0d18';
   ctx.fillRect(0, 0, w, panelH);
-  ctx.fillStyle = "#333";
-  ctx.fillRect(0, panelH - 1, w, 1);
+  // Bottom border
+  ctx.fillStyle = '#44dd88';
+  ctx.fillRect(0, panelH - 2, w, 2);
 
   var fontSize = Math.min(16, cellSize * 0.3);
-  ctx.font = fontSize + "px monospace";
-  ctx.textBaseline = "middle";
+  ctx.textBaseline = 'middle';
 
   // Turn indicator
-  ctx.textAlign = "center";
-  var turnText = aiThinking ? "AI Thinking..." : (turn === RED ? "Red's Turn" : "Black's Turn");
-  if (gameOver) turnText = (winner === RED ? "Red Wins!" : "Black Wins!");
-  ctx.fillStyle = turn === RED ? "#ff5555" : "#aaaaaa";
+  ctx.textAlign = 'center';
+  ctx.font = 'bold ' + fontSize + 'px monospace';
+  var turnText = aiThinking ? 'REACTOR BUGS THINKING...' : (turn === RED ? 'YOUR TURN' : 'ENEMY TURN');
+  if (gameOver) turnText = (winner === RED ? 'VICTORY!' : 'DEFEAT!');
+  ctx.fillStyle = '#000';
+  ctx.fillText(turnText, w / 2 + 1, panelH / 2 - fontSize * 0.7 + 1);
+  ctx.fillStyle = turn === RED ? '#44dd88' : '#aa66ff';
   ctx.fillText(turnText, w / 2, panelH / 2 - fontSize * 0.7);
 
-  // Captured counts
-  ctx.textAlign = "left";
-  ctx.font = (fontSize * 0.85) + "px monospace";
+  // Score display
+  ctx.font = (fontSize * 0.75) + 'px monospace';
+  ctx.textAlign = 'left';
+  ctx.fillStyle = '#44dd88';
+  ctx.fillText('SCORE: ' + playerScore, 10, 14);
 
-  // Red side (left)
-  drawPiece(20, panelH / 2 + fontSize * 0.4, RED, fontSize * 0.5);
-  ctx.fillStyle = "#ff5555";
-  ctx.fillText("x" + (12 - redCaptured), 20 + fontSize * 0.8, panelH / 2 + fontSize * 0.5);
-  ctx.fillStyle = "#666";
-  ctx.fillText("lost:" + redCaptured, 20 + fontSize * 2.3, panelH / 2 + fontSize * 0.5);
+  // Pieces remaining
+  ctx.fillStyle = '#88aa88';
+  ctx.fillText('x' + (12 + bonusPieces - redCaptured), 10, 30);
+  ctx.fillStyle = '#555';
+  ctx.fillText(' vs ', 10 + fontSize * 3, 30);
+  ctx.fillStyle = '#aa88cc';
+  ctx.fillText('x' + (12 - blackCaptured), 10 + fontSize * 4.5, 30);
 
-  // Black side (right)
-  ctx.textAlign = "right";
-  drawPiece(w - 20, panelH / 2 + fontSize * 0.4, BLACK, fontSize * 0.5);
-  ctx.fillStyle = "#aaaaaa";
-  ctx.fillText("x" + (12 - blackCaptured), w - 20 - fontSize * 0.3, panelH / 2 + fontSize * 0.5);
-  ctx.fillStyle = "#666";
-  ctx.fillText("lost:" + blackCaptured, w - 20 - fontSize * 2, panelH / 2 + fontSize * 0.5);
+  // Right side: undo and hint counters
+  ctx.textAlign = 'right';
+  // Undo charges (DEX + WIS)
+  ctx.fillStyle = undosRemaining > 0 ? '#66ccff' : '#333';
+  ctx.fillText('UNDO:' + undosRemaining, w - 10, 14);
+  // Hint charges (INT)
+  ctx.fillStyle = hintsRemaining > 0 ? '#ffcc44' : '#333';
+  ctx.fillText('HINT:' + hintsRemaining, w - 10, 30);
 
-  // New Game button
-  ctx.textAlign = "center";
-  var btnW = fontSize * 6;
-  var btnH = fontSize * 1.6;
+  // Stat bar (subtle, shows active baseling)
+  ctx.textAlign = 'center';
+  ctx.font = (fontSize * 0.6) + 'px monospace';
+  ctx.fillStyle = '#444';
+  ctx.fillText(statB.name + ' | STR:' + statB.str + ' DEX:' + statB.dex + ' CON:' + statB.con +
+               ' INT:' + statB.int + ' WIS:' + statB.wis + ' CHA:' + statB.cha, w / 2, panelH - 10);
+
+  // New Game button (middle bottom area)
+  var btnW = fontSize * 5;
+  var btnH = fontSize * 1.4;
   var btnX = w / 2 - btnW / 2;
-  var btnY = panelH / 2 + fontSize * 0.1;
-  ctx.fillStyle = "#2a2a2a";
+  var btnY = panelH / 2 + fontSize * 0.3;
+  ctx.fillStyle = '#1a1a2e';
   ctx.fillRect(btnX, btnY, btnW, btnH);
-  ctx.strokeStyle = "#444";
+  ctx.strokeStyle = '#44dd88';
   ctx.lineWidth = 1;
   ctx.strokeRect(btnX, btnY, btnW, btnH);
-  ctx.fillStyle = "#888";
-  ctx.font = (fontSize * 0.75) + "px monospace";
-  ctx.fillText("New Game", w / 2, btnY + btnH / 2);
+  ctx.fillStyle = '#44dd88';
+  ctx.font = (fontSize * 0.65) + 'px monospace';
+  ctx.fillText('NEW GAME', w / 2, btnY + btnH / 2);
 
-  // Store button rect for hit testing
   drawPanel._btnRect = {x: btnX, y: btnY, w: btnW, h: btnH};
 }
 
+// ============================================================
+// DRAW: MENU
+// ============================================================
 function drawMenu(w, h) {
-  ctx.fillStyle = "#111";
+  ctx.fillStyle = '#0a0a12';
   ctx.fillRect(0, 0, w, h);
 
-  var titleSize = Math.min(48, w * 0.08);
-  ctx.font = "bold " + titleSize + "px monospace";
-  ctx.textAlign = "center";
-  ctx.textBaseline = "middle";
-  ctx.fillStyle = "#ddd";
-  ctx.fillText("CHECKERS", w / 2, h * 0.2);
+  // Title
+  var titleSize = Math.min(42, w * 0.07);
+  ctx.font = 'bold ' + titleSize + 'px monospace';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+
+  // Title shadow
+  ctx.fillStyle = '#000';
+  ctx.fillText('BASELING CHECKERS', w / 2 + 3, h * 0.12 + 3);
+  ctx.fillStyle = '#44dd88';
+  ctx.fillText('BASELING CHECKERS', w / 2, h * 0.12);
+
+  // Subtitle
+  ctx.font = Math.floor(titleSize * 0.4) + 'px monospace';
+  ctx.fillStyle = '#aa66ff';
+  ctx.fillText('Baselings vs Reactor Bugs', w / 2, h * 0.12 + titleSize * 0.8);
 
   // Draw decorative pieces
-  drawPiece(w / 2 - titleSize * 2.5, h * 0.2, RED, titleSize * 0.4);
-  drawPiece(w / 2 + titleSize * 2.5, h * 0.2, BLACK_KING, titleSize * 0.4);
+  drawBaselingPiece(w / 2 - titleSize * 2.5, h * 0.12, RED, titleSize * 0.35);
+  drawBaselingPiece(w / 2 + titleSize * 2.5, h * 0.12, BLACK_KING, titleSize * 0.35);
 
-  var btnSize = Math.min(32, w * 0.05);
-  var btnW = Math.min(280, w * 0.6);
+  // Baseling stats display
+  ctx.font = Math.floor(titleSize * 0.3) + 'px monospace';
+  ctx.fillStyle = '#555';
+  ctx.fillText('Active: ' + statB.name + ' (Lv.' + statB.level + ')', w / 2, h * 0.22);
+
+  // Stat bonuses preview
+  var statY = h * 0.27;
+  var statFS = Math.floor(titleSize * 0.25);
+  ctx.font = statFS + 'px monospace';
+  ctx.textAlign = 'center';
+
+  var statLines = [
+    {label: 'STR ' + statB.str, desc: 'King Power +' + kingPowerBonus, color: '#ff6644'},
+    {label: 'DEX ' + statB.dex, desc: 'Undos: ' + undoCharges, color: '#44ff88'},
+    {label: 'CON ' + statB.con, desc: 'Bonus Pieces: ' + bonusPieces, color: '#ffaa44'},
+    {label: 'INT ' + statB.int, desc: 'Hints: ' + hintCharges + ' | AI -' + aiDepthMod, color: '#4488ff'},
+    {label: 'WIS ' + statB.wis, desc: 'Preview: ' + (previewMoves ? 'ON' : 'OFF') + ' | +' + wisUndoBonus + ' undo', color: '#aa44ff'},
+    {label: 'CHA ' + statB.cha, desc: 'Score x' + chaScoreMult.toFixed(2) + ' | Style ' + pieceStyle, color: '#ff44aa'}
+  ];
+  for (var si = 0; si < statLines.length; si++) {
+    var sl = statLines[si];
+    var slY = statY + si * (statFS + 4);
+    ctx.fillStyle = sl.color;
+    ctx.textAlign = 'right';
+    ctx.fillText(sl.label, w / 2 - 10, slY);
+    ctx.textAlign = 'left';
+    ctx.fillStyle = '#666';
+    ctx.fillText(sl.desc, w / 2 + 10, slY);
+  }
+
+  // Buttons
+  var btnSize = Math.min(28, w * 0.045);
+  var btnW = Math.min(260, w * 0.55);
   var btnH = btnSize * 2.2;
-  var gap = btnH * 1.5;
+  var gap = btnH * 1.6;
 
   // VS AI button
-  var aiY = h * 0.45;
-  ctx.fillStyle = "#2a2a2a";
-  roundRect(ctx, w / 2 - btnW / 2, aiY - btnH / 2, btnW, btnH, 8);
+  var aiY = h * 0.58;
+  ctx.fillStyle = '#0d1a0d';
+  roundRect(ctx, w / 2 - btnW / 2, aiY - btnH / 2, btnW, btnH, 4);
   ctx.fill();
-  ctx.strokeStyle = "#555";
+  ctx.strokeStyle = '#44dd88';
   ctx.lineWidth = 2;
-  roundRect(ctx, w / 2 - btnW / 2, aiY - btnH / 2, btnW, btnH, 8);
+  roundRect(ctx, w / 2 - btnW / 2, aiY - btnH / 2, btnW, btnH, 4);
   ctx.stroke();
-  ctx.fillStyle = "#ff7755";
-  ctx.font = "bold " + btnSize + "px monospace";
-  ctx.fillText("vs Computer", w / 2, aiY);
+  ctx.fillStyle = '#44dd88';
+  ctx.font = 'bold ' + btnSize + 'px monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText('vs Reactor Bugs', w / 2, aiY);
 
   // VS Human button
   var pvpY = aiY + gap;
-  ctx.fillStyle = "#2a2a2a";
-  roundRect(ctx, w / 2 - btnW / 2, pvpY - btnH / 2, btnW, btnH, 8);
+  ctx.fillStyle = '#0d0d1a';
+  roundRect(ctx, w / 2 - btnW / 2, pvpY - btnH / 2, btnW, btnH, 4);
   ctx.fill();
-  ctx.strokeStyle = "#555";
+  ctx.strokeStyle = '#aa66ff';
   ctx.lineWidth = 2;
-  roundRect(ctx, w / 2 - btnW / 2, pvpY - btnH / 2, btnW, btnH, 8);
+  roundRect(ctx, w / 2 - btnW / 2, pvpY - btnH / 2, btnW, btnH, 4);
   ctx.stroke();
-  ctx.fillStyle = "#55aaff";
-  ctx.font = "bold " + btnSize + "px monospace";
-  ctx.fillText("vs Human", w / 2, pvpY);
+  ctx.fillStyle = '#aa66ff';
+  ctx.font = 'bold ' + btnSize + 'px monospace';
+  ctx.fillText('vs Friend', w / 2, pvpY);
 
-  // Rules hint
-  ctx.font = (btnSize * 0.5) + "px monospace";
-  ctx.fillStyle = "#555";
-  ctx.fillText("Red moves first. Jumps are mandatory.", w / 2, pvpY + gap * 0.7);
-  ctx.fillText("Reach the far side to become a King.", w / 2, pvpY + gap * 0.7 + btnSize * 0.7);
+  // NES Controls info
+  var ctrlY = pvpY + gap * 0.8;
+  ctx.font = Math.floor(btnSize * 0.5) + 'px monospace';
+  ctx.fillStyle = '#555';
+  ctx.textAlign = 'center';
+  ctx.fillText('CONTROLS', w / 2, ctrlY);
+  ctx.fillStyle = '#444';
+  var ctrlFS = Math.floor(btnSize * 0.45);
+  ctx.font = ctrlFS + 'px monospace';
+  ctx.fillText('Click/Tap piece to select, then tap destination', w / 2, ctrlY + ctrlFS + 4);
+  ctx.fillText('[U] Undo (' + totalUndos + ' charges)  [H] Hint (' + hintCharges + ' charges)', w / 2, ctrlY + (ctrlFS + 4) * 2);
+  ctx.fillText('Jumps are mandatory. Reach far side to evolve!', w / 2, ctrlY + (ctrlFS + 4) * 3);
+  ctx.fillText('[N] New Game  [ESC] Menu', w / 2, ctrlY + (ctrlFS + 4) * 4);
 
   // Store button rects
   drawMenu._aiBtnRect = {x: w / 2 - btnW / 2, y: aiY - btnH / 2, w: btnW, h: btnH};
@@ -1020,6 +1965,27 @@ canvas.addEventListener("touchstart", function(e) {
   var touch = e.touches[0];
   handleInput(touch.clientX - rect.left, touch.clientY - rect.top);
 }, {passive: false});
+
+// Keyboard controls (NES-style)
+document.addEventListener("keydown", function(e) {
+  var key = e.key.toLowerCase();
+  if (key === 'u') {
+    // Undo (DEX + WIS powered)
+    performUndo();
+  } else if (key === 'h') {
+    // Hint (INT powered)
+    requestHint();
+  } else if (key === 'n') {
+    // New game
+    if (!showMenu) {
+      showMenu = true;
+    }
+  } else if (key === 'escape') {
+    if (!showMenu) {
+      showMenu = true;
+    }
+  }
+});
 
 // ============================================================
 // GAME LOOP

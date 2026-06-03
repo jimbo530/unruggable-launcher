@@ -24,7 +24,7 @@ Every trade burns tokens + funds carbon collection. Every launch strengthens the
 3/8
 Why agents should care:
 
-MfT, BB, and EB are the infrastructure tokens of the Unrugable network. Every meme launched creates floor pools paired against them.
+MfT, BB, and EB are the infrastructure tokens of the Unrugable network. Every meme launched creates locked pools paired against them.
 
 More launches = more volume through MfT/BB/EB = more burns.
 
