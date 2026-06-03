@@ -12,7 +12,7 @@ export const CHAINS = {
     router:       "0x2626664c2603336E57B271c5C0b26F421741e481",
     explorer:     "https://basescan.org",
     reactorImpl:  "0x82eC86F4536167A95eF302056162b1c8b9c7F4FA",
-    factory:      "0x72efb37D70266dFFe2f7D5003c138DD613D04B75"
+    factory:      "0x0cE80fC0Fb866aD807D6D24D01bd879ef79622E7"
   }
 };
 

@@ -58,6 +58,8 @@ const NEW_FACTORIES = [
   "0x65F8227f37932e1aF1771398DFA76B4079fbDb21",  // V5.3
   "0xb1fE1deeA42F85F124E7cB166B2f52a1D7f1d054",  // V5.4
   "0x9FCE6fF019570dC09678C6Fcd513bDF5cf766fC9",  // V5.5
+  "0x72efb37D70266dFFe2f7D5003c138DD613D04B75",  // V5.9 (mftStable=V2, superseded)
+  "0x0cE80fC0Fb866aD807D6D24D01bd879ef79622E7",  // V5.9 (mftStable=V4, current)
 ];
 const OLD_FACTORY_ABI = [
   "function launchCount() view returns (uint256)",
