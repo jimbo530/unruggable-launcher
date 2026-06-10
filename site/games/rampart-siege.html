@@ -20,6 +20,7 @@ canvas { display: block; margin: 0 auto; cursor: crosshair; }
 <a id="back-link" href="/games">Back to Arcade</a>
 <script src="nft-loader.js"></script>
 <script src="baseling-sprites.js"></script>
+<script src="baseling-player.js"></script>
 <script src="tasern-theme.js"></script>
 <script>if(window.NftLoader)NftLoader.gate();</script>
 <script src="tasern-art.js"></script>
@@ -28,18 +29,51 @@ canvas { display: block; margin: 0 auto; cursor: crosshair; }
 (function() {
 "use strict";
 
-// === BASELING STAT INTEGRATION ===
-var statB = { damage: 1, speed: 1, lives: 0, hpMult: 1, scoreMult: 1, cooldown: 1, luck: 1, str: 10, dex: 10, con: 10, int: 10, wis: 10, cha: 10, level: 0, color: '#38d973', name: 'Baseling', icon: 'B' };
-try { if (window.NftLoader && NftLoader.getStatBonuses) statB = NftLoader.getStatBonuses(); } catch(e) {}
-
-// Derived stat helpers — [1] STR: cannon damage, [2] DEX: cursor/placement speed,
-// [3] CON: wall HP/lives, [4] INT: score mult, [5] WIS: build timer/cooldowns, [6] CHA: piece luck
-var strMod = Math.max(1, Math.floor(statB.str / 5));           // cannon dmg multiplier 1-4
-var dexMod = Math.max(0.6, 1 + (statB.dex - 10) * 0.04);      // speed factor 0.6-1.8
-var conMod = Math.max(1, Math.floor(statB.con / 6));           // extra wall HP, bonus lives
-var intMod = Math.max(1, 1 + (statB.int - 10) * 0.05);         // score multiplier
-var wisMod = Math.max(0.7, 1 + (statB.wis - 10) * 0.03);      // timer bonus (higher = more time)
-var chaMod = Math.min(3, Math.max(0, Math.floor((statB.cha - 8) / 4))); // extra good pieces 0-3
+// === BASELING STATS (BaselingPlayer.getMults — the single clamped source) ===
+// The mod vars below are synthesized from the five bounded multipliers so every effect
+// traces back to a clamped getMults() value. str<-damage, dex<-moveSpeed, con<-health,
+// cha(piece luck)<-luck. Score (intMod) and build timer (wisMod) are NOT stats here —
+// fixed at neutral so feeding your pet never buys score or extra build time.
+// dnd(mult)=round(10+(mult-1)*20). Single-player siege builder -> default band.
+var statB = { damage: 1, speed: 1, lives: 0, hpMult: 1, scoreMult: 1, cooldown: 1, luck: 1, str: 10, dex: 10, con: 10, int: 10, wis: 10, cha: 10, level: 0, color: '#0052FF', name: 'Baseling', icon: 'B' };
+var picking = false;   // character-select overlay open
+var selName = 'WIMMPLE';
+function dnd(x) { return Math.round(10 + (x - 1) * 20); }
+var strMod = 1, dexMod = 1, conMod = 1, intMod = 1, wisMod = 1, chaMod = 0;
+function recomputeStats() {
+  var m = TAS.player.mults();
+  statB.damage = m.damage; statB.speed = m.moveSpeed; statB.hpMult = m.health; statB.luck = m.luck;
+  statB.str = dnd(m.damage); statB.dex = dnd(m.moveSpeed); statB.con = dnd(m.health);
+  statB.int = dnd(m.luck); statB.wis = dnd(m.luck); statB.cha = dnd(m.luck);
+  strMod = Math.max(1, Math.floor(statB.str / 5));            // [1] PWR: cannon dmg 1-4
+  dexMod = Math.max(0.6, 1 + (statB.dex - 10) * 0.04);        // [2] SPD: placement/cannon speed
+  conMod = Math.max(1, Math.floor(statB.con / 6));            // [3] STA: wall HP + bonus lives
+  intMod = 1;                                                 // score is not a stat
+  wisMod = 1;                                                 // build timer fixed/fair for all
+  chaMod = Math.min(3, Math.max(0, Math.floor((statB.cha - 8) / 4))); // [4] LCK: extra good pieces 0-3
+  // timers depend on wisMod (now 1.0) — refresh in case a pick changed it
+  BUILD_TIME = Math.floor(20 * wisMod);
+  PLACE_TIME = Math.floor(10 * wisMod);
+  var sel = (window.BaselingPlayer && BaselingPlayer.getSelected) ? BaselingPlayer.getSelected() : null;
+  selName = sel ? (sel.charName + (sel.tokenId != null ? ' #' + sel.tokenId : '')) : 'WIMMPLE';
+  if (sel) statB.name = sel.charName;
+}
+// 5 canonical arcade stat bars centered at cx (display only).
+function drawTitleStatBars(cx, topY, totalW) {
+  if (!window.BaselingPlayer || !BaselingPlayer.getStats) return;
+  var stats = BaselingPlayer.getStats();
+  var meta = BaselingPlayer.STAT_META, keys = BaselingPlayer.STAT_KEYS;
+  var bw = totalW / keys.length, x0 = cx - totalW / 2;
+  ctx.font = '8px monospace';
+  for (var i = 0; i < keys.length; i++) {
+    var mm = meta[keys[i]], v = stats[keys[i]], bx = x0 + i * bw;
+    ctx.fillStyle = mm.color; ctx.textAlign = 'center';
+    ctx.fillText(mm.label, bx + bw / 2, topY);
+    ctx.fillStyle = '#222'; ctx.fillRect(bx + 3, topY + 3, bw - 6, 5);
+    ctx.fillStyle = mm.color; ctx.fillRect(bx + 3, topY + 3, (bw - 6) * Math.max(0.04, Math.min(1, v / 200)), 5);
+  }
+  ctx.textAlign = 'center';
+}
 
 // === GAME CONSTANTS ===
 var GW = 480, GH = 320;
@@ -65,7 +99,14 @@ var PLACE_TIME = Math.floor(10 * wisMod);
 
 // === INIT ===
 TAS.initCanvas(GW, GH);
-TAS.input.initTouch({ buttons: ['a', 'b'], labels: { a: 'FIRE', b: 'ROTATE' } });
+TAS.input.initTouch({ buttons: ['a', 'b', 'c'], labels: { a: 'FIRE', b: 'ROTATE', c: 'PICK' } });
+
+// Boot the player module (silent) + recompute stats once it resolves.
+recomputeStats();
+if (window.TAS && TAS.player) {
+  TAS.player.init().then(function () { recomputeStats(); })
+    .catch(function (e) { console.warn('[rampart-siege] player init failed:', e && e.message); });
+}
 
 // === MOUSE/TOUCH TRACKING ===
 var mouseX = GW / 2, mouseY = GH / 2;
@@ -745,6 +786,14 @@ function update(dt) {
   if (bossWarning > 0) bossWarning--;
 
   if (state === 'title') {
+    if (picking) { mouseClicked = false; return; }   // picker overlay open — swallow input
+    if (TAS.input.keys['KeyC'] || TAS.input.keys['c'] || TAS.input.keys['C'] || TAS.input.touch.c) {
+      TAS.input.keys['KeyC'] = TAS.input.keys['c'] = TAS.input.keys['C'] = false;
+      TAS.input.touch.c = false;
+      picking = true;
+      TAS.player.select(function () { recomputeStats(); picking = false; });
+      return;
+    }
     if (Object.values(TAS.input.keys).some(Boolean) || TAS.input.touch.a || mouseClicked) {
       startGame();
       mouseClicked = false;
@@ -1869,15 +1918,10 @@ function drawStatBadge() {
   ctx.strokeStyle = 'rgba(56,217,115,0.3)';
   ctx.strokeRect(0, GH - 38, 72, 18);
 
-  ctx.fillStyle = statB.color;
-  ctx.font = 'bold 9px monospace';
+  ctx.fillStyle = '#0052FF';
+  ctx.font = 'bold 8px monospace';
   ctx.textAlign = 'left';
-  ctx.fillText(statB.icon + ' ' + statB.name, 4, GH - 26);
-  // Level
-  if (statB.level > 0) {
-    ctx.fillStyle = '#aaa';
-    ctx.fillText('Lv' + statB.level, 50, GH - 26);
-  }
+  ctx.fillText(selName, 4, GH - 26);
 }
 
 // === DRAW PHASE INDICATOR ===
@@ -2084,7 +2128,7 @@ function drawTitleScreen() {
   var controlY = GH - 100;
   ctx.fillText('Defend your garden fortress against the fungal invaders!', GW / 2, controlY);
   controlY += 14;
-  ctx.fillText('FIRE: Click/Tap to aim your baseling\\'s spore cannons', GW / 2, controlY);
+  ctx.fillText('FIRE: Click/Tap to aim your baseling spore cannons', GW / 2, controlY);
   controlY += 12;
   ctx.fillText('BUILD: Click to place mycelium bricks (R=Rotate)', GW / 2, controlY);
   controlY += 12;
@@ -2095,15 +2139,14 @@ function drawTitleScreen() {
   ctx.fillStyle = '#666';
   ctx.fillText('[Arrow Keys / Mouse] Move   [Space / Click] Action   [R] Rotate', GW / 2, controlY);
 
-  // Stat display — [baseling stat preview]
-  if (statB.level > 0) {
-    ctx.fillStyle = statB.color;
-    ctx.font = 'bold 10px monospace';
-    ctx.fillText(statB.icon + ' ' + statB.name + ' Lv' + statB.level, GW / 2, controlY + 16);
-    ctx.fillStyle = '#888';
-    ctx.font = '8px monospace';
-    ctx.fillText('STR:' + statB.str + ' DEX:' + statB.dex + ' CON:' + statB.con + ' INT:' + statB.int + ' WIS:' + statB.wis + ' CHA:' + statB.cha, GW / 2, controlY + 26);
-  }
+  // Champion name + 5 arcade stat bars + picker prompt
+  ctx.fillStyle = '#0052FF';
+  ctx.font = 'bold 10px monospace';
+  ctx.fillText(selName, GW / 2, controlY + 16);
+  drawTitleStatBars(GW / 2, controlY + 26, 220);
+  ctx.fillStyle = '#0052FF';
+  ctx.font = 'bold 9px monospace';
+  ctx.fillText('[C] SELECT BASELING', GW / 2, controlY + 46);
 
   // High score
   if (highScore > 0) {
