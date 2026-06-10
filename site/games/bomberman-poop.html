@@ -21,6 +21,7 @@ canvas { display: block; margin: 0 auto; }
 <a id="back-link" href="/games">Back to Arcade</a>
 <script src="nft-loader.js"></script>
 <script src="baseling-sprites.js"></script>
+<script src="baseling-player.js"></script>
 <script src="tasern-theme.js"></script>
 <script>if(window.NftLoader)NftLoader.gate();</script>
 <script>
@@ -240,31 +241,85 @@ function drawFlash() {
 // INT -> score multiplier
 // WIS -> poop bomb cooldown reduction
 // CHA -> power-up drop rate bonus
+// Stats come from BaselingPlayer.getMults() (ARCADE-STATS.md), the single clamped
+// source. Bomberman's helpers below read 0-baseline "bonus" fields on statB, so we
+// synthesize them from the five multipliers: bonus(mult) = round((mult-1)*20), giving
+// neutral 0 at mult 1.0, ~+12 at the 1.6 ceiling, ~-4 at the 0.8 floor. Mapping:
+//   STR<-damage (blast), DEX<-moveSpeed, CON<-health (lives), INT<-luck (score flavor),
+//   WIS<-luck (cooldown flavor), CHA<-luck (drop rate). Single-player -> default band.
 var statB = { str: 0, dex: 0, con: 0, int: 0, wis: 0, cha: 0 };
+var picking = false;   // character-select overlay open
+var frame = 0;         // global animation clock (incremented each game-loop tick)
 
-function loadStatB() {
-  statB = { str: 0, dex: 0, con: 0, int: 0, wis: 0, cha: 0 };
-  if (window.NftLoader && window.NftLoader.selectedCharacter) {
-    var ch = window.NftLoader.selectedCharacter;
-    if (ch.statB) {
-      statB.str = Math.floor(Number(ch.statB.str) || 0);
-      statB.dex = Math.floor(Number(ch.statB.dex) || 0);
-      statB.con = Math.floor(Number(ch.statB.con) || 0);
-      statB.int = Math.floor(Number(ch.statB.int) || 0);
-      statB.wis = Math.floor(Number(ch.statB.wis) || 0);
-      statB.cha = Math.floor(Number(ch.statB.cha) || 0);
-    }
-  }
+function bonusFromMult(x) { return Math.round((x - 1) * 20); }
+function recomputeStats() {
+  var m = (window.BaselingPlayer && BaselingPlayer.getMults) ? BaselingPlayer.getMults()
+        : { moveSpeed: 1, health: 1, damage: 1, luck: 1, swim: 1 };
+  statB.str = bonusFromMult(m.damage);
+  statB.dex = bonusFromMult(m.moveSpeed);
+  statB.con = bonusFromMult(m.health);
+  statB.int = bonusFromMult(m.luck);
+  statB.wis = bonusFromMult(m.luck);
+  statB.cha = bonusFromMult(m.luck);
+}
+function loadStatB() { recomputeStats(); }  // kept for existing call sites
+recomputeStats();
+if (window.BaselingPlayer && BaselingPlayer.init) {
+  BaselingPlayer.init().then(function () { recomputeStats(); })
+    .catch(function (e) { console.warn('[bomberman-poop] player init failed:', e && e.message); });
 }
 
-// Derived stat helpers
+// Draw the selected baseling sprite at (cx,cy) center, size px. Returns true if a
+// real sprite drew; false -> caller uses the procedural baseling.
+function drawSelectedBaseling(c, cx, cy, size, opts) {
+  if (!window.BaselingPlayer || !window.BaselingSprites) return false;
+  var sel = BaselingPlayer.getSelected();
+  if (!sel || !sel.charId) return false;
+  if (!BaselingSprites.isLoaded(sel.charId)) {
+    if (!BaselingSprites.hasFailed(sel.charId)) BaselingSprites.load(sel.charId, sel.colorVariant);
+    return false;
+  }
+  return BaselingSprites.draw(c, sel.charId, sel.colorVariant, sel.sparkle, cx, cy, size, opts || {});
+}
+
+// Title champion: name + 5 arcade stat bars (display) + [C] picker prompt.
+function drawTitleChampion(cx, topY) {
+  if (!window.BaselingPlayer) return;
+  var sel = BaselingPlayer.getSelected();
+  var nm = sel ? (sel.charName + (sel.tokenId != null ? ' #' + sel.tokenId : '')) : 'WIMMPLE';
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#0052FF';
+  ctx.font = 'bold ' + Math.floor(TILE * 0.42) + 'px monospace';
+  ctx.fillText(nm, cx, topY);
+
+  if (BaselingPlayer.getStats) {
+    var stats = BaselingPlayer.getStats();
+    var meta = BaselingPlayer.STAT_META, keys = BaselingPlayer.STAT_KEYS;
+    var totalW = Math.min(240, W * 0.62), bw = totalW / keys.length, x0 = cx - totalW / 2;
+    var barY = topY + Math.floor(TILE * 0.3);
+    ctx.font = '9px monospace';
+    for (var i = 0; i < keys.length; i++) {
+      var mm = meta[keys[i]], v = stats[keys[i]], bx = x0 + i * bw;
+      ctx.fillStyle = mm.color; ctx.textAlign = 'center';
+      ctx.fillText(mm.label, bx + bw / 2, barY);
+      ctx.fillStyle = '#222'; ctx.fillRect(bx + 3, barY + 4, bw - 6, 5);
+      ctx.fillStyle = mm.color; ctx.fillRect(bx + 3, barY + 4, (bw - 6) * Math.max(0.04, Math.min(1, v / 200)), 5);
+    }
+  }
+
+  ctx.fillStyle = '#0052FF';
+  ctx.font = 'bold ' + Math.floor(TILE * 0.34) + 'px monospace';
+  ctx.fillText('[C] SELECT BASELING', cx, topY + Math.floor(TILE * 0.7));
+}
+
+// Derived stat helpers (unchanged formulas; statB is now synthesized from getMults)
 function strBlastBonus() { return Math.floor(statB.str / 5); }
 function dexSpeedBonus() { return statB.dex * 0.02; }
-function conLivesBonus() { return Math.floor(statB.con / 4); }
+function conLivesBonus() { return Math.max(0, Math.floor(statB.con / 4)); } // STA buys a cushion; never removes lives
 function intScoreMult() { return 1 + statB.int * 0.03; }
 function wisCooldownMult() { return Math.max(0.4, 1 - statB.wis * 0.03); }
 function chaDropBonus() { return statB.cha * 0.02; }
-function canMegaBomb() { return statB.str >= 10; }
+function canMegaBomb() { return statB.str >= 4; }  // ~mult 1.2+ on PWR unlocks mega bomb
 
 // ============================================================
 // GAME STATE
@@ -1483,7 +1538,8 @@ function drawPlayer() {
   }
 
   // === BASELING SPRITE ===
-  if (!TAS.drawBaseling(ctx, 0, 0, s, { flipX: player.dir === DIR.LEFT, frame: frame })) {
+  var anim = player.dead ? 'ko' : (inputDir !== DIR.NONE ? 'walk' : 'idle');
+  if (!drawSelectedBaseling(ctx, 0, 0, s, { flipX: player.dir === DIR.LEFT, frame: frame, anim: anim })) {
     // Body
     ctx.fillStyle = '#a855f7';
     ctx.beginPath();
@@ -1992,45 +2048,47 @@ function drawTitle() {
   ctx.fillStyle = '#6B3A1F';
   ctx.fillText('BOMBER', Math.floor(W / 2), Math.floor(H * 0.36));
 
-  // Poop bomb
+  // Champion preview — the selected baseling (falls back to the poop-bomb art).
   var tbx = Math.floor(W / 2), tby = Math.floor(H * 0.52);
   var tr = TILE * 0.8;
-  ctx.fillStyle = '#6B3A1F';
-  ctx.beginPath();
-  ctx.ellipse(tbx, tby + 5, tr, tr * 0.85, 0, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.fillStyle = '#8B4E2A';
-  ctx.beginPath();
-  ctx.ellipse(tbx, tby - tr * 0.3, tr * 0.6, tr * 0.5, 0, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.beginPath();
-  ctx.ellipse(tbx + 2, tby - tr * 0.7, tr * 0.35, tr * 0.3, 0, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.fillStyle = '#6B3A1F';
-  ctx.beginPath();
-  ctx.ellipse(tbx + 2, tby - tr * 0.95, tr * 0.15, tr * 0.2, -0.3, 0, Math.PI * 2);
-  ctx.fill();
-  if (Math.sin(Date.now() * 0.01) > 0) {
-    ctx.fillStyle = '#FF4400';
+  if (!drawSelectedBaseling(ctx, tbx, tby, tr * 2, { anim: 'idle', frame: frame })) {
+    ctx.fillStyle = '#6B3A1F';
     ctx.beginPath();
-    ctx.arc(tbx + 4, tby - tr - 5, 5, 0, Math.PI * 2);
+    ctx.ellipse(tbx, tby + 5, tr, tr * 0.85, 0, 0, Math.PI * 2);
     ctx.fill();
-    ctx.fillStyle = '#FFDD00';
+    ctx.fillStyle = '#8B4E2A';
     ctx.beginPath();
-    ctx.arc(tbx + 4, tby - tr - 5, 2.5, 0, Math.PI * 2);
+    ctx.ellipse(tbx, tby - tr * 0.3, tr * 0.6, tr * 0.5, 0, 0, Math.PI * 2);
     ctx.fill();
+    ctx.beginPath();
+    ctx.ellipse(tbx + 2, tby - tr * 0.7, tr * 0.35, tr * 0.3, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = '#6B3A1F';
+    ctx.beginPath();
+    ctx.ellipse(tbx + 2, tby - tr * 0.95, tr * 0.15, tr * 0.2, -0.3, 0, Math.PI * 2);
+    ctx.fill();
+    if (Math.sin(Date.now() * 0.01) > 0) {
+      ctx.fillStyle = '#FF4400';
+      ctx.beginPath();
+      ctx.arc(tbx + 4, tby - tr - 5, 5, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = '#FFDD00';
+      ctx.beginPath();
+      ctx.arc(tbx + 4, tby - tr - 5, 2.5, 0, Math.PI * 2);
+      ctx.fill();
+    }
   }
 
+  // Champion name + 5 arcade stat bars (Base-blue), and the picker prompt.
+  drawTitleChampion(Math.floor(W / 2), Math.floor(H * 0.62));
+
   // Garden instructions
+  ctx.textAlign = 'center';
   ctx.fillStyle = '#aaa';
   ctx.font = Math.floor(TILE * 0.38) + 'px monospace';
-  ctx.fillText('ARROWS/WASD: MOVE', Math.floor(W / 2), Math.floor(H * 0.69));
-  ctx.fillText('SPACE/X: DROP POOP BOMB', Math.floor(W / 2), Math.floor(H * 0.75));
-  ctx.fillText('Z: DETONATE  C: CYCLE BOMB', Math.floor(W / 2), Math.floor(H * 0.81));
-  if (canMegaBomb()) {
-    ctx.fillStyle = '#f4b41b';
-    ctx.fillText('HOLD SPACE: MEGA POOP', Math.floor(W / 2), Math.floor(H * 0.87));
-  }
+  ctx.fillText('ARROWS/WASD: MOVE', Math.floor(W / 2), Math.floor(H * 0.79));
+  ctx.fillText('SPACE/X: DROP POOP BOMB', Math.floor(W / 2), Math.floor(H * 0.84));
+  ctx.fillText('Z: DETONATE  C: CYCLE BOMB (in-game)', Math.floor(W / 2), Math.floor(H * 0.89));
 
   // Start prompt
   var pulse = Math.sin(Date.now() * 0.004) * 0.3 + 0.7;
@@ -2083,11 +2141,13 @@ function drawGameOver() {
   ctx.font = Math.floor(TILE * 0.45) + 'px monospace';
   ctx.fillText('Garden Reached: ' + level, Math.floor(W / 2), Math.floor(H * 0.72));
 
-  // Show statB summary if any
-  if (statB.str + statB.dex + statB.con + statB.int + statB.wis + statB.cha > 0) {
-    ctx.fillStyle = '#88CCFF';
-    ctx.font = Math.floor(TILE * 0.3) + 'px monospace';
-    ctx.fillText('STR:' + statB.str + ' DEX:' + statB.dex + ' CON:' + statB.con + ' INT:' + statB.int + ' WIS:' + statB.wis + ' CHA:' + statB.cha, Math.floor(W / 2), Math.floor(H * 0.79));
+  // Champion (cosmetic)
+  if (window.BaselingPlayer) {
+    var _sel = BaselingPlayer.getSelected();
+    var _nm = _sel ? (_sel.charName + (_sel.tokenId != null ? ' #' + _sel.tokenId : '')) : 'WIMMPLE';
+    ctx.fillStyle = '#0052FF';
+    ctx.font = Math.floor(TILE * 0.32) + 'px monospace';
+    ctx.fillText('Champion: ' + _nm, Math.floor(W / 2), Math.floor(H * 0.79));
   }
 
   var pulse2 = Math.sin(Date.now() * 0.004) * 0.3 + 0.7;
@@ -2313,6 +2373,15 @@ window.addEventListener('keydown', function(e) {
   keys[e.code] = true;
 
   if (state === 'title') {
+    // C opens the baseling picker on the title (in-game C cycles bombs instead).
+    if (e.code === 'KeyC') {
+      if (picking) return;
+      picking = true;
+      if (window.BaselingPlayer && BaselingPlayer.select) {
+        BaselingPlayer.select(function () { recomputeStats(); picking = false; });
+      } else { picking = false; }
+      return;
+    }
     if ((e.code === 'KeyW') && window.NftLoader && !window.NftLoader.wallet && window.ethereum) {
       window.NftLoader.connectWallet().then(function(addr) {
         if (addr) window.NftLoader.checkNFTs().then(function(chars) {
@@ -2394,15 +2463,11 @@ function checkKick() {
 // GAME FLOW
 // ============================================================
 function startGame() {
-  loadStatB();
+  recomputeStats();   // refresh from the current baseling pick (clamped getMults)
   state = 'playing';
   score = 0;
   lives = 3 + conLivesBonus();
   level = 1;
-  if (window.NftLoader && window.NftLoader.selectedCharacter) {
-    var bonuses = window.NftLoader.getBonuses();
-    lives += bonuses.lives;
-  }
   // Boss intro for level 5
   if (level % 5 === 0) {
     state = 'bossIntro';
@@ -2453,6 +2518,7 @@ var lastTime = 0;
 function gameLoop(timestamp) {
   var dt = Math.min((timestamp - lastTime) / 1000, 0.05);
   lastTime = timestamp;
+  frame++;   // animation clock for the baseling sprite
 
   updateShake(dt);
 
