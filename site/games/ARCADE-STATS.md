@@ -19,8 +19,16 @@ it to the closest existing stat — don't add a sixth.
    `min(100, round(sqrt(usdFed * 1000)))` per stat, times a stage multiplier, times a
    0.5–2.0 care/feed condition multiplier. A baseling with nothing fed sits near the
    floor; a whale-fed legend approaches 200.
+
+   > **Consume `stats` exactly as served — they are final.** The server has *already*
+   > baked in the stage multiplier and the 0.5–2.0 care/feed condition multiplier. The
+   > `tokenFeeds` field is included for display only (USD totals already computed on the
+   > server). **Never recompute stats from `tokenFeeds`, never re-price tokens
+   > client-side, and never re-apply the stage or condition multiplier** — the API owns
+   > pricing and the formula. A game that re-derives stats will drift from the server and
+   > break fairness. Read `entry.stats`, pass it through `getMults()`, done.
 2. `baseling-player.js` loads that roster, picks the selected character, and exposes the
-   raw stats plus **bounded gameplay multipliers**. Games only ever touch the bounded
+   served stats plus **bounded gameplay multipliers**. Games only ever touch the bounded
    multipliers.
 3. No wallet / no baselings → the player is **Wimmple**, all stats 10, every multiplier
    ≈ 0.69 raw but **clamped up to the 0.8 floor**. So the worst case a game ever sees is
