@@ -39,6 +39,58 @@ function parseWagerGames() {
 const WAGER = parseWagerGames();
 
 // --- Per-file detection ---
+// --- Manual overrides (Task #10) ---
+// Three games were auto-flagged avatar:'unknown'. After reading each fully, their
+// focal entity, genre, and stat mapping are pinned here so Wave-2 builders hit zero
+// ambiguity. These win over the auto-detected genre/avatar/notes.
+const OVERRIDES = {
+  // Filename says "city builder" but the implemented game is a 1v1 FIGHTER
+  // (drawFighter / charSelect / KO / boss). P1's procedural body is the avatar.
+  'meme-city': {
+    genre: 'misc-action',
+    avatar: 'procedural',
+    focalEntity: 'P1 fighter body in drawFighter(f) (the !f.isP2 fighter). P2 is the opponent/NPC.',
+    notes: [
+      'MISLABELED: this is a Street-Fighter-style 1v1 FIGHTER, not a city builder. Genre corrected to misc-action (brawler).',
+      'Avatar = P1 fighter, drawn procedurally in drawFighter(f) (~line 1441) from ch.height/body parts; already tinted by statB.color for !f.isP2.',
+      'Remaster: replace P1 procedural body with TAS.drawBaseling()/BaselingPlayer.draw() at the fighter origin (X.translate(f.x,f.y), draw at head/body offsets). Keep P2 as a CHARS opponent.',
+      'Has a PvP mode — if a wager mode is wired, gate stat effects with getMults({pvp:true}) (0.95-1.10). Single-player vs CPU: default 0.8-1.6.',
+      'Replace old statB (NftLoader.getStatBonuses) with BaselingPlayer.getMults().',
+      'add baseling-player.js + character picker',
+    ],
+    statMap: { speed: 'walk/dash speed', stamina: 'health bar (maxHp)', power: 'attack/special damage + block-break', luck: 'crit chance / super-meter gain rate', swim: 'unused (no water)' },
+  },
+  // Snake Rattle N Roll — isometric snake. The HEAD (snake[0]) is the avatar.
+  'snake-rattle': {
+    genre: 'misc-action',
+    avatar: 'procedural',
+    focalEntity: 'snake head = snake[0], drawn in the render loop where i===0 (~line 1889).',
+    notes: [
+      'Isometric snake; avatar = the HEAD (snake[0]). Body segments stay procedural.',
+      'Auto-flagged unknown only because it draws via helper wrappers (drawPixelCircle/drawPixelRect) instead of raw ctx.* — it IS procedural with an obvious swap point.',
+      'Remaster: at the i===0 branch (~line 1889, already commented "Baseling icon on head"), replace the pixel sphere + eyes with TAS.drawBaseling()/BaselingPlayer.draw() centered at (sx, sy - radius*0.5), sized ~radius*2.5. Leave body spheres alone.',
+      'Replace old statB (NftLoader.getStatBonuses) with BaselingPlayer.getMults().',
+      'add baseling-player.js + character picker',
+    ],
+    statMap: { speed: 'snake step/move-tick speed', stamina: 'starting length + poison resistance (segments lost slower)', power: 'tongue / boss damage', luck: 'power-up + food spawn rate', swim: 'swamp/water-tile traversal (level 4+ has water/poison tiles)' },
+  },
+  // Clue/Cluedo board game. Player is a baseling detective TOKEN on the board +
+  // a HUD portrait. ALREADY integrates a baseling via TAS.drawBaseling (line ~985).
+  'whodunit': {
+    genre: 'rpg-adventure',
+    avatar: 'sprite-bridge', // already calls TAS.drawBaseling for the human player's token
+    focalEntity: "human player's detective token in drawBoard() (~line 985, `=== BASELING SPRITE ===`) and the HUD portrait.",
+    notes: [
+      'Clue/Cluedo board game. The human player is a moving baseling detective TOKEN on the board, plus a HUD portrait.',
+      'ALREADY draws a baseling: drawBoard() calls `TAS.drawBaseling(c, px, py, radius*2, {...})` for the human token with a procedural circle fallback (~line 985). Most-complete of the three.',
+      'Remaster is light: confirm TAS.drawBaseling resolves to the SELECTED baseling (via BaselingPlayer), and also draw it in the HUD portrait + char/turn UI.',
+      'KEY: its tutorial text maps D&D stats (STR/DEX/CON/CHA) to mechanics via the OLD statB. Re-map to the 5 ARCADE stats (see statMap) and update the tutorial copy to match.',
+      'add baseling-player.js + character picker',
+    ],
+    statMap: { speed: 'bonus dice/movement steps (was DEX)', stamina: 'survive one wrong accusation (was CON 16+); interrogation stamina', power: 'interrogation / suggestion success (was STR)', luck: 'evidence-card & secret-passage draw odds (was CHA/witness cooperation)', swim: 'unused (no water)' },
+  },
+};
+
 const SHARED = [
   ['tasern-engine.js', 'engine'],
   ['tasern-theme.js', 'theme'],
@@ -78,18 +130,25 @@ for (const file of all) {
   if (isBackup(base)) { skipped.push({ file, reason: 'backup' }); continue; }
   const lineCount = fs.readFileSync(path.join(DIR, file), 'utf8').split('\n').length;
   const d = detect(file);
-  games.push({
+  const ov = OVERRIDES[base] || null;
+  const entry = {
     slug: base,
     file,
     lineCount,
-    genre: GENRE[base] || 'unclassified',
+    genre: (ov && ov.genre) || GENRE[base] || 'unclassified',
     wager: WAGER.has(base),
     loads: d.loads,
-    avatar: d.avatar,
+    avatar: (ov && ov.avatar) || d.avatar,
     needsPlayerModule: !d.loads.player,           // every Wave-2 game must add baseling-player.js
-    needsSpriteSwap: d.avatar !== 'sprite',        // procedural avatar -> swap to BaselingPlayer.draw
-    notes: buildNotes(base, d),
-  });
+    needsSpriteSwap: ((ov && ov.avatar) || d.avatar) !== 'sprite', // not yet sprite-based via shared module
+    notes: (ov && ov.notes) ? ov.notes.slice() : buildNotes(base, d),
+  };
+  if (ov) {
+    entry.reviewed = true;                         // hand-inspected (Task #10)
+    if (ov.focalEntity) entry.focalEntity = ov.focalEntity;
+    if (ov.statMap) entry.statMap = ov.statMap;
+  }
+  games.push(entry);
 }
 
 function buildNotes(base, d) {
@@ -126,9 +185,10 @@ for (const g of games) {
 // --- Summary table ---
 const byGenre = {};
 for (const g of games) {
-  byGenre[g.genre] = byGenre[g.genre] || { count: 0, wager: 0, sprite: 0, procedural: 0, unknown: 0 };
+  byGenre[g.genre] = byGenre[g.genre] || { count: 0, wager: 0, sprite: 0, 'sprite-bridge': 0, procedural: 0, unknown: 0 };
   byGenre[g.genre].count++;
   if (g.wager) byGenre[g.genre].wager++;
+  if (byGenre[g.genre][g.avatar] === undefined) byGenre[g.genre][g.avatar] = 0;
   byGenre[g.genre][g.avatar]++;
 }
 
@@ -141,8 +201,10 @@ const out = {
     skipped: skipped.length,
     wagerGames: games.filter(g => g.wager).length,
     spriteAvatars: games.filter(g => g.avatar === 'sprite').length,
+    spriteBridgeAvatars: games.filter(g => g.avatar === 'sprite-bridge').length,
     proceduralAvatars: games.filter(g => g.avatar === 'procedural').length,
     unknownAvatars: games.filter(g => g.avatar === 'unknown').length,
+    reviewed: games.filter(g => g.reviewed).length,
     alreadyLoadPlayerModule: games.filter(g => g.loads.player).length,
   },
   summaryByGenre: byGenre,
@@ -150,8 +212,11 @@ const out = {
   games,
   skipped,
   legend: {
-    avatar: { sprite: 'already renders via BaselingSprites/BaselingPlayer', procedural: 'raw ctx-drawn avatar, swap to BaselingPlayer.draw()', unknown: 'inspect before remaster' },
+    avatar: { sprite: 'already renders via BaselingSprites/BaselingPlayer', 'sprite-bridge': 'already calls TAS.drawBaseling for the avatar — just point it at the selected baseling', procedural: 'raw ctx-drawn avatar, swap to BaselingPlayer.draw()', unknown: 'inspect before remaster' },
     loads: 'true = the game already includes that shared script',
+    reviewed: 'hand-inspected (Task #10); has focalEntity + statMap with finalized notes',
+    focalEntity: 'where the player avatar / focal entity is drawn (the sprite-swap point)',
+    statMap: 'per-stat gameplay mapping for THIS game (see ARCADE-STATS.md for the formula/clamp)',
     needsPlayerModule: 'baseling-player.js not yet included (Wave-2 must add it)',
     needsSpriteSwap: 'avatar is not yet sprite-based via the shared module',
     wager: 'in tasern-wager.js WAGER_GAMES — must call getMults({pvp:true})',
