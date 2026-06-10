@@ -17,6 +17,7 @@ canvas { display: block; margin: 0 auto; }
 <a id="back-link" href="/games">Back to Arcade</a>
 <script src="nft-loader.js"></script>
 <script src="baseling-sprites.js"></script>
+<script src="baseling-player.js"></script>
 <script src="tasern-theme.js"></script>
 <script>if(window.NftLoader)NftLoader.gate();</script>
 <script src="tasern-art.js"></script>
@@ -29,7 +30,7 @@ canvas { display: block; margin: 0 auto; }
 const GW = 480, GH = 320;
 const ctx = TAS.ctx;
 TAS.initCanvas(GW, GH);
-TAS.input.initTouch({ buttons: ['a', 'b'], labels: { a: 'JUMP', b: 'ATTACK' } });
+TAS.input.initTouch({ buttons: ['a', 'b', 'c'], labels: { a: 'JUMP', b: 'ATTACK', c: 'PICK' } });
 
 const TILE = 16;
 const COLS = 30;
@@ -40,10 +41,43 @@ const BASE_MOVE_SPEED = 120;
 const MAX_FALL = 400;
 const INVULN_TIME = 1.5;
 
-// === STAT B SYSTEM ===
-// STR=damage, DEX=speed, CON=hpMult+lives, INT=scoreMult, WIS=cooldown, CHA=luck(drops)
+// === STAT B SYSTEM (via BaselingPlayer.getMults — see ARCADE-STATS.md) ===
+// Single source of stat math: BaselingPlayer.getMults() -> {moveSpeed,health,damage,
+// luck,swim}, already clamped to the single-player band (0.8–1.6). RPG, not a wager
+// game -> default band. This game's helpers read the old D&D fields (statB.str/...),
+// so we synthesize those from the bounded multipliers in recomputeStats(); every
+// gameplay number still traces back to a clamped getMults().
+//   SPD -> move speed,  STA -> max HP + lives,  PWR -> sword/spell damage,
+//   LCK -> gold + drop rate,  SWM unused (no water).
 var statB = { damage: 1, speed: 1, lives: 0, hpMult: 1, scoreMult: 1, cooldown: 1, luck: 1, str: 10, dex: 10, con: 10, int: 10, wis: 10, cha: 10, level: 0, color: '#44dd88', name: 'Baseling', icon: 'B' };
-try { if (window.NftLoader && NftLoader.getStatBonuses) statB = NftLoader.getStatBonuses(); } catch(e) {}
+try {
+  if (window.NftLoader && NftLoader.getStatBonuses) {
+    var _b = NftLoader.getStatBonuses();
+    if (_b) { statB.color = _b.color || statB.color; statB.name = _b.name || statB.name; statB.icon = _b.icon || statB.icon; statB.level = _b.level || statB.level; }
+  }
+} catch (e) { console.warn('[faxanadu-fungi] NftLoader display info failed:', e && e.message); }
+function recomputeStats() {
+  var m = (window.BaselingPlayer && BaselingPlayer.getMults) ? BaselingPlayer.getMults() : { moveSpeed: 1, health: 1, damage: 1, luck: 1, swim: 1 };
+  function dnd(x) { return Math.round(10 + (x - 1) * 20); }
+  statB.damage = m.damage;
+  statB.speed = m.moveSpeed;
+  statB.hpMult = m.health;
+  statB.luck = m.luck;
+  statB.scoreMult = 1;
+  statB.cooldown = 1 / m.moveSpeed; // SPD -> faster spell cooldown
+  statB.lives = m.health > 1.3 ? 1 : 0;
+  statB.str = dnd(m.damage);
+  statB.dex = dnd(m.moveSpeed);
+  statB.con = dnd(m.health);
+  statB.int = dnd(m.luck);
+  statB.wis = dnd(m.luck);
+  statB.cha = dnd(m.luck);
+}
+recomputeStats();
+var picking = false; // baseling character-select overlay is open
+if (window.BaselingPlayer && BaselingPlayer.init) {
+  BaselingPlayer.init().then(function () { recomputeStats(); }).catch(function (e) { console.warn('[faxanadu-fungi] player init failed:', e && e.message); });
+}
 
 // === ENUMS ===
 const AREAS = ['mycelium_depths','reactor_caverns','spore_ridge','canopy_reaches','crown_citadel'];
@@ -1278,7 +1312,8 @@ function updateMenu(dt) {
         }
       } else if (menuCursor === 3) {
         // Stats display
-        showDialog('STR:' + statB.str + ' DEX:' + statB.dex + ' CON:' + statB.con + ' INT:' + statB.int + ' WIS:' + statB.wis + ' CHA:' + statB.cha);
+        var _st = (window.BaselingPlayer && BaselingPlayer.getStats) ? BaselingPlayer.getStats() : { speed: 10, stamina: 10, power: 10, luck: 10, swim: 10 };
+        showDialog('SPD:' + _st.speed + ' STA:' + _st.stamina + ' PWR:' + _st.power + ' LCK:' + _st.luck + ' SWM:' + _st.swim);
       } else if (menuCursor === 4) {
         menuOpen = false;
         state = 'playing';
@@ -1377,6 +1412,16 @@ function update(dt) {
   }
 
   if (state === 'title') {
+    if (picking) return; // character-select overlay open — ignore game input
+    // C key / C touch button opens the baseling picker (consume before "any key starts")
+    if (TAS.input.keys['KeyC'] || TAS.input.touch.c) {
+      TAS.input.keys['KeyC'] = false;
+      if (window.BaselingPlayer) {
+        picking = true;
+        BaselingPlayer.select(function () { recomputeStats(); picking = false; });
+      }
+      return;
+    }
     if (Object.values(TAS.input.keys).some(Boolean) || TAS.input.touch.a) {
       TAS.audio.ensureAudio();
       if (!loadGame()) {
@@ -1669,10 +1714,33 @@ function drawTitle() {
     ctx.globalAlpha = 0.3 + Math.sin(frame * 0.05 + i) * 0.3;
     ctx.fillStyle = i % 3 === 0 ? '#38d973' : '#a855f7';
     ctx.beginPath();
-    ctx.arc(Math.floor(spx), Math.floor(spy), 1 + Math.floor(Math.sin(frame * 0.04 + i) * 1.5), 0, Math.PI * 2);
+    ctx.arc(Math.floor(spx), Math.floor(spy), Math.max(0.5, 1 + Math.floor(Math.sin(frame * 0.04 + i) * 1.5)), 0, Math.PI * 2);
     ctx.fill();
   }
   ctx.globalAlpha = 1;
+
+  // Selected baseling preview (idle bob) + name + 5 stat bars
+  var _cy = Math.floor(GH / 2) - 10;
+  TAS.drawBaseling(ctx, Math.floor(GW / 2), _cy, 28, { anim: 'idle', frame: frame }); // procedural tree carries the screen if no sprite
+  var _sel = (window.BaselingPlayer && BaselingPlayer.getSelected) ? BaselingPlayer.getSelected() : null;
+  ctx.fillStyle = '#0052FF';
+  ctx.font = 'bold 10px monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText((_sel ? _sel.charName : 'WIMMPLE') + (_sel && _sel.tokenId != null ? ' #' + _sel.tokenId : ''), Math.floor(GW / 2), _cy + 24);
+  if (_sel && _sel.stats && window.BaselingPlayer) {
+    var _meta = BaselingPlayer.STAT_META, _keys = BaselingPlayer.STAT_KEYS, _x0 = Math.floor(GW / 2) - 115;
+    ctx.font = '8px monospace';
+    for (var _i = 0; _i < _keys.length; _i++) {
+      var _mm = _meta[_keys[_i]], _v = _sel.stats[_keys[_i]], _bx = _x0 + _i * 47;
+      ctx.fillStyle = _mm.color; ctx.textAlign = 'left'; ctx.fillText(_mm.label, _bx, _cy + 36);
+      ctx.fillStyle = '#222'; ctx.fillRect(_bx, _cy + 39, 40, 5);
+      ctx.fillStyle = _mm.color; ctx.fillRect(_bx, _cy + 39, 40 * Math.max(0.04, Math.min(1, _v / 200)), 5);
+    }
+    ctx.textAlign = 'center';
+  }
+  ctx.fillStyle = '#0052FF';
+  ctx.font = 'bold 10px monospace';
+  ctx.fillText('[C] SELECT BASELING', Math.floor(GW / 2), _cy + 54);
 
   // NES-style controls
   ctx.fillStyle = '#555';
@@ -2088,7 +2156,8 @@ function drawPlayer() {
   }
 
   // === BASELING SPRITE ===
-  if (!TAS.drawBaseling(ctx, px + player.w / 2, py + player.h / 2, Math.max(player.w, player.h), { flipX: player.facing < 0, frame: frame })) {
+  var _anim = (player.attacking) ? 'attack' : (!player.onGround ? 'jump' : (Math.abs(player.vx) > 1 ? 'walk' : 'idle'));
+  if (!TAS.drawBaseling(ctx, px + player.w / 2, py + player.h / 2, Math.max(player.w, player.h), { flipX: player.facing < 0, frame: frame, anim: _anim })) {
     // Body
     ctx.fillStyle = '#38d973';
     if (player.crouching) {
