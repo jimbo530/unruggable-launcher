@@ -268,11 +268,21 @@ async function testGame(browser, baseUrl, game) {
   try {
     await page.evaluateOnNewDocument(preloadStub);
 
+    // A request URL is "benign to 404" when it's a baseling sprite image or the roster
+    // API: Wimmple (the no-wallet default) has no art, and the roster API isn't running
+    // under the local static server. Both are the documented procedural-fallback path
+    // (see REMASTER-GUIDE Step 8 / ARCADE-STATS), not a game defect.
+    const isBenignAsset = (u) => /\/api\/baseling\/images\/|\/images\/[^/]+\.(png|webp|jpg|gif)(\?|$)|\/arcade-roster/.test(u || '');
+
     page.on('console', (msg) => {
       const t = msg.type();
       const text = msg.text();
       // Ignore the expected QA-stub wallet rejection noise.
       if (/QA stub wallet/.test(text)) return;
+      // The generic "Failed to load resource: ... 404" console line carries no URL, so we
+      // can't tell benign from real here — drop it and judge 404s via the response handler
+      // (which has the URL) instead.
+      if (/Failed to load resource/i.test(text)) return;
       if (t === 'error') result.consoleErrors.push(text);
       else if (t === 'warning') result.consoleWarnings.push(text);
     });
@@ -280,9 +290,17 @@ async function testGame(browser, baseUrl, game) {
     page.on('requestfailed', (req) => {
       const f = req.failure();
       // net::ERR_ABORTED on the stub-wallet RPC and on intentionally-cancelled
-      // requests is not a game defect; skip aborted.
+      // requests is not a game defect; skip aborted. Skip benign sprite/API assets.
       if (f && /ERR_ABORTED/.test(f.errorText)) return;
+      if (isBenignAsset(req.url())) return;
       result.failedRequests.push({ url: req.url(), error: f ? f.errorText : 'unknown' });
+    });
+    // 404s complete as responses (not requestfailed). A 404 on a real game asset is a
+    // defect; a 404 on a benign sprite/API URL is the documented fallback path.
+    page.on('response', (res) => {
+      if (res.status() === 404 && !isBenignAsset(res.url())) {
+        result.failedRequests.push({ url: res.url(), error: 'HTTP 404' });
+      }
     });
 
     const url = baseUrl + '/' + encodeURIComponent(game.file);
