@@ -20,6 +20,7 @@ canvas { display: block; margin: 0 auto; }
 <a id="back-link" href="/games">Back to Arcade</a>
 <script src="nft-loader.js"></script>
 <script src="baseling-sprites.js"></script>
+<script src="baseling-player.js"></script>
 <script src="tasern-theme.js"></script>
 <script>if(window.NftLoader)NftLoader.gate();</script>
 <script src="tasern-art.js"></script>
@@ -32,11 +33,54 @@ canvas { display: block; margin: 0 auto; }
 var GW = 480, GH = 320;
 var ctx = TAS.ctx;
 TAS.initCanvas(GW, GH);
-TAS.input.initTouch({ buttons: ['a', 'b'], labels: { a: 'FIRE', b: 'SELECT' } });
+TAS.input.initTouch({ buttons: ['a', 'b', 'c'], labels: { a: 'FIRE', b: 'SELECT', c: 'PICK' } });
 
-// === BASELING STAT INTEGRATION ===
-var statB = { damage: 1, speed: 1, lives: 0, hpMult: 1, scoreMult: 1, cooldown: 1, luck: 1, str: 10, dex: 10, con: 10, int: 10, wis: 10, cha: 10, level: 0, color: '#44dd88', name: 'Baseling', icon: 'B' };
-try { if (window.NftLoader && NftLoader.getStatBonuses) statB = NftLoader.getStatBonuses(); } catch(e) {}
+// === BASELING STATS (BaselingPlayer.getMults — the single clamped source) ===
+// Archon is a board+action HYBRID: the stat edge lives in the real-time COMBAT duels
+// (your LIGHT-team fighter's damage/speed/HP), which is the action skill layer. The
+// board itself stays fair — bonus pieces are disabled (lives=0) and score isn't a stat.
+// statB is synthesized from the five bounded multipliers; combat helpers read it directly.
+// Single-player vs AI -> default band (0.8–1.6).
+var statB = { damage: 1, speed: 1, lives: 0, hpMult: 1, scoreMult: 1, cooldown: 1, luck: 1, str: 10, dex: 10, con: 10, int: 10, wis: 10, cha: 10, level: 0, color: '#0052FF', name: 'Baseling', icon: 'B' };
+var picking = false;   // character-select overlay open
+var selName = 'WIMMPLE';
+function dnd(x) { return Math.round(10 + (x - 1) * 20); }
+function recomputeStats() {
+  var m = TAS.player.mults();
+  statB.damage = m.damage;       // PWR -> combat damage (your team only)
+  statB.speed = m.moveSpeed;     // SPD -> combat move speed (your team only)
+  statB.hpMult = m.health;       // STA -> combat/board HP (your team only)
+  statB.luck = m.luck;           // LCK -> combat pickup spawn bias
+  statB.cooldown = 1;            // ability cooldown fixed/fair
+  statB.scoreMult = 1;           // score is not a stat
+  statB.lives = 0;               // no bonus board pieces — the board stays fair
+  statB.str = dnd(m.damage); statB.dex = dnd(m.moveSpeed); statB.con = dnd(m.health);
+  statB.int = dnd(m.luck); statB.wis = dnd(m.luck); statB.cha = dnd(m.luck);
+  var sel = (window.BaselingPlayer && BaselingPlayer.getSelected) ? BaselingPlayer.getSelected() : null;
+  selName = sel ? (sel.charName + (sel.tokenId != null ? ' #' + sel.tokenId : '')) : 'WIMMPLE';
+  if (sel) statB.name = sel.charName;
+}
+recomputeStats();
+if (window.TAS && TAS.player) {
+  TAS.player.init().then(function () { recomputeStats(); })
+    .catch(function (e) { console.warn('[archon-battle] player init failed:', e && e.message); });
+}
+// 5 canonical arcade stat bars centered at cx (display only).
+function drawTitleStatBars(cx, topY, totalW) {
+  if (!window.BaselingPlayer || !BaselingPlayer.getStats) return;
+  var stats = BaselingPlayer.getStats();
+  var meta = BaselingPlayer.STAT_META, keys = BaselingPlayer.STAT_KEYS;
+  var bw = totalW / keys.length, x0 = cx - totalW / 2;
+  ctx.font = '8px monospace';
+  for (var i = 0; i < keys.length; i++) {
+    var mm = meta[keys[i]], v = stats[keys[i]], bx = x0 + i * bw;
+    ctx.fillStyle = mm.color; ctx.textAlign = 'center';
+    ctx.fillText(mm.label, bx + bw / 2, topY);
+    ctx.fillStyle = '#222'; ctx.fillRect(bx + 3, topY + 3, bw - 6, 5);
+    ctx.fillStyle = mm.color; ctx.fillRect(bx + 3, topY + 3, (bw - 6) * Math.max(0.04, Math.min(1, v / 200)), 5);
+  }
+  ctx.textAlign = 'center';
+}
 
 // Board constants
 var BOARD_SIZE = 9;
@@ -1810,6 +1854,13 @@ function update(dt) {
   }
 
   if (state === 'title') {
+    if (picking) return;   // picker overlay open — swallow menu input
+    if (checkKeyPress('KeyC') || checkKeyPress('c') || TAS.input.touch.c) {
+      TAS.input.touch.c = false;
+      picking = true;
+      TAS.player.select(function () { recomputeStats(); picking = false; });
+      return;
+    }
     if (checkKeyPress('ArrowUp') || checkKeyPress('KeyW')) {
       menuSelection = (menuSelection - 1 + MENU_ITEMS.length) % MENU_ITEMS.length;
       TAS.audio.playTone(300, 0.05, 'sine', 0.03);
@@ -2095,9 +2146,21 @@ function drawUnit(x, y, unit, size, selected) {
     var mushAccents = ['#f3e8ff', '#ede9fe', '#faf5ff', '#f5f3ff', '#fef3c7', '#ede9fe', '#f3e8ff', '#faf5ff'];
     var mColor = mushColors[unit.type % mushColors.length];
     var mAccent = mushAccents[unit.type % mushAccents.length];
-    // Use statB color for the wizard (player's main piece)
+    // The WIZARD is the player's champion: draw the SELECTED baseling sprite when
+    // ready, else fall through to the procedural mushroom (tinted Base-blue).
     if (unit.type === WIZARD) {
-      mColor = statB.color; // Baseling color from NFT
+      mColor = statB.color;
+      if (TAS.drawBaseling(ctx, x, y, size, { anim: 'idle', frame: frame })) {
+        ctx.shadowBlur = 0;
+        if (unit.hp < unit.maxHp) {
+          var wbW = size * 0.7, wbX = x - wbW / 2, wbY = y + size * 0.45;
+          ctx.fillStyle = '#333'; ctx.fillRect(wbX, wbY, wbW, 3);
+          var wpct = unit.hp / unit.maxHp;
+          ctx.fillStyle = wpct > 0.5 ? '#44dd44' : wpct > 0.25 ? '#dddd44' : '#dd4444';
+          ctx.fillRect(wbX, wbY, wbW * wpct, 3);
+        }
+        return;
+      }
     }
     drawBaseling(x, y, size, mColor, mAccent);
     ctx.shadowBlur = 0;
@@ -2826,17 +2889,12 @@ function drawTitleScreen() {
   ctx.textAlign = 'center';
   ctx.fillText('Campaign Best: Level ' + campaignProgress + '/10', GW / 2, 290);
 
-  // Baseling stat display if NFT loaded
-  if (statB.level > 0) {
-    ctx.fillStyle = statB.color;
-    ctx.font = '8px monospace';
-    ctx.fillText(statB.name + ' Lv.' + statB.level, GW / 2, 302);
-  }
-
-  ctx.fillStyle = '#444';
-  ctx.font = '8px monospace';
+  // Champion name + 5 arcade stat bars + picker prompt (combat-only stat edge)
+  ctx.fillStyle = '#0052FF';
+  ctx.font = 'bold 9px monospace';
   ctx.textAlign = 'center';
-  ctx.fillText('Click/Arrows to select - Enter to confirm', GW / 2, 314);
+  ctx.fillText(selName + '   [C] SELECT BASELING', GW / 2, 302);
+  drawTitleStatBars(GW / 2, 311, 180);
 }
 
 // Tutorial overlay
