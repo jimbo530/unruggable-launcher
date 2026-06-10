@@ -17,6 +17,7 @@ canvas { display: block; margin: 0 auto; }
 <a id="back-link" href="/games">Back to Arcade</a>
 <script src="nft-loader.js"></script>
 <script src="baseling-sprites.js"></script>
+<script src="baseling-player.js"></script>
 <script src="tasern-theme.js"></script>
 <script>if(window.NftLoader)NftLoader.gate();</script>
 <script src="tasern-art.js"></script>
@@ -25,52 +26,61 @@ canvas { display: block; margin: 0 auto; }
 (function(){
 "use strict";
 
-// === BASELING STAT INTEGRATION ===
-var statB = { damage: 1, speed: 1, lives: 0, hpMult: 1, scoreMult: 1, cooldown: 1, luck: 1, str: 10, dex: 10, con: 10, int: 10, wis: 10, cha: 10, level: 0, color: '#44dd88', name: 'Baseling', icon: 'B' };
-try { if (window.NftLoader && NftLoader.getStatBonuses) statB = NftLoader.getStatBonuses(); } catch(e) {}
+// === BASELING STAT INTEGRATION (via BaselingPlayer.getMults — see ARCADE-STATS.md) ===
+// Single source of stat math: TAS.player.mults() -> {moveSpeed,health,damage,luck,swim}
+// clamped to the single-player band (0.8–1.6). This game reads D&D-style statB fields and
+// many derived constants, so we synthesize statB from the bounded mults (mult 1.0 -> 10,
+// 0.8 -> 6, 1.6 -> 22) and recompute the mods + constants in recomputeStats(). Not a wager
+// game. NOTE: keeping statB.color always defined also fixes a pre-existing crash where the
+// title drew lightenColor(statB.color) with a null color when no NFT was selected.
+var statB = { damage: 1, speed: 1, lives: 0, hpMult: 1, scoreMult: 1, cooldown: 1, luck: 1,
+  str: 10, dex: 10, con: 10, int: 10, wis: 10, cha: 10, level: 0, color: '#44dd88', name: 'Baseling', icon: 'B' };
+try {
+  if (window.NftLoader && NftLoader.getStatBonuses) {
+    var _b = NftLoader.getStatBonuses();
+    if (_b) { statB.color = _b.color || statB.color; statB.name = _b.name || statB.name; statB.icon = _b.icon || statB.icon; }
+  }
+} catch (e) { console.warn('[spore-knight] NftLoader display info failed:', e && e.message); }
 
-// Derived stats from D&D attributes (15+ references)
-var strMod = Math.floor((statB.str - 10) / 2);  // ref1: whip damage bonus
-var dexMod = Math.floor((statB.dex - 10) / 2);  // ref2: walk speed, ref3: jump height
-var conMod = Math.floor((statB.con - 10) / 2);  // ref4: HP pool, ref5: knockback resist
-var intMod = Math.floor((statB.int - 10) / 2);  // ref6: sub cost reduction, ref7: holy spore homing
-var wisMod = Math.floor((statB.wis - 10) / 2);  // ref8: pickup range, ref9: candle drop rate
-var chaMod = Math.floor((statB.cha - 10) / 2);  // ref10: score mult, ref11: boss gold bonus
-
-// ref1: STR boosts whip damage
-var WHIP_DMG_BONUS = Math.max(0, strMod);
-// ref2: DEX boosts movement speed
-var SPEED_MULT = 1 + dexMod * 0.08;
-// ref3: DEX boosts jump
-var JUMP_MULT = 1 + Math.max(0, dexMod) * 0.05;
-// ref4: CON boosts max HP
-var HP_BONUS = Math.max(0, conMod * 4);
-// ref5: CON reduces knockback
-var KB_RESIST = Math.max(0.3, 1 - conMod * 0.08);
-// ref6: INT reduces sub-weapon cost
-var SUB_COST_REDUCE = Math.max(0, intMod);
-// ref7: INT boosts holy spore homing speed
-var HOMING_MULT = 1 + Math.max(0, intMod) * 0.15;
-// ref8: WIS boosts pickup detection range
-var PICKUP_RANGE = 10 + Math.max(0, wisMod) * 3;
-// ref9: WIS boosts candle drop quality
-var DROP_LUCK = Math.max(0, wisMod * 0.04);
-// ref10: CHA boosts score multiplier
-var SCORE_MULT = statB.scoreMult * (1 + Math.max(0, chaMod) * 0.1);
-// ref11: CHA boosts boss kill gold
-var BOSS_GOLD_MULT = 1 + Math.max(0, chaMod) * 0.15;
-// ref12: statB.damage boosts all damage
-var DMG_MULT = statB.damage;
-// ref13: statB.speed boosts attack speed (cooldown reduction)
-var COOLDOWN_MULT = Math.max(0.4, statB.cooldown);
-// ref14: statB.lives grants extra starting lives
-var BONUS_LIVES = statB.lives;
-// ref15: statB.luck boosts critical hit chance
-var CRIT_CHANCE = 0.05 + statB.luck * 0.03;
-// ref16: statB.hpMult scales max HP
-var HP_SCALE = statB.hpMult;
-// ref17: statB.level scales enemy difficulty
-var LEVEL_SCALE = 1 + statB.level * 0.02;
+// D&D mods + derived constants — (re)assigned by recomputeStats().
+var strMod, dexMod, conMod, intMod, wisMod, chaMod;
+var WHIP_DMG_BONUS, SPEED_MULT, JUMP_MULT, HP_BONUS, KB_RESIST, SUB_COST_REDUCE,
+    HOMING_MULT, PICKUP_RANGE, DROP_LUCK, SCORE_MULT, BOSS_GOLD_MULT, DMG_MULT,
+    COOLDOWN_MULT, BONUS_LIVES, CRIT_CHANCE, HP_SCALE, LEVEL_SCALE;
+var picking = false; // baseling character-select overlay open
+function recomputeStats() {
+  var m = (window.TAS && TAS.player) ? TAS.player.mults() : { moveSpeed: 1, health: 1, damage: 1, luck: 1, swim: 1 };
+  function dnd(x) { return Math.round(10 + (x - 1) * 20); }
+  statB.damage = m.damage; statB.speed = m.moveSpeed; statB.hpMult = m.health; statB.luck = m.luck;
+  statB.cooldown = 1 / m.moveSpeed; statB.scoreMult = 1; statB.lives = m.health > 1.3 ? 1 : 0;
+  statB.str = dnd(m.damage); statB.dex = dnd(m.moveSpeed); statB.con = dnd(m.health);
+  statB.int = dnd(m.luck); statB.wis = dnd(m.luck); statB.cha = dnd(m.luck);
+  statB.level = Math.round((statB.str + statB.dex + statB.con + statB.int + statB.wis + statB.cha) / 6);
+  strMod = Math.floor((statB.str - 10) / 2); dexMod = Math.floor((statB.dex - 10) / 2);
+  conMod = Math.floor((statB.con - 10) / 2); intMod = Math.floor((statB.int - 10) / 2);
+  wisMod = Math.floor((statB.wis - 10) / 2); chaMod = Math.floor((statB.cha - 10) / 2);
+  WHIP_DMG_BONUS = Math.max(0, strMod);
+  SPEED_MULT = m.moveSpeed;                          // DEX -> movement speed
+  JUMP_MULT = Math.min(1.25, m.moveSpeed);           // cap jump so 1.6x can't overshoot
+  HP_BONUS = Math.max(0, conMod * 4);
+  KB_RESIST = Math.max(0.3, 2 - m.health);           // STA -> knockback resist
+  SUB_COST_REDUCE = Math.max(0, intMod);
+  HOMING_MULT = 1 + Math.max(0, intMod) * 0.15;
+  PICKUP_RANGE = 10 + Math.max(0, wisMod) * 3;
+  DROP_LUCK = Math.max(0, (m.luck - 1) * 0.2);       // LCK -> candle drop quality
+  SCORE_MULT = 1;                                    // score is not a stat
+  BOSS_GOLD_MULT = m.luck;                           // LCK -> boss gold
+  DMG_MULT = m.damage;
+  COOLDOWN_MULT = Math.max(0.4, 1 / m.moveSpeed);    // SPD -> attack speed
+  BONUS_LIVES = statB.lives;
+  CRIT_CHANCE = 0.05 + (m.luck - 0.8) * 0.2;         // LCK -> crit chance
+  HP_SCALE = m.health;
+  LEVEL_SCALE = 1;                                   // don't scale enemy difficulty by stats
+}
+recomputeStats();
+if (window.TAS && TAS.player) {
+  TAS.player.init().then(function () { recomputeStats(); }).catch(function (e) { console.warn('[spore-knight] player init failed:', e && e.message); });
+}
 
 // === CONSTANTS ===
 var GW = 400, GH = 300;
@@ -661,6 +671,13 @@ function update(dt) {
     // Ambient title particles
     if (frame % 20 === 0) {
       TAS.particles.spawn(Math.random() * GW, GH, '#38d97344', 1, 3, { gravity: -0.3 });
+    }
+    if (picking) return; // character-select overlay open — ignore game input
+    if (TAS.input.keys['KeyC']) {
+      TAS.input.keys['KeyC'] = false;
+      picking = true;
+      TAS.player.select(function () { recomputeStats(); picking = false; });
+      return;
     }
     if (Object.values(TAS.input.keys).some(Boolean) || TAS.input.touch.a || TAS.input.touch.b) {
       TAS.audio.ensureAudio();
@@ -1652,7 +1669,14 @@ function drawPlayer() {
   var dir = player.dir;
 
   // === BASELING SPRITE ===
-  if (!TAS.drawBaseling(ctx, px + player.w / 2, py + player.h / 2, player.h, { flipX: dir < 0, frame: frame })) {
+  // Animation from player state: ko (dead) > hurt (i-frames) > attack (whip) > jump > walk > idle.
+  var _anim = 'idle';
+  if (player.dead) _anim = 'ko';
+  else if (player.invTimer > 0) _anim = 'hurt';
+  else if (player.whipTimer > 0) _anim = 'attack';
+  else if (!player.onGround) _anim = 'jump';
+  else if (player.vx) _anim = 'walk';
+  if (!TAS.drawBaseling(ctx, px + player.w / 2, py + player.h / 2, player.h + 4, { flipX: dir < 0, frame: frame, anim: _anim })) {
   // NES-style baseling knight (pixel blocks)
   // Body armor - colored by statB
   var bodyColor = statB.color;
@@ -2294,10 +2318,15 @@ function drawTitleScreen() {
     ctx.fillRect(whipX + wi * 6, 130 + Math.sin(wi * 0.8 + frame * 0.05) * 3, 4, 2);
   }
 
-  // Baseling info
-  ctx.fillStyle = statB.color;
-  ctx.font = '9px monospace';
-  ctx.fillText(statB.name + (statB.level > 0 ? ' (Lv ' + statB.level + ')' : ''), GW / 2, 158);
+  // Selected baseling preview (idle bob) over the knight mascot
+  var _sel = (window.BaselingPlayer && BaselingPlayer.getSelected) ? BaselingPlayer.getSelected() : null;
+  if (TAS.drawBaseling(ctx, GW / 2, 120, 34, { anim: 'idle', frame: frame })) { /* sprite drew */ }
+
+  // Selected baseling name + picker prompt (Base-blue)
+  ctx.fillStyle = '#0052FF';
+  ctx.font = 'bold 9px monospace';
+  ctx.fillText((_sel ? _sel.charName : 'WIMMPLE') + (_sel && _sel.tokenId != null ? ' #' + _sel.tokenId : ''), GW / 2, 158);
+  ctx.fillText('[C] SELECT BASELING', GW / 2, 170);
 
   // Controls
   ctx.fillStyle = '#666';
@@ -2384,6 +2413,7 @@ function drawVictoryScreen() {
 
 // === COLOR UTILITIES ===
 function lightenColor(hex, amt) {
+  if (!hex || hex.charAt(0) !== '#' || hex.length < 7) hex = '#44dd88'; // guard null/short
   var r = parseInt(hex.slice(1, 3), 16);
   var g = parseInt(hex.slice(3, 5), 16);
   var b = parseInt(hex.slice(5, 7), 16);
@@ -2394,6 +2424,7 @@ function lightenColor(hex, amt) {
 }
 
 function darkenColor(hex, amt) {
+  if (!hex || hex.charAt(0) !== '#' || hex.length < 7) hex = '#44dd88'; // guard null/short
   var r = parseInt(hex.slice(1, 3), 16);
   var g = parseInt(hex.slice(3, 5), 16);
   var b = parseInt(hex.slice(5, 7), 16);
