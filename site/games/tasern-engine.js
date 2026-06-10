@@ -13,7 +13,7 @@ const TAS = (function() {
 // ============================================================
 const canvas = document.getElementById('gc');
 const ctx = canvas.getContext('2d');
-let W = 0, H = 0, scale = 1;
+let W = 0, H = 0, scale = 1, _gameW = 0, _gameH = 0;
 
 /**
  * Initialize canvas with a fixed game resolution.
@@ -23,6 +23,7 @@ let W = 0, H = 0, scale = 1;
  * @returns {{W, H, scale}} current dimensions
  */
 function initCanvas(gw, gh) {
+  _gameW = gw; _gameH = gh;
   function resize() {
     const dpr = window.devicePixelRatio || 1;
     const sw = window.innerWidth;
@@ -36,6 +37,8 @@ function initCanvas(gw, gh) {
     canvas.style.height = H + 'px';
     canvas.style.marginTop = Math.max(0, Math.floor((sh - H) / 2)) + 'px';
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.imageSmoothingEnabled = false;
+    _crtDirty = true;
   }
   window.addEventListener('resize', resize);
   resize();
@@ -341,22 +344,69 @@ function saveHigh(key, score) {
 // ============================================================
 // UI HELPERS
 // ============================================================
+// Seed a stable random per-game from the page title
+var _artSeed = 0;
+try { var _t = document.title || ''; for (var _i=0;_i<_t.length;_i++) _artSeed = ((_artSeed << 5) - _artSeed + _t.charCodeAt(_i)) | 0; } catch(e){}
+var _artBg = null, _artBaseling = null, _artEnemy = null, _artPreloaded = false;
+
+function _preloadArt() {
+  if (_artPreloaded || !window.TasernArt) return;
+  _artPreloaded = true;
+  var A = TasernArt;
+  // Deterministic picks from seed
+  var abs = Math.abs(_artSeed);
+  _artBg = A.BACKGROUNDS[abs % A.BACKGROUNDS.length];
+  _artBaseling = A.BASELINGS[(abs >> 4) % A.BASELINGS.length];
+  _artEnemy = A.ENEMIES[(abs >> 8) % A.ENEMIES.length];
+  A.loadBg(_artBg);
+  A.loadBaseling(_artBaseling);
+  A.loadEnemy(_artEnemy);
+}
+
 function drawTitle(title, subtitle, w, h, opts) {
   opts = opts || {};
   const frame = opts.frame || 0;
+  _preloadArt();
+
+  // Art background if available
+  var artDrawn = false;
+  if (window.TasernArt && _artBg) {
+    var bgKey = 'art/backgrounds/' + _artBg + (_artBg.indexOf('bg-') === 0 || _artBg === 'adventure-level1' || _artBg === 'tavern-bg' ? '.webp' : '.jpg');
+    var bgImg = TasernArt.getImg(bgKey);
+    if (bgImg) {
+      TasernArt.drawCover(ctx, bgImg);
+      ctx.fillStyle = 'rgba(0,0,0,0.55)';
+      ctx.fillRect(0, 0, w, h);
+      // Scanlines
+      ctx.fillStyle = 'rgba(0,0,0,0.1)';
+      for (var sl = 0; sl < h; sl += 3) ctx.fillRect(0, sl, w, 1);
+      artDrawn = true;
+    }
+  }
+
   ctx.textAlign = 'center';
 
   // Title
   ctx.fillStyle = '#000';
   ctx.font = 'bold ' + Math.floor(h * 0.06) + 'px monospace';
   ctx.fillText(title, w / 2 + 2, h * 0.22 + 2);
-  ctx.fillStyle = opts.titleColor || '#44dd88';
+  ctx.fillStyle = opts.titleColor || (artDrawn ? '#f4b41b' : '#44dd88');
   ctx.fillText(title, w / 2, h * 0.22);
 
   if (subtitle) {
-    ctx.fillStyle = opts.subtitleColor || '#888';
+    ctx.fillStyle = opts.subtitleColor || '#cfc6b8';
     ctx.font = Math.floor(h * 0.03) + 'px monospace';
     ctx.fillText(subtitle, w / 2, h * 0.29);
+  }
+
+  // Baseling portrait
+  if (window.TasernArt && _artBaseling) {
+    var bKey = 'art/baselings/baby-' + _artBaseling + '.png';
+    var bImg = TasernArt.getImg(bKey);
+    if (bImg) {
+      var pr = Math.min(w * 0.1, 40);
+      TasernArt.drawPortrait(ctx, bImg, w / 2, h * 0.52, pr, '#a855f7');
+    }
   }
 
   // Start prompt
@@ -371,11 +421,45 @@ function drawTitle(title, subtitle, w, h, opts) {
 function drawGameOver(score, highScore, w, h, opts) {
   opts = opts || {};
   const frame = opts.frame || 0;
+  _preloadArt();
 
-  ctx.fillStyle = 'rgba(0,0,0,0.75)';
-  ctx.fillRect(0, 0, w, h);
+  // Art-enhanced game over: enemy looming in background
+  var artDrawn = false;
+  if (window.TasernArt && _artEnemy) {
+    var eKey = 'art/enemies/enemy-' + _artEnemy + '.jpg';
+    var eImg = TasernArt.getImg(eKey);
+    if (eImg) {
+      ctx.fillStyle = '#0a0a15';
+      ctx.fillRect(0, 0, w, h);
+      ctx.globalAlpha = 0.3;
+      TasernArt.drawCover(ctx, eImg);
+      ctx.globalAlpha = 1;
+      ctx.fillStyle = 'rgba(0,0,0,0.5)';
+      ctx.fillRect(0, 0, w, h);
+      // Red vignette
+      var grd = ctx.createRadialGradient(w/2, h/2, 0, w/2, h/2, w*0.7);
+      grd.addColorStop(0, 'rgba(180,30,30,0.1)');
+      grd.addColorStop(1, 'rgba(10,10,21,0)');
+      ctx.fillStyle = grd;
+      ctx.fillRect(0, 0, w, h);
+      // Scanlines
+      ctx.fillStyle = 'rgba(0,0,0,0.08)';
+      for (var sl = 0; sl < h; sl += 3) ctx.fillRect(0, sl, w, 1);
+      artDrawn = true;
+    }
+  }
+
+  if (!artDrawn) {
+    ctx.fillStyle = 'rgba(0,0,0,0.75)';
+    ctx.fillRect(0, 0, w, h);
+  }
   ctx.textAlign = 'center';
 
+  ctx.fillStyle = artDrawn ? '#000' : '#ff4444';
+  if (artDrawn) {
+    ctx.font = 'bold ' + Math.floor(h * 0.08) + 'px monospace';
+    ctx.fillText('GAME OVER', w / 2 + 2, h * 0.3 + 2);
+  }
   ctx.fillStyle = '#ff4444';
   ctx.font = 'bold ' + Math.floor(h * 0.08) + 'px monospace';
   ctx.fillText('GAME OVER', w / 2, h * 0.3);
@@ -462,6 +546,7 @@ function startLoop(updateFn, drawFn) {
     _lastTime = now;
     updateFn(dt);
     drawFn(dt);
+    if (_crtEnabled) drawCRT(_gameW, _gameH);
     requestAnimationFrame(frame);
   }
   requestAnimationFrame(frame);
@@ -522,6 +607,114 @@ function dist(x1, y1, x2, y2) { const dx = x2 - x1, dy = y2 - y1; return Math.sq
 function angle(x1, y1, x2, y2) { return Math.atan2(y2 - y1, x2 - x1); }
 
 // ============================================================
+// RETRO POLISH — NES palette, CRT filter, pixel-crisp
+// ============================================================
+
+// Canonical NES 2C02 PPU palette (54 usable colors, 4 rows)
+const NES_PALETTE = [
+  // Row 0 — darks
+  [124,124,124],[0,0,252],[0,0,188],[68,40,188],[148,0,132],[168,0,32],
+  [168,16,0],[136,20,0],[80,48,0],[0,120,0],[0,104,0],[0,88,0],
+  [0,64,88],[0,0,0],
+  // Row 1 — mids
+  [188,188,188],[0,120,248],[0,88,248],[104,68,252],[216,0,204],[228,0,88],
+  [248,56,0],[228,92,16],[172,124,0],[0,184,0],[0,168,0],[0,168,68],
+  [0,136,136],[0,0,0],
+  // Row 2 — brights
+  [248,248,248],[60,188,252],[104,136,252],[152,120,248],[248,120,248],
+  [248,88,152],[248,120,88],[252,160,68],[248,184,0],[184,248,24],
+  [88,216,84],[88,248,152],[0,232,216],[120,120,120],
+  // Row 3 — pastels
+  [252,252,252],[164,228,252],[184,184,248],[216,184,248],[248,184,248],
+  [248,164,192],[240,208,176],[252,224,168],[248,216,120],[216,248,120],
+  [184,248,184],[184,248,216],[0,252,252],[248,216,248]
+];
+
+// Pre-built hex lookup for fast NES color returns
+const _nesHexLookup = NES_PALETTE.map(function(c) {
+  return '#' + ((1<<24)+(c[0]<<16)+(c[1]<<8)+c[2]).toString(16).slice(1);
+});
+
+// Snap RGB to nearest NES palette color, returns [r,g,b]
+function nesSnap(r, g, b) {
+  let best = 0, bestDist = Infinity;
+  for (let i = 0; i < NES_PALETTE.length; i++) {
+    const p = NES_PALETTE[i];
+    const dr = r - p[0], dg = g - p[1], db = b - p[2];
+    const d = dr*dr + dg*dg + db*db;
+    if (d < bestDist) { bestDist = d; best = i; }
+  }
+  return NES_PALETTE[best];
+}
+
+// Convert hex color to nearest NES hex (#rrggbb)
+function nesHex(hex) {
+  let r, g, b;
+  if (hex.length === 4) {
+    r = parseInt(hex[1]+hex[1], 16); g = parseInt(hex[2]+hex[2], 16); b = parseInt(hex[3]+hex[3], 16);
+  } else {
+    r = parseInt(hex.slice(1,3), 16); g = parseInt(hex.slice(3,5), 16); b = parseInt(hex.slice(5,7), 16);
+  }
+  let best = 0, bestDist = Infinity;
+  for (let i = 0; i < NES_PALETTE.length; i++) {
+    const p = NES_PALETTE[i];
+    const dr = r - p[0], dg = g - p[1], db = b - p[2];
+    const d = dr*dr + dg*dg + db*db;
+    if (d < bestDist) { bestDist = d; best = i; }
+  }
+  return _nesHexLookup[best];
+}
+
+// Get full NES palette as hex array (for palette pickers, theme tools)
+function nesPalette() { return _nesHexLookup.slice(); }
+
+// ---- CRT Scanline Filter ----
+let _crtEnabled = true;
+let _crtIntensity = 0.18;
+let _crtOverlay = null;
+let _crtDirty = true;
+
+function _buildCRT() {
+  if (!_gameW || !_gameH) return;
+  _crtOverlay = document.createElement('canvas');
+  _crtOverlay.width = _gameW;
+  _crtOverlay.height = _gameH;
+  const c = _crtOverlay.getContext('2d');
+
+  // Scanlines — darken every other row
+  c.fillStyle = 'rgba(0,0,0,' + _crtIntensity + ')';
+  for (let y = 0; y < _gameH; y += 2) {
+    c.fillRect(0, y, _gameW, 1);
+  }
+
+  // Vignette — subtle edge/corner darkening
+  const grd = c.createRadialGradient(
+    _gameW / 2, _gameH / 2, Math.min(_gameW, _gameH) * 0.35,
+    _gameW / 2, _gameH / 2, Math.max(_gameW, _gameH) * 0.7
+  );
+  grd.addColorStop(0, 'rgba(0,0,0,0)');
+  grd.addColorStop(1, 'rgba(0,0,0,0.3)');
+  c.fillStyle = grd;
+  c.fillRect(0, 0, _gameW, _gameH);
+
+  _crtDirty = false;
+}
+
+function drawCRT(w, h) {
+  if (!_crtEnabled) return;
+  if (_crtDirty || !_crtOverlay) _buildCRT();
+  if (_crtOverlay) ctx.drawImage(_crtOverlay, 0, 0);
+}
+
+function setCRT(enabled, intensity) {
+  _crtEnabled = enabled !== false;
+  if (intensity !== undefined) {
+    _crtIntensity = Math.max(0, Math.min(1, intensity));
+    _crtDirty = true;
+  }
+}
+
+// ============================================================
 // BASELING SPRITE HELPER
 // ============================================================
 // Draw the player's selected baseling sprite. Returns true if drawn, false = use fallback.
@@ -542,7 +735,7 @@ return {
   initCanvas,
   audio,
   particles: { spawn: spawnParticles, update: updateParticles, draw: drawParticles, clear: clearParticles },
-  fx: { flash, shake, updateEffects, applyShake, drawFlash },
+  fx: { flash, shake, updateEffects, applyShake, drawFlash, drawCRT, setCRT },
   input: { keys, touch, isMobile, initTouch, onTouch, drawTouchControls },
   score: { load: loadHigh, save: saveHigh },
   ui: { drawTitle, drawGameOver, drawHUD },
@@ -550,7 +743,9 @@ return {
   bg: { createStarfield },
   hit: { rectOverlap, circleOverlap, pointInRect },
   math: { lerp, clamp, randRange, randInt, dist, angle },
-  drawBaseling
+  nes: { snap: nesSnap, hex: nesHex, palette: nesPalette, PALETTE: NES_PALETTE },
+  drawBaseling,
+  art: window.TasernArt || null
 };
 
 })();

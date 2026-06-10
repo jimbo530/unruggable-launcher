@@ -270,17 +270,153 @@ async function postPromo(client) {
   }
 }
 
-// ── Main cycle: meme → stats → meme → promo → repeat ───────────────────────
+// ── Tree Race — live leaderboard announcer ───────────────────────────────────
+const TREE_API = 'https://tasern.quest/api/trees/by-fund';
+
+async function getTreeRaceData() {
+  try {
+    const res = await fetch(TREE_API);
+    const data = await res.json();
+    const funds = data.funds || {};
+    const tree = funds['Trees'] || funds['trees'] || funds['Tree Planting'] || funds['Trees (MfT)'] || Object.values(funds)[0];
+    if (!tree || !tree.tokens) return null;
+
+    const sorted = tree.tokens
+      .filter(t => (t.deposited || 0) > 0)
+      .sort((a, b) => (b.treesFunded || 0) - (a.treesFunded || 0));
+
+    return {
+      rows: sorted,
+      totalDep: tree.totalDeposited || 0,
+      totalTrees: tree.totalTreesFunded || 0,
+      count: sorted.length,
+    };
+  } catch (e) {
+    console.error('[TREE] Fetch failed:', e.message);
+    return null;
+  }
+}
+
+function treeFmt(n) {
+  if (n >= 1) return n.toFixed(2);
+  if (n >= 0.01) return n.toFixed(3);
+  return n.toFixed(4);
+}
+
+function buildTreeRacePost(d) {
+  const top3 = d.rows.slice(0, 3);
+  const templates = [
+    // Race standings
+    () => {
+      let s = `tree race update — ${d.count} communities running\n\n`;
+      top3.forEach((r, i) => {
+        const medal = ['1st', '2nd', '3rd'][i];
+        s += `${medal}: ${r.token} — ${treeFmt(r.treesFunded)} trees ($${Math.round(r.deposited)} fueling)\n`;
+      });
+      s += `\n$${Math.round(d.totalDep)} total in the race. ${treeFmt(d.totalTrees)} trees and climbing\n\ntasern.quest/memefortrees`;
+      return s;
+    },
+    // Leader spotlight
+    () => {
+      const leader = top3[0];
+      const chaser = top3[1];
+      const gap = (leader.treesFunded - (chaser ? chaser.treesFunded : 0));
+      let s = `${leader.token} leads the tree race at ${treeFmt(leader.treesFunded)} trees\n\n`;
+      s += `$${Math.round(leader.deposited)} fueling their run`;
+      if (chaser) s += ` — ${chaser.token} is ${treeFmt(gap)} trees behind with $${Math.round(chaser.deposited)} in the tank`;
+      s += `\n\n${d.count} communities. live leaderboard ticking every second\n\ntasern.quest/memefortrees`;
+      return s;
+    },
+    // Speed vs distance
+    () => {
+      const fastest = d.rows.slice().sort((a, b) => (b.deposited || 0) - (a.deposited || 0))[0];
+      const furthest = top3[0];
+      let s = `fastest fuel: ${fastest.token} at $${Math.round(fastest.deposited)} deposited\n`;
+      s += `most trees: ${furthest.token} at ${treeFmt(furthest.treesFunded)}\n\n`;
+      if (fastest.token !== furthest.token) {
+        s += `more money means more speed — but ${furthest.token} got in early\n\n`;
+      } else {
+        s += `leading in both fuel and trees — ${furthest.token} is running away with it\n\n`;
+      }
+      s += `any Base token can enter. paste the CA, deposit USDC, your community joins the race\n\ntasern.quest/memefortrees`;
+      return s;
+    },
+    // Call out specific rivalry
+    () => {
+      if (top3.length < 2) return null;
+      const a = top3[0], b = top3[1];
+      let s = `${a.token} vs ${b.token}\n\n`;
+      s += `${a.token}: ${treeFmt(a.treesFunded)} trees — $${Math.round(a.deposited)} fuel\n`;
+      s += `${b.token}: ${treeFmt(b.treesFunded)} trees — $${Math.round(b.deposited)} fuel\n\n`;
+      const gap = a.treesFunded - b.treesFunded;
+      s += gap < 0.05 ? `neck and neck. this could flip any deposit\n` : `${treeFmt(gap)} tree gap. ${b.token} needs more fuel to close it\n`;
+      s += `\ntasern.quest/memefortrees`;
+      return s;
+    },
+    // Last place / newest entry
+    () => {
+      const last = d.rows[d.rows.length - 1];
+      if (d.rows.length < 3) return null;
+      let s = `last place: ${last.token} with ${treeFmt(last.treesFunded)} trees and $${Math.round(last.deposited)} fuel\n\n`;
+      s += `just entered the race. every community starts here\n\n`;
+      s += `${top3[0].token} didn't start at ${treeFmt(top3[0].treesFunded)} trees either. first deposit puts you on the board\n\ntasern.quest/memefortrees`;
+      return s;
+    },
+    // Back of the pack
+    () => {
+      const bottom = d.rows.slice(-3).reverse();
+      if (bottom.length < 2) return null;
+      let s = `back of the pack:\n\n`;
+      bottom.forEach(r => {
+        s += `${r.token} — ${treeFmt(r.treesFunded)} trees ($${Math.round(r.deposited)} fuel)\n`;
+      });
+      s += `\nsmall deposits now. one community rally changes everything\n\nany Base token can enter\n\ntasern.quest/memefortrees`;
+      return s;
+    },
+    // New community invite
+    () => {
+      let s = `${d.count} meme communities are racing to fund trees on Base right now\n\n`;
+      s += `${treeFmt(d.totalTrees)} trees funded. $${Math.round(d.totalDep)} fueling the race\n\n`;
+      s += `your token isn't on the board yet\n\npaste the contract address, deposit USDC, join the race. withdraw anytime\n\ntasern.quest/memefortrees`;
+      return s;
+    },
+  ];
+
+  // Pick one that works
+  const pick = templates[Math.floor(Math.random() * templates.length)];
+  return pick();
+}
+
+async function postTreeRace(client) {
+  const data = await getTreeRaceData();
+  if (!data || data.rows.length === 0) { console.log(`[${ts()}] Tree race skipped — no data`); return false; }
+
+  const tweet = buildTreeRacePost(data);
+  if (!tweet) { console.log(`[${ts()}] Tree race skipped — template returned null`); return false; }
+
+  try {
+    const result = await client.v2.tweet(tweet);
+    console.log(`[${ts()}] Tree race: ${tweet.slice(0, 60)}...`);
+    return true;
+  } catch (e) {
+    console.error(`[${ts()}] Tree race failed: ${(e.message || e).toString().slice(0, 120)}`);
+    return false;
+  }
+}
+
+// ── Main cycle: meme → stats → meme → promo → tree race → repeat ───────────
 async function postCycle() {
   const client = createClient();
-  const cycle = state.postCount % 4;
+  const cycle = state.postCount % 5;
 
   console.log(`[${ts()}] Post #${state.postCount + 1} (cycle phase: ${cycle})`);
 
-  if (cycle === 0 || cycle === 2) {
+  if (cycle === 0 || cycle === 3) {
     await postMeme(client);
   } else if (cycle === 1) {
     await postStats(client);
+  } else if (cycle === 2) {
+    await postTreeRace(client);
   } else {
     await postPromo(client);
   }

@@ -60,6 +60,7 @@ const NEW_FACTORIES = [
   "0x9FCE6fF019570dC09678C6Fcd513bDF5cf766fC9",  // V5.5
   "0x72efb37D70266dFFe2f7D5003c138DD613D04B75",  // V5.9 (mftStable=V2, superseded)
   "0x0cE80fC0Fb866aD807D6D24D01bd879ef79622E7",  // V5.9 (mftStable=V4, current)
+  "0x90297A8a1F9A7E35bbC9DF8C35Aa7F3FFBe9BDb2",  // V7+ (free launch, active)
 ];
 const OLD_FACTORY_ABI = [
   "function launchCount() view returns (uint256)",
@@ -102,6 +103,11 @@ function getProvider() {
   }
   return _provider;
 }
+// OLD_FACTORIES lack launchCount() on-chain — skip them permanently to avoid CALL_EXCEPTION spam
+const _deadFactories = new Set(OLD_FACTORIES.map(a => a.toLowerCase()));
+// Reactors that fail poolCount() — cleared each refresh cycle so transient RPC errors don't stick
+let _deadReactors = new Set();
+
 function getFactory(addr) {
   const isNew = NEW_FACTORIES.some(f => f.toLowerCase() === addr.toLowerCase());
   return new ethers.Contract(addr, isNew ? NEW_FACTORY_ABI : OLD_FACTORY_ABI, getProvider());
@@ -174,6 +180,7 @@ async function isFactoryToken(addr) {
   const provider = getProvider();
   const allFactories = [...OLD_FACTORIES, ...NEW_FACTORIES];
   for (const factoryAddr of allFactories) {
+    if (_deadFactories.has(factoryAddr.toLowerCase())) continue;
     try {
       const factory = getFactory(factoryAddr);
       const count = Number(await factory.launchCount());
@@ -188,7 +195,7 @@ async function isFactoryToken(addr) {
         }
       }
     } catch (e) {
-      console.error("Factory check error for", factoryAddr, e.message);
+      console.warn("Factory check failed for", factoryAddr, "(skipping this cycle):", e.message);
     }
   }
   return false;
@@ -264,13 +271,18 @@ if (fs.existsSync(CARDS_CACHE_PATH)) {
 
 async function refreshReactorCards() {
   try {
+    _deadReactors = new Set(); // clear transient failures each cycle
     const provider = getProvider();
     const reactors = [];
     const allFactories = [...OLD_FACTORIES, ...NEW_FACTORIES];
     for (const factoryAddr of allFactories) {
+      if (_deadFactories.has(factoryAddr.toLowerCase())) continue;
       const factory = getFactory(factoryAddr);
       let count;
-      try { count = Number(await factory.launchCount()); } catch (e) { console.error("launchCount failed for", factoryAddr, e.message); continue; }
+      try { count = Number(await factory.launchCount()); } catch (e) {
+        console.warn("Factory", factoryAddr, "launchCount failed (skipping this cycle):", e.message);
+        continue;
+      }
       const isNew = NEW_FACTORIES.some(f => f.toLowerCase() === factoryAddr.toLowerCase());
       for (let i = 0; i < count; i++) {
         try {
@@ -282,9 +294,14 @@ async function refreshReactorCards() {
     for (const addr of reactors) {
       if (!addr || addr === ethers.ZeroAddress) continue;
       const key = addr.toLowerCase();
+      if (_deadReactors.has(key)) continue;
       const rx = new ethers.Contract(addr, REACTOR_POOL_ABI, provider);
       let poolCount;
-      try { poolCount = Number(await rx.poolCount()); } catch (e) { console.error("poolCount failed for", addr, e.message); continue; }
+      try { poolCount = Number(await rx.poolCount()); } catch (e) {
+        _deadReactors.add(key);
+        console.warn("Reactor", addr, "marked dead — skipping future refreshes:", e.message);
+        continue;
+      }
       const existing = new Set(reactorCardsCache[key] || []);
       for (let i = 0; i < poolCount; i++) {
         try {
@@ -295,7 +312,7 @@ async function refreshReactorCards() {
       reactorCardsCache[key] = [...existing];
     }
     fs.writeFileSync(CARDS_CACHE_PATH, JSON.stringify(reactorCardsCache, null, 2));
-    console.log("Reactor cards cache updated:", Object.keys(reactorCardsCache).length, "reactors");
+    console.log("Reactor cards cache updated:", Object.keys(reactorCardsCache).length, "reactors,", _deadFactories.size, "dead factories,", _deadReactors.size, "dead reactors skipped");
   } catch (e) {
     console.error("Reactor cards refresh error:", e.message);
   }
