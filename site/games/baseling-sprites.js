@@ -59,6 +59,7 @@ var _processed = {};   // charId -> Canvas (background removed, centered, pixeli
 var _tintCache = {};   // charId+variant -> Canvas (tinted)
 var _frameCache = {};  // charId+variant+anim+frameIndex+size -> Canvas (animated frame)
 var _loading = {};     // charId -> [callbacks] (in-flight)
+var _failed = {};      // charId -> true (load failed — don't retry, prevents per-frame spam)
 
 // ---- Background removal (from v1 / sprites.js:1164-1249) ----
 function processSprite(img) {
@@ -433,6 +434,10 @@ window.BaselingSprites = {
       if (callback) callback(charId);
       return;
     }
+    if (_failed[charId]) {                   // previously failed — don't retry (no spam)
+      if (callback) callback(null);
+      return;
+    }
     if (_loading[charId]) {                 // already loading — queue the callback
       if (callback) _loading[charId].push(callback);
       return;
@@ -472,7 +477,8 @@ window.BaselingSprites = {
       for (var i = 0; i < cbs.length; i++) { try { cbs[i](charId); } catch (e3) { console.warn('[baseling-sprites] load callback error:', e3.message); } }
     };
     img.onerror = function() {
-      console.warn('[baseling-sprites] failed to load image for ' + charId + ' (' + img.src + ')');
+      console.warn('[baseling-sprites] failed to load image for ' + charId + ' (' + img.src + ') — will not retry');
+      _failed[charId] = true; // mark so load()/draw() stop retrying this charId
       var cbs = _loading[charId] || [];
       delete _loading[charId];
       for (var i = 0; i < cbs.length; i++) { try { cbs[i](null); } catch (e4) { console.warn('[baseling-sprites] load callback error:', e4.message); } }
@@ -575,6 +581,11 @@ window.BaselingSprites = {
   // Check if a character's sprite is loaded and ready
   isLoaded: function(charId) {
     return !!_processed[charId];
+  },
+
+  // True if a charId's image failed to load (so callers can stop asking / show fallback).
+  hasFailed: function(charId) {
+    return !!_failed[charId];
   },
 
   // Set custom base URL (for testing or different environments)

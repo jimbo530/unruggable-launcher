@@ -17,6 +17,7 @@ canvas { display: block; margin: 0 auto; }
 <a id="back-link" href="/games">Back to Arcade</a>
 <script src="nft-loader.js"></script>
 <script src="baseling-sprites.js"></script>
+<script src="baseling-player.js"></script>
 <script src="tasern-theme.js"></script>
 <script>if(window.NftLoader)NftLoader.gate();</script>
 <script src="tasern-art.js"></script>
@@ -47,10 +48,28 @@ const BASE_SLIDE_SPEED = 140;
 const SLIDE_TIME = 0.4;
 
 // ============================================================
-// BASELING STAT INTEGRATION (Pass 1)
+// BASELING STAT INTEGRATION (via BaselingPlayer.getMults — see ARCADE-STATS.md)
 // ============================================================
-var statB = { damage: 1, speed: 1, lives: 0, hpMult: 1, scoreMult: 1, cooldown: 1, luck: 1, str: 10, dex: 10, con: 10, int: 10, wis: 10, cha: 10, level: 0, color: '#38d973', name: 'Baseling', icon: 'B' };
-try { if (window.NftLoader && NftLoader.getStatBonuses) statB = NftLoader.getStatBonuses(); } catch(e) { console.warn('Stat load failed:', e); }
+// Single source of stat math: TAS.player.mults() -> {moveSpeed,health,damage,luck,swim},
+// already clamped to the single-player band (0.8–1.6). Wired per ARCADE-STATS:
+//   moveSpeed -> movement + shot cadence,  health -> HP/defense,  damage -> shot damage,
+//   luck -> drop chance.  swim unused (no water).  Not a wager game -> default band.
+// statB stays as the game's existing shape so downstream code is unchanged; it's just
+// recomputed from the bounded multipliers. recomputeStats() is called again after the
+// player picks a baseling on the title screen.
+var statB = { damage: 1, speed: 1, hpMult: 1, cooldown: 1, luck: 1, scoreMult: 1 };
+function recomputeStats() {
+  var m = (window.TAS && TAS.player) ? TAS.player.mults() : { moveSpeed: 1, health: 1, damage: 1, luck: 1, swim: 1 };
+  statB = {
+    damage: m.damage,        // PWR -> shot damage
+    speed: m.moveSpeed,      // SPD -> move/slide speed
+    hpMult: m.health,        // STA -> max HP + acts as defense divisor below
+    cooldown: 1 / m.moveSpeed, // SPD -> faster shots (lower cooldown). >1 speed = quicker.
+    luck: m.luck,            // LCK -> pickup drop chance
+    scoreMult: 1             // score is not a stat in the new system
+  };
+}
+recomputeStats();
 
 // Derived constants from stats
 function getMaxHP() { return Math.floor(BASE_MAX_HP * statB.hpMult); }
@@ -77,6 +96,13 @@ let pauseOpen = false;
 let weaponMenuCursor = 0;
 let ngPlus = 0; // New Game+ level
 let hasMyco = false; // Myco Burst unlocked
+let picking = false; // baseling character-select overlay is open
+
+// Initialize the shared player module at boot (silent — no wallet popup). When the
+// roster resolves, refresh stats so the title preview/HUD reflect the picked baseling.
+if (window.TAS && TAS.player) {
+  TAS.player.init().then(function () { recomputeStats(); }).catch(function (e) { console.warn('[poop-man] player init failed:', e && e.message); });
+}
 
 // Player
 let player = null;
@@ -1426,7 +1452,14 @@ function drawPlayer() {
   }
 
   // === BASELING SPRITE ===
-  if (!TAS.drawBaseling(ctx, px + player.w / 2, py + player.h / 2, Math.max(player.w, player.h), { flipX: player.dir < 0, frame: frame })) {
+  // Pick an animation from player state so the avatar reads as alive:
+  //   hurt (iframe) > jump (airborne) > attack (shooting) > walk (moving) > idle.
+  var _anim = 'idle';
+  if (iframeTimer > 0) _anim = 'hurt';
+  else if (!player.grounded && !player.onLadder) _anim = 'jump';
+  else if (player.shooting) _anim = 'attack';
+  else if (player.vx !== 0) _anim = 'walk';
+  if (!TAS.drawBaseling(ctx, px + player.w / 2, py + player.h / 2, Math.max(player.w, player.h) + 6, { flipX: player.dir < 0, frame: frame, anim: _anim })) {
     ctx.save();
     if (player.dir < 0) {
       ctx.translate(px + player.w, 0);
@@ -2060,28 +2093,44 @@ function drawTitle() {
     ctx.fillText('NEW GAME+ ' + ngPlus, GW / 2, 66);
   }
 
-  // Character preview
+  // Character preview — the selected baseling (idle bob), or fallback poop-man figure.
   const cy = 76;
-  ctx.fillStyle = '#7a444a';
-  ctx.fillRect(GW / 2 - 6, cy, 10, 7); // helmet
-  ctx.fillStyle = '#111';
-  ctx.fillRect(GW / 2 + 1, cy + 2, 4, 3); // visor
-  ctx.fillStyle = '#7a444a';
-  ctx.fillRect(GW / 2 - 4, cy + 7, 8, 6); // body
-  ctx.fillRect(GW / 2 + 3, cy + 7, 5, 4); // arm
-  ctx.fillStyle = '#222';
-  ctx.fillRect(GW / 2 - 4, cy + 13, 4, 4); // legs
-  ctx.fillRect(GW / 2, cy + 13, 4, 4);
+  if (!TAS.drawBaseling(ctx, GW / 2, cy + 9, 26, { anim: 'idle', frame: frame })) {
+    ctx.fillStyle = '#7a444a';
+    ctx.fillRect(GW / 2 - 6, cy, 10, 7); // helmet
+    ctx.fillStyle = '#111';
+    ctx.fillRect(GW / 2 + 1, cy + 2, 4, 3); // visor
+    ctx.fillStyle = '#7a444a';
+    ctx.fillRect(GW / 2 - 4, cy + 7, 8, 6); // body
+    ctx.fillRect(GW / 2 + 3, cy + 7, 5, 4); // arm
+    ctx.fillStyle = '#222';
+    ctx.fillRect(GW / 2 - 4, cy + 13, 4, 4); // legs
+    ctx.fillRect(GW / 2, cy + 13, 4, 4);
+    // Poop pellet
+    const shotX = GW / 2 + 12 + Math.sin(frame * 0.05) * 4;
+    ctx.fillStyle = '#7a444a';
+    ctx.fillRect(Math.floor(shotX), cy + 8, 6, 4);
+  }
 
-  // Poop pellet
-  const shotX = GW / 2 + 12 + Math.sin(frame * 0.05) * 4;
-  ctx.fillStyle = '#7a444a';
-  ctx.fillRect(Math.floor(shotX), cy + 8, 6, 4);
+  // Selected baseling name (Base-blue accent)
+  if (window.BaselingPlayer && BaselingPlayer.getSelected) {
+    var _sel = BaselingPlayer.getSelected();
+    ctx.fillStyle = '#0052FF';
+    ctx.font = '7px monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText((_sel.charName || 'WIMMPLE').toUpperCase() + (_sel.tokenId != null ? ' #' + _sel.tokenId : ''), GW / 2, cy + 26);
+  }
 
   // Stat bar (Pass 1)
   if (window.NftLoader && NftLoader.drawStatBar) {
     NftLoader.drawStatBar(ctx, 30, 100, GW - 60);
   }
+
+  // SELECT BASELING prompt (Base-blue)
+  ctx.fillStyle = '#0052FF';
+  ctx.font = '8px monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText('[C] SELECT BASELING', GW / 2, 162);
 
   // Start prompt
   const pulse = Math.sin(frame * 0.06) * 0.3 + 0.7;
@@ -2318,6 +2367,17 @@ function update(dt) {
 
   switch (state) {
     case 'title':
+      if (picking) break; // character-select overlay open — ignore game input
+      // C key / C touch button opens the baseling picker
+      if (keys['KeyC'] || tch.c) {
+        keys['KeyC'] = false;
+        picking = true;
+        TAS.player.select(function () {
+          recomputeStats();   // apply the newly-picked baseling's stats
+          picking = false;
+        });
+        break;
+      }
       if (anyKey) {
         TAS.audio.ensureAudio();
         loadProg();

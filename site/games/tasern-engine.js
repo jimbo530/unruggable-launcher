@@ -715,16 +715,63 @@ function setCRT(enabled, intensity) {
 }
 
 // ============================================================
-// BASELING SPRITE HELPER
+// BASELING SPRITE + PLAYER HELPER
 // ============================================================
 // Draw the player's selected baseling sprite. Returns true if drawn, false = use fallback.
 // Usage: if (!TAS.drawBaseling(ctx, x, y, size, opts)) { /* existing drawing */ }
+//
+// Prefers BaselingPlayer (the shared character module — gives the picked baseling +
+// animation frames via opts.anim). Falls back to NftLoader's selected character, then
+// to the caller's own procedural drawing. opts may include { anim, frameIndex, frame,
+// flipX, alpha } — see baseling-sprites.js.
 function drawBaseling(drawCtx, x, y, size, opts) {
-  var b = window.NftLoader && NftLoader.getStatBonuses();
-  if (b && b.charId && window.BaselingSprites && BaselingSprites.isLoaded(b.charId)) {
-    return BaselingSprites.draw(drawCtx, b.charId, b.colorVariant, b.sparkle, x, y, size, opts || {});
+  opts = opts || {};
+  // 1) BaselingPlayer (preferred — has the picked baseling + animations)
+  if (window.BaselingPlayer && BaselingPlayer.getSelected) {
+    var sel = BaselingPlayer.getSelected();
+    if (sel && sel.charId && window.BaselingSprites) {
+      if (BaselingSprites.isLoaded(sel.charId)) {
+        return BaselingSprites.draw(drawCtx, sel.charId, sel.colorVariant, sel.sparkle, x, y, size, opts);
+      }
+      BaselingSprites.load(sel.charId, sel.colorVariant); // kick off load for next frame
+    }
   }
-  return false;
+  // 2) Legacy NftLoader selected character
+  var b = window.NftLoader && NftLoader.getStatBonuses && NftLoader.getStatBonuses();
+  if (b && b.charId && window.BaselingSprites && BaselingSprites.isLoaded(b.charId)) {
+    return BaselingSprites.draw(drawCtx, b.charId, b.colorVariant, b.sparkle, x, y, size, opts);
+  }
+  return false; // caller draws its own fallback
+}
+
+// Bounded gameplay multipliers for the selected baseling. Single source of stat math
+// (see ARCADE-STATS.md). Returns {moveSpeed,health,damage,luck,swim}; if BaselingPlayer
+// isn't present it returns all-1.0 so a game is never broken by a missing module.
+// Pass { pvp: true } in wager/PvP games to tighten the band to 0.95–1.10.
+function playerMults(opts) {
+  if (window.BaselingPlayer && BaselingPlayer.getMults) {
+    try { return BaselingPlayer.getMults(opts || {}); }
+    catch (e) { console.warn('[TAS] playerMults failed:', e && e.message); }
+  }
+  return { moveSpeed: 1, health: 1, damage: 1, luck: 1, swim: 1 };
+}
+
+// Show the baseling character-select overlay (DOM). cb(entry) fires on pick. No-op-safe
+// if BaselingPlayer isn't loaded (calls cb immediately so the game still proceeds).
+function charSelect(cb) {
+  if (window.BaselingPlayer && BaselingPlayer.select) {
+    BaselingPlayer.select(cb || function () {});
+  } else {
+    console.warn('[TAS] charSelect: BaselingPlayer not loaded');
+    if (cb) cb(null);
+  }
+}
+
+// Initialize the player module early (silent — no wallet popup). Safe to call once at
+// game boot; resolves to BaselingPlayer or null.
+function initPlayer(opts) {
+  if (window.BaselingPlayer && BaselingPlayer.init) return BaselingPlayer.init(opts || {});
+  return Promise.resolve(null);
 }
 
 // ============================================================
@@ -745,6 +792,7 @@ return {
   math: { lerp, clamp, randRange, randInt, dist, angle },
   nes: { snap: nesSnap, hex: nesHex, palette: nesPalette, PALETTE: NES_PALETTE },
   drawBaseling,
+  player: { mults: playerMults, select: charSelect, init: initPlayer },
   art: window.TasernArt || null
 };
 

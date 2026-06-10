@@ -20,6 +20,7 @@ canvas { display: block; margin: 0 auto; image-rendering: pixelated; image-rende
 <a id="back-link" href="/games">Back to Arcade</a>
 <script src="nft-loader.js"></script>
 <script src="baseling-sprites.js"></script>
+<script src="baseling-player.js"></script>
 <script src="tasern-theme.js"></script>
 <script>if(window.NftLoader)NftLoader.gate();</script>
 <script src="tasern-art.js"></script>
@@ -29,25 +30,22 @@ canvas { display: block; margin: 0 auto; image-rendering: pixelated; image-rende
 "use strict";
 
 // ============================================================
-//  STAT BONUSES FROM NFT
+//  BASELING STATS (via BaselingPlayer.getMults — see ARCADE-STATS.md)
 // ============================================================
-var statB = {
-  damage: 1, speed: 1, lives: 0, hpMult: 1, scoreMult: 1,
-  cooldown: 1, luck: 1,
-  str: 10, dex: 10, con: 10, int: 10, wis: 10, cha: 10,
-  level: 0, color: '#44dd88', name: 'Baseling', icon: 'B'
-};
-try {
-  if (window.NftLoader && NftLoader.getStatBonuses) statB = NftLoader.getStatBonuses();
-} catch(e) { console.warn('NftLoader stat load failed:', e); }
-
-// Derived stat modifiers (each D&D stat point above 10 gives a bonus)
-var STR_MOD = Math.max(0, Math.floor((statB.str - 10) / 2));  // damage, knockback
-var DEX_MOD = Math.max(0, Math.floor((statB.dex - 10) / 2));  // speed, coyote time
-var CON_MOD = Math.max(0, Math.floor((statB.con - 10) / 2));  // HP, lives, fall resistance
-var INT_MOD = Math.max(0, Math.floor((statB.int - 10) / 2));  // fireball, cooldown
-var WIS_MOD = Math.max(0, Math.floor((statB.wis - 10) / 2));  // coin sense, timer, secrets
-var CHA_MOD = Math.max(0, Math.floor((statB.cha - 10) / 2));  // score mult, luck, drops
+// Single source of stat math: TAS.player.mults() -> {moveSpeed,health,damage,luck,swim}
+// clamped to the single-player band (0.8–1.6). This is a platformer with water
+// sections, so all five stats apply (genre cheat-sheet: Platformer + SWM for swimming):
+//   moveSpeed -> run speed / jump height / accel / coyote (capped so 1.6x can't clip geometry)
+//   health    -> slower fall, more lives, more level time (survivability)
+//   damage    -> stomp bounce / knockback / fireball power
+//   luck      -> coin/drop chance + coin-sense radius
+//   swim      -> swim jump strength in WATER only
+// statB is kept (some draw code reads statB.color/icon) but its numeric stats no longer
+// drive gameplay — getMults() does. recomputeStats() reassigns the tuned constants and
+// is called again after the player picks a baseling on the title screen.
+var statB = { color: '#44dd88', name: 'Baseling', icon: 'B' };
+try { if (window.NftLoader && NftLoader.getStatBonuses) { var _b = NftLoader.getStatBonuses(); if (_b) { statB.color = _b.color || statB.color; statB.name = _b.name || statB.name; statB.icon = _b.icon || statB.icon; } } }
+catch (e) { console.warn('[reactor-jump] NftLoader display info failed:', e && e.message); }
 
 // ============================================================
 //  INIT
@@ -55,38 +53,71 @@ var CHA_MOD = Math.max(0, Math.floor((statB.cha - 10) / 2));  // score mult, luc
 var GW = 480, GH = 320;
 var ctx = TAS.ctx;
 TAS.initCanvas(GW, GH);
-TAS.input.initTouch({ buttons: ['a', 'b'], labels: { a: 'JUMP', b: 'FIRE' } });
+TAS.input.initTouch({ buttons: ['a', 'b', 'c'], labels: { a: 'JUMP', b: 'FIRE', c: 'PICK' } });
 
 // ============================================================
-//  CONSTANTS (stat-modified)
+//  CONSTANTS (stat-modified). Fixed base values are tuned for a neutral 1.0x baseling;
+//  the mults nudge them within the clamp band. Declared here, (re)assigned by
+//  recomputeStats() so a title-screen character change takes effect immediately.
 // ============================================================
 var TILE = 16;
 var COLS = 60;
 var ROWS = 20;
 var GRAVITY = 1400;
-var JUMP_VEL = -380 - DEX_MOD * 8;               // DEX: higher jumps
-var JUMP_HOLD_VEL = -440 - DEX_MOD * 10;          // DEX: variable jump
-var MAX_FALL = 500 - CON_MOD * 15;                 // CON: slower fall
-var RUN_ACCEL = 600 + DEX_MOD * 30;               // DEX: faster accel
 var RUN_DECEL = 800;
-var MAX_SPEED = (160 + DEX_MOD * 12) * statB.speed; // DEX+speed: run faster
-var MAX_RUN_SPEED = (220 + DEX_MOD * 15) * statB.speed;
-var COYOTE_TIME = 0.08 + DEX_MOD * 0.02;          // DEX: more coyote
-var JUMP_BUFFER = 0.1 + DEX_MOD * 0.01;           // DEX: forgiving buffer
 var SWIM_GRAVITY = 300;
-var SWIM_JUMP = -180 - DEX_MOD * 6;               // DEX: swim
-var ICE_DECEL = 200 + DEX_MOD * 20;               // DEX: ice control
-var TIMER_START = 300 + WIS_MOD * 15;             // WIS: more time
-var BASE_DAMAGE = (1 + STR_MOD * 0.3) * statB.damage; // STR+damage
-var FIREBALL_MAX = 2 + Math.floor(INT_MOD / 2);   // INT: more fireballs
-var FIREBALL_SPEED = 250 + INT_MOD * 20;          // INT: faster fireballs
-var FIREBALL_COOLDOWN = 0.3 / (statB.cooldown * (1 + INT_MOD * 0.1)); // INT+cooldown
-var STOMP_VEL = -250 - STR_MOD * 15;              // STR: stomp bounce
-var KNOCKBACK = 200 + STR_MOD * 30;               // STR: knockback
-var COIN_SENSE_RANGE = WIS_MOD * 32;              // WIS: coin glow radius
-var SCORE_MULT = statB.scoreMult * (1 + CHA_MOD * 0.1); // CHA+scoreMult
-var DROP_LUCK = statB.luck * (1 + CHA_MOD * 0.05); // CHA+luck: better drops
-var EXTRA_LIVES = statB.lives + Math.floor(CON_MOD / 3); // CON+lives
+// Stat-driven constants (assigned in recomputeStats):
+var JUMP_VEL, JUMP_HOLD_VEL, MAX_FALL, RUN_ACCEL, MAX_SPEED, MAX_RUN_SPEED,
+    COYOTE_TIME, JUMP_BUFFER, SWIM_JUMP, ICE_DECEL, TIMER_START, BASE_DAMAGE,
+    FIREBALL_MAX, FIREBALL_SPEED, FIREBALL_COOLDOWN, STOMP_VEL, KNOCKBACK,
+    COIN_SENSE_RANGE, SCORE_MULT, DROP_LUCK, EXTRA_LIVES;
+// Small integer "mods" (0–4) derived from the bounded multipliers, kept so the few
+// places that add a discrete bonus (extra HP, bonus coins/secrets) still read cleanly.
+// Each maps to one mult: a mult of 0.8 -> 0, 1.0 -> 1, 1.2 -> 2, 1.6 -> 4.
+var STR_MOD, DEX_MOD, CON_MOD, INT_MOD, WIS_MOD, CHA_MOD;
+function modFromMult(x) { return Math.max(0, Math.round((x - 0.8) * 5)); }
+
+function recomputeStats() {
+  var m = (window.TAS && TAS.player) ? TAS.player.mults() : { moveSpeed: 1, health: 1, damage: 1, luck: 1, swim: 1 };
+  STR_MOD = modFromMult(m.damage);     // offense (damage/knockback/bump)
+  DEX_MOD = modFromMult(m.moveSpeed);  // agility (speed/coyote)
+  CON_MOD = modFromMult(m.health);     // toughness (HP/lives/invuln)
+  INT_MOD = modFromMult(m.damage);     // fireball/star (offense flavor)
+  WIS_MOD = modFromMult(m.luck);       // coin spawns / secrets
+  CHA_MOD = modFromMult(m.luck);       // drops / charm
+  // Jump height scales with moveSpeed but is CAPPED at 1.25x so 1.6x speed can't
+  // overshoot level geometry (per ARCADE-STATS "cap derived values where physics demands").
+  var jumpScale = Math.min(1.25, m.moveSpeed);
+  JUMP_VEL          = -380 * jumpScale;
+  JUMP_HOLD_VEL     = -440 * jumpScale;
+  MAX_FALL          = 500 / m.health;             // STA: soak fall -> slower terminal velocity
+  RUN_ACCEL         = 600 * m.moveSpeed;
+  MAX_SPEED         = 160 * m.moveSpeed;
+  MAX_RUN_SPEED     = 220 * m.moveSpeed;
+  COYOTE_TIME       = 0.08 * m.moveSpeed;
+  JUMP_BUFFER       = 0.1;
+  SWIM_JUMP         = -180 * m.swim;              // SWM: swim jump strength (water only)
+  ICE_DECEL         = 200 * m.moveSpeed;
+  TIMER_START       = Math.round(300 * m.health); // STA: more time on the clock
+  BASE_DAMAGE       = 1 * m.damage;
+  FIREBALL_MAX      = 2;
+  FIREBALL_SPEED    = 250 * m.damage;
+  FIREBALL_COOLDOWN = 0.3 / m.moveSpeed;          // SPD: faster fireball cadence
+  STOMP_VEL         = -250 * m.damage;
+  KNOCKBACK         = 200 * m.damage;
+  COIN_SENSE_RANGE  = Math.round(24 * (m.luck - 0.8)); // LCK: coin glow radius (0 at floor)
+  SCORE_MULT        = 1;                           // score is not a stat in the new system
+  DROP_LUCK         = m.luck;
+  EXTRA_LIVES       = m.health > 1.3 ? 1 : 0;      // STA buys a cushion life
+}
+recomputeStats();
+
+var picking = false; // baseling character-select overlay open
+
+// Initialize the shared player module at boot (silent — no wallet popup).
+if (window.TAS && TAS.player) {
+  TAS.player.init().then(function () { recomputeStats(); }).catch(function (e) { console.warn('[reactor-jump] player init failed:', e && e.message); });
+}
 
 // ============================================================
 //  TASERN ZONE THEMES
@@ -1152,6 +1183,13 @@ function update(dt) {
   }
 
   if (state === 'title') {
+    if (picking) return; // character-select overlay open — ignore game input
+    if (TAS.input.keys['KeyC'] || TAS.input.touch.c) {
+      TAS.input.keys['KeyC'] = false;
+      picking = true;
+      TAS.player.select(function () { recomputeStats(); picking = false; });
+      return;
+    }
     if (Object.values(TAS.input.keys).some(Boolean) || TAS.input.touch.a) startGame();
     return;
   }
@@ -2047,7 +2085,14 @@ function drawPlayer() {
   }
 
   // === BASELING SPRITE ===
-  if (!TAS.drawBaseling(ctx, 0, 0, pH, { flipX: false, frame: frame })) {
+  // Animation from player state: hurt (invuln) > jump (airborne) > walk (running) > idle.
+  // Context is already flipped for direction above, so flipX stays false.
+  var _anim = 'idle';
+  if (invincTimer > 0 && !P.dead) _anim = 'hurt';
+  else if (P.dead) _anim = 'ko';
+  else if (!P.grounded) _anim = 'jump';
+  else if (Math.abs(P.vx) > 10) _anim = 'walk';
+  if (!TAS.drawBaseling(ctx, 0, 0, pH + 4, { flipX: false, frame: frame, anim: _anim })) {
     // Body — NES pixel baseling
     var bodyCol = P.fire ? '#ff6600' : (P.star ? '#ffdd00' : (statB.color || '#44aaff'));
     var hiCol = P.fire ? '#ffaa44' : (P.star ? '#ffff88' : '#88ccff');
@@ -2269,36 +2314,44 @@ function drawTitle() {
   ctx.font = '10px monospace';
   ctx.fillText('A Baseling Adventure in Tasern', GW / 2, 78);
 
-  // Pixel baseling mascot
-  ctx.save();
-  ctx.translate(GW / 2, 130);
-  var bounce = Math.sin(frame * 0.04) * 4;
-  ctx.translate(0, bounce);
-  // Body
-  drawPixelRect(-12, -10, 24, 18, statB.color || '#44aaff');
-  drawPixelRect(-10, -14, 20, 8, '#88ccff');
-  drawPixelRect(-8, -16, 16, 4, '#aaddff');
-  // Highlight
-  drawPixelRect(-8, -8, 8, 6, '#88ccff');
-  // Eye
-  drawPixelRect(2, -6, 6, 6, '#fff');
-  drawPixelRect(4, -4, 3, 3, '#111');
-  // Feet
-  drawPixelRect(-10, 8, 6, 6, '#333');
-  drawPixelRect(4, 8, 6, 6, '#333');
-  ctx.restore();
+  // Selected baseling mascot (idle bob) — fallback to the procedural pixel mascot.
+  if (!TAS.drawBaseling(ctx, GW / 2, 128, 40, { anim: 'idle', frame: frame })) {
+    ctx.save();
+    ctx.translate(GW / 2, 130);
+    var bounce = Math.sin(frame * 0.04) * 4;
+    ctx.translate(0, bounce);
+    drawPixelRect(-12, -10, 24, 18, statB.color || '#44aaff');
+    drawPixelRect(-10, -14, 20, 8, '#88ccff');
+    drawPixelRect(-8, -16, 16, 4, '#aaddff');
+    drawPixelRect(-8, -8, 8, 6, '#88ccff');
+    drawPixelRect(2, -6, 6, 6, '#fff');
+    drawPixelRect(4, -4, 3, 3, '#111');
+    drawPixelRect(-10, 8, 6, 6, '#333');
+    drawPixelRect(4, 8, 6, 6, '#333');
+    ctx.restore();
+  }
 
-  // Baseling name
-  ctx.fillStyle = statB.color || '#44aaff';
-  ctx.font = 'bold 10px monospace';
-  ctx.fillText(statB.name || 'Baseling', GW / 2, 160);
-
-  // Stats display (if NFT loaded)
-  if (statB.level > 0) {
-    ctx.fillStyle = '#666';
+  // Baseling name (Base-blue accent) + arcade stat bars
+  var _sel = (window.BaselingPlayer && BaselingPlayer.getSelected) ? BaselingPlayer.getSelected() : null;
+  ctx.fillStyle = '#0052FF';
+  ctx.font = 'bold 11px monospace';
+  ctx.fillText((_sel ? _sel.charName : (statB.name || 'Baseling')) + (_sel && _sel.tokenId != null ? ' #' + _sel.tokenId : ''), GW / 2, 158);
+  if (_sel && _sel.stats) {
+    var _meta = BaselingPlayer.STAT_META, _keys = BaselingPlayer.STAT_KEYS;
+    var _sx = GW / 2 - 110;
+    ctx.textAlign = 'left';
     ctx.font = '8px monospace';
-    ctx.fillText('STR:' + statB.str + ' DEX:' + statB.dex + ' CON:' + statB.con +
-                 ' INT:' + statB.int + ' WIS:' + statB.wis + ' CHA:' + statB.cha, GW / 2, 175);
+    for (var _i = 0; _i < _keys.length; _i++) {
+      var _k = _keys[_i], _mm = _meta[_k], _v = _sel.stats[_k];
+      var _bx = _sx + _i * 46;
+      ctx.fillStyle = _mm.color;
+      ctx.fillText(_mm.label, _bx, 172);
+      ctx.fillStyle = '#222';
+      ctx.fillRect(_bx, 175, 38, 5);
+      ctx.fillStyle = _mm.color;
+      ctx.fillRect(_bx, 175, 38 * Math.max(0.04, Math.min(1, _v / 200)), 5);
+    }
+    ctx.textAlign = 'center';
   }
 
   // Progress
@@ -2323,6 +2376,11 @@ function drawTitle() {
   ctx.font = 'bold 14px monospace';
   ctx.fillText('PRESS ANY KEY TO START', GW / 2, GH - 42);
   ctx.globalAlpha = 1;
+
+  // Select-baseling prompt (Base-blue)
+  ctx.fillStyle = '#0052FF';
+  ctx.font = 'bold 10px monospace';
+  ctx.fillText('[C] SELECT BASELING', GW / 2, GH - 24);
 }
 
 // ============================================================
