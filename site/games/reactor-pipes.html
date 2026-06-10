@@ -17,6 +17,7 @@ canvas { display: block; margin: 0 auto; image-rendering: pixelated; image-rende
 <a id="back-link" href="/games">Back to Arcade</a>
 <script src="nft-loader.js"></script>
 <script src="baseling-sprites.js"></script>
+<script src="baseling-player.js"></script>
 <script src="tasern-theme.js"></script>
 <script>if(window.NftLoader)NftLoader.gate();</script>
 <script src="tasern-art.js"></script>
@@ -25,9 +26,19 @@ canvas { display: block; margin: 0 auto; image-rendering: pixelated; image-rende
 (function(){
 "use strict";
 
-// === STAT BONUSES (from NFT) ===
+// === BASELING STAT INTEGRATION (via BaselingPlayer.getMults — see ARCADE-STATS.md) ===
+// Single source of stat math: BaselingPlayer.getMults() -> {moveSpeed,health,damage,luck,
+// swim}, clamped to the single-player band (0.8–1.6). This game reads D&D-style fields on
+// statB via statMod() helpers, so we keep statB's shape and synthesize its fields from the
+// five bounded multipliers (str/dex/con/int/wis/cha each = 10 + (mult-1)*20). Not a wager
+// game -> default band. recomputeStats() re-runs after a title-screen character pick.
 var statB = { damage: 1, speed: 1, lives: 0, hpMult: 1, scoreMult: 1, cooldown: 1, luck: 1, str: 10, dex: 10, con: 10, int: 10, wis: 10, cha: 10, level: 0, color: '#44dd88', name: 'Baseling', icon: 'B' };
-try { if (window.NftLoader && NftLoader.getStatBonuses) statB = NftLoader.getStatBonuses(); } catch(e) {}
+try {
+  if (window.NftLoader && NftLoader.getStatBonuses) {
+    var _b = NftLoader.getStatBonuses();
+    if (_b) { statB.color = _b.color || statB.color; statB.name = _b.name || statB.name; statB.icon = _b.icon || statB.icon; }
+  }
+} catch (e) { console.warn('[reactor-pipes] NftLoader display info failed:', e && e.message); }
 
 // Derived stat helpers
 function statMod(val) { return Math.floor((val - 10) / 2); }
@@ -37,6 +48,19 @@ function conMod() { return statMod(statB.con); }
 function intMod() { return statMod(statB.int); }
 function wisMod() { return statMod(statB.wis); }
 function chaMod() { return statMod(statB.cha); }
+
+function recomputeStats() {
+  var m = (window.BaselingPlayer && BaselingPlayer.getMults) ? BaselingPlayer.getMults() : { moveSpeed: 1, health: 1, damage: 1, luck: 1, swim: 1 };
+  function dnd(x) { return Math.round(10 + (x - 1) * 20); }
+  statB.speed = m.moveSpeed; statB.damage = m.damage; statB.hpMult = m.health; statB.luck = m.luck;
+  statB.str = dnd(m.damage); statB.dex = dnd(m.moveSpeed); statB.con = dnd(m.health);
+  statB.int = dnd(m.luck);   statB.wis = dnd(m.luck);      statB.cha = dnd(m.luck);
+  // Re-derive config-like values (QUEUE_SIZE/scoreMultiplier). `lives` is game state,
+  // reset in startGame(), so it is NOT touched here.
+  QUEUE_SIZE = Math.min(8, BASE_QUEUE_SIZE + Math.max(0, intMod()));
+  scoreMultiplier = 1.0 + Math.max(0, chaMod()) * 0.1;
+}
+var picking = false; // baseling character-select overlay is open
 
 // === CONSTANTS ===
 var GW = 400, GH = 400;
@@ -161,6 +185,13 @@ var scoreMultiplier = 1.0 + Math.max(0, chaMod()) * 0.1;
 
 // Luck bonus (affects pipe quality)
 var luckBonus = statB.luck || 1;
+
+// Boot the shared player module (silent — no wallet popup) and apply stats. Done here,
+// after the config-like constants exist, so recomputeStats() can re-derive them.
+recomputeStats();
+if (window.TAS && TAS.player) {
+  TAS.player.init().then(function () { recomputeStats(); luckBonus = statB.luck || 1; }).catch(function (e) { console.warn('[reactor-pipes] player init failed:', e && e.message); });
+}
 
 // === SCORE POPUP SYSTEM ===
 function addScorePopup(x, y, text, color) {
@@ -918,6 +949,13 @@ function update(dt) {
   }
 
   if (state === 'title') {
+    if (picking) { clearKeys(); return; } // overlay open — swallow game input
+    if (consumeKey('KeyC')) {
+      picking = true;
+      TAS.player.select(function () { recomputeStats(); luckBonus = statB.luck || 1; picking = false; });
+      clearKeys();
+      return;
+    }
     if (clicked) { clicked = false; startGame(); return; }
     if (consumeKey('KeyZ') || consumeKey('Enter') || consumeKey('Space')) { startGame(); return; }
     clearKeys();
@@ -1402,6 +1440,8 @@ function draw(dt) {
       drawPixelRect(curX + CELL - 6, curY + CELL - 2, 6, 2, zone.accent);
       drawPixelRect(curX + CELL - 2, curY + CELL - 6, 2, 6, zone.accent);
       ctx.globalAlpha = 1;
+      // === BASELING SPRITE === the player's baseling plumber rides above the cursor cell.
+      TAS.drawBaseling(ctx, curX + CELL / 2, curY - CELL * 0.4, CELL * 0.7, { anim: 'idle', frame: frame });
     }
 
     // Draw walls
@@ -1752,35 +1792,38 @@ function drawTitleScreen() {
   ctx.font = '9px monospace';
   ctx.fillText('Your baseling plumber routes the POOP flow!', GW / 2, 100);
 
-  // Character display
+  // Character display — selected baseling sprite + name (Base-blue).
+  var _sel = (window.BaselingPlayer && BaselingPlayer.getSelected) ? BaselingPlayer.getSelected() : null;
   drawPixelRect(GW / 2 - 60, 115, 120, 35, '#1a1c2c');
-  drawPixelBorder(GW / 2 - 60, 115, 120, 35, statB.color || '#44dd88');
-  drawCharIcon(GW / 2 - 50, 118, 24);
-  ctx.fillStyle = statB.color || '#44dd88';
+  drawPixelBorder(GW / 2 - 60, 115, 120, 35, '#0052FF');
+  if (!TAS.drawBaseling(ctx, GW / 2 - 38, 132, 26, { anim: 'idle', frame: frame })) {
+    drawCharIcon(GW / 2 - 50, 118, 24);
+  }
+  ctx.fillStyle = '#0052FF';
   ctx.font = 'bold 10px monospace';
   ctx.textAlign = 'left';
-  ctx.fillText(statB.name || 'Baseling', GW / 2 - 22, 132);
+  ctx.fillText((_sel ? _sel.charName : 'WIMMPLE'), GW / 2 - 22, 130);
   ctx.fillStyle = '#888';
   ctx.font = '7px monospace';
-  ctx.fillText('Lv.' + (statB.level || 0), GW / 2 - 22, 142);
+  ctx.fillText(_sel && _sel.tokenId != null ? ('#' + _sel.tokenId) : 'starter', GW / 2 - 22, 142);
 
-  // Stat summary
-  ctx.textAlign = 'center';
-  ctx.font = '8px monospace';
-  var statNames = ['STR','DEX','CON','INT','WIS','CHA'];
-  var statVals = [statB.str, statB.dex, statB.con, statB.int, statB.wis, statB.cha];
-  var statColors = ['#e6482e','#38d973','#f4b41b','#3cacd7','#a855f7','#7a444a'];
-  for (var si = 0; si < 6; si++) {
-    var sx = 35 + si * 56;
-    ctx.fillStyle = statColors[si];
-    ctx.fillText(statNames[si] + ':' + statVals[si], sx, 170);
+  // 5 stat bars in their canonical colors (bar fill = stat / 200)
+  if (_sel && _sel.stats && window.BaselingPlayer) {
+    var _meta = BaselingPlayer.STAT_META, _keys = BaselingPlayer.STAT_KEYS, _x0 = GW / 2 - 115;
+    ctx.font = '8px monospace';
+    for (var _i = 0; _i < _keys.length; _i++) {
+      var _mm = _meta[_keys[_i]], _v = _sel.stats[_keys[_i]], _bx = _x0 + _i * 47;
+      ctx.fillStyle = _mm.color; ctx.textAlign = 'left'; ctx.fillText(_mm.label, _bx, 168);
+      ctx.fillStyle = '#222'; ctx.fillRect(_bx, 171, 40, 5);
+      ctx.fillStyle = _mm.color; ctx.fillRect(_bx, 171, 40 * Math.max(0.04, Math.min(1, _v / 200)), 5);
+    }
   }
 
-  // Stat effects explanation
-  ctx.fillStyle = '#556677';
-  ctx.font = '7px monospace';
+  // SELECT BASELING prompt (Base-blue)
+  ctx.fillStyle = '#0052FF';
+  ctx.font = 'bold 9px monospace';
   ctx.textAlign = 'center';
-  ctx.fillText('STR=cost DEX=time CON=lives INT=queue WIS=reveal CHA=POOP', GW / 2, 185);
+  ctx.fillText('[C] SELECT BASELING', GW / 2, 188);
 
   // Instructions box
   drawPixelRect(GW / 2 - 130, 245, 260, 65, '#1a1c2c');

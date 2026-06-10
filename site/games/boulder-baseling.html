@@ -17,6 +17,7 @@ canvas { display: block; margin: 0 auto; }
 <a id="back-link" href="/games">Back to Arcade</a>
 <script src="nft-loader.js"></script>
 <script src="baseling-sprites.js"></script>
+<script src="baseling-player.js"></script>
 <script src="tasern-theme.js"></script>
 <script>if(window.NftLoader)NftLoader.gate();</script>
 <script src="tasern-art.js"></script>
@@ -33,20 +34,45 @@ var VIEW_COLS = 20, VIEW_ROWS = 15;
 var ctx = TAS.ctx;
 
 TAS.initCanvas(GW, GH);
-TAS.input.initTouch({ buttons: [], labels: {} });
+TAS.input.initTouch({ buttons: ['c'], labels: { c: 'PICK' } });
 
-// === BASELING STAT INTEGRATION ===
+// === BASELING STAT INTEGRATION (via BaselingPlayer.getMults — see ARCADE-STATS.md) ===
+// Single source of stat math: BaselingPlayer.getMults() -> {moveSpeed,health,damage,luck,
+// swim}, already clamped to the single-player band (0.8–1.6). Boulder Baseling's many
+// derived MULTs read D&D-style fields on statB; rather than rewrite all of them we keep
+// statB's shape and synthesize its fields from the five bounded multipliers (str/dex/con/
+// int/wis/cha each = 10 + (mult-1)*20, so mult 1.0 -> neutral 10). Not a wager game ->
+// default band. recomputeStats() re-runs after a title-screen character pick.
 var statB = { damage: 1, speed: 1, lives: 0, hpMult: 1, scoreMult: 1, cooldown: 1, luck: 1, str: 10, dex: 10, con: 10, int: 10, wis: 10, cha: 10, level: 0, color: '#a855f7', name: 'Baseling', icon: 'B' };
-try { if (window.NftLoader && NftLoader.getStatBonuses) statB = NftLoader.getStatBonuses(); } catch(e) {}
+try {
+  if (window.NftLoader && NftLoader.getStatBonuses) {
+    var _b = NftLoader.getStatBonuses();
+    if (_b) { statB.color = _b.color || statB.color; statB.name = _b.name || statB.name; statB.icon = _b.icon || statB.icon; }
+  }
+} catch (e) { console.warn('[boulder-baseling] NftLoader display info failed:', e && e.message); }
 
-// Derived stat bonuses from baseling attributes
-var STR_DIG_MULT = 1 + (statB.str - 10) * 0.05;        // STR: digging power, push force, boulder damage
-var DEX_SPEED_MULT = 1 + (statB.dex - 10) * 0.03;      // DEX: movement speed
-var CON_HP_BONUS = Math.floor((statB.con - 10) / 5);    // CON: extra lives
-var INT_SCORE_MULT = 1 + (statB.int - 10) * 0.04;       // INT: score multiplier
-var WIS_CD_MULT = Math.max(0.3, 1 - (statB.wis - 10) * 0.03); // WIS: cooldown reduction
-var CHA_LUCK_MULT = 1 + (statB.cha - 10) * 0.04;       // CHA: gem drop rate, item chance
-var LEVEL_BONUS = statB.level * 0.02;                     // level: small global bonus
+// Derived stat bonuses — reassigned in recomputeStats() so a title-screen pick applies.
+var STR_DIG_MULT, DEX_SPEED_MULT, CON_HP_BONUS, INT_SCORE_MULT, WIS_CD_MULT, CHA_LUCK_MULT, LEVEL_BONUS;
+function recomputeStats() {
+  var m = (window.BaselingPlayer && BaselingPlayer.getMults) ? BaselingPlayer.getMults() : { moveSpeed: 1, health: 1, damage: 1, luck: 1, swim: 1 };
+  function dnd(x) { return Math.round(10 + (x - 1) * 20); }
+  statB.speed = m.moveSpeed; statB.damage = m.damage; statB.hpMult = m.health; statB.luck = m.luck;
+  statB.str = dnd(m.damage);    // STR -> dig power, push force, boulder damage
+  statB.dex = dnd(m.moveSpeed); // DEX -> movement speed
+  statB.con = dnd(m.health);    // CON -> extra lives
+  statB.int = dnd(m.luck);      // INT -> score multiplier (luck flavor)
+  statB.wis = dnd(m.luck);      // WIS -> cooldown reduction (luck flavor)
+  statB.cha = dnd(m.luck);      // CHA -> gem drop / item chance
+  STR_DIG_MULT  = 1 + (statB.str - 10) * 0.05;
+  DEX_SPEED_MULT = 1 + (statB.dex - 10) * 0.03;
+  CON_HP_BONUS  = Math.floor((statB.con - 10) / 5);
+  INT_SCORE_MULT = 1 + (statB.int - 10) * 0.04;
+  WIS_CD_MULT   = Math.max(0.3, 1 - (statB.wis - 10) * 0.03);
+  CHA_LUCK_MULT = 1 + (statB.cha - 10) * 0.04;
+  LEVEL_BONUS   = statB.level * 0.02;
+  MOVE_DELAY    = Math.max(0.04, 0.12 / DEX_SPEED_MULT); // DEX: faster movement [ref 1]
+}
+recomputeStats();
 
 // Tile types
 var T_EMPTY = 0, T_DIRT = 1, T_WALL = 2, T_BOULDER = 3, T_GEM = 4;
@@ -61,6 +87,12 @@ var state = 'title';
 var score = 0, highScore = TAS.score.load('boulderbaseling_hi');
 var lives = 3, level = 1;
 var frame = 0;
+var picking = false; // baseling character-select overlay is open
+// Initialize the shared player module at boot (silent — no wallet popup). Refresh stats
+// once the roster resolves so the title preview/HUD reflect the picked baseling.
+if (window.TAS && TAS.player) {
+  TAS.player.init().then(function () { recomputeStats(); }).catch(function (e) { console.warn('[boulder-baseling] player init failed:', e && e.message); });
+}
 var grid = [];
 var playerX = 1, playerY = 1;
 var gemsCollected = 0, gemsRequired = 0;
@@ -74,7 +106,7 @@ var camX = 0, camY = 0;
 var deathTimer = 0;
 var winTimer = 0;
 var moveTimer = 0;
-var MOVE_DELAY = Math.max(0.04, 0.12 / DEX_SPEED_MULT); // DEX: faster movement [ref 1]
+var MOVE_DELAY; // DEX: faster movement [ref 1] — set in recomputeStats()
 var lastDir = -1;
 var inputHeld = false;
 
@@ -1040,6 +1072,14 @@ function update(dt) {
   }
 
   if (state === 'title') {
+    if (picking) return; // character-select overlay open — swallow game input
+    if (TAS.input.keys['KeyC'] || TAS.input.touch.c) {
+      TAS.input.keys['KeyC'] = false; // consume so it doesn't also start the game
+      TAS.input.touch.c = false;
+      picking = true;
+      TAS.player.select(function () { recomputeStats(); picking = false; });
+      return;
+    }
     if (Object.values(TAS.input.keys).some(Boolean) || TAS.input.touch.left || TAS.input.touch.right || TAS.input.touch.up || TAS.input.touch.down) {
       startGame();
     }
@@ -1437,7 +1477,8 @@ function drawPlayer(screenX, screenY) {
   }
 
   // === BASELING SPRITE ===
-  if (!TAS.drawBaseling(ctx, screenX + s / 2, screenY + s / 2, s, { frame: frame })) {
+  var _anim = deathTimer > 0 ? 'hurt' : (moveTimer > 0 ? 'walk' : 'idle');
+  if (!TAS.drawBaseling(ctx, screenX + s / 2, screenY + s / 2, s, { frame: frame, anim: _anim, flipX: lastDir > 0 })) {
     // Baseling body - uses statB.color
     ctx.fillStyle = statB.color;
     ctx.beginPath();
@@ -1976,40 +2017,44 @@ function drawTitleScreen() {
   ctx.font = '12px monospace';
   ctx.fillText('Dig the Tasern Crystal Mines', GW / 2, 82);
 
-  // Draw big baseling mascot using statB.color
+  // Selected baseling preview (idle bob) — falls back to the procedural mascot for Wimmple.
   var bx = GW / 2, by = 118;
-  ctx.fillStyle = statB.color;
-  ctx.beginPath();
-  ctx.arc(bx, by, 16, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.fillStyle = 'rgba(255,255,255,0.15)';
-  ctx.beginPath();
-  ctx.arc(bx - 5, by - 5, 8, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.fillStyle = '#fff';
-  ctx.beginPath();
-  ctx.arc(bx - 5, by - 3, 5, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.beginPath();
-  ctx.arc(bx + 5, by - 3, 5, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.fillStyle = '#111';
-  ctx.beginPath();
-  ctx.arc(bx - 5, by - 1, 2.5, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.beginPath();
-  ctx.arc(bx + 5, by - 1, 2.5, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.strokeStyle = 'rgba(0,0,0,0.4)';
-  ctx.lineWidth = 1.5;
-  ctx.beginPath();
-  ctx.arc(bx, by + 5, 5, 0.1, Math.PI - 0.1);
-  ctx.stroke();
+  if (!TAS.drawBaseling(ctx, bx, by, 36, { anim: 'idle', frame: frame })) {
+    ctx.fillStyle = statB.color;
+    ctx.beginPath();
+    ctx.arc(bx, by, 16, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = 'rgba(255,255,255,0.15)';
+    ctx.beginPath();
+    ctx.arc(bx - 5, by - 5, 8, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = '#fff';
+    ctx.beginPath();
+    ctx.arc(bx - 5, by - 3, 5, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.beginPath();
+    ctx.arc(bx + 5, by - 3, 5, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = '#111';
+    ctx.beginPath();
+    ctx.arc(bx - 5, by - 1, 2.5, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.beginPath();
+    ctx.arc(bx + 5, by - 1, 2.5, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(0,0,0,0.4)';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.arc(bx, by + 5, 5, 0.1, Math.PI - 0.1);
+    ctx.stroke();
+  }
 
-  // Baseling name
-  ctx.fillStyle = statB.color;
+  // Selected baseling name (Base-blue accent)
+  var _sel = (window.BaselingPlayer && BaselingPlayer.getSelected) ? BaselingPlayer.getSelected() : null;
+  ctx.fillStyle = '#0052FF';
   ctx.font = 'bold 10px monospace';
-  ctx.fillText(statB.name, bx, by + 26);
+  ctx.textAlign = 'center';
+  ctx.fillText((_sel ? _sel.charName : 'WIMMPLE') + (_sel && _sel.tokenId != null ? ' #' + _sel.tokenId : ''), bx, by + 30);
 
   // Instructions
   ctx.fillStyle = '#aaa';
@@ -2038,12 +2083,24 @@ function drawTitleScreen() {
     ctx.fillText('HIGH SCORE: ' + highScore, GW / 2, 290);
   }
 
-  // Stat preview if baseling is loaded
-  if (statB.level > 0) {
-    ctx.fillStyle = '#666';
-    ctx.font = '9px monospace';
-    ctx.fillText('LV' + statB.level + ' ' + statB.name + ' | STR:' + statB.str + ' DEX:' + statB.dex + ' CON:' + statB.con + ' INT:' + statB.int + ' WIS:' + statB.wis + ' CHA:' + statB.cha, GW / 2, 308);
+  // 5 stat bars in their canonical colors (bar fill = stat / 200)
+  if (_sel && _sel.stats && window.BaselingPlayer) {
+    var _meta = BaselingPlayer.STAT_META, _keys = BaselingPlayer.STAT_KEYS, _x0 = GW / 2 - 115;
+    ctx.font = '8px monospace';
+    for (var _i = 0; _i < _keys.length; _i++) {
+      var _mm = _meta[_keys[_i]], _v = _sel.stats[_keys[_i]], _bx = _x0 + _i * 47;
+      ctx.fillStyle = _mm.color; ctx.textAlign = 'left'; ctx.fillText(_mm.label, _bx, 300);
+      ctx.fillStyle = '#222'; ctx.fillRect(_bx, 303, 40, 5);
+      ctx.fillStyle = _mm.color; ctx.fillRect(_bx, 303, 40 * Math.max(0.04, Math.min(1, _v / 200)), 5);
+    }
+    ctx.textAlign = 'center';
   }
+
+  // SELECT BASELING prompt (Base-blue)
+  ctx.fillStyle = '#0052FF';
+  ctx.font = 'bold 10px monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText('[C] SELECT BASELING', GW / 2, 322);
 
   // Start prompt
   var pulse = Math.sin(frame * 0.05) * 0.3 + 0.7;

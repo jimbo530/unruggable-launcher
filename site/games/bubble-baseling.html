@@ -21,6 +21,7 @@ canvas { display: block; margin: 0 auto; image-rendering: pixelated; }
 <a id="back-link" href="/games">Back to Arcade</a>
 <script src="nft-loader.js"></script>
 <script src="baseling-sprites.js"></script>
+<script src="baseling-player.js"></script>
 <script src="tasern-theme.js"></script>
 <script>if(window.NftLoader)NftLoader.gate();</script>
 <script>
@@ -281,7 +282,41 @@ let speedBoost = 0;
 let lightningBubble = 0;
 
 // NFT stat bonuses (loaded once at game start)
-var statB = {damage:1,speed:1,lives:0,hpMult:1,scoreMult:1,cooldown:1,luck:1,level:0};
+// === BASELING STAT INTEGRATION (via BaselingPlayer.getMults — see ARCADE-STATS.md) ===
+// Bespoke engine (no TAS): talk to BaselingPlayer directly. getMults() -> {moveSpeed,
+// health,damage,luck,swim}, clamped to the single-player band (0.8–1.6). statB is read live
+// throughout (speed/damage/luck/cooldown/hpMult/lives + str/dex unlock thresholds); we map
+// the five bounded multipliers onto those fields. Not a wager game -> default band.
+// recomputeStats() re-runs after a title-screen character pick.
+var statB = {damage:1,speed:1,lives:0,hpMult:1,scoreMult:1,cooldown:1,luck:1,level:0,str:10,dex:10};
+function recomputeStats() {
+  var m = (window.BaselingPlayer && BaselingPlayer.getMults) ? BaselingPlayer.getMults() : { moveSpeed: 1, health: 1, damage: 1, luck: 1, swim: 1 };
+  function dnd(x) { return Math.round(10 + (x - 1) * 20); }
+  statB.speed = m.moveSpeed;        // SPD -> move/jump/dash speed
+  statB.damage = m.damage;          // PWR -> bubble pop radius / charged shot
+  statB.luck = m.luck;              // LCK -> item & bonus drop odds
+  statB.cooldown = 1 / m.moveSpeed; // SPD -> faster shoot cadence (lower cooldown)
+  statB.hpMult = m.health;          // STA -> survivability (bonus-life chance)
+  statB.lives = m.health > 1.3 ? 1 : 0; // STA buys a cushion life
+  statB.scoreMult = 1;              // score is not a stat in the new system
+  statB.str = dnd(m.damage);        // STR unlock threshold -> from PWR
+  statB.dex = dnd(m.moveSpeed);     // DEX unlock threshold -> from SPD
+}
+recomputeStats();
+var picking = false; // baseling character-select overlay is open
+if (window.BaselingPlayer && BaselingPlayer.init) {
+  BaselingPlayer.init().then(function () { recomputeStats(); }).catch(function (e) { console.warn('[bubble-baseling] player init failed:', e && e.message); });
+}
+function drawSelectedBaseling(c, x, y, size, opts) {
+  if (!window.BaselingPlayer || !window.BaselingSprites) return false;
+  var sel = BaselingPlayer.getSelected();
+  if (!sel || !sel.charId) return false;
+  if (!BaselingSprites.isLoaded(sel.charId)) {
+    if (!BaselingSprites.hasFailed(sel.charId)) BaselingSprites.load(sel.charId, sel.colorVariant);
+    return false;
+  }
+  return BaselingSprites.draw(c, sel.charId, sel.colorVariant, sel.sparkle, x, y, size, opts || {});
+}
 
 // Reactor Bug goo trails (array of {x, y, life})
 var gooTiles = [];
@@ -2014,6 +2049,13 @@ function drawBaseling() {
   ctx.translate(cx, cy + walkBounce);
   ctx.scale(scaleX, scaleY);
 
+  // === BASELING SPRITE === the player's selected baseling (procedural body is fallback).
+  var _anim = player.invincible > 0 ? 'hurt' : (!player.onGround ? 'jump' : (Math.abs(player.vx) > 0.5 ? 'walk' : 'idle'));
+  if (drawSelectedBaseling(ctx, 0, 0, Math.max(w, h) + 2, { anim: _anim, frame: frameCount, flipX: player.dir < 0 })) {
+    ctx.restore();
+    return;
+  }
+
   const bodyR = w * 0.55;
 
   // Dark outline (NES-style 1px outline around body)
@@ -2918,16 +2960,35 @@ function drawTitle() {
     ctx.fillText('High Score: ' + highScore, W / 2, instY);
   }
 
-  // Stat bar (if NFT loaded)
-  if (window.NftLoader && NftLoader.drawStatBar) {
-    NftLoader.drawStatBar(ctx, W * 0.15, H * 0.82, W * 0.7);
+  // Selected baseling preview (idle bob) + name (Base-blue) + 5 stat bars.
+  var _sel = (window.BaselingPlayer && BaselingPlayer.getSelected) ? BaselingPlayer.getSelected() : null;
+  drawSelectedBaseling(ctx, W / 2, H * 0.74, TILE * 1.4, { anim: 'idle', frame: frameCount });
+  ctx.fillStyle = '#0052FF';
+  ctx.font = 'bold ' + Math.floor(TILE * 0.45) + 'px monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText((_sel ? _sel.charName : 'WIMMPLE') + (_sel && _sel.tokenId != null ? ' #' + _sel.tokenId : ''), W / 2, H * 0.74 + TILE * 1.3);
+  if (_sel && _sel.stats && window.BaselingPlayer) {
+    var _meta = BaselingPlayer.STAT_META, _keys = BaselingPlayer.STAT_KEYS, _bw = Math.min(W * 0.13, TILE * 2), _x0 = W / 2 - _bw * 2.5;
+    ctx.font = Math.max(7, Math.floor(TILE * 0.32)) + 'px monospace';
+    for (var _i = 0; _i < _keys.length; _i++) {
+      var _mm = _meta[_keys[_i]], _v = _sel.stats[_keys[_i]], _bx = _x0 + _i * _bw;
+      ctx.fillStyle = _mm.color; ctx.textAlign = 'left'; ctx.fillText(_mm.label, _bx, H * 0.84);
+      ctx.fillStyle = '#222'; ctx.fillRect(_bx, H * 0.845, _bw * 0.82, 4);
+      ctx.fillStyle = _mm.color; ctx.fillRect(_bx, H * 0.845, _bw * 0.82 * Math.max(0.04, Math.min(1, _v / 200)), 4);
+    }
+    ctx.textAlign = 'center';
   }
+
+  // SELECT BASELING prompt (Base-blue)
+  ctx.fillStyle = '#0052FF';
+  ctx.font = 'bold ' + Math.floor(TILE * 0.4) + 'px monospace';
+  ctx.fillText('[C] SELECT BASELING', W / 2, H * 0.88);
 
   const startPulse = Math.sin(frameCount * 0.05) * 0.3 + 0.7;
   ctx.globalAlpha = startPulse;
   ctx.fillStyle = '#f4b41b';
   ctx.font = 'bold ' + Math.floor(TILE * 0.55) + 'px monospace';
-  ctx.fillText(isMobile ? 'TAP TO START' : 'PRESS ENTER TO START', W / 2, H * 0.92);
+  ctx.fillText(isMobile ? 'TAP TO START' : 'PRESS ENTER TO START', W / 2, H * 0.94);
   ctx.globalAlpha = 1;
 
   // Animated demo baseling (shoots a bubble at an enemy)
@@ -3202,7 +3263,19 @@ canvas.addEventListener('touchstart', function(e) {
   e.preventDefault();
   ensureAudio();
 
-  if (state === 'title') { startGame(); return; }
+  if (state === 'title') {
+    if (picking) return; // overlay open — swallow
+    // Tap the lower "[C] SELECT BASELING" band to open the picker; tap elsewhere starts.
+    var _rect = canvas.getBoundingClientRect();
+    var _ty = (e.changedTouches[0] ? e.changedTouches[0].clientY - _rect.top : 0);
+    if (_ty > H * 0.84 && _ty < H * 0.92) {
+      picking = true;
+      BaselingPlayer.select(function () { recomputeStats(); picking = false; });
+      return;
+    }
+    startGame();
+    return;
+  }
   if (state === 'gameOver') { state = 'title'; return; }
   if (state === 'paused') { state = 'playing'; return; }
 
@@ -3304,8 +3377,14 @@ window.addEventListener('keydown', function(e) {
     e.preventDefault();
   }
 
-  // Title: only Enter/Space starts the game
+  // Title: C opens the baseling picker; Enter/Space starts the game.
   if (state === 'title') {
+    if (picking) return; // overlay open — swallow game input
+    if (e.code === 'KeyC') {
+      picking = true;
+      BaselingPlayer.select(function () { recomputeStats(); picking = false; });
+      return;
+    }
     if (e.code === 'Enter' || e.code === 'Space') startGame();
     return;
   }

@@ -17,6 +17,7 @@ canvas { display: block; margin: 0 auto; }
 <a id="back-link" href="/games">Back to Arcade</a>
 <script src="nft-loader.js"></script>
 <script src="baseling-sprites.js"></script>
+<script src="baseling-player.js"></script>
 <script src="tasern-theme.js"></script>
 <script>if(window.NftLoader)NftLoader.gate();</script>
 <script src="tasern-art.js"></script>
@@ -31,22 +32,31 @@ var COLS = 12, ROWS = 11, TS = 32;
 var ctx = TAS.ctx;
 
 TAS.initCanvas(GW, GH);
-TAS.input.initTouch({ buttons: ['a', 'b'], labels: { a: 'FROST', b: 'GROW' } });
+TAS.input.initTouch({ buttons: ['a', 'b', 'c'], labels: { a: 'FROST', b: 'GROW', c: 'PICK' } });
 
-// === STAT BONUSES (PASS 1) ===
+// === BASELING STAT INTEGRATION (via BaselingPlayer.getMults — see ARCADE-STATS.md) ===
+// Single source of stat math: BaselingPlayer.getMults() -> {moveSpeed,health,damage,luck,
+// swim}, clamped to the single-player band (0.8–1.6). Kickle Kube's many helpers read
+// D&D-style STR/DEX/CON/INT/WIS/CHA on statB (baseline 5), so we keep statB's shape and
+// synthesize its fields from the five bounded multipliers: stat = round(5 + (mult-1)*25)
+// (neutral mult 1.0 -> baseline 5, 1.6 -> ~20, 0.8 -> ~0). Not a wager game -> default
+// band. recomputeStats() re-runs after a title-screen character pick.
 var statB = { STR: 5, DEX: 5, CON: 5, INT: 5, WIS: 5, CHA: 5 };
-
-(function loadStats() {
-  if (window.NftLoader && NftLoader.stats) {
-    var s = NftLoader.stats;
-    if (s.STR !== undefined) statB.STR = Math.floor(Number(s.STR)) || 5;
-    if (s.DEX !== undefined) statB.DEX = Math.floor(Number(s.DEX)) || 5;
-    if (s.CON !== undefined) statB.CON = Math.floor(Number(s.CON)) || 5;
-    if (s.INT !== undefined) statB.INT = Math.floor(Number(s.INT)) || 5;
-    if (s.WIS !== undefined) statB.WIS = Math.floor(Number(s.WIS)) || 5;
-    if (s.CHA !== undefined) statB.CHA = Math.floor(Number(s.CHA)) || 5;
-  }
-})();
+function recomputeStats() {
+  var m = (window.BaselingPlayer && BaselingPlayer.getMults) ? BaselingPlayer.getMults() : { moveSpeed: 1, health: 1, damage: 1, luck: 1, swim: 1 };
+  function syn(x) { return Math.max(0, Math.round(5 + (x - 1) * 25)); }
+  statB.STR = syn(m.damage);    // STR -> freeze power / push range
+  statB.DEX = syn(m.moveSpeed); // DEX -> move speed, block slide
+  statB.CON = syn(m.health);    // CON -> lives, death resist
+  statB.INT = syn(m.luck);      // INT -> score / hints (luck flavor)
+  statB.WIS = syn(m.luck);      // WIS -> breath/pillar cooldown (luck flavor)
+  statB.CHA = syn(m.luck);      // CHA -> drops, magnet, bonus time
+}
+recomputeStats();
+var picking = false; // baseling character-select overlay is open
+if (window.TAS && TAS.player) {
+  TAS.player.init().then(function () { recomputeStats(); }).catch(function (e) { console.warn('[kickle-kube] player init failed:', e && e.message); });
+}
 
 // === STAT-DERIVED FUNCTIONS ===
 // STR: freeze power (freeze duration, ice block push range)
@@ -1215,6 +1225,14 @@ function update(dt) {
   if (shakeTimer > 0) shakeTimer -= dt;
 
   if (state === 'title') {
+    if (picking) return; // character-select overlay open — swallow game input
+    if (TAS.input.keys['KeyC'] || TAS.input.touch.c) {
+      TAS.input.keys['KeyC'] = false; // consume so it doesn't also advance
+      TAS.input.touch.c = false;
+      picking = true;
+      TAS.player.select(function () { recomputeStats(); picking = false; });
+      return;
+    }
     if (Object.values(TAS.input.keys).some(Boolean) || TAS.input.touch.a || TAS.input.touch.b) {
       TAS.audio.ensureAudio();
       state = 'select';
@@ -1551,19 +1569,38 @@ function drawTitle() {
   ctx.fillText('Z/SPACE = Frost Breath   X/SHIFT = Fungal Pillar', GW / 2, 240);
   ctx.fillText('H = Spore Sense   R = Restart Garden', GW / 2, 254);
 
-  // Stat info
-  if (statB.STR !== 5 || statB.DEX !== 5) {
-    ctx.fillStyle = '#446655';
-    ctx.font = '9px monospace';
-    ctx.fillText('STR:' + statB.STR + ' DEX:' + statB.DEX + ' CON:' + statB.CON + ' INT:' + statB.INT + ' WIS:' + statB.WIS + ' CHA:' + statB.CHA, GW / 2, 275);
+  // Selected baseling preview (idle bob) + name (Base-blue) — falls back to title deco.
+  var _sel = (window.BaselingPlayer && BaselingPlayer.getSelected) ? BaselingPlayer.getSelected() : null;
+  TAS.drawBaseling(ctx, GW / 2, 274, 24, { anim: 'idle', frame: frame });
+  ctx.fillStyle = '#0052FF';
+  ctx.font = 'bold 9px monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText((_sel ? _sel.charName : 'WIMMPLE') + (_sel && _sel.tokenId != null ? ' #' + _sel.tokenId : ''), GW / 2, 294);
+
+  // 5 stat bars in their canonical colors (bar fill = stat / 200)
+  if (_sel && _sel.stats && window.BaselingPlayer) {
+    var _meta = BaselingPlayer.STAT_META, _keys = BaselingPlayer.STAT_KEYS, _x0 = GW / 2 - 92;
+    ctx.font = '8px monospace';
+    for (var _i = 0; _i < _keys.length; _i++) {
+      var _mm = _meta[_keys[_i]], _v = _sel.stats[_keys[_i]], _bx = _x0 + _i * 38;
+      ctx.fillStyle = _mm.color; ctx.textAlign = 'left'; ctx.fillText(_mm.label, _bx, 305);
+      ctx.fillStyle = '#222'; ctx.fillRect(_bx, 308, 32, 4);
+      ctx.fillStyle = _mm.color; ctx.fillRect(_bx, 308, 32 * Math.max(0.04, Math.min(1, _v / 200)), 4);
+    }
+    ctx.textAlign = 'center';
   }
+
+  // SELECT BASELING prompt (Base-blue)
+  ctx.fillStyle = '#0052FF';
+  ctx.font = 'bold 10px monospace';
+  ctx.fillText('[C] SELECT BASELING', GW / 2, 326);
 
   // Start prompt
   var pulse = Math.sin(frame * 0.05) * 0.3 + 0.7;
   ctx.globalAlpha = pulse;
   ctx.fillStyle = '#f4b41b';
-  ctx.font = 'bold 14px monospace';
-  ctx.fillText('PRESS ANY KEY TO START', GW / 2, 310);
+  ctx.font = 'bold 13px monospace';
+  ctx.fillText('PRESS ANY KEY TO START', GW / 2, GH - 8);
   ctx.globalAlpha = 1;
 
   // High score
@@ -1997,7 +2034,8 @@ function drawPlayer() {
   }
 
   // === BASELING SPRITE ===
-  if (!TAS.drawBaseling(ctx, x, y + bob, 24, { flipX: player.dir === 2, frame: frame })) {
+  var _anim = player.dead ? 'ko' : (player.moveTimer > 0 ? 'walk' : 'idle');
+  if (!TAS.drawBaseling(ctx, x, y + bob, 24, { flipX: player.dir === 2, frame: frame, anim: _anim })) {
     // Body (frost baseling - round blue creature)
     ctx.fillStyle = '#3377bb';
     ctx.beginPath();

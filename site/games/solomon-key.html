@@ -17,6 +17,7 @@ canvas { display: block; margin: 0 auto; image-rendering: pixelated; image-rende
 <a id="back-link" href="/games">Back to Arcade</a>
 <script src="nft-loader.js"></script>
 <script src="baseling-sprites.js"></script>
+<script src="baseling-player.js"></script>
 <script src="tasern-theme.js"></script>
 <script>if(window.NftLoader)NftLoader.gate();</script>
 <script src="tasern-art.js"></script>
@@ -30,24 +31,30 @@ const COLS = 12, ROWS = 10, TS = 32;
 const ctx = TAS.ctx;
 
 TAS.initCanvas(GW, GH);
-TAS.input.initTouch({ buttons: ['a', 'b'], labels: { a: 'JUMP', b: 'BLOCK' } });
+TAS.input.initTouch({ buttons: ['a', 'b', 'c'], labels: { a: 'JUMP', b: 'BLOCK', c: 'PICK' } });
 
-// === STAT B SYSTEM (PASS 1) ===
+// === BASELING STAT INTEGRATION (via BaselingPlayer.getMults — see ARCADE-STATS.md) ===
+// Single source of stat math: BaselingPlayer.getMults() -> {moveSpeed,health,damage,luck,
+// swim}, clamped to the single-player band (0.8–1.6). Solomon's getX() helpers read D&D-
+// style STR/DEX/CON/INT/WIS/CHA on statB (baseline 5), so we keep statB's shape and
+// synthesize its fields: stat = round(5 + (mult-1)*25) (neutral mult 1.0 -> baseline 5).
+// Not a wager game -> default band. recomputeStats() re-runs after a title-screen pick.
 const statB = { STR: 5, DEX: 5, CON: 5, INT: 5, WIS: 5, CHA: 5 };
-function loadStatB() {
-  try {
-    if (window.NftLoader && NftLoader.stats) {
-      const s = NftLoader.stats;
-      if (s.STR !== undefined) statB.STR = Math.floor(Number(s.STR)) || 5;
-      if (s.DEX !== undefined) statB.DEX = Math.floor(Number(s.DEX)) || 5;
-      if (s.CON !== undefined) statB.CON = Math.floor(Number(s.CON)) || 5;
-      if (s.INT !== undefined) statB.INT = Math.floor(Number(s.INT)) || 5;
-      if (s.WIS !== undefined) statB.WIS = Math.floor(Number(s.WIS)) || 5;
-      if (s.CHA !== undefined) statB.CHA = Math.floor(Number(s.CHA)) || 5;
-    }
-  } catch(e) { /* no NFT loaded, use defaults */ }
+function recomputeStats() {
+  var m = (window.BaselingPlayer && BaselingPlayer.getMults) ? BaselingPlayer.getMults() : { moveSpeed: 1, health: 1, damage: 1, luck: 1, swim: 1 };
+  function syn(x) { return Math.max(0, Math.round(5 + (x - 1) * 25)); }
+  statB.STR = syn(m.damage);    // STR -> block push, fireball damage
+  statB.DEX = syn(m.moveSpeed); // DEX -> speed, jump
+  statB.CON = syn(m.health);    // CON -> lives, timer bonus
+  statB.INT = syn(m.luck);      // INT -> score, hints (luck flavor)
+  statB.WIS = syn(m.luck);      // WIS -> magic cooldown, bonus fireballs (luck flavor)
+  statB.CHA = syn(m.luck);      // CHA -> drop bonus
 }
-loadStatB();
+recomputeStats();
+var picking = false; // baseling character-select overlay is open
+if (window.TAS && TAS.player) {
+  TAS.player.init().then(function () { recomputeStats(); }).catch(function (e) { console.warn('[solomon-key] player init failed:', e && e.message); });
+}
 
 // Derived stats from statB
 function getSpeed() { return 100 + Math.floor(statB.DEX * 6); }
@@ -970,6 +977,14 @@ function update(dt) {
   }
 
   if (state === 'title') {
+    if (picking) return; // character-select overlay open — swallow game input
+    if (TAS.input.keys['KeyC'] || TAS.input.touch.c) {
+      TAS.input.keys['KeyC'] = false; // consume so it doesn't also start the game
+      TAS.input.touch.c = false;
+      picking = true;
+      TAS.player.select(function () { recomputeStats(); picking = false; });
+      return;
+    }
     if (Object.values(TAS.input.keys).some(Boolean) || TAS.input.touch.a || TAS.input.touch.b) {
       TAS.audio.ensureAudio();
       startGame();
@@ -2383,7 +2398,8 @@ function drawPlayer() {
   const walkBob = walking && pgrounded ? Math.floor(Math.sin(pwalkFrame) * 2) : 0;
 
   // === BASELING SPRITE ===
-  if (!TAS.drawBaseling(ctx, x + PW/2, y + PH/2, Math.max(PW, PH), { flipX: facing < 0, frame: frame })) {
+  var _anim = invincTimer > 0 ? 'hurt' : (casting ? 'attack' : (!pgrounded ? 'jump' : (walking ? 'walk' : 'idle')));
+  if (!TAS.drawBaseling(ctx, x + PW/2, y + PH/2, Math.max(PW, PH), { flipX: facing < 0, frame: frame, anim: _anim })) {
   // Body (robe)
   ctx.fillStyle = casting ? '#a855f7' : '#7a444a';
   ctx.fillRect(x + 3, y + 10 + walkBob, PW - 6, PH - 12);
@@ -2621,17 +2637,36 @@ function drawTitleScreen() {
   ctx.fillText('Up+Block: Spore Bolt  Down+Block: Special', GW/2, 148);
   ctx.fillText('C: Hint (INT)  Collect SPORE KEY then DOOR', GW/2, 162);
 
-  // statB display
-  ctx.fillStyle = '#666';
-  ctx.font = '9px monospace';
-  ctx.fillText('STR:' + statB.STR + ' DEX:' + statB.DEX + ' CON:' + statB.CON +
-               ' INT:' + statB.INT + ' WIS:' + statB.WIS + ' CHA:' + statB.CHA, GW/2, 182);
+  // Selected baseling preview (idle bob) + name (Base-blue) + 5 stat bars.
+  var _sel = (window.BaselingPlayer && BaselingPlayer.getSelected) ? BaselingPlayer.getSelected() : null;
+  TAS.drawBaseling(ctx, GW/2, 196, 26, { anim: 'idle', frame: frame });
+  ctx.fillStyle = '#0052FF';
+  ctx.font = 'bold 10px monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText((_sel ? _sel.charName : 'WIMMPLE') + (_sel && _sel.tokenId != null ? ' #' + _sel.tokenId : ''), GW/2, 216);
+
+  if (_sel && _sel.stats && window.BaselingPlayer) {
+    var _meta = BaselingPlayer.STAT_META, _keys = BaselingPlayer.STAT_KEYS, _x0 = GW/2 - 92;
+    ctx.font = '8px monospace';
+    for (var _i = 0; _i < _keys.length; _i++) {
+      var _mm = _meta[_keys[_i]], _v = _sel.stats[_keys[_i]], _bx = _x0 + _i * 38;
+      ctx.fillStyle = _mm.color; ctx.textAlign = 'left'; ctx.fillText(_mm.label, _bx, 228);
+      ctx.fillStyle = '#222'; ctx.fillRect(_bx, 231, 32, 4);
+      ctx.fillStyle = _mm.color; ctx.fillRect(_bx, 231, 32 * Math.max(0.04, Math.min(1, _v / 200)), 4);
+    }
+    ctx.textAlign = 'center';
+  }
+
+  // SELECT BASELING prompt (Base-blue)
+  ctx.fillStyle = '#0052FF';
+  ctx.font = 'bold 10px monospace';
+  ctx.fillText('[C] SELECT BASELING', GW/2, 252);
 
   // Progress
   if (savedProgress > 0) {
     ctx.fillStyle = '#3cacd7';
-    ctx.font = '10px monospace';
-    ctx.fillText('Continue from Room ' + (savedProgress + 1), GW/2, 202);
+    ctx.font = '9px monospace';
+    ctx.fillText('Continue from Room ' + (savedProgress + 1), GW/2, 268);
   }
 
   // Start prompt
@@ -2639,7 +2674,7 @@ function drawTitleScreen() {
   ctx.globalAlpha = pulse;
   ctx.fillStyle = '#f4b41b';
   ctx.font = 'bold 13px monospace';
-  ctx.fillText('PRESS ANY KEY TO START', GW/2, 290);
+  ctx.fillText('PRESS ANY KEY TO START', GW/2, 300);
   ctx.globalAlpha = 1;
 }
 
