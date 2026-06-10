@@ -21,6 +21,7 @@ canvas { display: block; margin: 0 auto; image-rendering: pixelated; }
 <a id="back-link" href="/games">Back to Arcade</a>
 <script src="nft-loader.js"></script>
 <script src="baseling-sprites.js"></script>
+<script src="baseling-player.js"></script>
 <script src="tasern-theme.js"></script>
 <script>if(window.NftLoader)NftLoader.gate();</script>
 <script>
@@ -28,19 +29,51 @@ canvas { display: block; margin: 0 auto; image-rendering: pixelated; }
 "use strict";
 
 // ============================================================
-// BASELING STAT INTEGRATION
+// BASELING STATS (BaselingPlayer.getMults, see ARCADE-STATS.md)
 // ============================================================
+// The single source of stat math, clamped to the single-player band (0.8-1.6). The racer
+// reads a D&D-style statB; rather than rewrite its many references, we synthesize statB
+// from the five bounded multipliers and recompute the derived mods in recomputeStats(),
+// re-run after a title-screen pick. Not a wager game.
+//   SPD -> top speed/accel,  STA -> armor,  PWR -> melee damage,  LCK -> prize/score.
 var statB = { damage: 1, speed: 1, lives: 0, hpMult: 1, scoreMult: 1, cooldown: 1, luck: 1, str: 10, dex: 10, con: 10, int: 10, wis: 10, cha: 10, level: 0, color: '#44dd88', name: 'Baseling', icon: 'B' };
-try { if (window.NftLoader && NftLoader.getStatBonuses) statB = NftLoader.getStatBonuses(); } catch(e) {}
-
-// Stat modifiers derived from D&D stats (modifier = (stat - 10) / 2)
 function statMod(stat) { return Math.floor((stat - 10) / 2); }
-var strMod = statMod(statB.str);  // [1] melee damage, knockback power
-var dexMod = statMod(statB.dex);  // [2] steering precision, dodge chance
-var conMod = statMod(statB.con);  // [3] armor, crash recovery speed
-var intMod = statMod(statB.int);  // [4] nitro efficiency, weapon range
-var wisMod = statMod(statB.wis);  // [5] hazard awareness, item detection
-var chaMod = statMod(statB.cha);  // [6] shop discounts, prize money bonus
+var strMod = 0, dexMod = 0, conMod = 0, intMod = 0, wisMod = 0, chaMod = 0;
+function recomputeStats() {
+  var m = (window.BaselingPlayer && BaselingPlayer.getMults) ? BaselingPlayer.getMults() : { moveSpeed: 1, health: 1, damage: 1, luck: 1, swim: 1 };
+  function dnd(x) { return Math.round(10 + (x - 1) * 20); } // mult 1.0->10, 0.8->6, 1.6->22
+  statB.damage = m.damage; statB.speed = m.moveSpeed; statB.hpMult = m.health; statB.luck = m.luck; statB.scoreMult = 1;
+  statB.str = dnd(m.damage);    // STR -> melee damage, knockback
+  statB.dex = dnd(m.moveSpeed); // DEX -> steering, dodge
+  statB.con = dnd(m.health);    // CON -> armor, crash recovery
+  statB.int = dnd(m.moveSpeed); // INT -> speed bonus (maps to moveSpeed here)
+  statB.wis = dnd(m.luck);      // WIS -> hazard/item detection (luck flavor)
+  statB.cha = dnd(m.luck);      // CHA -> prize/shop bonus
+  strMod = statMod(statB.str); dexMod = statMod(statB.dex); conMod = statMod(statB.con);
+  intMod = statMod(statB.int); wisMod = statMod(statB.wis); chaMod = statMod(statB.cha);
+}
+try {
+  if (window.NftLoader && NftLoader.getStatBonuses) {
+    var _b = NftLoader.getStatBonuses();
+    if (_b) { statB.color = _b.color || statB.color; statB.name = _b.name || statB.name; statB.icon = _b.icon || statB.icon; }
+  }
+} catch(e) { console.warn('[reactor-rash] NftLoader display info failed:', e && e.message); }
+recomputeStats();
+var picking = false; // baseling character-select overlay open
+var frame = 0;       // global animation clock (incremented each game-loop tick)
+if (window.BaselingPlayer && BaselingPlayer.init) {
+  BaselingPlayer.init().then(function () { recomputeStats(); }).catch(function (e) { console.warn('[reactor-rash] player init failed:', e && e.message); });
+}
+function drawSelectedBaseling(c, x, y, size, opts) {
+  if (!window.BaselingPlayer || !window.BaselingSprites) return false;
+  var sel = BaselingPlayer.getSelected();
+  if (!sel || !sel.charId) return false;
+  if (!BaselingSprites.isLoaded(sel.charId)) {
+    if (!BaselingSprites.hasFailed(sel.charId)) BaselingSprites.load(sel.charId, sel.colorVariant);
+    return false;
+  }
+  return BaselingSprites.draw(c, sel.charId, sel.colorVariant, sel.sparkle, x, y, size, opts || {});
+}
 
 // ============================================================
 // CANVAS SETUP
@@ -542,7 +575,15 @@ function drawScorePopups() {
 // ============================================================
 window.addEventListener('keydown', function(e) {
   ensureAudio();
+  if (picking) return; // baseling picker overlay open — ignore game input
   keys[e.code] = true;
+
+  // Open the baseling picker with C from the title.
+  if (state === 'title' && e.code === 'KeyC' && window.BaselingPlayer) {
+    picking = true;
+    BaselingPlayer.select(function () { recomputeStats(); picking = false; });
+    return;
+  }
 
   if (state === 'racing' && !player.crashed) {
     // NES: A = attack left (KeyA), B = attack right (KeyZ/KeyX)
@@ -2302,8 +2343,8 @@ function drawPlayer() {
     ctx.fillStyle = '#0f0';
     ctx.fillRect(px - 40, py - 40, 80 * Math.max(0, progress), 6);
   } else {
-    // === BASELING SPRITE ===
-    if (!TAS.drawBaseling(ctx, px, py - scale * 0.3, scale, { flipX: false, frame: Date.now() * 0.01 })) {
+    // === BASELING SPRITE === the rider IS the selected baseling.
+    if (!drawSelectedBaseling(ctx, px, py - scale * 0.3, scale, { flipX: false, frame: frame, anim: 'walk' })) {
       drawPixelBike(px, py, scale, statB.color, true, player.tilt);
     }
 
@@ -2611,34 +2652,23 @@ function drawTitle() {
   ctx.font = '14px monospace';
   ctx.fillText('Spore-fueled combat racing through the Baseling reactor tracks', W / 2, H * 0.18);
 
-  // Baseling stat display
-  ctx.fillStyle = statB.color;
-  ctx.font = '12px monospace';
-  ctx.fillText(statB.icon + ' ' + statB.name + (statB.level > 0 ? ' (Lv ' + statB.level + ')' : ''), W / 2, H * 0.23);
-
-  // Stat bars
-  var stats = [
-    { label: 'STR', val: statB.str, col: '#f44' },
-    { label: 'DEX', val: statB.dex, col: '#4f4' },
-    { label: 'CON', val: statB.con, col: '#ff0' },
-    { label: 'INT', val: statB.int, col: '#44f' },
-    { label: 'WIS', val: statB.wis, col: '#a4f' },
-    { label: 'CHA', val: statB.cha, col: '#f80' }
-  ];
-  var barStart = W / 2 - 120;
-  ctx.font = '10px monospace';
-  ctx.textAlign = 'left';
-  for (var si = 0; si < stats.length; si++) {
-    var sx = barStart + (si % 3) * 85;
-    var sy = H * 0.26 + Math.floor(si / 3) * 16;
-    ctx.fillStyle = '#555';
-    ctx.fillText(stats[si].label, sx, sy);
-    ctx.fillStyle = '#222';
-    ctx.fillRect(sx + 28, sy - 8, 40, 8);
-    ctx.fillStyle = stats[si].col;
-    ctx.fillRect(sx + 28, sy - 8, Math.min(40, stats[si].val * 2), 8);
-    ctx.fillStyle = '#aaa';
-    ctx.fillText(String(stats[si].val), sx + 72, sy);
+  // Selected baseling name (Base-blue) + 5 ARCADE stat bars
+  var _sel = (window.BaselingPlayer && BaselingPlayer.getSelected) ? BaselingPlayer.getSelected() : null;
+  ctx.fillStyle = '#0052FF';
+  ctx.font = 'bold 13px monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText((_sel ? _sel.charName : 'WIMMPLE') + (_sel && _sel.tokenId != null ? ' #' + _sel.tokenId : ''), W / 2, H * 0.23);
+  if (_sel && _sel.stats && window.BaselingPlayer) {
+    var _meta = BaselingPlayer.STAT_META, _keys = BaselingPlayer.STAT_KEYS;
+    var _bw = 44, _bx0 = W / 2 - (_keys.length * (_bw + 10)) / 2, _by = H * 0.28;
+    ctx.font = '10px monospace'; ctx.textAlign = 'left';
+    for (var _i = 0; _i < _keys.length; _i++) {
+      var _mm = _meta[_keys[_i]], _v = _sel.stats[_keys[_i]], _bx = _bx0 + _i * (_bw + 10);
+      ctx.fillStyle = _mm.color; ctx.fillText(_mm.label, _bx, _by);
+      ctx.fillStyle = '#222'; ctx.fillRect(_bx, _by + 3, _bw, 6);
+      ctx.fillStyle = _mm.color; ctx.fillRect(_bx, _by + 3, _bw * Math.max(0.04, Math.min(1, _v / 200)), 6);
+    }
+    ctx.textAlign = 'center';
   }
 
   // Animated bikes
@@ -2646,7 +2676,10 @@ function drawTitle() {
   const bounce = Math.sin(t * 5) * 2;
   drawPixelBike(W / 2 - 120, bikeY + bounce, 28, '#a86', false, Math.sin(t * 3) * 0.05);
   drawPixelBike(W / 2 - 40, bikeY - 10 + Math.sin(t * 5 + 1) * 2, 32, '#a4f', false, 0);
-  drawPixelBike(W / 2 + 40, bikeY - 20 + Math.sin(t * 5 + 2) * 2, 36, statB.color, true, 0);
+  // Player slot = the selected baseling, falling back to the procedural bike.
+  if (!drawSelectedBaseling(ctx, W / 2 + 40, bikeY - 32 + Math.sin(t * 5 + 2) * 2, 40, { anim: 'idle', frame: frame })) {
+    drawPixelBike(W / 2 + 40, bikeY - 20 + Math.sin(t * 5 + 2) * 2, 36, statB.color, true, 0);
+  }
   drawPixelBike(W / 2 + 120, bikeY + bounce, 28, '#8cf', false, Math.sin(t * 3 + 2) * 0.05);
 
   // Instructions
@@ -2663,10 +2696,12 @@ function drawTitle() {
     'Race 8 reactor tracks. Finish Top 3 to advance!',
     'Fight spore riders, dodge fungal hazards, defeat bosses!',
     '',
-    '[ENTER] or [TAP] to start'
+    '[ENTER] or [TAP] to start',
+    '[C] SELECT BASELING'
   ];
   lines.forEach(function(line, i) {
-    ctx.fillStyle = i === lines.length - 1 ? (Math.sin(t * 3) > 0 ? '#f4b41b' : '#7a444a') : '#aaa';
+    if (line === '[C] SELECT BASELING') ctx.fillStyle = '#0052FF';
+    else ctx.fillStyle = i === lines.length - 2 ? (Math.sin(t * 3) > 0 ? '#f4b41b' : '#7a444a') : '#aaa';
     ctx.fillText(line, W / 2, H * 0.36 + i * 18);
   });
 
@@ -2985,6 +3020,7 @@ function gameLoop(timestamp) {
   if (!lastTime) lastTime = timestamp;
   const dt = Math.min(0.05, (timestamp - lastTime) / 1000);
   lastTime = timestamp;
+  frame++;
 
   ctx.clearRect(0, 0, W, H);
 
