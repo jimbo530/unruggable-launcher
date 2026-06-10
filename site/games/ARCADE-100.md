@@ -9,7 +9,7 @@ Theme: Tasern universe (baselings, poop, MfT tokens, hex world, reactors, fungi,
 - [x] blocks-burg (block puzzle)
 - [x] maze-runner (maze escape)
 - [x] rodeo-toad (Frogger style)
-- [x] meme-city (city builder)
+- [x] meme-city (1v1 fighter — Street Fighter style; the implemented game is a brawler, NOT a city builder)
 - [x] whodunit (mystery/detective)
 - [x] chess
 - [x] checkers
