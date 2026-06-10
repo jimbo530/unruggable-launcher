@@ -20,6 +20,7 @@ canvas { display: block; margin: 0 auto; }
 <a id="back-link" href="/games">Back to Arcade</a>
 <script src="nft-loader.js"></script>
 <script src="baseling-sprites.js"></script>
+<script src="baseling-player.js"></script>
 <script src="tasern-theme.js"></script>
 <script>if(window.NftLoader)NftLoader.gate();</script>
 <script src="tasern-art.js"></script>
@@ -33,9 +34,18 @@ const ctx = TAS.ctx;
 TAS.initCanvas(GW, GH);
 TAS.input.initTouch({ buttons: ['a', 'b'], labels: { a: 'JUMP', b: 'SPORE' } });
 
-// === BASELING STAT INTEGRATION ===
-var statB = { damage: 1, speed: 1, lives: 0, hpMult: 1, scoreMult: 1, cooldown: 1, luck: 1, str: 10, dex: 10, con: 10, int: 10, wis: 10, cha: 10, level: 0, color: '#44dd88', name: 'Baseling', icon: 'B' };
-try { if (window.NftLoader && NftLoader.getStatBonuses) statB = NftLoader.getStatBonuses(); } catch(e) {}
+// === BASELING STAT INTEGRATION (via BaselingPlayer.getMults — see ARCADE-STATS.md) ===
+// Single source of stat math: TAS.player.mults() -> {moveSpeed,health,damage,luck,swim}
+// clamped to the single-player band (0.8–1.6). Wired: moveSpeed -> speed/jump/bullet/
+// cooldown, health -> HP/lives, damage -> damage, luck -> drops/crit. Not a wager game.
+// statB keeps color/name/icon for display. recomputeStats() re-runs after a pick.
+var statB = { color: '#44dd88', name: 'Baseling', icon: 'B' };
+try {
+  if (window.NftLoader && NftLoader.getStatBonuses) {
+    var _b = NftLoader.getStatBonuses();
+    if (_b) { statB.color = _b.color || statB.color; statB.name = _b.name || statB.name; statB.icon = _b.icon || statB.icon; }
+  }
+} catch (e) { console.warn('[blaster-baseling] NftLoader display info failed:', e && e.message); }
 
 // === CONSTANTS ===
 const TILE = 16;
@@ -55,21 +65,40 @@ const GRENADE_SPEED = 150;
 const BASE_SHOOT_CD_TANK = 0.2;
 const BASE_SHOOT_CD_FOOT = 0.25;
 
-// Derived from statB (STR=damage, DEX=speed, CON=HP+lives, INT=score, WIS=cooldown, CHA=drops)
-var TANK_SPEED = BASE_TANK_SPEED * statB.speed;            // DEX → speed
-var TANK_JUMP = BASE_TANK_JUMP * statB.speed;              // DEX → jump power
-var FOOT_SPEED = BASE_FOOT_SPEED * statB.speed;            // DEX → foot speed
-var TANK_MAX_HP = Math.round(BASE_TANK_MAX_HP * statB.hpMult); // CON → tank HP
-var FOOT_MAX_HP = Math.round(BASE_FOOT_MAX_HP * statB.hpMult); // CON → foot HP
-var MAX_LIVES = BASE_MAX_LIVES + statB.lives;              // CON → extra lives
-var BULLET_SPEED = BASE_BULLET_SPEED * statB.speed;        // DEX → bullet speed
-var SHOOT_CD_TANK = BASE_SHOOT_CD_TANK * statB.cooldown;   // WIS → shoot cooldown
-var SHOOT_CD_FOOT = BASE_SHOOT_CD_FOOT * statB.cooldown;   // WIS → shoot cooldown
-var DMG_MULT = statB.damage;                                // STR → damage multiplier
-var SCORE_MULT = statB.scoreMult;                           // INT → score multiplier
-var DROP_CHANCE = 0.15 * statB.luck;                        // CHA → item drop chance
-var CRIT_CHANCE = Math.min(0.5, (statB.luck - 1) * 0.1);   // CHA → crit chance
-var HOVER_MAX = 60 + (statB.dex - 10) * 2;                 // DEX → hover fuel
+// Stat-driven constants (assigned by recomputeStats from the bounded multipliers):
+var TANK_SPEED, TANK_JUMP, FOOT_SPEED, TANK_MAX_HP, FOOT_MAX_HP, MAX_LIVES,
+    BULLET_SPEED, SHOOT_CD_TANK, SHOOT_CD_FOOT, DMG_MULT, SCORE_MULT,
+    DROP_CHANCE, CRIT_CHANCE, HOVER_MAX;
+var picking = false; // baseling character-select overlay open
+function recomputeStats() {
+  var m = (window.TAS && TAS.player) ? TAS.player.mults() : { moveSpeed: 1, health: 1, damage: 1, luck: 1, swim: 1 };
+  // Keep legacy statB fields populated from the bounded mults so the few inline reads
+  // (drop chance, grenade cooldown) and the on-screen stat panel keep working.
+  function dnd(x) { return Math.round(10 + (x - 1) * 20); }
+  statB.damage = m.damage; statB.speed = m.moveSpeed; statB.hpMult = m.health;
+  statB.luck = m.luck; statB.cooldown = 1 / m.moveSpeed; statB.scoreMult = 1; statB.lives = m.health > 1.3 ? 1 : 0;
+  statB.str = dnd(m.damage); statB.dex = dnd(m.moveSpeed); statB.con = dnd(m.health);
+  statB.int = dnd(m.luck); statB.wis = dnd(m.moveSpeed); statB.cha = dnd(m.luck);
+  statB.level = Math.round((statB.str + statB.dex + statB.con + statB.int + statB.wis + statB.cha) / 6);
+  TANK_SPEED    = BASE_TANK_SPEED * m.moveSpeed;
+  TANK_JUMP     = BASE_TANK_JUMP * Math.min(1.25, m.moveSpeed); // cap jump so 1.6x can't overshoot
+  FOOT_SPEED    = BASE_FOOT_SPEED * m.moveSpeed;
+  TANK_MAX_HP   = Math.round(BASE_TANK_MAX_HP * m.health);
+  FOOT_MAX_HP   = Math.round(BASE_FOOT_MAX_HP * m.health);
+  MAX_LIVES     = BASE_MAX_LIVES + (m.health > 1.3 ? 1 : 0);
+  BULLET_SPEED  = BASE_BULLET_SPEED * m.moveSpeed;
+  SHOOT_CD_TANK = BASE_SHOOT_CD_TANK / m.moveSpeed; // SPD -> faster cadence
+  SHOOT_CD_FOOT = BASE_SHOOT_CD_FOOT / m.moveSpeed;
+  DMG_MULT      = m.damage;
+  SCORE_MULT    = 1; // score is not a stat
+  DROP_CHANCE   = 0.15 * m.luck;
+  CRIT_CHANCE   = Math.min(0.5, (m.luck - 1) * 0.5); // LCK -> crit chance
+  HOVER_MAX     = Math.round(60 * m.moveSpeed);      // SPD -> hover fuel
+}
+recomputeStats();
+if (window.TAS && TAS.player) {
+  TAS.player.init().then(function () { recomputeStats(); }).catch(function (e) { console.warn('[blaster-baseling] player init failed:', e && e.message); });
+}
 
 // === ZONE DEFINITIONS ===
 const ZONE_COLORS = [
@@ -1590,6 +1619,13 @@ function update(dt) {
   updateTrails(dt);
 
   if (state === 'title') {
+    if (picking) return; // character-select overlay open — ignore game input
+    if (TAS.input.keys['KeyC']) {
+      TAS.input.keys['KeyC'] = false;
+      picking = true;
+      TAS.player.select(function () { recomputeStats(); picking = false; });
+      return;
+    }
     if (Object.values(TAS.input.keys).some(Boolean) || TAS.input.touch.a) {
       var hasSave = loadGame();
       startGame(hasSave);
@@ -1818,7 +1854,12 @@ function drawPlayer() {
   // === BASELING SPRITE ===
   var _bsW = mode === 'tank' ? TANK_W : FOOT_W;
   var _bsH = mode === 'tank' ? TANK_H : FOOT_H;
-  if (!TAS.drawBaseling(ctx, px + _bsW / 2, py + _bsH / 2, Math.max(_bsW, _bsH), { flipX: player.facing < 0, frame: frame })) {
+  // Animation from player state: hurt (invuln) > jump (airborne) > walk > idle.
+  var _anim = 'idle';
+  if (player.invuln > 0) _anim = 'hurt';
+  else if (!player.grounded) _anim = 'jump';
+  else if (player.vx) _anim = 'walk';
+  if (!TAS.drawBaseling(ctx, px + _bsW / 2, py + _bsH / 2, Math.max(_bsW, _bsH) + 4, { flipX: player.facing < 0, frame: frame, anim: _anim })) {
     if (mode === 'tank') {
       // Tank body - Spore Blaster purple
       ctx.fillStyle = '#7c3aed';
@@ -2678,12 +2719,16 @@ function drawTitleScreen() {
   ctx.fillText('B / X / ENTER ..... Fire Spores', GW / 2, GH * 0.65 + 50);
   ctx.fillText('SELECT / C ........ POOP Bomb (dungeon)', GW / 2, GH * 0.65 + 61);
 
-  // Baseling info
-  if (statB.level > 0) {
-    ctx.fillStyle = statB.color;
-    ctx.font = '9px monospace';
-    ctx.fillText('Playing as: ' + statB.name + ' (Lv.' + statB.level + ')', GW / 2, GH * 0.60);
+  // Selected baseling preview (idle bob) + name + picker prompt (Base-blue)
+  var _sel = (window.BaselingPlayer && BaselingPlayer.getSelected) ? BaselingPlayer.getSelected() : null;
+  if (!TAS.drawBaseling(ctx, GW / 2, GH * 0.40, 44, { anim: 'idle', frame: frame })) {
+    // no sprite (Wimmple) — title art carries the screen
   }
+  ctx.fillStyle = '#0052FF';
+  ctx.font = 'bold 10px monospace';
+  ctx.fillText((_sel ? _sel.charName : 'WIMMPLE') + (_sel && _sel.tokenId != null ? ' #' + _sel.tokenId : ''), GW / 2, GH * 0.52);
+  ctx.font = 'bold 9px monospace';
+  ctx.fillText('[C] SELECT BASELING', GW / 2, GH * 0.585);
 
   // Start prompt
   var pulse = Math.sin(frame * 0.05) * 0.3 + 0.7;
