@@ -17,6 +17,7 @@ canvas { display: block; margin: 0 auto; }
 <a id="back-link" href="/games">Back to Arcade</a>
 <script src="nft-loader.js"></script>
 <script src="baseling-sprites.js"></script>
+<script src="baseling-player.js"></script>
 <script src="tasern-theme.js"></script>
 <script>if(window.NftLoader)NftLoader.gate();</script>
 <script src="tasern-art.js"></script>
@@ -28,7 +29,11 @@ canvas { display: block; margin: 0 auto; }
 const GW = 320, GH = 400;
 const ctx = TAS.ctx;
 TAS.initCanvas(GW, GH);
-TAS.input.initTouch({ buttons: ['a', 'b'], labels: { a: 'JUMP', b: 'POOP' } });
+TAS.input.initTouch({ buttons: ['a', 'b', 'c'], labels: { a: 'JUMP', b: 'POOP', c: 'PICK' } });
+var picking = false; // baseling character-select overlay open
+if (window.TAS && TAS.player) {
+  TAS.player.init().then(function () { recomputeStats(); }).catch(function (e) { console.warn('[snow-bros] player init failed:', e && e.message); });
+}
 
 // === CONSTANTS ===
 const GRAVITY = 600;
@@ -51,8 +56,23 @@ const ZONES = [
 function getZone(lvl) { return ZONES[Math.min(Math.floor((lvl - 1) / 10), 4)]; }
 function getZoneIndex(lvl) { return Math.min(Math.floor((lvl - 1) / 10), 4); }
 
-// === NFT STAT BONUSES ===
+// === BASELING STATS (BaselingPlayer.getMults, see ARCADE-STATS.md) ===
+// Snow Bros is a WAGER game (tasern-wager.js) — stats use the tightened PvP band
+// (getMults({pvp:true}) -> 0.95-1.10) so a better-fed baseling has at most a ~10% edge,
+// not a wall. The game reads D&D-style fields + multiplier fields on statB; we synthesize
+// both from the five PvP-clamped multipliers in recomputeStats(). Raw str/dex/.. are mapped
+// to a near-zero band (so threshold checks like statB.str>=10 never fire); the actual edge
+// rides only on the clamped damage/speed/scoreMult fields.
+//   SPD -> move speed,  STA -> lives,  PWR -> sporeball power,  LCK -> drops/score.
 var statB = { str: 0, dex: 0, con: 0, int: 0, wis: 0, cha: 0, damage: 1, speed: 1, lives: 0, hpMult: 1, scoreMult: 1, cooldown: 1, luck: 1, color: null, name: '', icon: '', level: 0 };
+function recomputeStats() {
+  var m = (window.TAS && TAS.player) ? TAS.player.mults({ pvp: true }) : { moveSpeed: 1, health: 1, damage: 1, luck: 1, swim: 1 };
+  function raw(x) { return (x - 1) * 30; } // pvp 0.95..1.10 -> -1.5..+3 (tiny; thresholds never trip)
+  statB.damage = m.damage; statB.speed = m.moveSpeed; statB.hpMult = m.health;
+  statB.luck = m.luck; statB.scoreMult = m.luck; statB.cooldown = 1; statB.lives = 0;
+  statB.str = raw(m.damage); statB.dex = raw(m.moveSpeed); statB.con = raw(m.health);
+  statB.int = raw(m.luck);   statB.wis = raw(m.luck);     statB.cha = raw(m.luck);
+}
 
 // === GAME STATE ===
 let state = 'title';
@@ -332,9 +352,16 @@ function startGame() {
   totalKills = 0;
   pw_speed = pw_power = pw_range = pw_blast = false;
   pw_timer = 0;
-  // Load NFT stat bonuses
-  statB = (window.NftLoader && window.NftLoader.getStatBonuses) ? NftLoader.getStatBonuses() : { str: 0, dex: 0, con: 0, int: 0, wis: 0, cha: 0, damage: 1, speed: 1, lives: 0, hpMult: 1, scoreMult: 1, cooldown: 1, luck: 1, color: null, name: '', icon: '', level: 0 };
-  lives += statB.lives; // CON bonus lives
+  // Baseling stats (PvP band) — synthesized from BaselingPlayer.getMults({pvp:true}).
+  recomputeStats();
+  // Display-only fields (name/color/level) come from NftLoader if present.
+  try {
+    if (window.NftLoader && NftLoader.getStatBonuses) {
+      var _b = NftLoader.getStatBonuses();
+      if (_b) { statB.color = _b.color || statB.color; statB.name = _b.name || statB.name; statB.icon = _b.icon || statB.icon; }
+    }
+  } catch(e) { console.warn('[snow-bros] NftLoader display info failed:', e && e.message); }
+  lives += statB.lives; // 0 in PvP band
   TAS.particles.clear();
   initLevel();
 }
@@ -380,6 +407,13 @@ function update(dt) {
   }
 
   if (state === 'title') {
+    if (picking) return; // baseling picker overlay open — ignore game input
+    if (TAS.input.keys['KeyC'] || TAS.input.touch.c) {
+      TAS.input.keys['KeyC'] = false; TAS.input.touch.c = false;
+      picking = true;
+      TAS.player.select(function () { recomputeStats(); picking = false; });
+      return;
+    }
     if (Object.values(TAS.input.keys).some(Boolean) || TAS.input.touch.a || TAS.input.touch.b) {
       TAS.audio.ensureAudio();
       startGame();
@@ -498,8 +532,9 @@ function update(dt) {
     player.shootCooldown -= dt;
 
     if (ks) {
-      // Charged spore: STR >= 10 or damage >= 1.5
-      if (statB.str >= 10 || statB.damage >= 1.5) {
+      // Charged spore: a hold-to-charge SKILL mechanic, available to every player (this is
+      // a wager game — a stronger shot can't be gated behind how much a pet was fed).
+      {
         chargeTimer += dt;
         if (chargeTimer >= 0.5 && !chargeReady) {
           chargeReady = true;
@@ -1622,28 +1657,33 @@ function draw(dt) {
   if (!player.dead) {
     const flicker = player.invuln > 0 && Math.floor(frame / 3) % 2 === 0;
     if (!flicker) {
-      const pCol = statB.color || '#3cacd7';
-      // Body - your baseling
-      ctx.fillStyle = pCol;
-      ctx.beginPath();
-      ctx.arc(player.x + player.w / 2, player.y + player.h / 2, player.w / 2, 0, Math.PI * 2);
-      ctx.fill();
-      // Face
-      ctx.fillStyle = '#fff';
-      const eyeOff = player.dir > 0 ? 2 : -2;
-      ctx.fillRect(player.x + 4 + eyeOff, player.y + 4, 3, 3);
-      ctx.fillRect(player.x + 8 + eyeOff, player.y + 4, 3, 3);
-      ctx.fillStyle = '#114433';
-      ctx.fillRect(player.x + 5 + eyeOff, player.y + 5, 2, 2);
-      ctx.fillRect(player.x + 9 + eyeOff, player.y + 5, 2, 2);
-      // Mushroom cap (baseling cap)
-      ctx.fillStyle = '#38d973';
-      ctx.beginPath();
-      ctx.arc(player.x + player.w / 2, player.y + 1, 6, Math.PI, 0);
-      ctx.fill();
-      ctx.fillStyle = '#aaddaa';
-      ctx.fillRect(player.x + 5, player.y - 1, 2, 2);
-      ctx.fillRect(player.x + 9, player.y, 1, 1);
+      // === BASELING SPRITE === the player IS the selected baseling.
+      var _pcx = player.x + player.w / 2, _pcy = player.y + player.h / 2;
+      var _pAnim = (player.invuln > 0) ? 'hurt' : (!player.grounded ? 'jump' : (Math.abs(player.vx) > 1 ? 'walk' : 'idle'));
+      if (!TAS.drawBaseling(ctx, _pcx, _pcy, player.w + 6, { flipX: player.dir < 0, frame: frame, anim: _pAnim })) {
+        const pCol = statB.color || '#3cacd7';
+        // Body - your baseling (procedural fallback for Wimmple / no sprite)
+        ctx.fillStyle = pCol;
+        ctx.beginPath();
+        ctx.arc(_pcx, _pcy, player.w / 2, 0, Math.PI * 2);
+        ctx.fill();
+        // Face
+        ctx.fillStyle = '#fff';
+        const eyeOff = player.dir > 0 ? 2 : -2;
+        ctx.fillRect(player.x + 4 + eyeOff, player.y + 4, 3, 3);
+        ctx.fillRect(player.x + 8 + eyeOff, player.y + 4, 3, 3);
+        ctx.fillStyle = '#114433';
+        ctx.fillRect(player.x + 5 + eyeOff, player.y + 5, 2, 2);
+        ctx.fillRect(player.x + 9 + eyeOff, player.y + 5, 2, 2);
+        // Mushroom cap (baseling cap)
+        ctx.fillStyle = '#38d973';
+        ctx.beginPath();
+        ctx.arc(_pcx, player.y + 1, 6, Math.PI, 0);
+        ctx.fill();
+        ctx.fillStyle = '#aaddaa';
+        ctx.fillRect(player.x + 5, player.y - 1, 2, 2);
+        ctx.fillRect(player.x + 9, player.y, 1, 1);
+      }
       // Charge indicator
       if (chargeTimer > 0 && !chargeReady) {
         ctx.strokeStyle = '#88ff44';
@@ -1873,19 +1913,22 @@ function drawTitleScreen() {
   ctx.font = '10px monospace';
   ctx.fillText('A Baseling Adventure', GW / 2, 68);
 
-  // NFT stats display
-  if (statB.name) {
-    ctx.fillStyle = statB.color || '#38d973';
-    ctx.font = '8px monospace';
-    ctx.fillText(statB.name + ' Lv' + statB.level, GW / 2, 82);
-    ctx.fillStyle = '#888';
+  // Selected baseling name + 5 ARCADE stat bars (Base-blue accents)
+  var _sel = (window.BaselingPlayer && BaselingPlayer.getSelected) ? BaselingPlayer.getSelected() : null;
+  ctx.fillStyle = '#0052FF';
+  ctx.font = 'bold 9px monospace';
+  ctx.fillText((_sel ? _sel.charName : 'WIMMPLE') + (_sel && _sel.tokenId != null ? ' #' + _sel.tokenId : ''), GW / 2, 84);
+  if (_sel && _sel.stats && window.BaselingPlayer) {
+    var _meta = BaselingPlayer.STAT_META, _keys = BaselingPlayer.STAT_KEYS;
+    var _bw = 34, _bx0 = GW / 2 - (_keys.length * (_bw + 6)) / 2, _by = 95;
     ctx.font = '7px monospace';
-    ctx.fillText('STR:' + statB.str + ' DEX:' + statB.dex + ' CON:' + statB.con + ' INT:' + statB.int + ' WIS:' + statB.wis + ' CHA:' + statB.cha, GW / 2, 92);
-  }
-
-  // Stat bar (if NFT loaded)
-  if (window.NftLoader && NftLoader.drawStatBar) {
-    NftLoader.drawStatBar(ctx, GW * 0.15, GH * 0.24, GW * 0.7);
+    for (var _i = 0; _i < _keys.length; _i++) {
+      var _mm = _meta[_keys[_i]], _v = _sel.stats[_keys[_i]], _bx = _bx0 + _i * (_bw + 6);
+      ctx.fillStyle = _mm.color; ctx.textAlign = 'left'; ctx.fillText(_mm.label, _bx, _by);
+      ctx.fillStyle = '#222'; ctx.fillRect(_bx, _by + 3, _bw, 4);
+      ctx.fillStyle = _mm.color; ctx.fillRect(_bx, _by + 3, _bw * Math.max(0.04, Math.min(1, _v / 200)), 4);
+    }
+    ctx.textAlign = 'center';
   }
 
   // Instructions
@@ -1908,7 +1951,7 @@ function drawTitleScreen() {
   ctx.fillText('ARROW/WASD.....Move', GW / 2, cy);
   ctx.fillText('SPACE/UP.......Jump', GW / 2, cy + 11);
   ctx.fillText('Z/X............Spore', GW / 2, cy + 22);
-  ctx.fillText('HOLD Z (STR>=10)..Charged Spore', GW / 2, cy + 33);
+  ctx.fillText('HOLD Z.........Charged Spore', GW / 2, cy + 33);
 
   // Enemy types preview
   ctx.fillStyle = '#a855f7';
@@ -1924,15 +1967,17 @@ function drawTitleScreen() {
   }
 
   // Demo characters
-  // Player (your baseling)
-  ctx.fillStyle = '#3cacd7';
-  ctx.beginPath();
-  ctx.arc(GW / 2 - 50, 316, 8, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.fillStyle = '#38d973';
-  ctx.beginPath();
-  ctx.arc(GW / 2 - 50, 310, 5, Math.PI, 0);
-  ctx.fill();
+  // Player (your selected baseling), falling back to the procedural snowman.
+  if (!TAS.drawBaseling(ctx, GW / 2 - 50, 312, 22, { anim: 'idle', frame: frame })) {
+    ctx.fillStyle = '#3cacd7';
+    ctx.beginPath();
+    ctx.arc(GW / 2 - 50, 316, 8, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = '#38d973';
+    ctx.beginPath();
+    ctx.arc(GW / 2 - 50, 310, 5, Math.PI, 0);
+    ctx.fill();
+  }
 
   // Frost Mold
   ctx.fillStyle = '#55cc55';
@@ -1951,13 +1996,16 @@ function drawTitleScreen() {
   ctx.arc(sbx, 316, 6, 0, Math.PI * 2);
   ctx.fill();
 
-  // Start prompt
+  // Start prompt + [C] SELECT BASELING (Base-blue)
   const pulse = Math.sin(frame * 0.05) * 0.3 + 0.7;
   ctx.globalAlpha = pulse;
   ctx.fillStyle = '#f4b41b';
   ctx.font = 'bold 12px monospace';
   ctx.fillText('PRESS ANY KEY TO START', GW / 2, GH - 40);
   ctx.globalAlpha = 1;
+  ctx.fillStyle = '#0052FF';
+  ctx.font = 'bold 9px monospace';
+  ctx.fillText('[C] SELECT BASELING', GW / 2, GH - 24);
 }
 
 // === START ===

@@ -35,6 +35,7 @@ canvas{display:block;image-rendering:pixelated;}
 </div>
 <script src="nft-loader.js"></script>
 <script src="baseling-sprites.js"></script>
+<script src="baseling-player.js"></script>
 <script src="tasern-theme.js"></script>
 <script>if(window.NftLoader)NftLoader.gate();</script>
 <script>
@@ -45,22 +46,64 @@ canvas{display:block;image-rendering:pixelated;}
 const C = document.getElementById('gc');
 const X = C.getContext('2d');
 
-// --- BASELING STAT INTEGRATION (PASS 1) ---
+// --- BASELING STAT INTEGRATION ---
+// Spore City is a 1v1 FIGHTER: the selected baseling is the P1 fighter body; P2 stays a
+// CHARS opponent (CPU, or P2 in versus). Stats come from BaselingPlayer.getMults() (see
+// ARCADE-STATS.md) — the single source of stat math. This game is NOT in tasern-wager.js,
+// so it uses the single-player band (0.8-1.6). The 20 P1 integration points below read a
+// D&D-style statB; rather than rewrite them, we synthesize statB from the five bounded
+// multipliers and recompute the derived stat* globals in recomputeStats():
+//   SPD -> walk/dash speed,  STA -> max HP,  PWR -> attack/special damage + block-break,
+//   LCK -> crit chance + super-meter gain rate.  (No INT/WIS/CHA stat -> luck-flavored.)
 var statB = { damage: 1, speed: 1, lives: 0, hpMult: 1, scoreMult: 1, cooldown: 1, luck: 1, str: 10, dex: 10, con: 10, int: 10, wis: 10, cha: 10, level: 0, color: '#44dd88', name: 'Baseling', icon: 'B' };
-try { if (window.NftLoader && NftLoader.getStatBonuses) statB = NftLoader.getStatBonuses(); } catch(e) { console.warn('StatB load failed:', e); }
+var statDamageMult = 1, statSpeedMult = 1, statHpMult = 1, statSuperGain = 1;
+var statCooldownMult = 1, statComboMult = 1, statLevelBonus = 0, statLuckCrit = 0.05;
 
-// Derived stat multipliers from baseling stats
-var statDamageMult = 1 + (statB.str - 10) * 0.03;       // [1] STR: +3% damage per point above 10
-var statSpeedMult = 1 + (statB.dex - 10) * 0.02;        // [2] DEX: +2% move speed per point
-var statHpMult = 1 + (statB.con - 10) * 0.04;           // [3] CON: +4% HP per point
-var statSuperGain = 1 + (statB.int - 10) * 0.03;        // [4] INT: +3% super meter gain
-var statCooldownMult = 1 - (statB.wis - 10) * 0.015;    // [5] WIS: -1.5% recovery frames
-var statComboMult = 1 + (statB.cha - 10) * 0.02;        // [6] CHA: +2% combo damage retention
-var statLevelBonus = statB.level * 0.01;                  // [7] Level: +1% all stats per level
-var statLuckCrit = 0.05 + (statB.luck - 1) * 0.02;      // [8] Luck: crit chance
-statDamageMult += statLevelBonus;
-statSpeedMult += statLevelBonus;
-statHpMult += statLevelBonus;
+function recomputeStats() {
+  var m = (window.BaselingPlayer && BaselingPlayer.getMults) ? BaselingPlayer.getMults() : { moveSpeed: 1, health: 1, damage: 1, luck: 1, swim: 1 };
+  function dnd(x) { return Math.round(10 + (x - 1) * 20); } // mult 1.0->10, 0.8->6, 1.6->22
+  statB.damage = m.damage; statB.speed = m.moveSpeed; statB.hpMult = m.health; statB.luck = m.luck;
+  statB.str = dnd(m.damage);    // STR -> P1 attack/special damage + block-break
+  statB.dex = dnd(m.moveSpeed); // DEX -> P1 walk/dash speed
+  statB.con = dnd(m.health);    // CON -> P1 max HP
+  statB.int = dnd(m.luck);      // INT -> P1 super-meter gain (luck flavor)
+  statB.wis = dnd(m.luck);      // WIS -> P1 recovery frames (luck flavor)
+  statB.cha = dnd(m.luck);      // CHA -> P1 combo retention (luck flavor)
+  statDamageMult = 1 + (statB.str - 10) * 0.03;
+  statSpeedMult  = 1 + (statB.dex - 10) * 0.02;
+  statHpMult     = 1 + (statB.con - 10) * 0.04;
+  statSuperGain  = 1 + (statB.int - 10) * 0.03;
+  statCooldownMult = 1 - (statB.wis - 10) * 0.015;
+  statComboMult  = 1 + (statB.cha - 10) * 0.02;
+  // Luck-based crit: getMults luck is ~0.8-1.6, map to a 5%-~14% crit band centered at neutral.
+  statLuckCrit   = Math.max(0.02, 0.05 + (m.luck - 1) * 0.15);
+}
+try {
+  if (window.NftLoader && NftLoader.getStatBonuses) {
+    var _b = NftLoader.getStatBonuses();
+    if (_b) { statB.color = _b.color || statB.color; statB.name = _b.name || statB.name; statB.icon = _b.icon || statB.icon; }
+  }
+} catch(e) { console.warn('[meme-city] NftLoader display info failed:', e && e.message); }
+recomputeStats();
+
+var picking = false; // baseling character-select overlay open
+var frame = 0;       // global animation clock (incremented each game-loop tick)
+if (window.BaselingPlayer && BaselingPlayer.init) {
+  BaselingPlayer.init().then(function () { recomputeStats(); }).catch(function (e) { console.warn('[meme-city] player init failed:', e && e.message); });
+}
+
+// Local sprite-draw helper (meme-city has no TAS engine). Draws the selected baseling at
+// (x,y) center, size px; returns true if a real sprite drew, false to use the fallback.
+function drawSelectedBaseling(c, x, y, size, opts) {
+  if (!window.BaselingPlayer || !window.BaselingSprites) return false;
+  var sel = BaselingPlayer.getSelected();
+  if (!sel || !sel.charId) return false;
+  if (!BaselingSprites.isLoaded(sel.charId)) {
+    if (!BaselingSprites.hasFailed(sel.charId)) BaselingSprites.load(sel.charId, sel.colorVariant);
+    return false;
+  }
+  return BaselingSprites.draw(c, sel.charId, sel.colorVariant, sel.sparkle, x, y, size, opts || {});
+}
 
 // --- SIZING ---
 let W = 800, H = 500;
@@ -1496,11 +1539,29 @@ function drawFighter(f) {
   const bodyMidY = -h * 0.55 + bob;
   const hipY = -h * 0.35 + bob;
 
-  // Shadow
+  // Shadow (kept for both fighters — grounds the baseling sprite too)
   X.fillStyle = 'rgba(0,0,0,0.3)';
   X.beginPath();
   X.ellipse(0, 2, ch.width * 0.6, 6, 0, 0, Math.PI * 2);
   X.fill();
+
+  // === P1 BASELING SPRITE ===
+  // The player's selected baseling IS the P1 fighter body. Draw it over the procedural
+  // stick-figure, centered on the body; falls through to the procedural draw for Wimmple
+  // (no art) or P2 (always a CHARS opponent). Effect shadows set above still apply.
+  if (!f.isP2) {
+    var _bAnim = 'idle';
+    if (f.state === 'attack' || f.state === 'dashAtk') _bAnim = 'attack';
+    else if (f.state === 'hitstun' || f.state === 'thrown' || f.state === 'blockstun') _bAnim = 'hurt';
+    else if (f.state === 'knockdown') _bAnim = 'ko';
+    else if (!f.grounded) _bAnim = 'jump';
+    else if (f.state === 'walk') _bAnim = 'walk';
+    var _bSize = h + 24; // cover head + body
+    if (drawSelectedBaseling(X, 0, -h * 0.5 + bob, _bSize, { flipX: f.facing < 0, frame: frame, anim: _bAnim })) {
+      X.restore();
+      return;
+    }
+  }
 
   // --- BODY ---
   X.strokeStyle = ch.color;
@@ -1998,38 +2059,49 @@ function drawTitle() {
   }
   X.globalAlpha = 1;
 
+  // Selected baseling preview (the P1 fighter), centered above the prompt.
+  if (!drawSelectedBaseling(X, W / 2, titleY + 150, 96, { anim: 'idle', frame: frame })) {
+    // Wimmple / no sprite — the silhouettes carry the screen.
+  }
+
   // Press start
   X.font = 'bold 20px Courier New';
   X.fillStyle = 'rgba(255,255,255,' + (0.5 + Math.sin(Date.now() * 0.004) * 0.5) + ')';
-  X.fillText('PRESS ENTER OR TAP TO START', W / 2, H - 70);
+  X.fillText('PRESS ENTER OR TAP TO START', W / 2, H - 92);
+
+  // Selected baseling name + 5 ARCADE stat bars (Base-blue accents)
+  var _sel = (window.BaselingPlayer && BaselingPlayer.getSelected) ? BaselingPlayer.getSelected() : null;
+  X.font = 'bold 14px Courier New';
+  X.fillStyle = '#0052FF';
+  X.fillText((_sel ? _sel.charName : 'WIMMPLE') + (_sel && _sel.tokenId != null ? ' #' + _sel.tokenId : ''), W / 2, H - 72);
+  if (_sel && _sel.stats && window.BaselingPlayer) {
+    var _meta = BaselingPlayer.STAT_META, _keys = BaselingPlayer.STAT_KEYS;
+    var _bw = 46, _bx0 = W / 2 - (_keys.length * (_bw + 8)) / 2, _by = H - 62;
+    X.font = '9px Courier New';
+    for (var _i = 0; _i < _keys.length; _i++) {
+      var _mm = _meta[_keys[_i]], _v = _sel.stats[_keys[_i]], _bx = _bx0 + _i * (_bw + 8);
+      X.fillStyle = _mm.color; X.textAlign = 'left'; X.fillText(_mm.label, _bx, _by);
+      X.fillStyle = '#222'; X.fillRect(_bx, _by + 3, _bw, 5);
+      X.fillStyle = _mm.color; X.fillRect(_bx, _by + 3, _bw * Math.max(0.04, Math.min(1, _v / 200)), 5);
+    }
+    X.textAlign = 'center';
+  }
 
   // NES Controls display
   X.font = '10px Courier New';
   X.fillStyle = '#555';
-  var ctrlY = H - 48;
+  var ctrlY = H - 40;
   X.fillText('P1: WASD Move | J Light | K Medium | L Heavy | U Special', W / 2, ctrlY);
-  X.fillText('P2: Arrows Move | Num1 Light | Num2 Medium | Num3 Heavy | Num0 Special', W / 2, ctrlY + 14);
-  X.fillText('Down+Special = SUPER (when meter full)  |  Forward+Light = THROW', W / 2, ctrlY + 28);
+  X.fillText('Down+Special = SUPER  |  Forward+Light = THROW', W / 2, ctrlY + 13);
 
-  // Baseling stat display
-  if (statB.level > 0) {
-    X.font = 'bold 11px Courier New';
-    X.fillStyle = statB.color || '#44dd88';
-    X.fillText('Baseling: ' + statB.name + ' (Lv.' + statB.level + ')', W / 2, ctrlY - 16);
+  // [C] SELECT BASELING prompt (Base-blue) + wallet hint
+  X.font = 'bold 11px Courier New';
+  X.fillStyle = '#0052FF';
+  X.fillText('[C] SELECT BASELING', W / 2, ctrlY + 28);
+  if (window.ethereum && window.NftLoader && !window.NftLoader.wallet) {
     X.font = '9px Courier New';
-    X.fillStyle = '#888';
-    X.fillText('STR:' + statB.str + ' DEX:' + statB.dex + ' CON:' + statB.con + ' INT:' + statB.int + ' WIS:' + statB.wis + ' CHA:' + statB.cha, W / 2, ctrlY - 4);
-  }
-
-  // NFT status
-  if (window.NftLoader && window.NftLoader.selectedCharacter) {
-    X.font = 'bold 12px Courier New';
-    X.fillStyle = window.NftLoader.selectedCharacter.color || '#a855f7';
-    X.fillText('Your Baseling: ' + window.NftLoader.selectedCharacter.name, W / 2, H - 8);
-  } else if (window.ethereum && window.NftLoader && !window.NftLoader.wallet) {
-    X.font = '11px Courier New';
     X.fillStyle = '#444';
-    X.fillText('Press W to Connect Wallet for Baseling Bonuses', W / 2, H - 8);
+    X.fillText('Press W to connect wallet for your baselings', W / 2, ctrlY + 40);
   }
 
   X.restore();
@@ -2470,6 +2542,7 @@ function gameLoop(timestamp) {
 
   while (frameAccum >= FRAME_TIME) {
     frameAccum -= FRAME_TIME;
+    frame++;
     update();
     for (const k in keys) prevKeys[k] = keys[k];
   }
@@ -2480,8 +2553,17 @@ function gameLoop(timestamp) {
 function update() {
   bgScroll += 0.3;
 
+  // Baseling character-select overlay is open — swallow game input until it closes.
+  if (picking) return;
+
   switch (gameState) {
     case 'title':
+      // Open the baseling picker (C). The selected baseling becomes the P1 fighter.
+      if (justPressed('KeyC') && window.BaselingPlayer) {
+        picking = true;
+        BaselingPlayer.select(function () { recomputeStats(); picking = false; });
+        break;
+      }
       if (justPressed('KeyW') && window.NftLoader && !window.NftLoader.wallet && window.ethereum) {
         window.NftLoader.connectWallet().then(function(addr) {
           if (addr) window.NftLoader.checkNFTs().then(function(chars) {
@@ -2661,15 +2743,12 @@ function startMatch() {
   p2Wins = 0;
   roundNum = 1;
   matchStats = { p1Hits: 0, p2Hits: 0, p1Combos: 0, p2Combos: 0, p1Supers: 0, p2Supers: 0, p1Crits: 0, p2Crits: 0 };
+  // P1 stat buffs now flow through statB (synthesized from BaselingPlayer.getMults() in
+  // recomputeStats()); keep these legacy hooks neutral so buffs aren't double-applied.
+  recomputeStats();
   nftDamageMultiplier = 1;
   nftBonusHp = 0;
   nftFighterColor = null;
-  if (window.NftLoader && window.NftLoader.selectedCharacter) {
-    var bonuses = window.NftLoader.getBonuses();
-    nftBonusHp = Math.floor(CHARS[p1Char].hp * 0.15);
-    nftDamageMultiplier = bonuses.scoreMultiplier;
-    nftFighterColor = bonuses.color;
-  }
   // Pick arena
   currentArena = Math.floor(Math.random() * ARENAS.length);
   bossActive = p2Char === 7;

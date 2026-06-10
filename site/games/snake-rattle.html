@@ -17,6 +17,7 @@ canvas { display: block; margin: 0 auto; image-rendering: pixelated; image-rende
 <a id="back-link" href="/games">Back to Arcade</a>
 <script src="nft-loader.js"></script>
 <script src="baseling-sprites.js"></script>
+<script src="baseling-player.js"></script>
 <script src="tasern-theme.js"></script>
 <script>if(window.NftLoader)NftLoader.gate();</script>
 <script src="tasern-art.js"></script>
@@ -25,29 +26,58 @@ canvas { display: block; margin: 0 auto; image-rendering: pixelated; image-rende
 (function(){
 "use strict";
 
-// === STAT BONUSES (NftLoader) ===
+// === BASELING STATS (BaselingPlayer.getMults, see ARCADE-STATS.md) ===
+// The single source of stat math, clamped to the single-player band (0.8-1.6). The snake's
+// derived globals read a D&D-style statB; rather than rewrite them, we synthesize statB from
+// the five bounded multipliers and recompute the derived globals in recomputeStats(), re-run
+// after a title-screen pick. The snake HEAD is the selected baseling; body stays procedural.
+//   SPD -> move speed,  STA -> lives,  PWR -> tongue damage/range,  LCK -> score/spawns.
+//   SWM is unused: water tiles are hazards here, not a traversable speed zone (don't fake it).
 var statB = { damage: 1, speed: 1, lives: 0, hpMult: 1, scoreMult: 1, cooldown: 1, luck: 1, str: 10, dex: 10, con: 10, int: 10, wis: 10, cha: 10, level: 0, color: '#44dd88', name: 'Baseling', icon: 'B' };
-try { if (window.NftLoader && NftLoader.getStatBonuses) statB = NftLoader.getStatBonuses(); } catch(e) { console.warn('NftLoader stat load failed:', e); }
-
-// === STAT DERIVATIONS ===
-// STR: tongue damage, tongue range, segment loss reduction
-// DEX: move speed, ice control, dodge chance
-// CON: extra lives, spike resistance, HP mult
-// INT: score multiplier, timer bonus, gate insight
-// WIS: nibbley detection range, gold spawn rate, hazard sense
-// CHA: nibbley value boost, better spawns, enemy hesitation
-var strMod = Math.floor((statB.str - 10) / 2);
-var dexMod = Math.floor((statB.dex - 10) / 2);
-var conMod = Math.floor((statB.con - 10) / 2);
-var intMod = Math.floor((statB.int - 10) / 2);
-var wisMod = Math.floor((statB.wis - 10) / 2);
-var chaMod = Math.floor((statB.cha - 10) / 2);
+var strMod = 0, dexMod = 0, conMod = 0, intMod = 0, wisMod = 0, chaMod = 0;
+function syncMods() {
+  strMod = Math.floor((statB.str - 10) / 2);
+  dexMod = Math.floor((statB.dex - 10) / 2);
+  conMod = Math.floor((statB.con - 10) / 2);
+  intMod = Math.floor((statB.int - 10) / 2);
+  wisMod = Math.floor((statB.wis - 10) / 2);
+  chaMod = Math.floor((statB.cha - 10) / 2);
+}
+function recomputeStats() {
+  var m = (window.TAS && TAS.player) ? TAS.player.mults() : { moveSpeed: 1, health: 1, damage: 1, luck: 1, swim: 1 };
+  function dnd(x) { return Math.round(10 + (x - 1) * 20); } // mult 1.0->10, 0.8->6, 1.6->22
+  statB.damage = m.damage; statB.speed = m.moveSpeed; statB.hpMult = m.health; statB.luck = m.luck; statB.scoreMult = 1;
+  statB.str = dnd(m.damage);    // STR -> tongue damage/range, segment loss reduction
+  statB.dex = dnd(m.moveSpeed); // DEX -> move speed
+  statB.con = dnd(m.health);    // CON -> extra lives
+  statB.int = dnd(m.luck);      // INT -> score multiplier (luck flavor)
+  statB.wis = dnd(m.luck);      // WIS -> detection/spawn (luck flavor)
+  statB.cha = dnd(m.luck);      // CHA -> nibbley value, spawns
+  syncMods();
+  // Recompute the derived movement/combat globals from the refreshed mods.
+  MOVE_SPEED = BASE_MOVE_SPEED + dexMod * 0.15; if (MOVE_SPEED < 1.5) MOVE_SPEED = 1.5;
+  TONGUE_RANGE = BASE_TONGUE_RANGE + strMod * 0.2; if (TONGUE_RANGE < 1.2) TONGUE_RANGE = 1.2;
+  TONGUE_DAMAGE = Math.max(1, statB.damage + Math.floor(strMod * 0.5));
+  SCORE_MULT = Math.max(1, statB.scoreMult + intMod * 0.1);
+  if (typeof COLORS !== 'undefined') {
+    COLORS.snake = statB.color || '#44cc44';
+    COLORS.snakeHead = lightenColorSafe(statB.color || '#44cc44', 40);
+  }
+}
+try {
+  if (window.NftLoader && NftLoader.getStatBonuses) {
+    var _b = NftLoader.getStatBonuses();
+    if (_b) { statB.color = _b.color || statB.color; statB.name = _b.name || statB.name; statB.icon = _b.icon || statB.icon; }
+  }
+} catch(e) { console.warn('[snake-rattle] NftLoader display info failed:', e && e.message); }
+syncMods();
+var picking = false; // baseling character-select overlay open
 
 // === CONSTANTS ===
 var GW = 400, GH = 400;
 var ctx = TAS.ctx;
 TAS.initCanvas(GW, GH);
-TAS.input.initTouch({ buttons: ['a'], labels: { a: 'TONGUE' } });
+TAS.input.initTouch({ buttons: ['a', 'c'], labels: { a: 'TONGUE', c: 'PICK' } });
 
 // Isometric tile dimensions
 var TW = 32;
@@ -203,6 +233,13 @@ var COLORS = {
   lava: '#ff4400',
   crystal: '#aaddff'
 };
+
+// Now that COLORS exists, do a full stat recompute (also refreshes snake colors) and boot
+// the shared player module (silent — never pops a wallet dialog).
+recomputeStats();
+if (window.TAS && TAS.player) {
+  TAS.player.init().then(function () { recomputeStats(); }).catch(function (e) { console.warn('[snake-rattle] player init failed:', e && e.message); });
+}
 
 // === BASELING ENEMY TYPES ===
 var ENEMY_TYPES = [
@@ -822,6 +859,13 @@ function update(dt) {
   updateScorePopups(dt);
 
   if (state === 'title') {
+    if (picking) return; // baseling picker overlay open — ignore game input
+    if (TAS.input.keys['KeyC'] || TAS.input.touch.c) {
+      TAS.input.keys['KeyC'] = false; TAS.input.touch.c = false;
+      picking = true;
+      TAS.player.select(function () { recomputeStats(); picking = false; });
+      return;
+    }
     if (Object.values(TAS.input.keys).some(Boolean) || TAS.input.touch.a) {
       startGame();
     }
@@ -1878,28 +1922,38 @@ function drawSnake() {
       ctx.globalAlpha = 0.5 + Math.sin(frame * 0.2) * 0.2;
     }
 
-    // NES pixel sphere body
-    drawPixelCircle(sx, sy - radius * 0.5, radius, segColor);
-    // Highlight
-    drawPixelRect(sx - radius * 0.4, sy - radius, 2, 2, lightenColor(segColor, 50));
+    // === BASELING SPRITE on the HEAD === (body segments stay procedural spheres).
+    var _headSprite = false;
+    if (i === 0 && window.TAS && TAS.drawBaseling) {
+      var _hAnim = (powerUps.speed > 0) ? 'walk' : 'idle';
+      _headSprite = TAS.drawBaseling(ctx, sx, sy - radius * 0.5, radius * 2.5,
+        { flipX: DIR_DX[snakeDir] < 0, frame: frame, anim: _hAnim });
+    }
+
+    if (!_headSprite) {
+      // NES pixel sphere body
+      drawPixelCircle(sx, sy - radius * 0.5, radius, segColor);
+      // Highlight
+      drawPixelRect(sx - radius * 0.4, sy - radius, 2, 2, lightenColor(segColor, 50));
+    }
 
     if (powerUps.phase > 0) ctx.globalAlpha = 1;
 
-    // Head details
+    // Head details (procedural eyes only when the sprite didn't draw)
     if (i === 0) {
-      // Baseling icon on head
-      ctx.fillStyle = '#fff';
-      ctx.font = 'bold 5px monospace';
-      ctx.textAlign = 'center';
-
-      // Eyes (NES pixel)
-      var eyeOff = DIR_DX[snakeDir] * 2;
-      var eyeOffY = DIR_DY[snakeDir] * 1;
-      drawPixelRect(sx + eyeOff - 3, sy - radius * 0.5 + eyeOffY - 3, 2, 2, '#fff');
-      drawPixelRect(sx + eyeOff + 1, sy - radius * 0.5 + eyeOffY - 3, 2, 2, '#fff');
-      // Pupils
-      drawPixelRect(sx + eyeOff - 2 + DIR_DX[snakeDir], sy - radius * 0.5 + eyeOffY - 2, 1, 1, '#111');
-      drawPixelRect(sx + eyeOff + 2 + DIR_DX[snakeDir], sy - radius * 0.5 + eyeOffY - 2, 1, 1, '#111');
+      if (!_headSprite) {
+        ctx.fillStyle = '#fff';
+        ctx.font = 'bold 5px monospace';
+        ctx.textAlign = 'center';
+        // Eyes (NES pixel)
+        var eyeOff = DIR_DX[snakeDir] * 2;
+        var eyeOffY = DIR_DY[snakeDir] * 1;
+        drawPixelRect(sx + eyeOff - 3, sy - radius * 0.5 + eyeOffY - 3, 2, 2, '#fff');
+        drawPixelRect(sx + eyeOff + 1, sy - radius * 0.5 + eyeOffY - 3, 2, 2, '#fff');
+        // Pupils
+        drawPixelRect(sx + eyeOff - 2 + DIR_DX[snakeDir], sy - radius * 0.5 + eyeOffY - 2, 1, 1, '#111');
+        drawPixelRect(sx + eyeOff + 2 + DIR_DX[snakeDir], sy - radius * 0.5 + eyeOffY - 2, 1, 1, '#111');
+      }
 
       // Speed boost trail
       if (powerUps.speed > 0) {
@@ -2100,27 +2154,22 @@ function drawTitleScreen() {
   ctx.font = '11px monospace';
   ctx.fillText('A Baseling Tale', GW / 2, 90);
 
-  // Baseling info
-  ctx.fillStyle = statB.color;
+  // Selected baseling name (Base-blue) + 5 ARCADE stat bars
+  var _sel = (window.BaselingPlayer && BaselingPlayer.getSelected) ? BaselingPlayer.getSelected() : null;
+  ctx.fillStyle = '#0052FF';
   ctx.font = 'bold 10px monospace';
-  ctx.fillText(statB.icon + ' ' + statB.name + ' (Lv' + statB.level + ')', GW / 2, 108);
-
-  // Stat display (NES pixel bars)
-  var statNames = ['STR', 'DEX', 'CON', 'INT', 'WIS', 'CHA'];
-  var statVals = [statB.str, statB.dex, statB.con, statB.int, statB.wis, statB.cha];
-  var statColors = ['#ff6644', '#ffaa33', '#44cc44', '#4488ff', '#aa88ff', '#ff88aa'];
-  for (var si = 0; si < 6; si++) {
-    var ssx = GW / 2 - 80 + (si % 3) * 55;
-    var ssy = 118 + Math.floor(si / 3) * 14;
-    ctx.fillStyle = '#666';
-    ctx.font = '7px monospace';
-    ctx.textAlign = 'left';
-    ctx.fillText(statNames[si], ssx, ssy);
-    drawPixelRect(ssx + 22, ssy - 5, 24, 4, '#222');
-    var statFill = Math.min(statVals[si] / 20, 1);
-    drawPixelRect(ssx + 22, ssy - 5, Math.floor(24 * statFill), 4, statColors[si]);
-    ctx.fillStyle = statColors[si];
-    ctx.fillText(statVals[si], ssx + 48, ssy);
+  ctx.fillText((_sel ? _sel.charName : 'WIMMPLE') + (_sel && _sel.tokenId != null ? ' #' + _sel.tokenId : ''), GW / 2, 108);
+  if (_sel && _sel.stats && window.BaselingPlayer) {
+    var _meta = BaselingPlayer.STAT_META, _keys = BaselingPlayer.STAT_KEYS;
+    var _bw = 38, _bx0 = GW / 2 - (_keys.length * (_bw + 8)) / 2, _by = 122;
+    ctx.font = '8px monospace';
+    for (var _i = 0; _i < _keys.length; _i++) {
+      var _mm = _meta[_keys[_i]], _v = _sel.stats[_keys[_i]], _bx = _bx0 + _i * (_bw + 8);
+      ctx.fillStyle = _mm.color; ctx.textAlign = 'left'; ctx.fillText(_mm.label, _bx, _by);
+      drawPixelRect(_bx, _by + 3, _bw, 5, '#222');
+      drawPixelRect(_bx, _by + 3, Math.floor(_bw * Math.max(0.04, Math.min(1, _v / 200))), 5, _mm.color);
+    }
+    ctx.textAlign = 'center';
   }
 
   // Animated NES pixel snake
@@ -2131,10 +2180,15 @@ function drawTitleScreen() {
     var tsy = 170 + Math.sin(angle * 1.5) * 15 + ts * 2;
     var trad = ts === 0 ? 6 : 5 - ts * 0.2;
     var tsColor = ts === 0 ? COLORS.snakeHead : COLORS.snake;
-    drawPixelCircle(tsx, tsy, trad, tsColor);
-    if (ts === 0) {
-      drawPixelRect(tsx - 1, tsy - 3, 2, 2, '#fff');
-      drawPixelRect(tsx + 1, tsy - 3, 2, 2, '#fff');
+    if (ts === 0 && window.TAS && TAS.drawBaseling &&
+        TAS.drawBaseling(ctx, tsx, tsy, trad * 2.5, { anim: 'idle', frame: frame })) {
+      // baseling head drawn
+    } else {
+      drawPixelCircle(tsx, tsy, trad, tsColor);
+      if (ts === 0) {
+        drawPixelRect(tsx - 1, tsy - 3, 2, 2, '#fff');
+        drawPixelRect(tsx + 1, tsy - 3, 2, 2, '#fff');
+      }
     }
   }
 
@@ -2167,6 +2221,9 @@ function drawTitleScreen() {
   ctx.font = 'bold 12px monospace';
   ctx.fillText('PRESS ANY KEY TO START', GW / 2, GH - 30);
   ctx.globalAlpha = 1;
+  ctx.fillStyle = '#0052FF';
+  ctx.font = 'bold 9px monospace';
+  ctx.fillText('[C] SELECT BASELING', GW / 2, GH - 14);
 }
 
 function drawLevelClear() {
