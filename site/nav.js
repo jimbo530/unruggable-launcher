@@ -7,6 +7,7 @@
 const NAV_CATEGORIES = {
   'DeFi Tools': [
     { href: 'generator.html', label: 'Impact Generator' },
+    { href: 'vaults/index.html', label: 'Community Vaults' },
     { href: '/fund/', label: 'Charity Funds' },
     { href: 'adopt.html', label: 'Adopt a Token' },
     { href: 'card-shop.html', label: 'Card Shop' },
@@ -38,7 +39,7 @@ const NAV_CATEGORIES = {
 function _navPrefix() {
   // Detect if we're in a subdirectory (e.g., games/)
   const path = window.location.pathname;
-  if (path.includes('/games/') || path.includes('/fund/') || path.includes('/marketplace/')) return '../';
+  if (path.includes('/games/') || path.includes('/fund/') || path.includes('/marketplace/') || path.includes('/vaults/')) return '../';
   return '';
 }
 
