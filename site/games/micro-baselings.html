@@ -25,34 +25,46 @@ canvas { display: block; margin: 0 auto; }
 (function(){
 "use strict";
 
-// === BASELING STAT INTEGRATION (Pass 1) ===
+// === BASELING STAT INTEGRATION (via BaselingPlayer.getMults — see ARCADE-STATS.md) ===
+// WAGER game -> TAS.player.mults({ pvp:true }) (tight 0.95–1.10 fairness band). The derived
+// DEX_SPEED/STR_DAMAGE/etc constants are reassigned from the clamped mults in recomputeStats()
+// so a title-screen character change takes effect; statB.color/name/icon are kept for display.
+// Racing-sports wiring: DEX_SPEED<-moveSpeed, STR_DAMAGE<-damage, CON_HP<-health,
+// INT_SCORE/CHA_DROPS<-luck, WIS_COOLDOWN<-1/moveSpeed (faster pet, snappier cooldowns).
+// One track is a WATER zone -> SWM is applied to speed there only (see applyZoneSpeed below).
 var statB = { damage: 1, speed: 1, lives: 0, hpMult: 1, scoreMult: 1, cooldown: 1, luck: 1, str: 10, dex: 10, con: 10, int: 10, wis: 10, cha: 10, level: 0, color: '#44dd88', name: 'Baseling', icon: 'B' };
-try { if (window.NftLoader && NftLoader.getStatBonuses) statB = NftLoader.getStatBonuses(); } catch(e) {}
+try { if (window.NftLoader && NftLoader.getStatBonuses) { var _b = NftLoader.getStatBonuses(); if (_b) { statB.color = _b.color || statB.color; statB.name = _b.name || statB.name; statB.icon = _b.icon || statB.icon; } } }
+catch (e) { console.warn('[micro-baselings] NftLoader display info failed:', e && e.message); }
 
-// Derived stats from baseling attributes
-var STR_DAMAGE = 1 + (statB.str - 10) * 0.08;        // STR -> collision/missile damage
-var DEX_SPEED = 1 + (statB.dex - 10) * 0.06;          // DEX -> max speed & turn rate
-var CON_HP = 1 + (statB.con - 10) * 0.05;              // CON -> hp multiplier & extra lives
-var INT_SCORE = 1 + (statB.int - 10) * 0.07;           // INT -> score multiplier
-var WIS_COOLDOWN = 1 - (statB.wis - 10) * 0.03;        // WIS -> cooldown reduction (lower = better)
-var CHA_DROPS = 1 + (statB.cha - 10) * 0.06;           // CHA -> powerup drop rate boost
-var STAT_LEVEL = statB.level || 0;
-var EXTRA_LIVES = statB.con >= 15 ? (statB.con >= 20 ? 2 : 1) : 0; // CON 15+ = +1 life, 20+ = +2
+// Derived stats — assigned in recomputeStats() from the clamped mults.
+var STR_DAMAGE, DEX_SPEED, CON_HP, INT_SCORE, WIS_COOLDOWN, CHA_DROPS, STAT_LEVEL, EXTRA_LIVES, SWIM_MULT;
 
-// Clamp derived stats
-if (STR_DAMAGE < 0.3) STR_DAMAGE = 0.3;
-if (DEX_SPEED < 0.5) DEX_SPEED = 0.5;
-if (CON_HP < 0.5) CON_HP = 0.5;
-if (INT_SCORE < 0.5) INT_SCORE = 0.5;
-if (WIS_COOLDOWN < 0.3) WIS_COOLDOWN = 0.3;
-if (WIS_COOLDOWN > 1.5) WIS_COOLDOWN = 1.5;
-if (CHA_DROPS < 0.5) CHA_DROPS = 0.5;
+function recomputeStats() {
+  var m = (window.TAS && TAS.player) ? TAS.player.mults({ pvp: true }) : { moveSpeed: 1, health: 1, damage: 1, luck: 1, swim: 1 };
+  STR_DAMAGE   = m.damage;       // collision/missile damage
+  DEX_SPEED    = m.moveSpeed;    // max speed & turn rate (land)
+  CON_HP       = m.health;       // hp multiplier & extra lives
+  INT_SCORE    = m.luck;         // score multiplier (folded into luck, not a 6th stat)
+  WIS_COOLDOWN = 1 / m.moveSpeed; // cooldown reduction (lower = better; faster pet = snappier)
+  CHA_DROPS    = m.luck;         // powerup drop rate boost
+  SWIM_MULT    = m.swim;         // applied to speed in the water zone only
+  var sel = (window.BaselingPlayer && BaselingPlayer.getSelected) ? BaselingPlayer.getSelected() : null;
+  STAT_LEVEL  = sel ? (typeof sel.stage === 'number' ? sel.stage : 0) : 0;
+  EXTRA_LIVES = m.health > 1.05 ? 1 : 0; // tiny pvp-band cushion
+  if (sel) { statB.name = sel.charName || statB.name; statB.level = STAT_LEVEL; }
+}
+recomputeStats();
 
 // === CONSTANTS ===
 var GW = 480, GH = 480;
 var ctx = TAS.ctx;
 TAS.initCanvas(GW, GH);
-TAS.input.initTouch({ buttons: ['a','b'], labels: { a: 'GROW', b: 'SPORE' } });
+TAS.input.initTouch({ buttons: ['a','b','c'], labels: { a: 'GROW', b: 'SPORE', c: 'PICK' } });
+
+var picking = false; // baseling character-select overlay open
+if (window.TAS && TAS.player) {
+  TAS.player.init().then(function () { recomputeStats(); }).catch(function (e) { console.warn('[micro-baselings] player init failed:', e && e.message); });
+}
 
 var PI = Math.PI, PI2 = PI * 2;
 var sin = Math.sin, cos = Math.cos, abs = Math.abs, sqrt = Math.sqrt, atan2 = Math.atan2;
@@ -597,6 +609,11 @@ function updateRacer(r, dt, accelInput, steerInput) {
   // Boost
   var currentMax = r.maxSpeed;
   var currentAccel = r.accel;
+  // SWM: in the water zone the player's swim stat sets their pace (ARCADE-STATS racing rule).
+  if (r.isPlayer && track && track.zone === 'water') {
+    currentMax *= SWIM_MULT;
+    currentAccel *= SWIM_MULT;
+  }
   if (r.boost > 0) {
     r.boost -= dt;
     currentMax *= 1.5;
@@ -1152,6 +1169,13 @@ function update(dt) {
   TAS.fx.updateEffects(dt);
 
   if (state === 'title') {
+    if (picking) return; // character-select overlay open — swallow game input
+    if (TAS.input.keys['KeyC'] || TAS.input.touch.c) {
+      TAS.input.keys['KeyC'] = false; TAS.input.touch.c = false; // consume so it doesn't also start
+      picking = true;
+      TAS.player.select(function () { recomputeStats(); picking = false; });
+      return;
+    }
     if (Object.values(TAS.input.keys).some(Boolean) || TAS.input.touch.a) {
       state = 'trackSelect';
       TAS.audio.ensureAudio();
@@ -1545,15 +1569,15 @@ function drawTitle() {
   ctx.font = '14px monospace';
   ctx.fillText('Spore Circuit Racing', GW / 2, 125);
 
-  // Draw baseling kart
+  // Draw baseling kart, with the selected baseling driving it (upright, on top).
   drawMiniCar(GW / 2, 165, 0, statB.color, '#228855', 3);
+  TAS.drawBaseling(ctx, GW / 2, 160, 40, { anim: 'idle', frame: frame, flipX: false });
 
-  // Baseling name & level
-  if (STAT_LEVEL > 0) {
-    ctx.fillStyle = statB.color;
-    ctx.font = 'bold 12px monospace';
-    ctx.fillText(statB.name + ' Lv.' + STAT_LEVEL, GW / 2, 200);
-  }
+  // Selected baseling name (Base-blue)
+  var _sel = (window.BaselingPlayer && BaselingPlayer.getSelected) ? BaselingPlayer.getSelected() : null;
+  ctx.fillStyle = '#0052FF';
+  ctx.font = 'bold 12px monospace';
+  ctx.fillText((_sel ? _sel.charName : 'WIMMPLE') + (_sel && _sel.tokenId != null ? ' #' + _sel.tokenId : ''), GW / 2, 200);
 
   // NES-style control reference box
   ctx.strokeStyle = '#444';
@@ -1585,23 +1609,17 @@ function drawTitle() {
   ctx.fillStyle = '#aaa'; ctx.fillText('CTRL', 80, cy);
   ctx.fillStyle = '#777'; ctx.fillText('Hypha Boost', 280, cy);
 
-  // Stat bonuses display if baseling loaded
-  if (STAT_LEVEL > 0) {
+  // 5 arcade stat bars (canonical colors) for the selected baseling
+  if (_sel && _sel.stats) {
+    var _meta = BaselingPlayer.STAT_META, _keys = BaselingPlayer.STAT_KEYS, _bx0 = GW / 2 - 110;
+    ctx.textAlign = 'left'; ctx.font = '8px monospace';
+    for (var _i = 0; _i < _keys.length; _i++) {
+      var _k = _keys[_i], _mm = _meta[_k], _v = _sel.stats[_k], _bx = _bx0 + _i * 46;
+      ctx.fillStyle = _mm.color; ctx.fillText(_mm.label, _bx, 350);
+      ctx.fillStyle = '#222'; ctx.fillRect(_bx, 353, 38, 5);
+      ctx.fillStyle = _mm.color; ctx.fillRect(_bx, 353, 38 * Math.max(0.04, Math.min(1, _v / 200)), 5);
+    }
     ctx.textAlign = 'center';
-    ctx.fillStyle = '#555';
-    ctx.font = '9px monospace';
-    ctx.fillText('STR:' + statB.str + ' DEX:' + statB.dex + ' CON:' + statB.con + ' INT:' + statB.int + ' WIS:' + statB.wis + ' CHA:' + statB.cha, GW / 2, 345);
-
-    ctx.fillStyle = '#38d973';
-    ctx.font = '9px monospace';
-    var bonusY = 360;
-    var bonuses = [];
-    if (STR_DAMAGE > 1.05) bonuses.push('DMG+' + floor((STR_DAMAGE - 1) * 100) + '%');
-    if (DEX_SPEED > 1.05) bonuses.push('SPD+' + floor((DEX_SPEED - 1) * 100) + '%');
-    if (CON_HP > 1.05) bonuses.push('HP+' + floor((CON_HP - 1) * 100) + '%');
-    if (INT_SCORE > 1.05) bonuses.push('SCR+' + floor((INT_SCORE - 1) * 100) + '%');
-    if (EXTRA_LIVES > 0) bonuses.push('+' + EXTRA_LIVES + ' LIVES');
-    if (bonuses.length > 0) ctx.fillText(bonuses.join('  '), GW / 2, bonusY);
   }
 
   // Start prompt
@@ -1610,8 +1628,13 @@ function drawTitle() {
   ctx.fillStyle = '#f4b41b';
   ctx.font = 'bold 16px monospace';
   ctx.textAlign = 'center';
-  ctx.fillText('PRESS ANY KEY', GW / 2, 400);
+  ctx.fillText('PRESS ANY KEY', GW / 2, 398);
   ctx.globalAlpha = 1;
+
+  // Select-baseling prompt (Base-blue)
+  ctx.fillStyle = '#0052FF';
+  ctx.font = 'bold 10px monospace';
+  ctx.fillText('[C] SELECT BASELING', GW / 2, 418);
 
   // High score
   if (highScore > 0) {
@@ -2500,6 +2523,14 @@ function drawRacer(r) {
 
   ctx.globalAlpha = 1;
   ctx.restore();
+
+  // Player kart: draw the selected baseling as the upright driver (focal entity), facing
+  // the camera so it doesn't spin with the kart. Procedural kart-face above is the fallback.
+  if (r.isPlayer) {
+    var _da = (r.boost > 0) ? 'walk' : 'idle';
+    var _alpha = (r.invincible > 0 && floor(r.invincible * 10) % 2 === 0) ? 0.4 : 1;
+    TAS.drawBaseling(ctx, r.x, r.y - 2, 22, { anim: _da, frame: frame, flipX: false, alpha: _alpha });
+  }
 
   // Skid marks when drifting
   if (abs(r.speed) > 80 && r.spinOut <= 0) {

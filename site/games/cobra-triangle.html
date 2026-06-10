@@ -17,6 +17,7 @@ canvas { display: block; margin: 0 auto; }
 <a id="back-link" href="/games">Back to Arcade</a>
 <script src="nft-loader.js"></script>
 <script src="baseling-sprites.js"></script>
+<script src="baseling-player.js"></script>
 <script src="tasern-theme.js"></script>
 <script>if(window.NftLoader)NftLoader.gate();</script>
 <script src="tasern-art.js"></script>
@@ -29,23 +30,33 @@ canvas { display: block; margin: 0 auto; }
 var GW = 480, GH = 320;
 var ctx = TAS.ctx;
 TAS.initCanvas(GW, GH);
-TAS.input.initTouch({ buttons: ['a', 'b'], labels: { a: 'FIRE', b: 'TURBO' } });
+TAS.input.initTouch({ buttons: ['a', 'b', 'c'], labels: { a: 'FIRE', b: 'TURBO', c: 'PICK' } });
 
-// === STAT B SYSTEM ===
-// STR=weapon power, DEX=speed/steering, CON=HP/lives, INT=score mult, WIS=fire rate, CHA=power-up drops
+// === STAT SYSTEM (via BaselingPlayer.getMults — see ARCADE-STATS.md) ===
+// STR=weapon power, DEX=speed/steering, CON=HP/lives, INT=score mult, WIS=fire rate, CHA=power-up drops.
+// WAGER game -> TAS.player.mults({ pvp:true }) (tight 0.95–1.10 fairness band). The many
+// statB.*/getX() helpers are kept working by synthesizing the 1–10 D&D stats from the clamped
+// mults (option b in REMASTER-GUIDE) so every gameplay number traces back to a clamped value.
+// This is the boat-racing genre: the WHOLE track is water, so SWM is folded into boat speed.
+//   STR<-damage, DEX<-moveSpeed (blended with swim for the water track), CON<-health,
+//   INT<-luck (score), WIS<-luck (fire rate), CHA<-luck (powerup drops).
 var statB = { STR: 5, DEX: 5, CON: 5, INT: 5, WIS: 5, CHA: 5 };
 
-function loadStatB() {
-  if (window.TAS && TAS.nft && TAS.nft.statB) {
-    var s = TAS.nft.statB;
-    statB.STR = Math.floor(s.STR || s.str || 5);
-    statB.DEX = Math.floor(s.DEX || s.dex || 5);
-    statB.CON = Math.floor(s.CON || s.con || 5);
-    statB.INT = Math.floor(s.INT || s.int || 5);
-    statB.WIS = Math.floor(s.WIS || s.wis || 5);
-    statB.CHA = Math.floor(s.CHA || s.cha || 5);
-  }
+// Map a clamped mult to the game's 1–10 stat scale centered on 5 (neutral = mult 1.0).
+function statFromMult(m) { return Math.max(1, Math.min(10, Math.round(5 + (m - 1) * 50))); }
+
+function recomputeStats() {
+  var m = (window.TAS && TAS.player) ? TAS.player.mults({ pvp: true }) : { moveSpeed: 1, health: 1, damage: 1, luck: 1, swim: 1 };
+  // All-water track: blend swim into the speed/steering stat (avg of moveSpeed & swim).
+  var moveWithSwim = (m.moveSpeed + m.swim) / 2;
+  statB.STR = statFromMult(m.damage);
+  statB.DEX = statFromMult(moveWithSwim);
+  statB.CON = statFromMult(m.health);
+  statB.INT = statFromMult(m.luck);
+  statB.WIS = statFromMult(m.luck);
+  statB.CHA = statFromMult(m.luck);
 }
+function loadStatB() { recomputeStats(); } // called on game start (keeps existing call site)
 
 // Stat helpers - all use Math.floor
 function weaponDmg() { return Math.floor(1 + statB.STR * 0.15); }
@@ -57,6 +68,12 @@ function scoreMult() { return 1 + Math.floor(statB.INT * 0.08 * 100) / 100; }
 function fireRateBonus() { return Math.floor(statB.WIS * 0.6); }
 function powerupChance() { return 0.4 + Math.floor(statB.CHA * 0.04 * 100) / 100; }
 function chargedShotReady() { return statB.STR >= 10; }
+
+recomputeStats();
+var picking = false; // baseling character-select overlay open
+if (window.TAS && TAS.player) {
+  TAS.player.init().then(function () { recomputeStats(); }).catch(function (e) { console.warn('[cobra-triangle] player init failed:', e && e.message); });
+}
 
 // === GAME STATE ===
 var state = 'title';
@@ -658,6 +675,13 @@ function update(dt) {
 
   if (state === 'title') {
     waterOffset += 0.5;
+    if (picking) return; // character-select overlay open — swallow game input
+    if (TAS.input.keys['KeyC'] || TAS.input.touch.c) {
+      TAS.input.keys['KeyC'] = false; TAS.input.touch.c = false; // consume so it doesn't also start
+      picking = true;
+      TAS.player.select(function () { recomputeStats(); picking = false; });
+      return;
+    }
     if (Object.values(TAS.input.keys).some(Boolean) || TAS.input.touch.a || TAS.input.touch.b) {
       TAS.audio.ensureAudio();
       startGame();
@@ -1752,6 +1776,10 @@ function drawBoat() {
   ctx.fillStyle = '#7c3aed';
   ctx.fillRect(-BOAT_W / 3, -BOAT_H / 4, BOAT_W * 2 / 3, BOAT_H / 2);
 
+  // Pilot: selected baseling rides the deck (focal entity). Falls back to the boat's
+  // own spore-core look (drawn below) so the boat is never empty with no wallet.
+  TAS.drawBaseling(ctx, 0, -1, BOAT_W * 0.8, { anim: turboActive ? 'walk' : 'idle', frame: frame, flipX: false });
+
   // Spore core glow
   var glowPulse = Math.sin(frame * 0.1) * 0.3 + 0.7;
   ctx.fillStyle = turboActive ? '#f4b41b' : '#38d973';
@@ -2617,10 +2645,13 @@ function drawTitleScreen() {
   ctx.moveTo(0, -12); ctx.lineTo(-8, 8); ctx.lineTo(8, 8);
   ctx.closePath();
   ctx.fill();
-  ctx.fillStyle = '#38d973';
-  ctx.beginPath();
-  ctx.arc(0, 0, 3, 0, Math.PI * 2);
-  ctx.fill();
+  // Selected baseling pilots the title boat (falls back to the spore core).
+  if (!TAS.drawBaseling(ctx, 0, -1, 18, { anim: 'idle', frame: frame, flipX: false })) {
+    ctx.fillStyle = '#38d973';
+    ctx.beginPath();
+    ctx.arc(0, 0, 3, 0, Math.PI * 2);
+    ctx.fill();
+  }
   ctx.restore();
 
   // Wake
@@ -2652,11 +2683,28 @@ function drawTitleScreen() {
   ctx.fillText('25 STAGES - 5 FUNGAL ZONES - 5 BOSSES', GW / 2, Math.floor(GH * 0.35));
   ctx.fillText('RACE / DEFEND / COLLECT / SURVIVE / BOSS', GW / 2, Math.floor(GH * 0.41));
 
+  // Selected baseling name (Base-blue) + 5 arcade stat bars
+  var _sel = (window.BaselingPlayer && BaselingPlayer.getSelected) ? BaselingPlayer.getSelected() : null;
+  ctx.fillStyle = '#0052FF';
+  ctx.font = 'bold 10px monospace';
+  ctx.fillText((_sel ? _sel.charName : 'WIMMPLE') + (_sel && _sel.tokenId != null ? ' #' + _sel.tokenId : ''), GW / 2, Math.floor(GH * 0.62));
+  if (_sel && _sel.stats) {
+    var _meta = BaselingPlayer.STAT_META, _keys = BaselingPlayer.STAT_KEYS, _sx = GW / 2 - 110, _by = Math.floor(GH * 0.67);
+    ctx.textAlign = 'left'; ctx.font = '8px monospace';
+    for (var _i = 0; _i < _keys.length; _i++) {
+      var _k = _keys[_i], _mm = _meta[_k], _v = _sel.stats[_k], _bx = _sx + _i * 46;
+      ctx.fillStyle = _mm.color; ctx.fillText(_mm.label, _bx, _by);
+      ctx.fillStyle = '#222'; ctx.fillRect(_bx, _by + 3, 38, 5);
+      ctx.fillStyle = _mm.color; ctx.fillRect(_bx, _by + 3, 38 * Math.max(0.04, Math.min(1, _v / 200)), 5);
+    }
+    ctx.textAlign = 'center';
+  }
+
   // High score
   if (highScore > 0) {
     ctx.fillStyle = '#f4b41b';
     ctx.font = 'bold 10px monospace';
-    ctx.fillText('HIGH SCORE: ' + highScore, GW / 2, Math.floor(GH * 0.76));
+    ctx.fillText('HIGH SCORE: ' + highScore, GW / 2, Math.floor(GH * 0.78));
   }
 
   // Start prompt (NES pulse)
@@ -2664,13 +2712,16 @@ function drawTitleScreen() {
   ctx.globalAlpha = pulse;
   ctx.fillStyle = '#f4b41b';
   ctx.font = 'bold 12px monospace';
-  ctx.fillText('PRESS ANY KEY TO START', GW / 2, Math.floor(GH * 0.88));
+  ctx.fillText('PRESS ANY KEY TO START', GW / 2, Math.floor(GH * 0.87));
   ctx.globalAlpha = 1;
 
-  // Controls hint
+  // Controls hint + select-baseling prompt (Base-blue)
   ctx.fillStyle = '#666';
   ctx.font = '8px monospace';
-  ctx.fillText('ARROWS: Steer | SPACE/X: Shoot | Z: Turbo', GW / 2, Math.floor(GH * 0.95));
+  ctx.fillText('ARROWS: Steer | SPACE/X: Shoot | Z: Turbo', GW / 2, Math.floor(GH * 0.93));
+  ctx.fillStyle = '#0052FF';
+  ctx.font = 'bold 9px monospace';
+  ctx.fillText('[C] SELECT BASELING', GW / 2, Math.floor(GH * 0.985));
 }
 
 // === START ===

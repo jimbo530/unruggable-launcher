@@ -25,11 +25,18 @@ canvas { display: block; margin: 0 auto; image-rendering: pixelated; image-rende
 (function(){
 "use strict";
 
-// === BASELING STAT BLOCK (NftLoader integration) ===
+// === BASELING STAT BLOCK (via BaselingPlayer.getMults — see ARCADE-STATS.md) ===
+// WAGER game -> TAS.player.mults({ pvp:true }) (tight 0.95–1.10 fairness band). This game's
+// many statB.*/*Bonus() reads are kept working by synthesizing the 1–20 D&D stats from the
+// clamped mults (option b in REMASTER-GUIDE) in recomputeStats(), so every gameplay number
+// traces back to a clamped value. Racing-sports wiring: STR/speed<-damage&moveSpeed,
+// DEX<-moveSpeed, CON<-health, INT<-luck, WIS<-luck, CHA<-luck. Tracks are land (forest/cave/
+// reactor/etc — no water zone), so SWM is untouched.
 var statB = { damage: 1, speed: 1, lives: 0, hpMult: 1, scoreMult: 1, cooldown: 1, luck: 1, str: 10, dex: 10, con: 10, int: 10, wis: 10, cha: 10, level: 0, color: '#44dd88', name: 'Baseling', icon: 'B' };
-try { if (window.NftLoader && NftLoader.getStatBonuses) statB = NftLoader.getStatBonuses(); } catch(e) {}
+try { if (window.NftLoader && NftLoader.getStatBonuses) { var _b = NftLoader.getStatBonuses(); if (_b) { statB.color = _b.color || statB.color; statB.name = _b.name || statB.name; statB.icon = _b.icon || statB.icon; } } }
+catch (e) { console.warn('[rc-reactor] NftLoader display info failed:', e && e.message); }
 
-// === STAT HELPERS — derive gameplay from D&D stats ===
+// === STAT HELPERS — derive gameplay from the synthesized D&D stats ===
 function statMod(val) { return Math.floor((val - 10) / 2); }
 function statPct(val) { return val / 20; } // 0.5 at 10, 1.0 at 20
 function strBonus() { return 1 + statMod(statB.str) * 0.08; }   // barrier smash, ram damage
@@ -42,17 +49,43 @@ function chaBonus() { return 1 + statMod(statB.cha) * 0.04; }   // score mult, i
 const GW = 480, GH = 480;
 const ctx = TAS.ctx;
 TAS.initCanvas(GW, GH);
-TAS.input.initTouch({ buttons: ['a', 'b'], labels: { a: 'GAS', b: 'ITEM' } });
+TAS.input.initTouch({ buttons: ['a', 'b', 'c'], labels: { a: 'GAS', b: 'ITEM', c: 'PICK' } });
 
 // === CONSTANTS ===
 const ISO_TX = 24, ISO_TY = 12;
 const LAPS_TO_WIN = 3;
 const TRACK_COUNT = 10;
 const CAR_TIERS = ['CART', 'HAULER', 'BASELING', 'TURBO'];
-// STR ref #1: base speed scales with str
-const CAR_SPEEDS = [1.6, 2.0, 2.5, 3.1].map(function(s) { return s * strBonus(); });
-// DEX ref #1: acceleration scales with dex
-const CAR_ACCEL = [0.018, 0.022, 0.028, 0.035].map(function(a) { return a * dexBonus(); });
+// Speed/accel per tier — recomputed from the clamped mults in recomputeStats() so a
+// title-screen character change takes effect (STR scales top speed, DEX scales accel).
+var CAR_SPEEDS, CAR_ACCEL;
+
+// Map a clamped mult to the 1–20 D&D scale centered on 10 (neutral = mult 1.0).
+function dndFromMult(m) { return Math.max(1, Math.min(20, Math.round(10 + (m - 1) * 50))); }
+
+function recomputeStats() {
+  var m = (window.TAS && TAS.player) ? TAS.player.mults({ pvp: true }) : { moveSpeed: 1, health: 1, damage: 1, luck: 1, swim: 1 };
+  statB.str = dndFromMult(m.damage);
+  statB.dex = dndFromMult(m.moveSpeed);
+  statB.con = dndFromMult(m.health);
+  statB.int = dndFromMult(m.luck);
+  statB.wis = dndFromMult(m.luck);
+  statB.cha = dndFromMult(m.luck);
+  statB.damage = m.damage;       // direct ram/missile damage reads
+  statB.scoreMult = m.luck;       // score bias folded into luck (not a 6th stat)
+  statB.luck = m.luck;            // item-luck reads
+  // Speed scales with STR (top speed) and DEX (accel), tuned for the neutral 1.0x baseline.
+  CAR_SPEEDS = [1.6, 2.0, 2.5, 3.1].map(function (s) { return s * strBonus(); });
+  CAR_ACCEL  = [0.018, 0.022, 0.028, 0.035].map(function (a) { return a * dexBonus(); });
+  var sel = (window.BaselingPlayer && BaselingPlayer.getSelected) ? BaselingPlayer.getSelected() : null;
+  if (sel) { statB.name = sel.charName || statB.name; statB.level = (typeof sel.stage === 'number' ? sel.stage : statB.level); }
+}
+recomputeStats();
+
+var picking = false; // baseling character-select overlay open
+if (window.TAS && TAS.player) {
+  TAS.player.init().then(function () { recomputeStats(); }).catch(function (e) { console.warn('[rc-reactor] player init failed:', e && e.message); });
+}
 const CAR_COLORS = ['#ee4444', '#4488ee', '#44cc44', '#ffaa22'];
 const AI_COLORS = ['#4488ee', '#44cc44', '#ffaa22'];
 
@@ -1528,6 +1561,13 @@ function update(dt) {
   updateScorePopups(dt);
 
   if (state === 'title') {
+    if (picking) return; // character-select overlay open — swallow game input
+    if (TAS.input.keys['KeyC'] || TAS.input.touch.c) {
+      TAS.input.keys['KeyC'] = false; TAS.input.touch.c = false; // consume so it doesn't also start
+      picking = true;
+      TAS.player.select(function () { recomputeStats(); picking = false; });
+      return;
+    }
     if (Object.values(TAS.input.keys).some(Boolean) || TAS.input.touch.a) {
       startGame();
     }
@@ -1962,13 +2002,17 @@ function drawCar(screenPos, color, tier, spinTimer, hasShield, isPlayer) {
     pxRect(sx, sy + size * 0.6 + 2 + Math.floor(flameH), 1, 2, '#ff8800');
   }
 
-  // Player indicator
+  // Player: the selected baseling rides the RC car (focal entity). Drawn upright so it
+  // doesn't spin with the car; falls back to the baseling-color icon if no sprite.
   if (isPlayer) {
-    // Show baseling icon above car
-    ctx.fillStyle = statB.color;
-    ctx.font = 'bold 8px monospace';
-    ctx.textAlign = 'center';
-    ctx.fillText(statB.icon, sx, sy - size - 4);
+    var _alpha = (playerInvuln > 0 && Math.floor(playerInvuln * 10) % 2 === 0) ? 0.4 : 1;
+    var _da = (playerBoostTimer > 0) ? 'walk' : 'idle';
+    if (!TAS.drawBaseling(ctx, sx, sy - size + 1, size * 2.6, { anim: _da, frame: frame, flipX: false, alpha: _alpha })) {
+      ctx.fillStyle = statB.color;
+      ctx.font = 'bold 8px monospace';
+      ctx.textAlign = 'center';
+      ctx.fillText(statB.icon, sx, sy - size - 4);
+    }
   }
 }
 
@@ -2523,11 +2567,12 @@ function drawTitleScreen() {
   ctx.globalAlpha = 1;
   ctx.restore();
 
-  // Animated car
+  // Animated car, with the selected baseling driving it.
   var carAngle = (frame * 0.03) % (Math.PI * 2);
   var carX = GW / 2 + Math.cos(carAngle) * 100;
   var carY = GH / 2 + 40 + Math.sin(carAngle) * 50;
   drawCar({ x: carX, y: carY }, statB.color, 2, 0, false, false);
+  TAS.drawBaseling(ctx, carX, carY - 6, 20, { anim: 'idle', frame: frame, flipX: false });
 
   // Spore particles on title
   if (frame % 15 === 0) {
@@ -2548,10 +2593,22 @@ function drawTitleScreen() {
   ctx.font = '12px monospace';
   ctx.fillText('BASELING SPORE TRACK RACING', GW / 2, 118);
 
-  // Baseling identity
-  ctx.fillStyle = statB.color;
+  // Selected baseling name (Base-blue) + 5 arcade stat bars
+  var _sel = (window.BaselingPlayer && BaselingPlayer.getSelected) ? BaselingPlayer.getSelected() : null;
+  ctx.fillStyle = '#0052FF';
   ctx.font = 'bold 11px monospace';
-  ctx.fillText('RACER: ' + statB.name + ' [Lv' + statB.level + ']', GW / 2, 140);
+  ctx.fillText('RACER: ' + (_sel ? _sel.charName : 'WIMMPLE') + (_sel && _sel.tokenId != null ? ' #' + _sel.tokenId : ''), GW / 2, 140);
+  if (_sel && _sel.stats) {
+    var _meta = BaselingPlayer.STAT_META, _keys = BaselingPlayer.STAT_KEYS, _bx0 = GW / 2 - 110;
+    ctx.textAlign = 'left'; ctx.font = '8px monospace';
+    for (var _i = 0; _i < _keys.length; _i++) {
+      var _k = _keys[_i], _mm = _meta[_k], _v = _sel.stats[_k], _bx = _bx0 + _i * 46;
+      ctx.fillStyle = _mm.color; ctx.fillText(_mm.label, _bx, 158);
+      ctx.fillStyle = '#222'; ctx.fillRect(_bx, 161, 38, 5);
+      ctx.fillStyle = _mm.color; ctx.fillRect(_bx, 161, 38 * Math.max(0.04, Math.min(1, _v / 200)), 5);
+    }
+    ctx.textAlign = 'center';
+  }
 
   // NES-style control layout
   ctx.fillStyle = '#aaa';
@@ -2596,8 +2653,12 @@ function drawTitleScreen() {
   ctx.globalAlpha = pulse;
   ctx.fillStyle = '#f4b41b';
   ctx.font = 'bold 14px monospace';
-  ctx.fillText('PRESS ANY KEY TO START', GW / 2, GH - 30);
+  ctx.fillText('PRESS ANY KEY TO START', GW / 2, GH - 34);
   ctx.globalAlpha = 1;
+
+  ctx.fillStyle = '#0052FF';
+  ctx.font = 'bold 9px monospace';
+  ctx.fillText('[C] SELECT BASELING', GW / 2, GH - 16);
 
   TAS.input.drawTouchControls(GW, GH);
 }
