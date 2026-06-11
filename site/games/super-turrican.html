@@ -20,6 +20,7 @@ canvas { display: block; margin: 0 auto; }
 <a id="back-link" href="/games">Back to Arcade</a>
 <script src="nft-loader.js"></script>
 <script src="baseling-sprites.js"></script>
+<script src="baseling-player.js"></script>
 <script src="tasern-theme.js"></script>
 <script>if(window.NftLoader)NftLoader.gate();</script>
 <script src="tasern-art.js"></script>
@@ -53,6 +54,25 @@ function dexIframes() { return Math.max(40, 90 - statMod(statB.dex) * 4); }
 function strGroundPound() { return 500 + Math.max(0, statMod(statB.str)) * 30; }
 function luckCritChance() { return 0.05 + statB.luck * 0.03; }
 function conDefense() { return Math.max(0, Math.floor(statMod(statB.con) / 3)); }
+
+// === BASELING PLAYER MODULE (TAS bridge) ===
+// All the stat helpers above read statB live, so synthesizing statB from the
+// clamped getMults() is the whole migration — every gameplay number traces to it.
+var picking = false; // character-select overlay open
+function dnd(x) { return Math.round(10 + (x - 1) * 20); } // mult 1.0->10, 0.8->6, 1.6->22
+function recomputeStats() {
+  var m = (window.TAS && TAS.player) ? TAS.player.mults() : { moveSpeed: 1, health: 1, damage: 1, luck: 1, swim: 1 };
+  statB.str = dnd(m.damage); statB.dex = dnd(m.moveSpeed); statB.con = dnd(m.health);
+  statB.int = dnd(m.luck); statB.wis = dnd(m.luck); statB.cha = dnd(m.luck);
+  statB.speed = m.moveSpeed; statB.damage = m.damage; statB.luck = m.luck; statB.hpMult = m.health;
+  statB.lives = 0; statB.scoreMult = 1; statB.cooldown = 1;
+  var sel = (window.BaselingPlayer && BaselingPlayer.getSelected) ? BaselingPlayer.getSelected() : null;
+  if (sel && sel.charName) statB.name = sel.charName;
+}
+if (window.TAS && TAS.player) {
+  TAS.player.init().then(function () { recomputeStats(); })
+    .catch(function (e) { console.warn('[super-turrican] player init failed:', e && e.message); });
+}
 
 // ============================================================
 // CONSTANTS
@@ -115,7 +135,7 @@ for (let layer = 0; layer < 3; layer++) {
 // INIT
 // ============================================================
 TAS.initCanvas(GW, GH);
-TAS.input.initTouch({ buttons: ['a', 'b'], labels: { a: 'JUMP', b: 'FIRE' } });
+TAS.input.initTouch({ buttons: ['a', 'b', 'c'], labels: { a: 'JUMP', b: 'FIRE', c: 'PICK' } });
 
 // ============================================================
 // SCORE POPUP SYSTEM
@@ -1127,7 +1147,16 @@ function update(dt) {
   TAS.fx.updateEffects(dt);
 
   if (state === 'title') {
-    if (Object.values(TAS.input.keys).some(Boolean) || TAS.input.touch.a || TAS.input.touch.b) {
+    if (picking) return; // character-select overlay open — swallow input
+    if (TAS.input.keys['KeyC'] || TAS.input.touch.c) {
+      TAS.input.keys['KeyC'] = false;
+      if (TAS.input.touch) TAS.input.touch.c = false;
+      picking = true;
+      TAS.player.select(function () { recomputeStats(); picking = false; });
+      return;
+    }
+    var anyStart = Object.keys(TAS.input.keys).some(function (k) { return k !== 'KeyC' && TAS.input.keys[k]; });
+    if (anyStart || TAS.input.touch.a || TAS.input.touch.b) {
       TAS.audio.ensureAudio();
       startGame();
     }
@@ -1922,7 +1951,11 @@ function drawPlayer() {
   var col = statB.color;
 
   // === BASELING SPRITE ===
-  if (!TAS.drawBaseling(ctx, x + 7, y + 9, 18, { flipX: pFacing < 0, frame: frame })) {
+  var anim = 'idle';
+  if (iframes > 0) anim = 'hurt';
+  else if (!grounded) anim = 'jump';
+  else if (pvx) anim = 'walk';
+  if (!TAS.drawBaseling(ctx, x + 7, y + 9, 18, { flipX: pFacing < 0, frame: frame, anim: anim })) {
   if (morphBall) {
     // Ball shape in baseling color
     ctx.fillStyle = col;
@@ -2609,15 +2642,30 @@ function drawTitle() {
   ctx.fill();
   ctx.globalAlpha = 1;
 
-  // Baseling name
-  ctx.fillStyle = statB.color;
-  ctx.font = 'bold 10px monospace';
-  ctx.fillText(statB.name, cx, cy + 26);
+  // Selected baseling preview (covers the procedural mini-figure when loaded)
+  TAS.drawBaseling(ctx, cx, cy + 8, 24, { anim: 'idle', frame: frame });
 
-  // Stat summary
-  ctx.fillStyle = '#666';
-  ctx.font = '8px monospace';
-  ctx.fillText('STR:' + statB.str + ' DEX:' + statB.dex + ' CON:' + statB.con + ' INT:' + statB.int + ' WIS:' + statB.wis + ' CHA:' + statB.cha, cx, cy + 38);
+  // Baseling name (Base blue)
+  var selT = (window.BaselingPlayer && BaselingPlayer.getSelected) ? BaselingPlayer.getSelected() : null;
+  ctx.fillStyle = '#0052FF';
+  ctx.font = 'bold 10px monospace';
+  ctx.fillText((selT ? selT.charName : statB.name) + (selT && selT.tokenId != null ? ' #' + selT.tokenId : ''), cx, cy + 26);
+
+  // 5 arcade stat bars in canonical colors
+  if (selT && selT.stats && window.BaselingPlayer && BaselingPlayer.STAT_META) {
+    var _meta = BaselingPlayer.STAT_META, _keys = BaselingPlayer.STAT_KEYS, _x0 = cx - 110;
+    ctx.font = '8px monospace';
+    for (var _i = 0; _i < _keys.length; _i++) {
+      var _mm = _meta[_keys[_i]], _v = selT.stats[_keys[_i]] || 0, _bx = _x0 + _i * 46;
+      ctx.fillStyle = _mm.color; ctx.textAlign = 'left'; ctx.fillText(_mm.label, _bx, cy + 36);
+      ctx.fillStyle = '#222222'; ctx.fillRect(_bx, cy + 39, 38, 5);
+      ctx.fillStyle = _mm.color; ctx.fillRect(_bx, cy + 39, 38 * Math.max(0.04, Math.min(1, _v / 200)), 5);
+    }
+    ctx.textAlign = 'center';
+  }
+  ctx.fillStyle = '#0052FF';
+  ctx.font = 'bold 9px monospace';
+  ctx.fillText('[C] SELECT BASELING (title only)', cx, cy + 54);
 
   // Controls info — NES-style
   ctx.fillStyle = '#888';
