@@ -29,6 +29,7 @@ const NAV_CATEGORIES = {
   ],
   'Info': [
     { href: 'agents.html', label: 'Agent SDK / Docs' },
+    { href: 'analytics.html', label: 'Analytics' },
     { href: 'sitemap.html', label: 'Sitemap' },
     { href: 'terms.html', label: 'Terms' },
     { href: 'privacy.html', label: 'Privacy' },
