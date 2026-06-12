@@ -14,8 +14,8 @@ const { ethers } = require("ethers");
 const fs = require("fs");
 const path = require("path");
 
-// Use Alchemy for reliable, fast scanning
-const RPC = "https://base-mainnet.g.alchemy.com/v2/bwii0dH70pKYTKnqj3aNU";
+// Set ALCHEMY_RPC in env for reliable, fast scanning (public RPC fallback)
+const RPC = process.env.ALCHEMY_RPC || "https://mainnet.base.org";
 const TARGETS_FILE = path.join(__dirname, "agent-targets.json");
 
 const TOKENS = {

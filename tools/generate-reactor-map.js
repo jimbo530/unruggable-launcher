@@ -11,7 +11,7 @@ const path = require("path");
 const SUPABASE_URL = "https://hhniimufxjjgmessjtbc.supabase.co";
 const SUPABASE_ANON = "sb_publishable_F471ZS8yTS8qiXU0ZLEqvQ_I-O3av-l";
 const HUB = "0xF5B9Fc40080aAcC262f078eCE374A2268dcdb045";
-const RPC = process.env.ALCHEMY_RPC || "https://base-mainnet.g.alchemy.com/v2/bwii0dH70pKYTKnqj3aNU";
+const RPC = process.env.ALCHEMY_RPC || "https://mainnet.base.org";
 const BURN_ADDR = "0xfd780B0aE569e15e514B819ecFDF46f804953a4B";
 
 const WETH = "0x4200000000000000000000000000000000000006";
@@ -20,6 +20,7 @@ const MFT  = "0x8FB87d13B40B1A67B22ED1a17e2835fe7e3a9bA3";
 const V3_FACTORY = "0x33128a8fC17869897dcE68Ed026d694621f6FDfD";
 
 const IMPACT_TOKENS = [
+  { symbol: "MfT",     address: "0x8FB87d13B40B1A67B22ED1a17e2835fe7e3a9bA3", decimals: 18 },
   { symbol: "CHAR",    address: "0x20b048fA035D5763685D695e66aDF62c5D9F5055", decimals: 18 },
   { symbol: "BURGERS", address: "0x06A05043eb2C1691b19c2C13219dB9212269dDc5", decimals: 18 },
   { symbol: "TGN",     address: "0xD75dfa972C6136f1c594Fec1945302f885E1ab29", decimals: 18 },
@@ -305,7 +306,9 @@ async function main() {
       console.warn("  " + t.symbol + ": burn read failed");
     }
 
-    if (t.symbol === "AZUSD") {
+    if (t.symbol === "MfT") {
+      price = mftPrice; // already priced via WETH pool; getTokenPriceVsMft can't price MfT against itself
+    } else if (t.symbol === "AZUSD") {
       price = 1.0;
     } else if (mftPrice > 0) {
       try { price = await getTokenPriceVsMft(t.address, mftPrice); } catch (e) { console.warn('[reactor-map] token price fetch failed:', e.message || e); }

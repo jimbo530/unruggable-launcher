@@ -3,9 +3,9 @@
 // v3.0 — Real baseling sprites via arcade-roster API + BaselingSprites renderer
 
 const BASE_RPCS = [
-  "https://base-mainnet.g.alchemy.com/v2/bwii0dH70pKYTKnqj3aNU",
   "https://mainnet.base.org",
-  "https://base.llamarpc.com"
+  "https://base.llamarpc.com",
+  "https://base.publicnode.com"
 ];
 const BASE_CHAIN_ID = 8453;
 

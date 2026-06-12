@@ -36,7 +36,7 @@ const fs = require("fs");
 const path = require("path");
 
 // --- Config ---
-const RPC = "https://base-mainnet.g.alchemy.com/v2/bwii0dH70pKYTKnqj3aNU";
+const RPC = process.env.ALCHEMY_RPC || "https://mainnet.base.org";
 const TARGETS_FILE = path.join(__dirname, "agent-targets.json");
 const DROP_LOG = path.join(__dirname, "multi-drop-log.json");
 
