@@ -93,7 +93,7 @@ Complete localStorage key inventory (68 unique keys across 55 games):
 | `bubblebaseling_hi` | bubble-baseling |
 | `buckybaseling_save` | bucky-baseling |
 | `chain_reaction_save` | chain-reaction |
-| `crystalquest_save` | crystal-quest |
+| `sporecrystal_save` | spore-crystal |
 | `dice-roller-history` | dice-roller |
 | `elite_trader_save` | elite-trader |
 | `faxanadu_fungi_save` | faxanadu-fungi |

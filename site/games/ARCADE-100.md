@@ -22,7 +22,7 @@ Theme: Tasern universe (baselings, poop, MfT tokens, hex world, reactors, fungi,
 - [ ] spore-knight (Castlevania — whip=mycelium, candles=poop piles)
 - [ ] poop-man (Mega Man — defeat token bosses, gain abilities)
 - [ ] reactor-jump (Mario Bros — collect MfT coins, stomp slimes)
-- [ ] crystal-quest (Crystalis — action RPG overworld)
+- [x] spore-crystal (action RPG overworld; renamed from crystal-quest, IP)
 - [ ] hex-ninja (Ninja Gaiden — wall-jump through hex dungeons)
 - [ ] iron-maw (Metroid — explore Iron Maw dungeon, gain upgrades)
 - [ ] baseling-bounce (Kirby — float + absorb enemy powers)
