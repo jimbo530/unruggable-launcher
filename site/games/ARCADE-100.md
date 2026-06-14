@@ -68,7 +68,7 @@ Theme: Tasern universe (baselings, poop, MfT tokens, hex world, reactors, fungi,
 ## BATCH 5 — RPG/Adventure (Zelda, Final Fantasy, Dragon Quest, etc.)
 - [ ] legend-of-tasern (Zelda — top-down dungeon crawler)
 - [ ] tasern-quest (Dragon Quest — turn-based RPG)
-- [ ] faxanadu-fungi (Faxanadu — side-scroll RPG)
+- [ ] fungi-quest (Fungi Quest — side-scroll RPG)
 - [ ] river-city-brawl (River City Ransom — beat-em-up RPG)
 - [ ] gargoyle-quest (Gargoyle's Quest — fly+fight platformer RPG)
 - [ ] willow-grove (Willow — action RPG with magic)
