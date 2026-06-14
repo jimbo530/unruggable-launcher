@@ -51,7 +51,7 @@ Theme: Tasern universe (baselings, poop, MfT tokens, hex world, reactors, fungi,
 - [x] baseling-sky-patrol (Baseling Sky Patrol — vertical+side scroll mix; was legendary-wings)
 - [ ] power-blade (Power Blade — throw boomerang blades)
 - [x] spore-force (Spore Force — transforming ship)
-- [ ] metal-storm (Metal Storm — gravity flip mechanic)
+- [x] metal-spore (Metal Spore — gravity flip mechanic; was metal-storm, IP renamed)
 
 ## BATCH 4 — Racing/Sports (RC Pro-Am, Micro Machines, etc.)
 - [ ] micro-baselings (Micro Machines — tiny top-down racing)
