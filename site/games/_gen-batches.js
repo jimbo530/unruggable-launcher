@@ -19,7 +19,7 @@ function isBackup(base) { return /-backup$/i.test(base); }
 const GENRE = {};
 function tag(genre, slugs) { slugs.forEach(s => { GENRE[s] = genre; }); }
 tag('platformer-action', ['fungal-fury','spore-knight','poop-man','reactor-jump','spore-crystal','hex-ninja','iron-maw','baseling-bounce','chain-reaction','blaster-baseling','jumpy-bros']);
-tag('puzzle', ['poop-drop','bubble-baseling','lp-lemmings','token-columns','fire-n-ice','rainbow-bridge','reactor-pipes','boulder-baseling','poop-puzznic','kickle-kube','blocks-burg','solomon-key','lolo-puzzle','ooze-battle']);
+tag('puzzle', ['poop-drop','bubble-baseling','lp-lemmings','token-columns','spore-n-ice','rainbow-bridge','reactor-pipes','boulder-baseling','poop-puzznic','kickle-kube','blocks-burg','solomon-key','lolo-puzzle','ooze-battle']);
 tag('shmup', ['reactor-force','spore-storm','over-horizon','super-turrican','scat-attack','zombie-nation','legendary-wings','power-blade','spore-force','metal-storm','spore-invaders','spore-defense']);
 tag('racing-sports', ['micro-baselings','rc-reactor','baseling-bowl','blades-of-poop','track-n-field','super-dodge','rad-racer','baseling-sluggers','spore-tributaries','baseling-grind']);
 tag('rpg-adventure', ['legend-of-tasern','tasern-quest','fungi-quest','river-city-brawl','gargoyle-quest','willow-grove','solstice-tower','startropics-hex','maniac-mansion','pirates-of-tasern','rygar-realm','spore-crystal','whodunit']);

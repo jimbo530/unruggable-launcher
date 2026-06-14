@@ -34,7 +34,7 @@ Theme: Tasern universe (baselings, poop, MfT tokens, hex world, reactors, fungi,
 - [ ] bubble-baseling (Bubble Bobble — trap in bubbles, pop for tokens)
 - [ ] lp-lemmings (Lemmings — guide baselings to LP pools)
 - [ ] token-columns (Klax — catch falling tokens in order)
-- [ ] fire-n-ice (Fire N Ice — push ice/fire blocks, Tasern puzzles)
+- [x] spore-n-ice (Spore N Ice — push spore/ice blocks, Tasern puzzles)
 - [ ] rainbow-bridge (Rainbow Islands — climb rainbows, collect food)
 - [ ] reactor-pipes (Pipe Mania — connect reactor pipes before overflow)
 - [ ] boulder-baseling (Boulder Dash — dig + dodge boulders for gems)

@@ -97,8 +97,8 @@ Complete localStorage key inventory (68 unique keys across 55 games):
 | `dice-roller-history` | dice-roller |
 | `spore_trader_save` | spore-trader |
 | `fungi_quest_save` | fungi-quest |
-| `firennice_progress` | fire-n-ice |
-| `firennice_hi` | fire-n-ice |
+| `sporennice_progress` | spore-n-ice |
+| `sporennice_hi` | spore-n-ice |
 | `gargoylequest_save` | gargoyle-quest |
 | `ironmaw_save` | iron-maw |
 | `jumpyBrosHiScore` | jumpy-bros |
