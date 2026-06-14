@@ -32,7 +32,7 @@ const WAGER_GAMES = {
   'baseling-grind':    { name: 'Baseling Grind',          type: 'score',   description: 'Skateboarding - trick score' },
   'snow-bros':        { name: 'Snow Bros',          type: 'score',   description: 'Action - highest score wins' },
   'streets-of-tasern':{ name: 'Streets of Tasern',  type: 'score',   description: 'Beat-em-up - highest score wins' },
-  'arkanoid-mft':     { name: 'Arkanoid MfT',       type: 'score',   description: 'Breakout - highest score wins' },
+  'spore-breaker':    { name: 'Spore Breaker',      type: 'score',   description: 'Breakout - highest score wins' },
   'rc-reactor':       { name: 'RC Reactor',         type: 'time',    description: 'Racing - fastest time wins' },
   'cobra-triangle':   { name: 'Cobra Triangle',     type: 'score',   description: 'Boat racing - highest score wins' }
 };

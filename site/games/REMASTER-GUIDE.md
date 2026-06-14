@@ -26,7 +26,7 @@ Grep the file for `tasern-engine.js`:
 - **Archetype A — TAS-engine game** (≈81 of the games; e.g. poop-man, reactor-jump). It
   has `<script src="tasern-engine.js">` and a `TAS` global. **Use the `TAS.player.*`
   bridge** — least code.
-- **Archetype B — bespoke-engine game** (≈22; e.g. tunnel-bug, poop-out, arkanoid-mft). No
+- **Archetype B — bespoke-engine game** (≈22; e.g. tunnel-bug, poop-out, spore-breaker). No
   `tasern-engine.js`, its own input/audio/loop. **Call `BaselingPlayer` / `BaselingSprites`
   directly** via a tiny local helper. Do **not** add `tasern-engine.js` to a Type B game —
   it would spin up a second canvas/loop and conflict.
@@ -39,7 +39,7 @@ Grep the file for `tasern-engine.js`:
 Also check **`tasern-wager.js`**: if the game's id is in `WAGER_GAMES`, it's a **wager
 game** → you must call `getMults({ pvp: true })` everywhere (Step 4). Current wager games:
 `poop-out, micro-baselings, token-columns, super-dodge, baseling-grind, snow-bros,
-streets-of-tasern, arkanoid-mft, rc-reactor, cobra-triangle`.
+streets-of-tasern, spore-breaker, rc-reactor, cobra-triangle`.
 
 Some "games" are non-action (chess, checkers, dice-roller, ttrpg-notepad, whodunit). They
 have no player avatar — for those, do Steps 1 and (optionally) a cosmetic palette pass;

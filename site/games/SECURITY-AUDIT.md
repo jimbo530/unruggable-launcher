@@ -82,7 +82,7 @@ Complete localStorage key inventory (68 unique keys across 55 games):
 ### Direct localStorage keys:
 | Key | Game |
 |-----|------|
-| `arkanoid_mft_high` | arkanoid-mft |
+| `spore_breaker_high` | spore-breaker |
 | `garden_wars_campaign` | garden-wars |
 | `bbowl_hi` | baseling-bowl |
 | `blades_poop_tournament` | blades-of-poop |
@@ -153,7 +153,7 @@ All 78 games using tasern-engine.js use `TAS.score.load/save` which wraps localS
 - **23 games** are standalone (older games with self-contained canvas/audio code)
 
 The 23 standalone games are:
-arcade, arkanoid-mft, blocks-burg, bomberman-poop, bubble-baseling, checkers, chess, dice-roller, golden-axe, jumpy-bros, legend-of-tasern, lp-lemmings, maze-runner, meme-city, poop-drop, poop-out, reactor-force, reactor-rash, rodeo-toad, spore-sprint, streets-of-tasern, ttrpg-notepad, tunnel-bug
+arcade, spore-breaker, blocks-burg, bomberman-poop, bubble-baseling, checkers, chess, dice-roller, golden-axe, jumpy-bros, legend-of-tasern, lp-lemmings, maze-runner, meme-city, poop-drop, poop-out, reactor-force, reactor-rash, rodeo-toad, spore-sprint, streets-of-tasern, ttrpg-notepad, tunnel-bug
 
 **Assessment:** Not a security issue. Older games predate the shared engine and work correctly without it. The engine provides convenience wrappers (canvas, audio, input, particles) but is not a security dependency.
 

@@ -95,7 +95,7 @@ effect.
 
 Current wager games (must use `{ pvp: true }`): `poop-out`, `micro-baselings`,
 `token-columns`, `super-dodge`, `baseling-grind`, `snow-bros`, `streets-of-tasern`,
-`arkanoid-mft`, `rc-reactor`, `cobra-triangle`. If you add a game to `WAGER_GAMES`, you
+`spore-breaker`, `rc-reactor`, `cobra-triangle`. If you add a game to `WAGER_GAMES`, you
 must also switch its `getMults()` call to `{ pvp: true }` in the same change.
 
 ### How to apply a multiplier without breaking balance
@@ -130,15 +130,15 @@ games). Every example assumes `base*` constants are tuned for a neutral 1.0× ba
 - Power-up spawn bias: `powerupP = basePowerupP * m.luck`
 - SWM: ignore
 
-### Puzzle (e.g. Token Columns, Arkanoid MfT, Poop Out)
+### Puzzle (e.g. Token Columns, Spore Breaker, Poop Out)
 - Drop/fall speed of pieces or ball: `speed = baseSpeed * m.moveSpeed` (faster = harder, so
   consider this *player-friendly* only if speed helps them — for falling-block puzzles,
   prefer mapping SPD to a small soft-drop bonus, not the gravity that pressures them)
 - Lives / continues: `lives = baseLives + (m.health > 1.3 ? 1 : 0)` (STA buys a cushion)
-- Combo / break power: `breakRadius = baseRadius * m.damage` (e.g. bigger Arkanoid paddle
+- Combo / break power: `breakRadius = baseRadius * m.damage` (e.g. bigger breakout paddle
   or stronger line-clear)
 - Bonus-tile / special-piece chance: `specialP = baseSpecialP * m.luck`
-- SWM: ignore. **Puzzle wager games (Token Columns, Arkanoid MfT, Poop Out) use
+- SWM: ignore. **Puzzle wager games (Token Columns, Spore Breaker, Poop Out) use
   `{pvp:true}`** — keep effects tiny.
 
 ### Racing (e.g. Micro Baselings, RC Reactor, Cobra Triangle)
