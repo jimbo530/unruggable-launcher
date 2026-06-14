@@ -86,7 +86,7 @@ Theme: Tasern universe (baselings, poop, MfT tokens, hex world, reactors, fungi,
 - [ ] spy-hunter (Spy Hunter — driving shooter)
 - [x] spore-breaker (breakout with powerups; renamed from arkanoid-mft)
 - [ ] solomon-key (Solomon's Key — create/destroy blocks puzzle)
-- [ ] bomberman-poop (Bomberman — bomb maze, collect powerups)
+- [x] poop-bomber (bomb maze, collect powerups)
 - [ ] baseling-island (Baseling Island — run+throw, food=energy)
 
 ## BATCH 7 — Misc Unique Mechanics
