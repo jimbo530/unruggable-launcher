@@ -103,7 +103,7 @@ Theme: Tasern universe (baselings, poop, MfT tokens, hex world, reactors, fungi,
 - [ ] lolo-puzzle (Adventures of Lolo — room puzzles)
 - [ ] double-dragon (Double Dragon II — side-scroll brawler)
 - [ ] punch-out (Punch Out — boxing pattern game)
-- [ ] batman-baseling (Batman — wall jump beat-em-up)
+- [x] shadow-baseling (original — wall jump beat-em-up)
 - [ ] toads-of-tasern (beat-em-up + vehicle sections)
 - [ ] chip-n-dale (Chip N Dale — co-op throw+lift platformer)
 - [ ] tiny-toons (Tiny Toons — character-swap platformer)

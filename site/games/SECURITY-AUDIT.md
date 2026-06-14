@@ -139,7 +139,7 @@ Complete localStorage key inventory (68 unique keys across 55 games):
 | `willow_grove_save` | willow-grove |
 
 ### TAS.score keys (via tasern-engine.js wrapper):
-All 78 games using tasern-engine.js use `TAS.score.load/save` which wraps localStorage with unique per-game keys (e.g., `comixzone_hi`, `batman_baseling_hi`, `baselinggrind_hi`, etc.). All verified unique.
+All 78 games using tasern-engine.js use `TAS.score.load/save` which wraps localStorage with unique per-game keys (e.g., `comixzone_hi`, `shadow_baseling_hi`, `baselinggrind_hi`, etc.). All verified unique.
 
 **Zero key conflicts detected.**
 
