@@ -48,7 +48,7 @@ Theme: Tasern universe (baselings, poop, MfT tokens, hex world, reactors, fungi,
 - [ ] super-turrican (Turrican — explore+shoot platformer hybrid)
 - [ ] scat-attack (SCAT — twin astronauts shoot aliens)
 - [ ] zombie-nation (Zombie Nation — giant head shoots buildings)
-- [ ] legendary-wings (Legendary Wings — vertical+side scroll mix)
+- [x] baseling-sky-patrol (Baseling Sky Patrol — vertical+side scroll mix; was legendary-wings)
 - [ ] power-blade (Power Blade — throw boomerang blades)
 - [x] spore-force (Spore Force — transforming ship)
 - [ ] metal-storm (Metal Storm — gravity flip mechanic)
