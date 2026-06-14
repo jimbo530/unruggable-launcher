@@ -82,7 +82,7 @@ Theme: Tasern universe (baselings, poop, MfT tokens, hex world, reactors, fungi,
 - [ ] spore-trader (space trading sim)
 - [ ] north-south-war (North and South — war strategy)
 - [ ] rampart-siege (Rampart — build walls, shoot cannons)
-- [ ] guerrilla-war (Guerilla War — top-down rescue shooter)
+- [x] garden-guerrilla (Garden Guerrilla — top-down rescue shooter)
 - [ ] spy-hunter (Spy Hunter — driving shooter)
 - [x] spore-breaker (breakout with powerups; renamed from arkanoid-mft)
 - [ ] solomon-key (Solomon's Key — create/destroy blocks puzzle)
