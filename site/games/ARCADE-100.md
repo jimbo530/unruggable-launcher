@@ -99,7 +99,7 @@ Theme: Tasern universe (baselings, poop, MfT tokens, hex world, reactors, fungi,
 - [ ] snow-bros (Snow Bros — freeze+push snowball arcade)
 - [x] spore-tales (Spore Tales — pogo-cane jump, collect spores/treasure)
 - [ ] ufouria (Ufouria — multi-character metroidvania)
-- [ ] little-samson (Little Samson — 4 character switch platformer)
+- [x] spore-samson (Spore Samson — 4 character switch platformer)
 - [ ] lolo-puzzle (Adventures of Lolo — room puzzles)
 - [x] double-baseling (Double Baseling — spore-city side-scroll brawler)
 - [ ] punch-out (Punch Out — boxing pattern game)

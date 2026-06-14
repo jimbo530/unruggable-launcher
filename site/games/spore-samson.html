@@ -44,7 +44,7 @@ recomputeStats();
 var picking = false;
 if (window.TAS && TAS.player) {
   TAS.player.init().then(function(){ recomputeStats(); })
-    .catch(function(e){ console.warn('[little-samson] player init failed:', e && e.message); });
+    .catch(function(e){ console.warn('[spore-samson] player init failed:', e && e.message); });
 }
 
 // Derived stat helpers
@@ -63,7 +63,31 @@ var COLS = 80, ROWS = 20;
 var ctx = TAS.ctx;
 
 TAS.initCanvas(GW, GH);
-TAS.input.initTouch({ buttons: ['a', 'b'], labels: { a: 'JUMP', b: 'SWAP' } });
+TAS.input.initTouch({ buttons: ['a', 'c', 'b'], labels: { a: 'JUMP', c: 'ATK', b: 'SWAP' } });
+
+// === SHARED ART LAYER (§7d baked scenery) ===
+function _img(src) { var i = new Image(); i.crossOrigin = 'anonymous'; i.src = src; return i; }
+function _ready(i) { return !!(i && i.complete && i.naturalWidth > 0); }
+var SCN = {
+  trees: [_img('art/scenery/tree-1.png'), _img('art/scenery/tree-2.png')],
+  clouds: [_img('art/scenery/cloud-1.png'), _img('art/scenery/cloud-2.png')],
+  bgs: {} // bg name -> Image, lazy-loaded
+};
+// Zone index -> shared background scene that matches the fungal/garden mood
+var ZONE_BG = [
+  'bg-fungal-forest', 'bg-toadstool-grove', 'bg-compost-cavern', 'bg-fae-court',
+  'bg-mire-swamp', 'bg-mushroom-village', 'bg-compost-cavern', 'bg-barrow-crypt',
+  'bg-mire-swamp', 'bg-fae-court'
+];
+function _bgImg(name) {
+  if (!SCN.bgs[name]) SCN.bgs[name] = _img('art/backgrounds/' + name + '.webp');
+  return SCN.bgs[name];
+}
+// Offscreen baked scene
+var bgScene = document.createElement('canvas');
+var bgSceneCtx = bgScene.getContext('2d');
+var bgSceneStage = -1;   // which stage is currently baked
+var bgSceneBaked = false; // did the bg image finish baking (vs gradient fallback)
 
 // === CHARACTER DEFINITIONS ===
 var CHARS = { SAMSON: 0, KIKIRA: 1, GAMM: 2, KO: 3 };
@@ -94,7 +118,7 @@ var ZONE_THEMES = [
 var state = 'title';
 var frame = 0;
 var score = 0;
-var highScore = TAS.score.load('littlesamson_hi');
+var highScore = TAS.score.load('sporesamson_hi');
 var continues = 3;
 var stage = 0;
 var bossMode = false;
@@ -694,12 +718,15 @@ function update(dt) {
 
   var cd = getCharData();
   var inp = TAS.input;
-  var left = inp.keys['ArrowLeft'] || inp.keys['KeyA'] || inp.touch.left;
-  var right = inp.keys['ArrowRight'] || inp.keys['KeyD'] || inp.touch.right;
-  var up = inp.keys['ArrowUp'] || inp.keys['KeyW'] || inp.touch.up;
-  var down = inp.keys['ArrowDown'] || inp.keys['KeyS'] || inp.touch.down;
-  var jumpBtn = inp.keys['Space'] || inp.keys['KeyZ'] || inp.touch.a;
-  var swapBtn = justPressed('KeyX') || justPressed('ShiftLeft') || justPressed('ShiftRight') || inp.touch.b;
+  // CONTROLS (§7c): ARROWS = MOVE only. WASD = action cluster (W jump, S attack, A switch).
+  // Legacy keys (Z jump, C attack, X/Shift switch, Space jump) kept as hidden alts.
+  var left = inp.keys['ArrowLeft'] || inp.touch.left;
+  var right = inp.keys['ArrowRight'] || inp.touch.right;
+  var up = inp.keys['ArrowUp'] || inp.touch.up;
+  var down = inp.keys['ArrowDown'] || inp.touch.down;
+  var jumpBtn = inp.keys['KeyW'] || inp.keys['Space'] || inp.keys['KeyZ'] || inp.touch.a;
+  var attackBtn = inp.keys['KeyS'] || inp.keys['KeyC'] || inp.touch.c;
+  var swapBtn = justPressed('KeyA') || justPressed('KeyX') || justPressed('ShiftLeft') || justPressed('ShiftRight') || inp.touch.b;
 
   // Switch character
   if (switchCooldown > 0) switchCooldown--;
@@ -735,7 +762,7 @@ function update(dt) {
     P.vy = 0;
     if (up) { P.vy = -speed * 0.7; P.y += P.vy * dt; }
     if (down) { P.vy = speed * 0.5; P.y += P.vy * dt; }
-    if (jumpBtn && !prevKeys['Space'] && !prevKeys['KeyZ']) {
+    if (jumpBtn && !prevKeys['Space'] && !prevKeys['KeyZ'] && !prevKeys['KeyW']) {
       P.clinging = false;
       P.vx = -P.clingDir * speed * 1.2;
       P.vy = -cd.jumpPow * 0.8;
@@ -747,7 +774,7 @@ function update(dt) {
     P.vy = 0; P.vx = 0;
     if (left) { P.x -= speed * dt; P.facing = -1; }
     if (right) { P.x += speed * dt; P.facing = 1; }
-    if (down || (jumpBtn && !prevKeys['Space'] && !prevKeys['KeyZ'])) {
+    if (down || (jumpBtn && !prevKeys['Space'] && !prevKeys['KeyZ'] && !prevKeys['KeyW'])) {
       P.onCeiling = false;
       P.vy = 50;
     }
@@ -767,7 +794,7 @@ function update(dt) {
     }
 
     // Jump
-    if (jumpBtn && P.onGround && !prevKeys['Space'] && !prevKeys['KeyZ']) {
+    if (jumpBtn && P.onGround && !prevKeys['Space'] && !prevKeys['KeyZ'] && !prevKeys['KeyW']) {
       P.vy = -cd.jumpPow;
       P.onGround = false;
       TAS.audio.playTone(350, 0.08, 'square', 0.05);
@@ -831,7 +858,7 @@ function update(dt) {
 
   // Attack — WIS reduces cooldown via wisMult
   var cooldownTime = (cd.projType === 'punch' ? 0.4 : 0.25) * wisMult() * statB.cooldown;
-  if ((inp.keys['KeyC'] || (down && P.attackTimer <= 0)) && P.attackTimer <= 0) {
+  if (attackBtn && P.attackTimer <= 0) {
     fireProjectile();
     P.attackTimer = cooldownTime;
   }
@@ -962,7 +989,7 @@ function respawnOrGameOver() {
     state = 'gameOver';
     if (score > highScore) {
       highScore = score;
-      TAS.score.save('littlesamson_hi', highScore);
+      TAS.score.save('sporesamson_hi', highScore);
     }
     saveStageProgress();
   } else {
@@ -987,7 +1014,7 @@ function completeStage() {
     state = 'victory';
     if (score > highScore) {
       highScore = score;
-      TAS.score.save('littlesamson_hi', highScore);
+      TAS.score.save('sporesamson_hi', highScore);
     }
     TAS.audio.playMelody([[523, 0.15], [659, 0.15], [784, 0.15], [1047, 0.3]], 150);
   } else {
@@ -1343,10 +1370,10 @@ function updateBoss(dt) {
 
 // === SAVE/LOAD ===
 function saveStageProgress() {
-  try { localStorage.setItem('littlesamson_progress', String(stageProgress)); } catch(e) { console.error('Save failed:', e); }
+  try { localStorage.setItem('sporesamson_progress', String(stageProgress)); } catch(e) { console.error('Save failed:', e); }
 }
 function loadStageProgress() {
-  try { stageProgress = parseInt(localStorage.getItem('littlesamson_progress') || '0', 10); } catch(e) { console.error('Load failed:', e); stageProgress = 0; }
+  try { stageProgress = parseInt(localStorage.getItem('sporesamson_progress') || '0', 10); } catch(e) { console.error('Load failed:', e); stageProgress = 0; }
 }
 
 // === DRAW ===
@@ -1421,8 +1448,8 @@ function drawTutorial() {
   ctx.font = '10px monospace';
   ctx.fillStyle = '#aaa';
   var lines = [
-    'ARROWS/WASD: Move | Z/SPACE: Jump',
-    'C: Attack | X/SHIFT: Switch Baseling (Stage 5+)',
+    'ARROWS: Move | W: Jump | S: Attack',
+    'A: Switch Baseling (Stage 5+)',
     '',
     'STR ' + statB.str + ': Attack Power    DEX ' + statB.dex + ': Move Speed',
     'CON ' + statB.con + ': HP/Lives        INT ' + statB.int + ': Score Bonus',
@@ -1445,28 +1472,82 @@ function drawTutorial() {
   ctx.globalAlpha = 1;
 }
 
+// §7d: bake the static scene (bg image + clouds + trees) once per stage into bgScene.
+function bakeScene() {
+  var zone = getZone();
+  var W = COLS * TS, H = ROWS * TS;
+  if (bgScene.width !== W) { bgScene.width = W; bgScene.height = H; }
+  var bc = bgSceneCtx;
+  bc.clearRect(0, 0, W, H);
+
+  // Base gradient (zone-tinted) — always present so the scene is never blank.
+  var grad = bc.createLinearGradient(0, 0, 0, H);
+  grad.addColorStop(0, zone.bg1);
+  grad.addColorStop(1, zone.bg2);
+  bc.fillStyle = grad;
+  bc.fillRect(0, 0, W, H);
+
+  // Shared background image stretched (cover) across the whole world, dark-overlaid.
+  var bg = _bgImg(ZONE_BG[stage % ZONE_BG.length]);
+  var imgOk = _ready(bg);
+  if (imgOk) {
+    var iw = bg.naturalWidth, ih = bg.naturalHeight;
+    var scale = Math.max(W / iw, H / ih);
+    var sw = W / scale, sh = H / scale;
+    bc.drawImage(bg, (iw - sw) / 2, (ih - sh) / 2, sw, sh, 0, 0, W, H);
+    bc.fillStyle = 'rgba(' + zone.tileTint[0] / 4 + ',' + zone.tileTint[1] / 4 + ',' + zone.tileTint[2] / 4 + ',0.45)';
+    bc.fillRect(0, 0, W, H);
+  }
+
+  // Deterministic per-stage scatter
+  var seed = stage * 4093 + 71;
+  function rnd() { seed = (seed * 1103515245 + 12345) & 0x7fffffff; return (seed >> 16) / 32768; }
+
+  // Clouds in the sky band
+  for (var i = 0; i < 14; i++) {
+    var cl = SCN.clouds[Math.floor(rnd() * SCN.clouds.length)];
+    if (!_ready(cl)) continue;
+    var cw = 56 + rnd() * 40;
+    var ch = cw * (cl.naturalHeight / cl.naturalWidth);
+    bc.globalAlpha = 0.55;
+    bc.drawImage(cl, rnd() * (W - cw), 24 + rnd() * 70, cw, ch);
+  }
+  bc.globalAlpha = 1;
+
+  // Trees rooted on the world floor (floor top = (ROWS-2)*TS)
+  var floorTop = (ROWS - 2) * TS;
+  for (var i = 0; i < 22; i++) {
+    var tr = SCN.trees[Math.floor(rnd() * SCN.trees.length)];
+    if (!_ready(tr)) continue;
+    var th = 64 + rnd() * 56;
+    var tw = th * (tr.naturalWidth / tr.naturalHeight);
+    bc.globalAlpha = 0.8;
+    bc.drawImage(tr, rnd() * (W - tw), floorTop - th + 4, tw, th);
+  }
+  bc.globalAlpha = 1;
+
+  bgSceneStage = stage;
+  bgSceneBaked = imgOk; // if image wasn't ready, re-bake later when it loads
+}
+
 function drawBackground() {
   var zone = getZone();
-  var bgOffset = camX * 0.3;
-  // Far layer
-  for (var i = 0; i < 25; i++) {
-    var bx = ((i * 70 - bgOffset * 0.5) % (GW + 200)) - 80 + camX;
-    var by = 80 + Math.sin(i * 0.7 + frame * 0.008) * 30 + camY * 0.3;
-    ctx.fillStyle = zone.bg1;
-    ctx.fillRect(bx, by, 50, ROWS * TS);
-  }
-  // Near layer
-  for (var i = 0; i < 20; i++) {
-    var bx = ((i * 80 - bgOffset) % (GW + 160)) - 80 + camX;
-    var by = 100 + Math.sin(i * 0.8 + frame * 0.01) * 20 + camY * 0.5;
-    ctx.fillStyle = zone.bg2;
-    ctx.fillRect(bx, by, 60, ROWS * TS);
-  }
+  // (Re)bake when the stage changes, or once the bg image finishes loading.
+  if (bgSceneStage !== stage || !bgSceneBaked) bakeScene();
+
+  // Blit the baked scene with gentle parallax (slower than camera), always filling the viewport.
+  // ctx is translated by (-camX,-camY); sample a viewport-sized sub-rect of bgScene at a slowed
+  // offset so the scene never leaves a gap at either edge.
+  var W = COLS * TS, H = ROWS * TS;
+  var sx = TAS.math.clamp(camX * 0.5, 0, Math.max(0, W - GW));
+  var sy = TAS.math.clamp(camY * 0.5, 0, Math.max(0, H - GH));
+  ctx.drawImage(bgScene, sx, sy, GW, GH, camX, camY, GW, GH);
+
   // Ambient particles
   if (frame % 12 === 0) {
-    var px = camX + Math.random() * GW;
-    var py = camY + Math.random() * GH;
-    TAS.particles.spawn(px, py, zone.skyParticle, 1, 1, { gravity: -0.3, size: 1 });
+    var ppx = camX + Math.random() * GW;
+    var ppy = camY + Math.random() * GH;
+    TAS.particles.spawn(ppx, ppy, zone.skyParticle, 1, 1, { gravity: -0.3, size: 1 });
   }
 }
 
@@ -2199,6 +2280,16 @@ function drawHUD() {
   ctx.textAlign = 'left';
   ctx.fillText(statB.icon + ' S' + statB.str + ' D' + statB.dex + ' C' + statB.con + ' I' + statB.int + ' W' + statB.wis + ' Ch' + statB.cha, 3, GH - 4);
 
+  // Persistent controls legend (desktop only; brighter on stage 1)
+  if (!('ontouchstart' in window)) {
+    ctx.textAlign = 'right';
+    ctx.font = '7px monospace';
+    ctx.globalAlpha = stage === 0 ? 0.85 : 0.4;
+    ctx.fillStyle = '#9aa';
+    ctx.fillText('ARROWS Move  W Jump  S Attack' + (stage >= 4 ? '  A Swap' : ''), GW - 3, GH - 4);
+    ctx.globalAlpha = 1;
+  }
+
   // Boss HP bar at bottom center
   if (boss && boss.alive) {
     ctx.fillStyle = 'rgba(10,5,20,0.8)';
@@ -2299,8 +2390,8 @@ function drawTitleScreen() {
   // NES-style controls
   ctx.fillStyle = '#556';
   ctx.font = '9px monospace';
-  ctx.fillText('ARROWS/WASD: Move  |  Z/SPACE: Jump', GW / 2, 236);
-  ctx.fillText('C: Attack  |  X/SHIFT: Switch Baseling', GW / 2, 250);
+  ctx.fillText('ARROWS: Move  |  W: Jump  |  S: Attack', GW / 2, 236);
+  ctx.fillText('A: Switch Baseling (Stage 5+)', GW / 2, 250);
   ctx.fillStyle = '#445';
   ctx.fillText('B button swaps baselings (Stage 5+)', GW / 2, 264);
 
