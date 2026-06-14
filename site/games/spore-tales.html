@@ -49,7 +49,7 @@ recomputeStats();
 var picking = false;
 if (window.TAS && TAS.player) {
   TAS.player.init().then(function(){ recomputeStats(); })
-    .catch(function(e){ console.warn('[duck-tales] player init failed:', e && e.message); });
+    .catch(function(e){ console.warn('[spore-tales] player init failed:', e && e.message); });
 }
 
 // Derived stat helpers
@@ -144,6 +144,100 @@ const LEVEL_COLORS = [
   { bg: '#2a0a0a', tile: '#6a3a2a', tile2: '#4a1a1a', sky: '#1a1c2c', accent: '#e6482e', bgDetail: '#3a1010' }
 ];
 
+// === ART LAYER (§7d flattened scenery + sprite overlay) ===
+// Shared Grok backgrounds per stage + reusable scenery sprites baked once into bgScene.
+const STAGE_BG = ['bg-fungal-forest', 'bg-barrow-crypt', 'bg-compost-cavern', 'bg-mushroom-village', 'bg-mire-swamp'];
+const SCENERY_FILES = ['tree-1', 'tree-2', 'cloud-1', 'cloud-2',
+  'platform-grass', 'platform-snow', 'platform-stone', 'platform-dirt', 'platform-metal'];
+// Map each level's solid tiles to a platform-tile material for baking
+const STAGE_PLATFORM = ['platform-grass', 'platform-stone', 'platform-dirt', 'platform-metal', 'platform-stone'];
+const SPR = { scenery: {}, bg: {} };
+(function loadArt() {
+  if (!window.TasernArt) return;
+  for (let i = 0; i < STAGE_BG.length; i++) TasernArt.loadBg(STAGE_BG[i]);
+  for (let i = 0; i < SCENERY_FILES.length; i++) {
+    let name = SCENERY_FILES[i];
+    SPR.scenery[name] = TasernArt.load('art/scenery/' + name + '.png');
+    TasernArt.load('art/scenery/' + name + '.png', function(img){ SPR.scenery[name] = img; });
+  }
+})();
+function sceneryImg(name) {
+  return SPR.scenery[name] || (window.TasernArt ? TasernArt.getImg('art/scenery/' + name + '.png') : null);
+}
+function stageBgImg(idx) {
+  return window.TasernArt ? TasernArt.getImg('art/backgrounds/' + STAGE_BG[idx] + '.webp') : null;
+}
+
+// Flattened scenery canvas, rebuilt per stage.
+let bgScene = null;
+let bgSceneLevel = -1;
+function buildScene(idx) {
+  let worldW = levelW * TILE;
+  let worldH = levelH * TILE;
+  let cv = document.createElement('canvas');
+  cv.width = worldW; cv.height = worldH;
+  let c = cv.getContext('2d');
+  let col = LEVEL_COLORS[idx];
+
+  // Base sky/bg fill (always present so the scene never shows transparent gaps)
+  c.fillStyle = col.sky;
+  c.fillRect(0, 0, worldW, worldH);
+
+  // Cover the shared Grok background across the whole world (tiled horizontally)
+  let bgImg = stageBgImg(idx);
+  if (bgImg) {
+    let iw = bgImg.naturalWidth || bgImg.width, ih = bgImg.naturalHeight || bgImg.height;
+    let scale = worldH / ih;
+    let tileW = iw * scale;
+    c.globalAlpha = 0.9;
+    for (let x = 0; x < worldW; x += tileW) c.drawImage(bgImg, x, 0, tileW, worldH);
+    c.globalAlpha = 1;
+    // Darken for contrast against sprites
+    c.fillStyle = 'rgba(0,0,0,0.35)';
+    c.fillRect(0, 0, worldW, worldH);
+  }
+
+  // Clouds drifting in the sky band
+  let cloud1 = sceneryImg('cloud-1'), cloud2 = sceneryImg('cloud-2');
+  for (let i = 0; i < levelW / 6; i++) {
+    let cimg = (i % 2 === 0) ? cloud1 : cloud2;
+    if (!cimg) continue;
+    let cx = (i * 110 + (i * 37) % 90);
+    let cy = 8 + (i * 23) % 40;
+    c.globalAlpha = 0.7;
+    c.drawImage(cimg, cx, cy, 56, 32);
+    c.globalAlpha = 1;
+  }
+
+  // Trees on the ground line (rows 14/15 are ground in every stage)
+  let tree1 = sceneryImg('tree-1'), tree2 = sceneryImg('tree-2');
+  let groundY = 14 * TILE;
+  for (let tx = 0; tx < levelW; tx += 3) {
+    if (getTile(tx, 14) !== 1) continue;          // only where there's ground
+    if ((tx * 73) % 5 !== 0) continue;            // sparse, deterministic
+    let timg = ((tx >> 1) % 2 === 0) ? tree1 : tree2;
+    if (!timg) continue;
+    let th = 44 + (tx * 17) % 20;
+    c.drawImage(timg, tx * TILE - 8, groundY - th, 40, th);
+  }
+
+  // Platform tiles stamped onto solid + one-way tiles (visual skin over collision)
+  let plat = sceneryImg(STAGE_PLATFORM[idx]);
+  if (plat) {
+    for (let ty = 0; ty < levelH; ty++) {
+      for (let tx = 0; tx < levelW; tx++) {
+        let t = getTile(tx, ty);
+        let isTop = (t === 1 && getTile(tx, ty - 1) !== 1) || t === 5;
+        if (isTop) c.drawImage(plat, tx * TILE, ty * TILE, TILE, TILE);
+      }
+    }
+  }
+
+  bgScene = cv;
+  bgSceneLevel = idx;
+  bgSceneHasArt = !!bgImg;
+}
+
 // Level map data: 24 columns x 16 rows per screen, multiple screens wide
 // 0=air, 1=solid, 2=breakable, 3=spikes, 4=vine, 5=platform(one-way), 6=chest, 7=exit
 let tiles = [];
@@ -234,6 +328,9 @@ function generateLevel(idx) {
 
   // Big treasure at end
   collectibles.push({ x: (levelW - 5) * TILE, y: 11 * TILE, w: 16, h: 16, type: 'bigGem', collected: false });
+
+  // §7d: bake flattened scenery for this stage (visual only; collision uses `tiles`)
+  buildScene(idx);
 }
 
 function genFungalCanopy() {
@@ -432,13 +529,15 @@ function spawnBoss(idx, x, y) {
   };
 }
 
-// === INPUT HELPERS ===
-function keyLeft() { return TAS.input.keys['ArrowLeft'] || TAS.input.keys['KeyA'] || TAS.input.touch.left; }
-function keyRight() { return TAS.input.keys['ArrowRight'] || TAS.input.keys['KeyD'] || TAS.input.touch.right; }
-function keyUp() { return TAS.input.keys['ArrowUp'] || TAS.input.keys['KeyW'] || TAS.input.touch.up; }
+// === INPUT HELPERS (CONTROL STANDARD §7c) ===
+// Arrows = MOVE only.  WASD = the action cluster (W jump, S duck/pogo-aim, A/D spore whip).
+// Legacy keys (Z/X/J/K/Space/Shift) kept as hidden alts for compatibility.
+function keyLeft() { return TAS.input.keys['ArrowLeft'] || TAS.input.touch.left; }
+function keyRight() { return TAS.input.keys['ArrowRight'] || TAS.input.touch.right; }
+function keyUp() { return TAS.input.keys['ArrowUp'] || TAS.input.touch.up; }
 function keyDown() { return TAS.input.keys['ArrowDown'] || TAS.input.keys['KeyS'] || TAS.input.touch.down; }
-function keyJump() { return TAS.input.keys['Space'] || TAS.input.keys['KeyZ'] || TAS.input.touch.a; }
-function keyAttack() { return TAS.input.keys['KeyX'] || TAS.input.keys['ShiftLeft'] || TAS.input.touch.b; }
+function keyJump() { return TAS.input.keys['KeyW'] || TAS.input.keys['Space'] || TAS.input.keys['KeyZ'] || TAS.input.touch.a; }
+function keyAttack() { return TAS.input.keys['KeyA'] || TAS.input.keys['KeyD'] || TAS.input.keys['KeyX'] || TAS.input.keys['KeyJ'] || TAS.input.keys['KeyK'] || TAS.input.keys['ShiftLeft'] || TAS.input.touch.b; }
 
 let jumpPressed = false;
 let jumpWasPressed = false;
@@ -1720,13 +1819,34 @@ function drawCollectibles() {
   }
 }
 
+// Tracks whether the baked scene still needs the (async) bg image folded in.
+let bgSceneHasArt = false;
 function drawBackground() {
   let col = LEVEL_COLORS[currentLevel];
-  // Sky gradient
+  // Sky gradient (also the fallback floor under the flattened scene)
   ctx.fillStyle = col.sky;
   ctx.fillRect(0, 0, GW, GH);
 
-  // Stage-specific backgrounds (Pass 3)
+  // §7d: blit the flattened scenery layer (bg image + clouds + trees + platform tiles).
+  // Rebuild once the async Grok bg/scenery finishes loading so it isn't a flat-color scene.
+  if (bgScene && bgSceneLevel === currentLevel) {
+    if (!bgSceneHasArt && stageBgImg(currentLevel)) { buildScene(currentLevel); bgSceneHasArt = true; }
+    ctx.drawImage(bgScene, -Math.floor(camera.x), -Math.floor(camera.y));
+    // Light atmospheric particles on top for motion (cheap)
+    if (currentLevel === 0 || currentLevel === 1) {
+      ctx.globalAlpha = 0.18;
+      ctx.fillStyle = currentLevel === 0 ? '#88ffaa' : '#aa88ff';
+      for (let i = 0; i < 12; i++) {
+        let sx = Math.floor((i * 43 + frame * 0.3) % GW);
+        let sy = Math.floor((i * 29 + Math.sin(frame * 0.02 + i) * 10) % (GH - 40));
+        ctx.fillRect(sx, sy, 2, 2);
+      }
+      ctx.globalAlpha = 1;
+    }
+    return;
+  }
+
+  // Fallback: procedural backgrounds (Pass 3) if scene/art unavailable
   let px = Math.floor(-camera.x * 0.3);
 
   switch(currentLevel) {
@@ -2135,11 +2255,11 @@ function drawTitleScreen() {
   let ctrlX = GW / 2 - 120;
   let ctrlY = 172;
   let controls = [
-    ['ARROWS/WASD', 'Move'],
-    ['Z / SPACE', 'Jump'],
-    ['X / SHIFT', 'Spore Whip'],
-    ['DOWN+JUMP', 'Spore Bounce'],
-    ['HOLD POGO', 'Mycelium Slam']
+    ['ARROWS', 'Move'],
+    ['W / SPACE', 'Jump'],
+    ['A / D', 'Spore Whip'],
+    ['DOWN+W', 'Spore Bounce'],
+    ['HOLD BOUNCE', 'Mycelium Slam']
   ];
   for (let i = 0; i < controls.length; i++) {
     let label = controls[i][0];
@@ -2303,6 +2423,17 @@ function drawPlayingHUD() {
       ctx.font = 'bold 8px monospace';
       ctx.fillText('POGO!', 4, GH - 8);
     }
+  }
+
+  // Persistent controls legend (desktop only; brighter on the first stage). §7c
+  if (!('ontouchstart' in window)) {
+    var firstStage = (currentLevel === 0);
+    ctx.globalAlpha = firstStage ? 0.85 : 0.4;
+    ctx.fillStyle = '#0052FF';
+    ctx.font = 'bold 7px monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText('ARROWS MOVE   W JUMP   A/D WHIP   DOWN+W BOUNCE', GW / 2, GH - 2);
+    ctx.globalAlpha = 1;
   }
 }
 
