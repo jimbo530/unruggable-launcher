@@ -23,7 +23,7 @@ tag('puzzle', ['poop-drop','bubble-baseling','lp-lemmings','token-columns','fire
 tag('shmup', ['reactor-force','spore-storm','over-horizon','super-turrican','scat-attack','zombie-nation','legendary-wings','power-blade','crisis-force','metal-storm','spore-invaders','spore-defense']);
 tag('racing-sports', ['micro-baselings','rc-reactor','baseling-bowl','blades-of-poop','track-n-field','super-dodge','rad-racer','baseball-stars','cobra-triangle','720-grind']);
 tag('rpg-adventure', ['legend-of-tasern','tasern-quest','faxanadu-fungi','river-city-brawl','gargoyle-quest','willow-grove','solstice-tower','startropics-hex','maniac-mansion','pirates-of-tasern','rygar-realm','crystal-quest','whodunit']);
-tag('strategy-board', ['archon-battle','elite-trader','north-south-war','rampart-siege','guerrilla-war','spy-hunter','arkanoid-mft','bomberman-poop','adventure-island','chess','checkers','meme-city']);
+tag('strategy-board', ['archon-battle','elite-trader','north-south-war','rampart-siege','guerrilla-war','spy-hunter','arkanoid-mft','bomberman-poop','baseling-island','chess','checkers','meme-city']);
 tag('misc-action', ['marble-madness','snake-rattle','little-nemo','kid-icarus','bucky-ohare','dark-wing','snow-bros','duck-tales','ufouria','little-samson','double-dragon','punch-out','batman-baseling','toads-of-tasern','chip-n-dale','tiny-toons','shatter-hand','shadow-ninja','golden-axe','comix-zone','streets-of-tasern','maze-runner','rodeo-toad','swamp-hop','seasons','poop-chomp','poop-out','ecco-deep','rhythm-baseling','reactor-rash','spore-sprint','tasern-pinball']);
 
 // --- WAGER_GAMES (from tasern-wager.js) — pvp:true required ---

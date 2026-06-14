@@ -87,7 +87,7 @@ Theme: Tasern universe (baselings, poop, MfT tokens, hex world, reactors, fungi,
 - [ ] arkanoid-mft (Arkanoid — breakout with powerups)
 - [ ] solomon-key (Solomon's Key — create/destroy blocks puzzle)
 - [ ] bomberman-poop (Bomberman — bomb maze, collect powerups)
-- [ ] adventure-island (Adventure Island — run+throw, food=energy)
+- [ ] baseling-island (Baseling Island — run+throw, food=energy)
 
 ## BATCH 7 — Misc Unique Mechanics
 - [ ] marble-madness (Marble Madness — isometric ball rolling)
