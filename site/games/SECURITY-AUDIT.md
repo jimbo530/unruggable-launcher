@@ -91,7 +91,7 @@ Complete localStorage key inventory (68 unique keys across 55 games):
 | `poopbomber_hi` | poop-bomber |
 | `bstars` | baseling-sluggers |
 | `bubblebaseling_hi` | bubble-baseling |
-| `buckyohare_save` | bucky-ohare |
+| `buckybaseling_save` | bucky-baseling |
 | `chain_reaction_save` | chain-reaction |
 | `crystalquest_save` | crystal-quest |
 | `dice-roller-history` | dice-roller |
