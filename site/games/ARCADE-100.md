@@ -101,7 +101,7 @@ Theme: Tasern universe (baselings, poop, MfT tokens, hex world, reactors, fungi,
 - [ ] ufouria (Ufouria — multi-character metroidvania)
 - [ ] little-samson (Little Samson — 4 character switch platformer)
 - [ ] lolo-puzzle (Adventures of Lolo — room puzzles)
-- [ ] double-dragon (Double Dragon II — side-scroll brawler)
+- [x] double-baseling (Double Baseling — spore-city side-scroll brawler)
 - [ ] punch-out (Punch Out — boxing pattern game)
 - [x] shadow-baseling (original — wall jump beat-em-up)
 - [ ] toads-of-tasern (beat-em-up + vehicle sections)
