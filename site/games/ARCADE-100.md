@@ -92,7 +92,7 @@ Theme: Tasern universe (baselings, poop, MfT tokens, hex world, reactors, fungi,
 ## BATCH 7 — Misc Unique Mechanics
 - [ ] marble-madness (Marble Madness — isometric ball rolling)
 - [ ] snake-rattle (Snake Rattle N Roll — 3D snake eat balls)
-- [ ] little-nemo (Little Nemo — ride animals, collect keys)
+- [x] little-baseling (Little Baseling — ride spore creatures, collect garden seeds)
 - [x] spore-icarus (Spore Icarus — vertical+horizontal platformer; ours)
 - [ ] bucky-baseling (Bucky Baseling — team switch platformer)
 - [x] dark-spore (cape+spore-gun platformer, IP-renamed)

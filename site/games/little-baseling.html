@@ -38,6 +38,85 @@ var ctx = TAS.ctx;
 TAS.initCanvas(GW, GH);
 TAS.input.initTouch({ buttons: ['a', 'b'], labels: { a: 'JUMP', b: 'ACTION' } });
 
+// === GROK ART LAYER (Little Baseling — reused shared sprite pools) ===
+// Player = baseling sprite via TAS.drawBaseling. Enemies/items/scenery/backgrounds
+// all reuse the shared art pools (art/toads, art/items, art/scenery, art/backgrounds).
+var SPR = { enemy: [], item: {}, tree: [], cloud: [], bg: [] };
+(function loadArt() {
+  function img(src) { var i = new Image(); i.src = src; return i; }
+  // 4 enemy types (Dream Mold / Sleep Spore / Nightmare Fungi / Rot Crawler) -> keyed sprites.
+  SPR.enemy = [
+    img('art/toads/enemy-slime-mold.png'),   // 0 Dream Mold
+    img('art/toads/enemy-will-o-wisp.png'),  // 1 Sleep Spore (floaty)
+    img('art/toads/enemy-myconid.png'),      // 2 Nightmare Fungi
+    img('art/toads/enemy-rot-walker.png')    // 3 Rot Crawler
+  ];
+  // Items reuse shared pickups.
+  SPR.item = {
+    heart: img('art/items/pickup-hp.png'),
+    sporecap: img('art/items/coin-eth.png'),
+    thread: img('art/items/pickup-magic.png')
+  };
+  // Shared scenery (trees on ground, clouds in sky band).
+  SPR.tree = [img('art/scenery/tree-1.png'), img('art/scenery/tree-2.png')];
+  SPR.cloud = [img('art/scenery/cloud-1.png'), img('art/scenery/cloud-2.png')];
+  // 7 dream levels -> reused atmospheric backgrounds.
+  var bgNames = ['bg-fungal-forest','bg-toadstool-grove','bg-compost-cavern','bg-mire-swamp','bg-fae-court','bg-mushroom-village','bg-barrow-crypt'];
+  SPR.bg = bgNames.map(function(n) { return img('art/backgrounds/' + n + '.webp'); });
+})();
+function sprReady(i) { return !!(i && i.complete && i.naturalWidth > 0); }
+
+// Flattened scenery layer (§7d): bg + trees + clouds baked once per stage into an
+// offscreen canvas sized to the whole world; blitted per-frame under the mobile sprites.
+var bgScene = document.createElement('canvas');
+var bgSceneCtx = bgScene.getContext('2d');
+var bgSceneLevel = -1;
+var sceneryTrees = [];
+function bakeScene(lvl) {
+  bgScene.width = COLS * TS;
+  bgScene.height = ROWS * TS;
+  var b = bgSceneCtx;
+  b.clearRect(0, 0, bgScene.width, bgScene.height);
+  // Background image (cover, tiled horizontally across the world) + dark dreamy overlay.
+  var bg = SPR.bg[lvl] || SPR.bg[0];
+  if (sprReady(bg)) {
+    var tileW = ROWS * TS * (bg.naturalWidth / bg.naturalHeight);
+    for (var x = 0; x < bgScene.width; x += tileW) {
+      b.drawImage(bg, x, 0, tileW, ROWS * TS);
+    }
+    b.fillStyle = 'rgba(10,8,24,0.45)';
+    b.fillRect(0, 0, bgScene.width, bgScene.height);
+  }
+  // Trees along the ground line (seeded so they sit consistently each bake).
+  var gseed = lvl * 911 + 7;
+  function grng() { gseed = (gseed * 1664525 + 1013904223) & 0x7fffffff; return (gseed & 0xffff) / 0xffff; }
+  sceneryTrees = [];
+  for (var i = 0; i < 10; i++) {
+    var tx = Math.floor(grng() * (COLS - 2) + 1) * TS;
+    var tr = SPR.tree[i % 2];
+    if (!sprReady(tr)) continue;
+    var th = (60 + Math.floor(grng() * 30));
+    var tw = th * (tr.naturalWidth / tr.naturalHeight);
+    var gy = findGround(Math.floor(tx / TS)) * TS;
+    b.globalAlpha = 0.85;
+    b.drawImage(tr, Math.floor(tx - tw / 2), Math.floor(gy - th), tw, th);
+    b.globalAlpha = 1;
+  }
+  // Clouds drifting in the sky band.
+  for (var c = 0; c < 6; c++) {
+    var cl = SPR.cloud[c % 2];
+    if (!sprReady(cl)) continue;
+    var cw = 40 + Math.floor(grng() * 30);
+    var ch = cw * (cl.naturalHeight / cl.naturalWidth);
+    var cx = grng() * bgScene.width;
+    var cy = 8 + grng() * 50;
+    b.globalAlpha = 0.5;
+    b.drawImage(cl, Math.floor(cx), Math.floor(cy), cw, ch);
+    b.globalAlpha = 1;
+  }
+  bgSceneLevel = lvl;
+}
+
 // === STAT BONUSES (from NftLoader) ===
 var statB = { damage: 1, speed: 1, lives: 0, hpMult: 1, scoreMult: 1, cooldown: 1, luck: 1, str: 10, dex: 10, con: 10, int: 10, wis: 10, cha: 10, level: 0, color: '#44dd88', name: 'Baseling', icon: 'B' };
 try { if (window.NftLoader && NftLoader.getStatBonuses) statB = NftLoader.getStatBonuses(); } catch(e) {}
@@ -56,7 +135,7 @@ recomputeStats();
 var picking = false;
 if (window.TAS && TAS.player) {
   TAS.player.init().then(function(){ recomputeStats(); })
-    .catch(function(e){ console.warn('[little-nemo] player init failed:', e && e.message); });
+    .catch(function(e){ console.warn('[little-baseling] player init failed:', e && e.message); });
 }
 
 // Scaled score add — always Math.floor
@@ -74,7 +153,7 @@ var hp = 3;
 var maxHp = 3;
 var keysCollected = 0;
 var keysPerLevel = BASE_KEYS;
-var highScore = TAS.score.load('littlenemo_hi');
+var highScore = TAS.score.load('littlebaseling_hi');
 var invincTimer = 0;
 var levelCompleteTimer = 0;
 var deathTimer = 0;
@@ -443,6 +522,9 @@ function generateLevel(lvl) {
   }
 
   camX = 0; camY = 0;
+
+  // Bake the flattened Grok scenery layer for this level (§7d).
+  bakeScene(lvl);
 }
 
 function placeAnimal(type, rng) {
@@ -489,13 +571,16 @@ function isPlatform(col, row) {
   return getTile(col, row) === TILE.PLATFORM;
 }
 
-// === INPUT HELPERS (NES-style: Z=B button, X=A button) ===
-function btnLeft() { return TAS.input.keys['ArrowLeft'] || TAS.input.keys['KeyA'] || TAS.input.touch.left; }
-function btnRight() { return TAS.input.keys['ArrowRight'] || TAS.input.keys['KeyD'] || TAS.input.touch.right; }
-function btnUp() { return TAS.input.keys['ArrowUp'] || TAS.input.keys['KeyW'] || TAS.input.touch.up; }
+// === INPUT HELPERS (CONTROL STANDARD §7c) ===
+// Arrows = MOVE (Up/Down also climb ladders / fly / swim). WASD = action cluster:
+// W = JUMP, S = down/dismount-with-action, A/D paired with arrows for movement only,
+// J/D = ACTION (throw spore treat / creature attack). Legacy Z/X/Space/Shift = hidden alts.
+function btnLeft() { return TAS.input.keys['ArrowLeft'] || TAS.input.touch.left; }
+function btnRight() { return TAS.input.keys['ArrowRight'] || TAS.input.touch.right; }
+function btnUp() { return TAS.input.keys['ArrowUp'] || TAS.input.touch.up; }
 function btnDown() { return TAS.input.keys['ArrowDown'] || TAS.input.keys['KeyS'] || TAS.input.touch.down; }
-function btnJump() { return TAS.input.keys['KeyZ'] || TAS.input.keys['Space'] || TAS.input.touch.a; }
-function btnAction() { return TAS.input.keys['KeyX'] || TAS.input.keys['ShiftLeft'] || TAS.input.touch.b; }
+function btnJump() { return TAS.input.keys['KeyW'] || TAS.input.keys['KeyZ'] || TAS.input.keys['Space'] || TAS.input.touch.a; }
+function btnAction() { return TAS.input.keys['KeyJ'] || TAS.input.keys['KeyD'] || TAS.input.keys['KeyX'] || TAS.input.keys['ShiftLeft'] || TAS.input.touch.b; }
 function btnStart() { return TAS.input.keys['Enter'] || TAS.input.keys['Escape']; }
 function btnSelect() { return TAS.input.keys['ShiftRight'] || TAS.input.keys['Tab']; }
 
@@ -880,7 +965,7 @@ function nextLevel() {
   level++;
   if (level >= 7) {
     state = 'victory';
-    if (score > highScore) { highScore = score; TAS.score.save('littlenemo_hi', score); }
+    if (score > highScore) { highScore = score; TAS.score.save('littlebaseling_hi', score); }
     return;
   }
   generateLevel(level);
@@ -928,7 +1013,7 @@ function update(dt) {
     if (deathTimer <= 0) {
       if (hp <= 0) {
         state = 'gameOver';
-        if (score > highScore) { highScore = score; TAS.score.save('littlenemo_hi', score); }
+        if (score > highScore) { highScore = score; TAS.score.save('littlebaseling_hi', score); }
         frame = 0;
       } else {
         generateLevel(level);
@@ -1164,6 +1249,10 @@ function draw(dt) {
   TAS.fx.applyShake();
   ctx.translate(-Math.floor(camX), -Math.floor(camY));
 
+  // Flattened Grok scenery layer (bg + trees + clouds), baked once per stage (§7d).
+  if (bgSceneLevel !== level) bakeScene(level);
+  ctx.drawImage(bgScene, 0, 0);
+
   // Draw background floaters (spores)
   drawFloaters();
 
@@ -1328,10 +1417,10 @@ function drawTitleScreen() {
     ctx.fillText(creatureDesc[i], GW / 2, 136 + i * 12);
   }
 
-  // NES controls hint
+  // Controls hint (§7c: arrows move, W jump, J/D action)
   ctx.fillStyle = '#666';
   ctx.font = '7px monospace';
-  ctx.fillText('Z=JUMP  X=ACTION  ARROWS=MOVE', GW / 2, 214);
+  ctx.fillText('ARROWS MOVE   W JUMP   J/D ACTION', GW / 2, 214);
 
   // Stat bar
   if (window.NftLoader && NftLoader.drawStatBar) NftLoader.drawStatBar(ctx, 10, 10, 120);
@@ -1570,6 +1659,13 @@ function drawItems() {
   for (var i = 0; i < items.length; i++) {
     var it = items[i];
     var bob = Math.sin(frame * 0.05 + i * 2) * 2;
+    // Grok pickup sprite (centered on the item rect); procedural fallback below.
+    var _is = SPR.item[it.type];
+    if (sprReady(_is)) {
+      var _sz = 14;
+      ctx.drawImage(_is, Math.floor(it.x + it.w / 2 - _sz / 2), Math.floor(it.y + bob + it.h / 2 - _sz / 2), _sz, _sz);
+      continue;
+    }
     if (it.type === 'heart') {
       ctx.fillStyle = '#ff4466';
       ctx.fillRect(it.x + 1, it.y + bob, 2, 2);
@@ -1751,6 +1847,19 @@ function drawEnemies() {
   for (var i = 0; i < enemies.length; i++) {
     var e = enemies[i];
     var bounce = Math.sin(e.animT * 4) * 2;
+
+    // Grok enemy sprite (anchored at feet, flipped by movement direction); procedural fallback.
+    var _es = SPR.enemy[e.type];
+    if (sprReady(_es)) {
+      var _eh = e.h + 6;
+      var _ew = _eh * (_es.naturalWidth / _es.naturalHeight);
+      ctx.save();
+      ctx.translate(Math.floor(e.x + e.w / 2), Math.floor(e.y + e.h + bounce));
+      if (e.vx < 0) ctx.scale(-1, 1);
+      ctx.drawImage(_es, -_ew / 2, -_eh, _ew, _eh);
+      ctx.restore();
+      continue;
+    }
 
     switch (e.type) {
       case 0: // Dream Mold
@@ -2101,6 +2210,16 @@ function drawHUD() {
   if (abilityCooldown > 0) {
     ctx.fillStyle = '#e6482e';
     ctx.fillRect(GW - 12, 6, 6, 6);
+  }
+
+  // Persistent controls legend (desktop only; brighter on the first dream).
+  if (!('ontouchstart' in window)) {
+    ctx.globalAlpha = (level === 0) ? 0.85 : 0.4;
+    ctx.fillStyle = '#0052FF';
+    ctx.font = 'bold 7px monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText('ARROWS MOVE   W JUMP   J/D ACTION', Math.floor(GW / 2), GH - 4);
+    ctx.globalAlpha = 1;
   }
 }
 
