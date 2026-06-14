@@ -153,7 +153,7 @@ All 78 games using tasern-engine.js use `TAS.score.load/save` which wraps localS
 - **23 games** are standalone (older games with self-contained canvas/audio code)
 
 The 23 standalone games are:
-arcade, spore-breaker, blocks-burg, poop-bomber, bubble-baseling, checkers, chess, dice-roller, golden-axe, jumpy-bros, legend-of-tasern, lp-lemmings, maze-runner, meme-city, poop-drop, poop-out, reactor-force, reactor-rash, rodeo-toad, spore-sprint, streets-of-tasern, ttrpg-notepad, tunnel-bug
+arcade, spore-breaker, blocks-burg, poop-bomber, bubble-baseling, checkers, chess, dice-roller, golden-axe, jumpy-bros, legend-of-tasern, spore-lemmings, maze-runner, meme-city, poop-drop, poop-out, reactor-force, reactor-rash, rodeo-toad, spore-sprint, streets-of-tasern, ttrpg-notepad, tunnel-bug
 
 **Assessment:** Not a security issue. Older games predate the shared engine and work correctly without it. The engine provides convenience wrappers (canvas, audio, input, particles) but is not a security dependency.
 

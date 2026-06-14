@@ -32,7 +32,7 @@ Theme: Tasern universe (baselings, poop, MfT tokens, hex world, reactors, fungi,
 ## BATCH 2 — Puzzle Games (Tetris, Lemmings, Bubble Bobble, etc.)
 - [ ] poop-drop (Tetris — falling poop blocks)
 - [ ] bubble-baseling (Bubble Bobble — trap in bubbles, pop for tokens)
-- [ ] lp-lemmings (Lemmings — guide baselings to LP pools)
+- [ ] spore-lemmings (Spore Lemmings — guide baselings to LP pools)
 - [ ] token-columns (Klax — catch falling tokens in order)
 - [x] spore-n-ice (Spore N Ice — push spore/ice blocks, Tasern puzzles)
 - [ ] rainbow-bridge (Rainbow Islands — climb rainbows, collect food)
