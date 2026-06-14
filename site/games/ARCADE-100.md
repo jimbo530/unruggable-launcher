@@ -104,7 +104,7 @@ Theme: Tasern universe (baselings, poop, MfT tokens, hex world, reactors, fungi,
 - [ ] double-dragon (Double Dragon II — side-scroll brawler)
 - [ ] punch-out (Punch Out — boxing pattern game)
 - [ ] batman-baseling (Batman — wall jump beat-em-up)
-- [ ] battletoads (Battletoads — beat-em-up + vehicle sections)
+- [ ] toads-of-tasern (beat-em-up + vehicle sections)
 - [ ] chip-n-dale (Chip N Dale — co-op throw+lift platformer)
 - [ ] tiny-toons (Tiny Toons — character-swap platformer)
 - [ ] shatter-hand (Shatterhand — punch-bots action)

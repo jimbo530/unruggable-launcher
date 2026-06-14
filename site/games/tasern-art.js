@@ -16,12 +16,17 @@
     'orange-tree','pear-tree','plum-tree','rabbit','redpanda'
   ];
 
-  var ENEMIES = ['goblin','wolf'];
+  var ENEMIES = [
+    'goblin','wolf','bog-wight','myconid','root-witch','rot-walker',
+    'shroom-knight','slime-mold','spriggan','troll','will-o-wisp','wyrm','skeleton'
+  ];
 
   var BACKGROUNDS = [
     'bg-desert-1','bg-desert-2','bg-desert-3','bg-desert-4',
     'bg-plains-1','bg-plains-2','bg-plains-3','bg-plains-4',
-    'adventure-level1','tavern-bg'
+    'adventure-level1','tavern-bg',
+    'bg-fungal-forest','bg-mire-swamp','bg-toadstool-grove','bg-compost-cavern',
+    'bg-fae-court','bg-barrow-crypt','bg-mushroom-village'
   ];
 
   var MAPS = ['world-map','kardovs-gate-map','londa-map','manlan-map'];
