@@ -105,7 +105,7 @@ Complete localStorage key inventory (68 unique keys across 55 games):
 | `kicklespore_progress` | kickle-spore |
 | `legend_of_tasern_save` | legend-of-tasern |
 | `sporesamson_progress` | spore-samson |
-| `lolopuzzle_progress` | lolo-puzzle |
+| `sporesphere_progress` | spore-sphere |
 | `maniac_mansion_save` | maniac-mansion |
 | `mazeRunnerHigh` | maze-runner |
 | `memecity_arcade` | meme-city |

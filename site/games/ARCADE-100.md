@@ -100,7 +100,7 @@ Theme: Tasern universe (baselings, poop, MfT tokens, hex world, reactors, fungi,
 - [x] spore-tales (Spore Tales — pogo-cane jump, collect spores/treasure)
 - [ ] ufouria (Ufouria — multi-character metroidvania)
 - [x] spore-samson (Spore Samson — 4 character switch platformer)
-- [ ] lolo-puzzle (Adventures of Lolo — room puzzles)
+- [ ] spore-sphere (Spore Sphere — room block-push puzzles)
 - [x] double-baseling (Double Baseling — spore-city side-scroll brawler)
 - [ ] punch-out (Punch Out — boxing pattern game)
 - [x] shadow-baseling (original — wall jump beat-em-up)
