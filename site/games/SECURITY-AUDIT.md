@@ -109,7 +109,7 @@ Complete localStorage key inventory (68 unique keys across 55 games):
 | `spore_mansion_save` | spore-mansion |
 | `sporeMazeHigh` | spore-maze |
 | `memecity_arcade` | meme-city |
-| `nswar_campaign` | north-south-war |
+| `spore_civil_war_campaign` | spore-civil-war |
 | `pirates_tasern_save` | pirates-of-tasern |
 | `poopdrop_hi` | poop-drop |
 | `poopman_save` | poop-man |

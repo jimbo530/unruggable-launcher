@@ -80,7 +80,7 @@ Theme: Tasern universe (baselings, poop, MfT tokens, hex world, reactors, fungi,
 ## BATCH 6 — Strategy/Board/Classic (Garden Wars, Elite, etc.)
 - [ ] garden-wars (Garden Wars — chess+real-time combat)
 - [ ] spore-trader (space trading sim)
-- [ ] north-south-war (North and South — war strategy)
+- [x] spore-civil-war (Spore Civil War — garden war strategy; IP-renamed)
 - [ ] rampart-siege (Rampart — build walls, shoot cannons)
 - [x] garden-guerrilla (Garden Guerrilla — top-down rescue shooter)
 - [ ] spy-hunter (Spy Hunter — driving shooter)
