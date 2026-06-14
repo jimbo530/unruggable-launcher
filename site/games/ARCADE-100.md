@@ -77,8 +77,8 @@ Theme: Tasern universe (baselings, poop, MfT tokens, hex world, reactors, fungi,
 - [ ] maniac-mansion (Maniac Mansion — point-n-click adventure)
 - [ ] pirates-of-tasern (Pirates! — sail, trade, fight)
 
-## BATCH 6 — Strategy/Board/Classic (Archon, Elite, etc.)
-- [ ] archon-battle (Archon — chess+real-time combat)
+## BATCH 6 — Strategy/Board/Classic (Garden Wars, Elite, etc.)
+- [ ] garden-wars (Garden Wars — chess+real-time combat)
 - [ ] elite-trader (Elite — space trading sim)
 - [ ] north-south-war (North and South — war strategy)
 - [ ] rampart-siege (Rampart — build walls, shoot cannons)

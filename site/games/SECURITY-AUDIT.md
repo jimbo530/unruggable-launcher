@@ -83,7 +83,7 @@ Complete localStorage key inventory (68 unique keys across 55 games):
 | Key | Game |
 |-----|------|
 | `arkanoid_mft_high` | arkanoid-mft |
-| `archon_campaign` | archon-battle |
+| `garden_wars_campaign` | garden-wars |
 | `bbowl_hi` | baseling-bowl |
 | `blades_poop_tournament` | blades-of-poop |
 | `blaster_baseling_save` | blaster-baseling |
