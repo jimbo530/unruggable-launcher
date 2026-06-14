@@ -39,7 +39,7 @@ Theme: Tasern universe (baselings, poop, MfT tokens, hex world, reactors, fungi,
 - [ ] reactor-pipes (Pipe Mania — connect reactor pipes before overflow)
 - [ ] boulder-baseling (Boulder Dash — dig + dodge boulders for gems)
 - [ ] poop-puzznic (Puzznic — match poop types to clear)
-- [ ] kickle-kube (Kickle Cubicle — freeze enemies into stepping stones)
+- [ ] kickle-spore (Kickle Spore — freeze enemies into stepping stones)
 
 ## BATCH 3 — Shooters/Shmups (Gradius, Life Force, Gun Nac, etc.)
 - [ ] reactor-force (Gradius/Life Force — horizontal ship shmup)

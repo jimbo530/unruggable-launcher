@@ -102,7 +102,7 @@ Complete localStorage key inventory (68 unique keys across 55 games):
 | `sporegoylequest_save` | sporegoyle-quest |
 | `ironmaw_save` | iron-maw |
 | `jumpyBrosHiScore` | jumpy-bros |
-| `kicklekube_progress` | kickle-kube |
+| `kicklespore_progress` | kickle-spore |
 | `legend_of_tasern_save` | legend-of-tasern |
 | `littlesamson_progress` | little-samson |
 | `lolopuzzle_progress` | lolo-puzzle |
