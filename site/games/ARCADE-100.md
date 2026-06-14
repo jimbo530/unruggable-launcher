@@ -93,7 +93,7 @@ Theme: Tasern universe (baselings, poop, MfT tokens, hex world, reactors, fungi,
 - [ ] marble-madness (Marble Madness — isometric ball rolling)
 - [ ] snake-rattle (Snake Rattle N Roll — 3D snake eat balls)
 - [ ] little-nemo (Little Nemo — ride animals, collect keys)
-- [ ] kid-icarus (Kid Icarus — vertical+horizontal platformer)
+- [x] spore-icarus (Spore Icarus — vertical+horizontal platformer; ours)
 - [ ] bucky-baseling (Bucky Baseling — team switch platformer)
 - [x] dark-spore (cape+spore-gun platformer, IP-renamed)
 - [ ] snow-bros (Snow Bros — freeze+push snowball arcade)
