@@ -44,7 +44,7 @@ Theme: Tasern universe (baselings, poop, MfT tokens, hex world, reactors, fungi,
 ## BATCH 3 — Shooters/Shmups (Gradius, Life Force, Gun Nac, etc.)
 - [ ] reactor-force (Gradius/Life Force — horizontal ship shmup)
 - [ ] spore-storm (Gun Nac — vertical shmup, fungal enemies)
-- [ ] over-horizon (Over Horizon — multi-directional, reactor bosses)
+- [x] baseling-horizon (Baseling Horizon — multi-directional, reactor bosses)
 - [ ] super-turrican (Turrican — explore+shoot platformer hybrid)
 - [ ] scat-attack (SCAT — twin astronauts shoot aliens)
 - [ ] zombie-nation (Zombie Nation — giant head shoots buildings)
