@@ -31,7 +31,7 @@
 
   var MAPS = ['world-map','kardovs-gate-map','londa-map','manlan-map'];
 
-  var ITEMS = ['salad','rice','burger','berry','orange','backpack','sprout','farmer','bloom-eth','bloom-btc'];
+  var ITEMS = ['salad','rice','burger','berry','orange','backpack','sprout','farmer','bloom-eth','bloom-btc','coin-btc','coin-eth','pickup-hp','pickup-magic'];
 
   // ── Loader ──────────────────────────────────────────────────
   function load(path, cb) {
