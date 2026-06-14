@@ -500,7 +500,7 @@ const ARCADE_GAME_ACCESSORIES = {
   "spore_defense": { id: "acc_tower_helm", name: "Tower Guardian Helm", threshold: 10 },
   "rhythm_baseling": { id: "acc_music_note", name: "Rhythm Note", threshold: 1 },
   "tasern_quest": { id: "acc_quest_scroll", name: "Quest Scroll", threshold: 1 },
-  "baseball_stars": { id: "acc_baseball_cap", name: "Champion Cap", threshold: 1 }
+  "baseling_sluggers": { id: "acc_baseball_cap", name: "Champion Cap", threshold: 1 }
 };
 
 function calculateArcadeRewards(arcadeData, crossState) {

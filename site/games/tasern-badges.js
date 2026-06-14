@@ -70,7 +70,7 @@ const BADGES = [
   { id: 'arcade_rat',      name: 'Arcade Rat',       desc: 'Spend 1 hour total in the arcade',       icon: 'clock',    color: '#607D8B' },
   { id: 'pinball_wizard',  name: 'Pinball Wizard',   desc: 'Score 100K+ in Tasern Pinball',          icon: 'ball',     color: '#CE93D8' },
   { id: 'quest_complete',  name: 'Quest Complete',   desc: 'Finish a quest in Tasern Quest',         icon: 'scroll',   color: '#A1887F' },
-  { id: 'champion',        name: 'Champion',         desc: 'Win a season in Baseball Stars',         icon: 'trophy',   color: '#CDDC39' },
+  { id: 'champion',        name: 'Champion',         desc: 'Win a season in Baseling Sluggers',      icon: 'trophy',   color: '#CDDC39' },
   { id: 'rhythm_master',   name: 'Rhythm Master',    desc: 'Get S rank in Rhythm Baseling',          icon: 'note',     color: '#E040FB' },
   { id: 'builder_badge',   name: 'Builder',          desc: 'Build 10+ towers in Spore Defense',      icon: 'tower',    color: '#8D6E63' },
   { id: 'legend',          name: 'Legend',            desc: 'Earn 15+ other badges',                  icon: 'dragon',   color: '#FFD700' }

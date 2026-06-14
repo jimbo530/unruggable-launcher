@@ -89,7 +89,7 @@ Complete localStorage key inventory (68 unique keys across 55 games):
 | `blaster_baseling_save` | blaster-baseling |
 | `blocksburg_settings` | blocks-burg |
 | `bomberpoop_hi` | bomberman-poop |
-| `bstars` | baseball-stars |
+| `bstars` | baseling-sluggers |
 | `bubblebaseling_hi` | bubble-baseling |
 | `buckyohare_save` | bucky-ohare |
 | `chain_reaction_save` | chain-reaction |
