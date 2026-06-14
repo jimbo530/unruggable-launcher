@@ -95,7 +95,7 @@ Theme: Tasern universe (baselings, poop, MfT tokens, hex world, reactors, fungi,
 - [ ] little-nemo (Little Nemo — ride animals, collect keys)
 - [ ] kid-icarus (Kid Icarus — vertical+horizontal platformer)
 - [ ] bucky-baseling (Bucky Baseling — team switch platformer)
-- [ ] dark-wing (Darkwing Duck — cape+gas gun platformer)
+- [x] dark-spore (cape+spore-gun platformer, IP-renamed)
 - [ ] snow-bros (Snow Bros — freeze+push snowball arcade)
 - [ ] duck-tales (Duck Tales — pogo jump, collect treasure)
 - [ ] ufouria (Ufouria — multi-character metroidvania)
