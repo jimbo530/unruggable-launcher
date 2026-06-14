@@ -31,6 +31,40 @@ const ctx = TAS.ctx;
 TAS.initCanvas(GW, GH);
 TAS.input.initTouch({ buttons: ['a', 'b'], labels: { a: 'JUMP', b: 'INHALE' } });
 
+// === GROK ART LAYER (shared reuse pools — see PIPELINE-RUNBOOK §6/§7d) ===
+// All scenery is reused from the shared pools (zero new Grok images). Baked into a
+// flattened per-stage offscreen layer; mobile sprites drawn on top each frame.
+const SPR = { tree: [], cloud: [], tile: {}, mushroom: null, bg: [] };
+(function loadArt() {
+  function img(s) { var i = new Image(); i.src = s; return i; }
+  SPR.tree = [img('art/scenery/tree-1.png'), img('art/scenery/tree-2.png')];
+  SPR.cloud = [img('art/scenery/cloud-1.png'), img('art/scenery/cloud-2.png')];
+  SPR.tile = {
+    grass: img('art/scenery/platform-grass.png'),
+    snow: img('art/scenery/platform-snow.png'),
+    stone: img('art/scenery/platform-stone.png'),
+    dirt: img('art/scenery/platform-dirt.png'),
+    metal: img('art/scenery/platform-metal.png')
+  };
+  SPR.mushroom = img('art/toads/platform-mushroom.png');
+  // 6 worlds -> reused backgrounds (Mushroom Meadows..Spore Citadel).
+  var bgNames = ['bg-mushroom-village', 'bg-fae-court', 'bg-mire-swamp', 'bg-barrow-crypt', 'bg-compost-cavern', 'bg-toadstool-grove'];
+  SPR.bg = bgNames.map(function (n) { return img('art/backgrounds/' + n + '.webp'); });
+})();
+function sprReady(i) { return !!(i && i.complete && i.naturalWidth > 0); }
+// Per-world ground/platform material tile (visual only; collision rects stay in levelData).
+function worldTileSpr(w) {
+  switch (w) {
+    case 1: return SPR.tile.grass;   // Mushroom Meadows
+    case 2: return SPR.tile.stone;   // Crystal Canopy
+    case 3: return SPR.tile.dirt;    // Coral Depths
+    case 4: return SPR.tile.stone;   // Phantom Hollow
+    case 5: return SPR.tile.metal;   // Reactor Ruins
+    case 6: return SPR.tile.stone;   // Spore Citadel
+    default: return SPR.tile.grass;
+  }
+}
+
 const TILE = 16;
 const COLS = 80;
 const ROWS = 16;
@@ -203,6 +237,98 @@ const BOSSES = [
   { name: 'Spore Lord', color: '#aa22ff', w: 40, h: 50, maxHp: 24, pattern: 'spore' }
 ];
 
+// === FLATTENED SCENERY LAYER (PIPELINE-RUNBOOK §7d) ===
+// One offscreen canvas per stage = bg image (cover) + clouds + trees + platform tiles,
+// composited ONCE. Per frame we blit it with -camX; mobile sprites draw on top.
+// Collision rects live in levelData and are untouched (this layer is visual only).
+let bgScene = null;          // offscreen canvas
+let bgSceneW = 0;            // world pixel width
+let bgSceneReady = false;    // all needed images decoded when baked
+let bgSceneRebuild = false;  // re-bake if images finished loading after first attempt
+
+function buildScene() {
+  const cols = levelData[0] ? levelData[0].length : COLS;
+  const worldW = cols * TILE;
+  const worldH = ROWS * TILE;
+  bgSceneW = worldW;
+  if (!bgScene) bgScene = document.createElement('canvas');
+  bgScene.width = worldW;
+  bgScene.height = worldH;
+  const bg = bgScene.getContext('2d');
+  bg.imageSmoothingEnabled = false;
+  bg.clearRect(0, 0, worldW, worldH);
+
+  const theme = WORLD_THEMES[(world - 1) % 6];
+
+  // 1) Background image stretched to cover the full world (sky gradient fallback).
+  const bgImg = SPR.bg[(world - 1) % 6];
+  let allReady = true;
+  if (sprReady(bgImg)) {
+    // tile the cover horizontally so a wide world stays painted
+    const tilesAcross = Math.ceil(worldW / GW);
+    for (let t = 0; t < tilesAcross; t++) {
+      bg.drawImage(bgImg, t * GW, 0, GW, worldH);
+    }
+    bg.fillStyle = 'rgba(0,0,0,0.18)';
+    bg.fillRect(0, 0, worldW, worldH);
+  } else {
+    allReady = false;
+    const grad = bg.createLinearGradient(0, 0, 0, worldH);
+    grad.addColorStop(0, theme.sky);
+    grad.addColorStop(1, theme.bg2);
+    bg.fillStyle = grad;
+    bg.fillRect(0, 0, worldW, worldH);
+  }
+
+  // 2) Clouds across the sky band.
+  const cloudCount = Math.floor(worldW / 130);
+  for (let i = 0; i < cloudCount; i++) {
+    const cl = SPR.cloud[i % 2];
+    const cx = i * 130 + (i * 37) % 60;
+    const cy = 14 + (i * 23) % 70;
+    if (sprReady(cl)) {
+      const cw = 56, ch = cw * (cl.naturalHeight / cl.naturalWidth);
+      bg.globalAlpha = 0.85;
+      bg.drawImage(cl, cx, cy, cw, ch);
+      bg.globalAlpha = 1;
+    } else { allReady = false; }
+  }
+
+  // 3) Trees on the ground line (skip gaps).
+  const groundTopY = (ROWS - 2) * TILE;
+  for (let c = 2; c < cols - 2; c += 6) {
+    if (levelData[ROWS - 2] && levelData[ROWS - 2][c] !== 1) continue; // gap -> no tree
+    const tr = SPR.tree[(c >> 1) % 2];
+    if (sprReady(tr)) {
+      const th = 46 + ((c * 13) % 18);
+      const tw = th * (tr.naturalWidth / tr.naturalHeight);
+      bg.drawImage(tr, c * TILE - tw / 2, groundTopY - th, tw, th);
+    } else { allReady = false; }
+  }
+
+  // 4) Platform / ground tiles painted over collision tiles (visual skin).
+  const tileSpr = worldTileSpr(world);
+  const mushSpr = SPR.mushroom;
+  for (let r = 0; r < ROWS; r++) {
+    for (let c = 0; c < cols; c++) {
+      const t = levelData[r] ? levelData[r][c] : 0;
+      const tx = c * TILE, ty = r * TILE;
+      if (t === 1) {
+        if (sprReady(tileSpr)) bg.drawImage(tileSpr, 0, 0, tileSpr.naturalWidth, tileSpr.naturalHeight, tx, ty, TILE, TILE);
+        else { allReady = false; bg.fillStyle = theme.ground; bg.fillRect(tx, ty, TILE, TILE); }
+      } else if (t === 2) {
+        // floating platform -> mushroom ledge
+        if (sprReady(mushSpr)) bg.drawImage(mushSpr, 0, 0, mushSpr.naturalWidth, mushSpr.naturalHeight, tx, ty, TILE, TILE);
+        else if (sprReady(tileSpr)) bg.drawImage(tileSpr, 0, 0, tileSpr.naturalWidth, tileSpr.naturalHeight, tx, ty, TILE, TILE);
+        else { allReady = false; bg.fillStyle = theme.block; bg.fillRect(tx, ty, TILE, TILE); }
+      }
+      // t===3 (breakable) drawn live in drawTiles() since it disappears; hazards (4/5/6) live too.
+    }
+  }
+
+  bgSceneReady = allReady;
+}
+
 // === LEVEL GENERATION ===
 function generateLevel(w, s) {
   levelData = [];
@@ -336,6 +462,9 @@ function generateLevel(w, s) {
   player.x = 40;
   player.y = (ROWS - 4) * TILE;
   camX = 0;
+
+  // Bake the flattened scenery layer for this stage.
+  buildScene();
 }
 
 function getEnemyTypesForWorld(w) {
@@ -412,12 +541,14 @@ function breakBlock(col, row) {
   }
 }
 
-// === INPUT HELPERS ===
-function inputLeft() { return TAS.input.keys['ArrowLeft'] || TAS.input.keys['KeyA'] || TAS.input.touch.left; }
-function inputRight() { return TAS.input.keys['ArrowRight'] || TAS.input.keys['KeyD'] || TAS.input.touch.right; }
-function inputJump() { return TAS.input.keys['ArrowUp'] || TAS.input.keys['KeyW'] || TAS.input.keys['Space'] || TAS.input.touch.a; }
-function inputAttack() { return TAS.input.keys['KeyZ'] || TAS.input.keys['KeyX'] || TAS.input.keys['KeyJ'] || TAS.input.touch.b; }
-function inputDown() { return TAS.input.keys['ArrowDown'] || TAS.input.keys['KeyS'] || TAS.input.touch.down; }
+// === INPUT HELPERS (CONTROL STANDARD §7c) ===
+// Arrows = MOVE only.  WASD = the action cluster (W jump, S down, A/D action buttons).
+// Legacy keys (Z/X/J/K/Space/Up/Down) kept as hidden alts for compatibility.
+function inputLeft() { return TAS.input.keys['ArrowLeft'] || TAS.input.touch.left; }
+function inputRight() { return TAS.input.keys['ArrowRight'] || TAS.input.touch.right; }
+function inputJump() { return TAS.input.keys['KeyW'] || TAS.input.keys['ArrowUp'] || TAS.input.keys['Space'] || TAS.input.touch.a; }
+function inputAttack() { return TAS.input.keys['KeyA'] || TAS.input.keys['KeyD'] || TAS.input.keys['KeyZ'] || TAS.input.keys['KeyX'] || TAS.input.keys['KeyJ'] || TAS.input.keys['KeyK'] || TAS.input.touch.b; }
+function inputDown() { return TAS.input.keys['KeyS'] || TAS.input.keys['ArrowDown'] || TAS.input.touch.down; }
 
 let prevJump = false;
 let prevAttack = false;
@@ -1476,13 +1607,28 @@ function update(dt) {
 // === DRAWING ===
 function drawBackground() {
   const theme = WORLD_THEMES[(world - 1) % 6];
+
+  // If the baked scene wasn't fully ready (images still decoding on first stage),
+  // re-bake once they finish so the painted scenery appears.
+  if (!bgSceneReady && !bgSceneRebuild) {
+    if (sprReady(SPR.bg[(world - 1) % 6])) { buildScene(); bgSceneRebuild = true; }
+  }
+
+  if (bgScene && bgSceneReady) {
+    // Blit the visible slice of the flattened scenery layer at the scroll offset.
+    const sx = Math.max(0, Math.floor(camX));
+    const sw = Math.min(GW, bgSceneW - sx);
+    if (sw > 0) ctx.drawImage(bgScene, sx, 0, sw, bgScene.height, 0, 0, sw, GH);
+    return;
+  }
+
+  // Fallback (images not yet decoded): procedural gradient + simple parallax.
   const grad = ctx.createLinearGradient(0, 0, 0, GH);
   grad.addColorStop(0, theme.sky);
   grad.addColorStop(1, theme.bg2);
   ctx.fillStyle = grad;
   ctx.fillRect(0, 0, GW, GH);
 
-  // Parallax hills
   ctx.fillStyle = theme.bg1 + '44';
   for (let i = 0; i < 6; i++) {
     const hx = ((i * 120) - camX * 0.2) % (GW + 120) - 60;
@@ -1491,19 +1637,7 @@ function drawBackground() {
     ctx.ellipse(hx, GH - 30, 70, hh, 0, 0, Math.PI * 2);
     ctx.fill();
   }
-
-  // Zone-specific background decorations (Pass 3)
   drawZoneDecorations(theme);
-
-  // Background clouds
-  ctx.fillStyle = '#ffffff22';
-  for (let i = 0; i < 5; i++) {
-    const cx = ((i * 150 + 30) - camX * 0.1) % (GW + 100) - 50;
-    const cy = 20 + (i * 17) % 60;
-    ctx.beginPath();
-    ctx.ellipse(cx, cy, 30 + i*5, 12, 0, 0, Math.PI * 2);
-    ctx.fill();
-  }
 }
 
 // === ZONE DECORATIONS (Pass 3) ===
@@ -1643,7 +1777,8 @@ function drawTiles() {
   for (let r = 0; r < ROWS; r++) {
     for (let c = startCol; c < endCol; c++) {
       const t = levelData[r] ? levelData[r][c] : 0;
-      if (t === 0) continue;
+      // t===1 (ground) and t===2 (platforms) are baked into bgScene; skip when baked.
+      if (t === 0 || ((t === 1 || t === 2) && bgSceneReady)) continue;
       const tx = c * TILE - camX;
       const ty = r * TILE;
       if (t === 1) {
@@ -2441,7 +2576,7 @@ function draw(dt) {
     ctx.fillStyle = '#f4b41b';
     ctx.font = '8px monospace';
     ctx.textAlign = 'center';
-    ctx.fillText('SPIT: DOWN+B  |  ABSORB: B', GW/2, GH - 8);
+    ctx.fillText('SPIT: S+A   |   ABSORB/POWER: A', GW/2, GH - 14);
   }
 
   // Stage cleared
@@ -2450,6 +2585,17 @@ function draw(dt) {
     ctx.font = 'bold 16px monospace';
     ctx.textAlign = 'center';
     ctx.fillText('GARDEN CLEARED!', GW/2, GH/2);
+  }
+
+  // Persistent controls legend (desktop only; brighter on the first stage). §7c
+  if (!('ontouchstart' in window)) {
+    const first = (world === 1 && stage === 1);
+    ctx.globalAlpha = first ? 0.85 : 0.45;
+    ctx.fillStyle = '#0052FF';
+    ctx.font = 'bold 7px monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText('ARROWS MOVE   W JUMP/FLOAT   A INHALE/POWER   S+A SLIDE/SPIT', GW/2, GH - 4);
+    ctx.globalAlpha = 1;
   }
 
   TAS.input.drawTouchControls(GW, GH);
@@ -2552,14 +2698,14 @@ function drawTitleScreen() {
   ctx.font = '8px monospace';
   const controlY = GH - 100;
   const controls = [
-    ['MOVE', 'ARROWS / WASD'],
-    ['JUMP', 'SPACE / UP'],
-    ['FLOAT', 'HOLD JUMP'],
-    ['INHALE', 'Z / X / J'],
-    ['ABILITY', 'Z / X / J'],
-    ['SLIDE', 'DOWN + ATTACK'],
-    ['SPIT', 'DOWN + ATTACK'],
-    ['SWALLOW', 'ATTACK']
+    ['MOVE', 'ARROW KEYS'],
+    ['JUMP', 'W  (or SPACE)'],
+    ['FLOAT', 'HOLD W'],
+    ['INHALE', 'A  (or D)'],
+    ['ABILITY', 'A'],
+    ['SLIDE', 'S + A'],
+    ['SPIT', 'S + A'],
+    ['SWALLOW', 'A']
   ];
   for (let i = 0; i < controls.length; i++) {
     const label = controls[i][0];
