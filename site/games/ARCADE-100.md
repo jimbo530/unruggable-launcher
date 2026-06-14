@@ -62,7 +62,7 @@ Theme: Tasern universe (baselings, poop, MfT tokens, hex world, reactors, fungi,
 - [ ] super-dodge (Super Dodge Ball — dodgeball with powers)
 - [ ] rad-racer (Rad Racer — into-screen racing)
 - [x] baseling-sluggers (Baseling Sluggers — RPG baseball; renamed from SNK "Baseball Stars")
-- [ ] cobra-triangle (Cobra Triangle — boat racing+combat)
+- [x] spore-tributaries (Spore Tributaries — boat racing+combat; IP renamed)
 - [ ] baseling-grind (skateboarding)
 
 ## BATCH 5 — RPG/Adventure (Zelda, Final Fantasy, Dragon Quest, etc.)

@@ -95,7 +95,7 @@ effect.
 
 Current wager games (must use `{ pvp: true }`): `poop-out`, `micro-baselings`,
 `token-columns`, `super-dodge`, `baseling-grind`, `snow-bros`, `streets-of-tasern`,
-`spore-breaker`, `rc-reactor`, `cobra-triangle`. If you add a game to `WAGER_GAMES`, you
+`spore-breaker`, `rc-reactor`, `spore-tributaries`. If you add a game to `WAGER_GAMES`, you
 must also switch its `getMults()` call to `{ pvp: true }` in the same change.
 
 ### How to apply a multiplier without breaking balance
@@ -141,12 +141,12 @@ games). Every example assumes `base*` constants are tuned for a neutral 1.0× ba
 - SWM: ignore. **Puzzle wager games (Token Columns, Spore Breaker, Poop Out) use
   `{pvp:true}`** — keep effects tiny.
 
-### Racing (e.g. Micro Baselings, RC Reactor, Cobra Triangle)
+### Racing (e.g. Micro Baselings, RC Reactor, Spore Tributaries)
 - Top speed: `vmax = baseVmax * m.moveSpeed`
 - Boost duration / fuel: `boost = baseBoost * m.health`
 - Ram / bump force: `ram = baseRam * m.damage`
 - Item-box roll bias: weight good items by `m.luck`
-- **Water sections** (Cobra Triangle boats, RC water tracks): `waterV = baseWaterV * m.swim`
+- **Water sections** (Spore Tributaries boats, RC water tracks): `waterV = baseWaterV * m.swim`
   — this is the one genre where SWM matters. No water on the track → ignore SWM.
 - All three are wager games → `{pvp:true}`.
 

@@ -34,7 +34,7 @@ const WAGER_GAMES = {
   'streets-of-tasern':{ name: 'Streets of Tasern',  type: 'score',   description: 'Beat-em-up - highest score wins' },
   'spore-breaker':    { name: 'Spore Breaker',      type: 'score',   description: 'Breakout - highest score wins' },
   'rc-reactor':       { name: 'RC Reactor',         type: 'time',    description: 'Racing - fastest time wins' },
-  'cobra-triangle':   { name: 'Cobra Triangle',     type: 'score',   description: 'Boat racing - highest score wins' }
+  'spore-tributaries':{ name: 'Spore Tributaries',  type: 'score',   description: 'Boat racing - highest score wins' }
 };
 
 // Contract ABI placeholder (for future deployment)
