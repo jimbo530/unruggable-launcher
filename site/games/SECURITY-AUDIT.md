@@ -95,7 +95,7 @@ Complete localStorage key inventory (68 unique keys across 55 games):
 | `chain_reaction_save` | chain-reaction |
 | `sporecrystal_save` | spore-crystal |
 | `dice-roller-history` | dice-roller |
-| `elite_trader_save` | elite-trader |
+| `spore_trader_save` | spore-trader |
 | `faxanadu_fungi_save` | faxanadu-fungi |
 | `firennice_progress` | fire-n-ice |
 | `firennice_hi` | fire-n-ice |
