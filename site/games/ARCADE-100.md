@@ -74,7 +74,7 @@ Theme: Tasern universe (baselings, poop, MfT tokens, hex world, reactors, fungi,
 - [ ] willow-grove (Willow — action RPG with magic)
 - [ ] solstice-tower (Solstice — isometric puzzle adventure)
 - [ ] startropics-hex (Startropics — island hop adventure)
-- [ ] maniac-mansion (Maniac Mansion — point-n-click adventure)
+- [ ] spore-mansion (Spore Mansion — point-n-click adventure)
 - [ ] pirates-of-tasern (Pirates! — sail, trade, fight)
 
 ## BATCH 6 — Strategy/Board/Classic (Garden Wars, Elite, etc.)
