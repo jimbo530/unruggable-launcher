@@ -50,7 +50,7 @@ Theme: Tasern universe (baselings, poop, MfT tokens, hex world, reactors, fungi,
 - [ ] zombie-nation (Zombie Nation — giant head shoots buildings)
 - [ ] legendary-wings (Legendary Wings — vertical+side scroll mix)
 - [ ] power-blade (Power Blade — throw boomerang blades)
-- [ ] crisis-force (Crisis Force — transforming ship)
+- [x] spore-force (Spore Force — transforming ship)
 - [ ] metal-storm (Metal Storm — gravity flip mechanic)
 
 ## BATCH 4 — Racing/Sports (RC Pro-Am, Micro Machines, etc.)
