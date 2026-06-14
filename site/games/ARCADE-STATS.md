@@ -94,7 +94,7 @@ choice. Show the stats in the UI either way (players want to see them); just bou
 effect.
 
 Current wager games (must use `{ pvp: true }`): `poop-out`, `micro-baselings`,
-`token-columns`, `super-dodge`, `720-grind`, `snow-bros`, `streets-of-tasern`,
+`token-columns`, `super-dodge`, `baseling-grind`, `snow-bros`, `streets-of-tasern`,
 `arkanoid-mft`, `rc-reactor`, `cobra-triangle`. If you add a game to `WAGER_GAMES`, you
 must also switch its `getMults()` call to `{ pvp: true }` in the same change.
 

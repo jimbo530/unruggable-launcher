@@ -29,7 +29,7 @@ const WAGER_GAMES = {
   'micro-baselings':  { name: 'Micro Baselings',    type: 'time',    description: 'Racing - fastest lap wins' },
   'token-columns':    { name: 'Token Columns',      type: 'score',   description: 'Puzzle - highest score wins' },
   'super-dodge':      { name: 'Super Dodge',        type: 'score',   description: 'Dodgeball - most wins' },
-  '720-grind':        { name: '720 Grind',          type: 'score',   description: 'Skateboarding - trick score' },
+  'baseling-grind':    { name: 'Baseling Grind',          type: 'score',   description: 'Skateboarding - trick score' },
   'snow-bros':        { name: 'Snow Bros',          type: 'score',   description: 'Action - highest score wins' },
   'streets-of-tasern':{ name: 'Streets of Tasern',  type: 'score',   description: 'Beat-em-up - highest score wins' },
   'arkanoid-mft':     { name: 'Arkanoid MfT',       type: 'score',   description: 'Breakout - highest score wins' },

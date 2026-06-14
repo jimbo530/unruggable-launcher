@@ -38,7 +38,7 @@ Grep the file for `tasern-engine.js`:
 
 Also check **`tasern-wager.js`**: if the game's id is in `WAGER_GAMES`, it's a **wager
 game** → you must call `getMults({ pvp: true })` everywhere (Step 4). Current wager games:
-`poop-out, micro-baselings, token-columns, super-dodge, 720-grind, snow-bros,
+`poop-out, micro-baselings, token-columns, super-dodge, baseling-grind, snow-bros,
 streets-of-tasern, arkanoid-mft, rc-reactor, cobra-triangle`.
 
 Some "games" are non-action (chess, checkers, dice-roller, ttrpg-notepad, whodunit). They

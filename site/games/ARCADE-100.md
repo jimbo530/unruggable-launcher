@@ -63,7 +63,7 @@ Theme: Tasern universe (baselings, poop, MfT tokens, hex world, reactors, fungi,
 - [ ] rad-racer (Rad Racer — into-screen racing)
 - [ ] baseball-stars (Baseball Stars — RPG baseball)
 - [ ] cobra-triangle (Cobra Triangle — boat racing+combat)
-- [ ] 720-grind (720 Degrees — skateboarding)
+- [ ] baseling-grind (skateboarding)
 
 ## BATCH 5 — RPG/Adventure (Zelda, Final Fantasy, Dragon Quest, etc.)
 - [ ] legend-of-tasern (Zelda — top-down dungeon crawler)
