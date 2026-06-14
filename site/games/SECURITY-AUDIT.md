@@ -99,7 +99,7 @@ Complete localStorage key inventory (68 unique keys across 55 games):
 | `fungi_quest_save` | fungi-quest |
 | `sporennice_progress` | spore-n-ice |
 | `sporennice_hi` | spore-n-ice |
-| `gargoylequest_save` | gargoyle-quest |
+| `sporegoylequest_save` | sporegoyle-quest |
 | `ironmaw_save` | iron-maw |
 | `jumpyBrosHiScore` | jumpy-bros |
 | `kicklekube_progress` | kickle-kube |

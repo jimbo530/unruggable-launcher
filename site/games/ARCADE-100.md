@@ -70,7 +70,7 @@ Theme: Tasern universe (baselings, poop, MfT tokens, hex world, reactors, fungi,
 - [ ] tasern-quest (Dragon Quest — turn-based RPG)
 - [ ] fungi-quest (Fungi Quest — side-scroll RPG)
 - [ ] river-city-brawl (River City Ransom — beat-em-up RPG)
-- [ ] gargoyle-quest (Gargoyle's Quest — fly+fight platformer RPG)
+- [x] sporegoyle-quest (Sporegoyle Quest — fly+fight platformer RPG; renamed from gargoyle-quest, IP)
 - [ ] willow-grove (Willow — action RPG with magic)
 - [ ] solstice-tower (Solstice — isometric puzzle adventure)
 - [ ] startropics-hex (Startropics — island hop adventure)
