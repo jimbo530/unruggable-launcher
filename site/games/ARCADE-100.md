@@ -90,7 +90,7 @@ Theme: Tasern universe (baselings, poop, MfT tokens, hex world, reactors, fungi,
 - [ ] baseling-island (Baseling Island — run+throw, food=energy)
 
 ## BATCH 7 — Misc Unique Mechanics
-- [ ] marble-madness (Marble Madness — isometric ball rolling)
+- [x] spore-roll (Spore Roll — isometric ball rolling)
 - [ ] snake-rattle (Snake Rattle N Roll — 3D snake eat balls)
 - [x] little-baseling (Little Baseling — ride spore creatures, collect garden seeds)
 - [x] spore-icarus (Spore Icarus — vertical+horizontal platformer; ours)
