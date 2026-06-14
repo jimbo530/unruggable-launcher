@@ -105,7 +105,7 @@ Theme: Tasern universe (baselings, poop, MfT tokens, hex world, reactors, fungi,
 - [ ] punch-out (Punch Out — boxing pattern game)
 - [x] shadow-baseling (original — wall jump beat-em-up)
 - [ ] toads-of-tasern (beat-em-up + vehicle sections)
-- [ ] chip-n-dale (Chip N Dale — co-op throw+lift platformer)
+- [x] baseling-rescue (Baseling Rescue — co-op throw+lift platformer)
 - [ ] tiny-toons (Tiny Toons — character-swap platformer)
 - [ ] shatter-hand (Shatterhand — punch-bots action)
 - [ ] shadow-ninja (Shadow of Ninja — ninja co-op action)
