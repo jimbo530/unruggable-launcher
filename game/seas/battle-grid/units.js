@@ -258,15 +258,31 @@ function readActiveId() {
  * When on, makeStarterUnits() builds the ENEMY from a stored OPPONENT SNAPSHOT
  * (their stats + equipped loadout, AI-piloted) instead of the hardcoded sparring caster.
  */
-export function isPvpMode() {
-  let urlOn = false;
+/**
+ * BATTLE MODE — which framing the deck runs under:
+ *   "encounter" → a VOYAGE PVE encounter (raiders on a sail route). URL ?mode=encounter,
+ *                 armed by the voyage bridge (encounter.js) off location.js setSail().
+ *   "pvp"       → async open-sea PVP duel (URL ?mode=pvp, or sts_pvp_mode flag fallback).
+ *   "training"  → default harbor sparring (unchanged).
+ * encounter and pvp BOTH build the enemy from the same `sts_pvp_opponent` snapshot, so the
+ * voyage bridge reuses the entire PVP enemy-build path — only the framing/return differ.
+ */
+export function battleMode() {
+  let urlMode = null;
   if (typeof window !== "undefined" && window.location && window.location.search) {
-    try { urlOn = new URLSearchParams(window.location.search).get("mode") === "pvp"; }
-    catch (e) { console.warn("pvp url parse failed:", e); }   // visible, not silent
+    try { urlMode = new URLSearchParams(window.location.search).get("mode"); }
+    catch (e) { console.warn("battle mode url parse failed:", e); }   // visible, not silent
   }
-  let flagOn = false;
-  if (typeof localStorage !== "undefined") flagOn = localStorage.getItem("sts_pvp_mode") === "1";
-  return urlOn || flagOn;
+  if (urlMode === "encounter") return "encounter";
+  if (urlMode === "pvp") return "pvp";
+  if (typeof localStorage !== "undefined" && localStorage.getItem("sts_pvp_mode") === "1") return "pvp";
+  return "training";
+}
+
+/** Open-sea (real-stakes) mode = PVP duel OR a voyage PVE encounter. Both share the
+ *  enemy-from-snapshot path in makeStarterUnits; battleMode() splits the framing. */
+export function isPvpMode() {
+  return battleMode() !== "training";
 }
 
 /**
@@ -413,10 +429,11 @@ export function makeStarterUnits() {
     const opp = readPvpOpponent();
     if (opp) {
       // pvp:true tells game.js to set state.stakes=true + state.arena="water" (open sea).
-      return { pvp: true, units: [player, buildOpponentUnit(opp)] };
+      // mode lets game.js frame it as a voyage "encounter" (raiders) vs a "pvp" duel.
+      return { pvp: true, mode: battleMode(), units: [player, buildOpponentUnit(opp)] };
     }
-    // PVP requested but no opponent chosen → tell the caller to send the player to setup.
-    return { pvpNoOpponent: true };
+    // PVP/encounter requested but no opponent snapshot stored → tell the caller to set up.
+    return { pvpNoOpponent: true, mode: battleMode() };
   }
 
   // The sparring opponent is a REAL Black Tide pawn paper-doll (#1, a dev play-pawn) —

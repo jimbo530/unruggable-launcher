@@ -1,0 +1,475 @@
+<!DOCTYPE html>
+<!--
+  game/seas/hold.html — THE CARGO HOLD. Move items between three inventories that all live
+  at a PORT: the active PAWN's CARRY, the active SHIP's HOLD, and the PORT WAREHOUSE.
+
+  CO-LOCATION GATE (the whole point):
+    • You can only move an item between two inventories when they're at the SAME place.
+    • The SHIP HOLD is unlocked ONLY when areCoLocated(pawn, ship) — same port AND the ship
+      isn't out at sea. If isAtSea(ship) or the ship sits at a different port, the hold is
+      LOCKED (greyed, "ship is away at <port>"). You literally can't reach a hold that sailed off.
+    • A WAREHOUSE is unlocked only when the pawn is standing at THAT warehouse's port. Peek at
+      another port's warehouse and it's LOCKED ("warehouse is at <port>").
+    • Capacity bites too: pawn carry = pawnCapacity(STR) lb; ship hold = shipCargoLb(key) lb;
+      warehouse = a big depot cap. Over capacity → can't add.
+
+  DEPENDENCY: the location core lib game/lib/location.js (built by another agent) provides
+      getLocation(id)->portId, areCoLocated(idA,idB)->bool, isAtSea(shipId)->bool, PORTS{}.
+      This page imports it; if it isn't present yet, a localStorage-backed STUB with the SAME
+      API takes over so the screen is testable in beta. When the real lib lands it wins
+      automatically — no code change here.
+
+  STATE (localStorage, beta — NO on-chain, NO network):
+      sts_inv_pawn            → the active pawn's carry      [{id,qty}]
+      sts_hold_<ship>         → that ship's hold             [{id,qty}]
+      sts_warehouse_<port>    → that port's warehouse        [{id,qty}]
+  Item ids are gear ids (battle-grid/items.js ITEMS) or trade-good string ids (TRADE_GOODS).
+
+  Serve game/ and open /seas/hold.html  (trailing path matters for the art/nav links).
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Cargo Hold — move your goods</title>
+  <style>
+    :root{ --ink:#f3ead7; --muted:#b6a584; --gold:#e6b422; --rope:#caa45a; --green:#2ecc71; --sea:#1a3550; --lock:#c0563a; }
+    *{box-sizing:border-box}
+    body{ margin:0; min-height:100vh; font-family:"Segoe UI",system-ui,sans-serif; color:var(--ink);
+      background:linear-gradient(rgba(8,12,18,.72), rgba(8,12,18,.88)), url("./art/rooms/shipyard.jpg") center/cover fixed, linear-gradient(#0e1a24,#0a0f14 70%);
+      padding:22px 16px 60px; }
+    .top{ display:flex; align-items:center; justify-content:space-between; max-width:1180px; margin:0 auto 8px; flex-wrap:wrap; gap:8px; }
+    h1{ font-size:26px; margin:0; letter-spacing:2px; color:var(--gold); text-transform:uppercase; }
+    .nav a{ color:var(--rope); text-decoration:none; font-size:13px; margin-left:14px; }
+    .nav a:hover{ color:var(--gold); }
+    .blurb{ max-width:1180px; margin:0 auto 12px; color:var(--muted); font-size:13px; line-height:1.55; }
+    .blurb b{color:var(--ink)}
+
+    /* where-am-i bar */
+    .here{ max-width:1180px; margin:0 auto 14px; font-size:13px; color:var(--muted); background:rgba(0,0,0,.30); border:1px solid #2a2114; border-radius:9px; padding:10px 14px; display:flex; align-items:center; gap:14px; flex-wrap:wrap; }
+    .here b{ color:var(--gold); }
+    .here label{ color:var(--muted); }
+    .here select{ background:#16212e; color:var(--ink); border:1px solid #34516b; border-radius:7px; padding:5px 8px; font-size:12.5px; }
+    .here .src{ margin-left:auto; font-size:11px; color:var(--muted); }
+    .here .src b{ color:var(--rope); }
+
+    /* three inventory columns */
+    .cols{ max-width:1180px; margin:0 auto; display:grid; grid-template-columns:repeat(3,1fr); gap:14px; }
+    @media(max-width:840px){ .cols{ grid-template-columns:1fr; } }
+    .col{ background:linear-gradient(#1a2735,#101820); border:1px solid #2c4257; border-radius:14px; padding:14px; display:flex; flex-direction:column; gap:10px; position:relative; min-height:240px; }
+    .col.locked{ opacity:.92; border-color:#3a2c22; }
+    .col.locked .body{ filter:grayscale(.7) brightness(.6); pointer-events:none; }
+    .colhead{ display:flex; align-items:center; gap:10px; }
+    .colhead .ico{ font-size:26px; width:46px; height:46px; display:flex; align-items:center; justify-content:center; background:radial-gradient(circle at 50% 42%, #24506f, #0c1620); border:1px solid #34516b; border-radius:10px; flex:none; }
+    .colhead .nm{ font-weight:700; font-size:16px; color:var(--ink); }
+    .colhead .sub{ color:var(--rope); font-size:11.5px; margin-top:2px; }
+    .colhead .sub b{ color:var(--ink); }
+
+    .coloc{ font-size:11px; letter-spacing:.4px; text-transform:uppercase; border-radius:999px; padding:3px 9px; align-self:flex-start; }
+    .coloc.ok{ color:#bfe9cd; background:rgba(46,204,113,.13); border:1px solid rgba(46,204,113,.4); }
+    .coloc.no{ color:#f0c9bb; background:rgba(192,86,58,.16); border:1px solid var(--lock); }
+
+    /* load bar */
+    .load{ font-size:11px; color:var(--muted); }
+    .load .bar{ height:7px; border-radius:4px; background:#0c1620; border:1px solid #25364a; overflow:hidden; margin-top:4px; }
+    .load .fill{ height:100%; background:linear-gradient(90deg,#2ecc71,#caa45a); transition:width .2s; }
+    .load.laden .fill{ background:linear-gradient(90deg,#caa45a,#e6b422); }
+    .load.over .fill{ background:linear-gradient(90deg,#e6b422,#c0563a); }
+    .load b{ color:var(--ink); }
+
+    .body{ display:flex; flex-direction:column; gap:7px; }
+    .item{ display:flex; align-items:center; gap:9px; background:rgba(0,0,0,.24); border:1px solid #25364a; border-radius:9px; padding:7px 9px; }
+    .item .emo{ font-size:19px; width:26px; text-align:center; flex:none; }
+    .item .meta{ flex:1; min-width:0; }
+    .item .nm{ font-size:13px; color:var(--ink); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+    .item .wt{ font-size:10.5px; color:var(--muted); margin-top:1px; }
+    .item .qty{ font-size:11px; color:var(--rope); background:rgba(202,164,90,.12); border:1px solid #4a3a22; border-radius:6px; padding:1px 6px; flex:none; }
+    .moves{ display:flex; gap:4px; flex:none; }
+    .moves button{ background:#23344a; border:1px solid #34516b; color:var(--ink); border-radius:6px; font-size:11px; padding:3px 7px; cursor:pointer; white-space:nowrap; }
+    .moves button:hover:not(:disabled){ background:#2c4257; }
+    .moves button:disabled{ opacity:.32; cursor:default; }
+
+    .empty{ color:var(--muted); font-size:12px; text-align:center; padding:18px 6px; font-style:italic; }
+    .addrow{ display:flex; gap:6px; margin-top:auto; }
+    .addrow select{ flex:1; background:#16212e; color:var(--ink); border:1px solid #34516b; border-radius:7px; padding:5px 7px; font-size:12px; }
+    .addrow button{ background:#2a5a2f; border:1px solid var(--green); color:#eafff0; border-radius:7px; font-size:12px; padding:5px 10px; cursor:pointer; }
+    .addrow button:disabled{ opacity:.4; cursor:default; }
+
+    .lockmsg{ position:absolute; left:50%; top:54%; transform:translate(-50%,-50%); text-align:center; font-size:12.5px; color:#f0c9bb; background:rgba(20,12,8,.86); border:1px solid var(--lock); border-radius:10px; padding:10px 14px; max-width:88%; line-height:1.5; z-index:3; }
+    .lockmsg b{ color:#ffd9c9; }
+
+    /* beta location controls (only shown when the stub lib is driving) */
+    .stub{ max-width:1180px; margin:16px auto 0; background:rgba(230,180,34,.07); border:1px dashed rgba(230,180,34,.4); border-radius:11px; padding:12px 15px; font-size:12.5px; color:var(--ink); line-height:1.6; }
+    .stub h3{ margin:0 0 8px; font-size:13px; color:var(--gold); letter-spacing:1px; text-transform:uppercase; }
+    .stub .row{ display:flex; align-items:center; gap:9px; flex-wrap:wrap; margin:6px 0; }
+    .stub label{ color:var(--muted); min-width:120px; }
+    .stub select,.stub button{ background:#16212e; color:var(--ink); border:1px solid #34516b; border-radius:7px; padding:5px 9px; font-size:12px; cursor:pointer; }
+    .stub button.sea{ border-color:var(--lock); }
+    .stub .hint{ color:var(--muted); font-size:11.5px; }
+
+    .note{ max-width:1180px; margin:18px auto 0; background:rgba(46,204,113,.06); border:1px solid rgba(46,204,113,.22); border-radius:11px; padding:12px 15px; font-size:12.5px; color:var(--ink); line-height:1.55; }
+    .note b{ color:#bfe9cd; }
+    .foot{ max-width:1180px; margin:16px auto 0; color:var(--muted); font-size:11px; text-align:center; line-height:1.6; }
+    .toast{ position:fixed; left:50%; bottom:24px; transform:translateX(-50%); background:#15212e; border:1px solid var(--gold); color:var(--ink); border-radius:10px; padding:11px 18px; font-size:13px; box-shadow:0 8px 24px rgba(0,0,0,.5); opacity:0; transition:opacity .2s; pointer-events:none; max-width:90vw; text-align:center; }
+    .toast.show{ opacity:1; }
+  </style>
+</head>
+<body>
+  <div class="top">
+    <h1>📦 Cargo Hold</h1>
+    <div class="nav"><a href="./">⚓ Port</a><a href="./crew/">🧑‍🤝‍🧑 Crew</a><a href="../shipyard/store.html">🚢 Shipyard</a><a href="./battle-grid/">⚔️ Decks</a></div>
+  </div>
+
+  <p class="blurb">
+    Move goods between your <b>pawn's pack</b>, your <b>ship's hold</b>, and the <b>port warehouse</b> — but only when
+    they're in the <b>same place</b>. A hold that's <b>out at sea</b> (or docked at another port) is locked: you can't reach
+    cargo that sailed off without you. Stand at a port to use its warehouse.
+  </p>
+
+  <div class="here">
+    <span>📍 Your pawn is at <b id="herePort">—</b></span>
+    <label>Pawn: <select id="pawnSel"></select></label>
+    <label>Ship: <select id="shipSel"></select></label>
+    <label>Hull: <select id="hullSel"></select></label>
+    <label>Warehouse: <select id="whSel"></select></label>
+    <span class="src">location lib: <b id="locSrc">—</b></span>
+  </div>
+
+  <div class="cols">
+    <div class="col" id="col-pawn"></div>
+    <div class="col" id="col-ship"></div>
+    <div class="col" id="col-wh"></div>
+  </div>
+
+  <div class="stub" id="locPanel" style="display:none">
+    <h3 id="locPanelTitle">⚓ Location</h3>
+    <div id="locPanelBody"></div>
+  </div>
+
+  <div class="note">
+    <b>Co-location gate:</b> the ship hold unlocks only when <code>areCoLocated(pawn, ship)</code> is true — same port and the
+    ship isn't at sea. A warehouse unlocks only when your pawn stands at that warehouse's port. Capacity is enforced on every
+    move (pawn lb / ship cargo tonnage / depot cap).
+  </div>
+
+  <div class="foot">super-early beta 🏴‍☠️ — localStorage only, no chain, no network. Hold contents restore from <code>sts_hold_&lt;ship&gt;</code>; warehouse from <code>sts_warehouse_&lt;port&gt;</code>.</div>
+  <div class="toast" id="toast"></div>
+
+  <script type="module">
+    import { ITEMS, itemImg } from "./battle-grid/items.js";
+    import { pawnCapacity, shipCargoLb, loadState, LOAD } from "../lib/weight.js";
+
+    // ── DEPENDENCY: the location core lib (another agent's). Import it; if it isn't on disk
+    //    yet, fall back to a localStorage-backed STUB exposing the EXACT same API so beta works.
+    //    When the real lib lands at ../lib/location.js it takes over with zero changes here.
+    let LOC, usingStub = false;
+    try {
+      LOC = await import("../lib/location.js");
+      if (typeof LOC.getLocation !== "function" || !LOC.PORTS) throw new Error("location.js missing expected API");
+    } catch (e) {
+      usingStub = true;
+      LOC = makeStubLocation();
+    }
+    document.getElementById("locSrc").textContent = usingStub ? "stub (lib not present)" : "lib/location.js ✓";
+
+    // ── Active entities (shared keys used across the seas pages) ───────────────────────────
+    // Pawn = the active worker/fighter (sts_active). Ship = the active vessel (sts_active_ship,
+    // chosen from the owned fleet sts_ships_owned). For beta a pawn carries ONE pack (sts_inv_pawn).
+    // HULLS = shipyard tonnage classes (the keys weight.js shipCargoLb knows). A voyage SHIP
+    // (e.g. the lib's ship_black_tide) maps to a hull for its cargo capacity.
+    const HULL_NAMES = { rowboat:"Rowboat", keelboat:"Keelboat", sailship:"Sailing Ship", warship:"Warship", galley:"Galley" };
+    const HULL_ICON  = { rowboat:"🛶", keelboat:"⛵", sailship:"🚢", warship:"🛡️", galley:"🛳️" };
+    const HULLS = ["rowboat","keelboat","sailship","warship","galley"];
+    const DEFAULT_HULL = "keelboat";
+
+    function crew(){ try{ return JSON.parse(localStorage.getItem("sts_crew")||"[]"); }catch{ return []; } }
+
+    // The fleet of voyage-tracked ships. Prefer the location lib's own SHIPS (the real voyage
+    // entities the journey clock tracks); fall back to shipyard-owned hull keys for standalone beta.
+    function fleet(){
+      if (LOC.SHIPS && Object.keys(LOC.SHIPS).length) return Object.values(LOC.SHIPS).map(s=>({ id:s.id, name:s.name }));
+      let owned=[]; try{ owned=JSON.parse(localStorage.getItem("sts_ships_owned")||"[]"); }catch{}
+      if(!owned.length) owned=["rowboat"];
+      return owned.map(k=>({ id:k, name:HULL_NAMES[k]||k }));
+    }
+    // A voyage ship's hull class (sets cargo tonnage). Owned-key ids ARE hulls; lib ship ids
+    // default to a mid hull unless the player has pinned one (sts_ship_hull_<id>).
+    function hullOf(id){ const v=localStorage.getItem("sts_ship_hull_"+id); if(v&&HULLS.includes(v)) return v; return HULLS.includes(id)?id:DEFAULT_HULL; }
+    function shipIcon(id){ return HULL_ICON[hullOf(id)] || "🚢"; }
+    function shipName(id){ const f=fleet().find(x=>x.id===id); return f?f.name:(HULL_NAMES[id]||id); }
+
+    function pawnId(){
+      let id = localStorage.getItem("sts_active");
+      if (!id){ const c = crew(); id = c.length ? String(c[0].id) : "pawn"; localStorage.setItem("sts_active", id); }
+      return id;
+    }
+    function shipId(){
+      let s = localStorage.getItem("sts_active_ship");
+      const ids = fleet().map(f=>f.id);
+      if (!s || !ids.includes(s)){ s = ids[0]; localStorage.setItem("sts_active_ship", s); }
+      return s;
+    }
+    function pawnLabel(){ const p = crew().find(x=>String(x.id)===pawnId()); return p ? (p.name || p.class || ("Pawn "+pawnId())) : "Your pawn"; }
+    // Pawn carry capacity scales with STR (best-effort read; sane beta default of STR 12 → 160 lb).
+    function pawnStr(){ const p = crew().find(x=>String(x.id)===pawnId()); return Number(p?.stats?.STR ?? p?.stats?.str ?? p?.str ?? 12); }
+
+    // ── TRADE GOODS (beta) — bulk cargo as plain string ids (no battle stats), with a lb each.
+    //    Gear ids resolve through ITEMS; anything else falls back to this table / a default lb.
+    const TRADE_GOODS = {
+      rum_barrel:   { name:"Barrel of Rum",   emoji:"🛢️", weight:120 },
+      spice_crate:  { name:"Crate of Spice",  emoji:"🧂", weight:40  },
+      silk_bolt:    { name:"Bolt of Silk",    emoji:"🧵", weight:10  },
+      timber:       { name:"Timber",          emoji:"🪵", weight:80  },
+      iron_ingot:   { name:"Iron Ingot",      emoji:"🪙", weight:25  },
+      grain_sack:   { name:"Sack of Grain",   emoji:"🌾", weight:50  },
+      salt_fish:    { name:"Salt Fish",       emoji:"🐟", weight:30  },
+      tea_chest:    { name:"Chest of Tea",    emoji:"🍵", weight:35  },
+    };
+    function itemDef(id){
+      if (ITEMS[id]) return { name:ITEMS[id].name, emoji:ITEMS[id].emoji || "🎒", weight:Number(ITEMS[id].weight)||1, gear:true };
+      if (TRADE_GOODS[id]) return { ...TRADE_GOODS[id], gear:false };
+      return { name:id, emoji:"📦", weight:1, gear:false };       // unknown id → default 1 lb
+    }
+
+    // ── Inventory storage (localStorage) ─────────────────────────────────────────────────
+    const fmtLb = n => (Math.round(n*10)/10).toLocaleString("en-US")+" lb";
+    function read(key){ try{ const a=JSON.parse(localStorage.getItem(key)||"[]"); return Array.isArray(a)?a:[]; }catch{ return []; } }
+    function write(key, list){ localStorage.setItem(key, JSON.stringify(list.filter(e=>e.qty>0))); }
+    function invWeight(list){ return list.reduce((s,e)=> s + itemDef(e.id).weight * e.qty, 0); }
+    function addItem(list, id, n=1){ const e=list.find(x=>x.id===id); if(e) e.qty+=n; else list.push({id,qty:n}); }
+    function removeItem(list, id, n=1){ const e=list.find(x=>x.id===id); if(!e) return; e.qty-=n; if(e.qty<=0) list.splice(list.indexOf(e),1); }
+
+    // Storage keys for the THREE inventories of the moment.
+    const keyPawn = () => "sts_inv_pawn";
+    const keyHold = () => "sts_hold_" + shipId();
+    const keyWh   = () => "sts_warehouse_" + whPort();
+
+    // The warehouse the player is viewing (defaults to the pawn's current port).
+    let _whPort = null;
+    function whPort(){ if (_whPort && LOC.PORTS[_whPort]) return _whPort; return LOC.getLocation(pawnId()); }
+
+    // ── One-time beta seed so there's something to drag around ─────────────────────────────
+    (function seed(){
+      if (localStorage.getItem("sts_hold_seeded")) return;
+      localStorage.setItem("sts_hold_seeded","1");
+      if (!read(keyPawn()).length){ const l=[]; addItem(l,"silk_bolt",2); addItem(l,"tea_chest",1); write(keyPawn(),l); }
+      const wk = "sts_warehouse_" + LOC.getLocation(pawnId());
+      if (!read(wk).length){ const l=[]; addItem(l,"rum_barrel",3); addItem(l,"timber",4); addItem(l,"grain_sack",6); addItem(l,"iron_ingot",10); write(wk,l); }
+    })();
+
+    // ── Gate logic (the heart of it) ──────────────────────────────────────────────────────
+    // Pawn pack: always reachable (it's ON the pawn). Ship hold: areCoLocated(pawn, ship).
+    // Warehouse: pawn must be standing at that warehouse's port.
+    function shipReachable(){ return LOC.areCoLocated(pawnId(), shipId()); }
+    function whReachable(){ return LOC.getLocation(pawnId()) === whPort(); }
+    function portName(id){ return LOC.PORTS[id]?.name || id || "?"; }
+    function shipAwayReason(){
+      if (LOC.isAtSea(shipId())){
+        const j = LOC.journeyOf ? LOC.journeyOf(shipId()) : null;
+        return j ? `at sea → ${portName(j.to)} (${j.secsLeft}s left)` : "out at sea";
+      }
+      return "docked at " + portName(LOC.getLocation(shipId()));
+    }
+
+    // ── Capacities ────────────────────────────────────────────────────────────────────────
+    const WAREHOUSE_CAP_LB = 50000;     // a port depot — big, but not infinite
+    function capPawn(){ return pawnCapacity(pawnStr()); }
+    function capHold(){ return shipCargoLb(hullOf(shipId()), 0); }   // hull tonnage; roomTons=0 for beta (no installed rooms yet)
+    function capWh(){ return WAREHOUSE_CAP_LB; }
+
+    // ── Move: source → dest, with co-location + capacity gates ─────────────────────────────
+    // which ∈ pawn|ship|wh
+    function keyOf(which){ return which==="pawn"?keyPawn():which==="ship"?keyHold():keyWh(); }
+    function capOf(which){ return which==="pawn"?capPawn():which==="ship"?capHold():capWh(); }
+    function reachable(which){ return which==="pawn"?true:which==="ship"?shipReachable():whReachable(); }
+    function labelOf(which){ return which==="pawn"?"your pack":which==="ship"?"the hold":"the warehouse"; }
+
+    function move(id, from, to){
+      if (!reachable(from) || !reachable(to)) return toast("🔒 Can't reach both spots — they're not in the same place.");
+      const dest = read(keyOf(to));
+      const def = itemDef(id);
+      if (invWeight(dest) + def.weight > capOf(to)) return toast(`No room in ${labelOf(to)} — ${def.name} is ${fmtLb(def.weight)}.`);
+      const src = read(keyOf(from));
+      if (!src.find(e=>e.id===id)) return;
+      removeItem(src, id, 1); write(keyOf(from), src);
+      addItem(dest, id, 1);    write(keyOf(to), dest);
+      render();
+    }
+
+    // ── Render one inventory column ────────────────────────────────────────────────────────
+    const COLS = [
+      { which:"pawn", el:"col-pawn", ico:"🎒", title:()=>pawnLabel()+"'s Pack",  sub:()=>"carry · STR "+pawnStr() },
+      { which:"ship", el:"col-ship", ico:()=>shipIcon(shipId()), title:()=>shipName(shipId())+" — Hold", sub:()=>"hold · "+(HULL_NAMES[hullOf(shipId())]||hullOf(shipId())) },
+      { which:"wh",   el:"col-wh",   ico:"🏚️", title:()=>portName(whPort())+" Warehouse", sub:()=>"port depot" },
+    ];
+
+    function loadClass(st){ return st.tier===LOAD.OVERLOADED?"over":st.tier===LOAD.LADEN?"laden":""; }
+
+    function renderCol(c){
+      const host = document.getElementById(c.el);
+      const which = c.which;
+      const open = reachable(which);
+      const list = read(keyOf(which));
+      const wt = invWeight(list), cap = capOf(which), st = loadState(wt, cap);
+      const ico = typeof c.ico==="function"?c.ico():c.ico;
+
+      // co-location chip + (if ship/wh) lock reason
+      let chip;
+      if (which==="pawn") chip = `<span class="coloc ok">📍 with you</span>`;
+      else if (open)      chip = `<span class="coloc ok">co-located ✓</span>`;
+      else                chip = `<span class="coloc no">away ✗</span>`;
+
+      const otherTargets = ["pawn","ship","wh"].filter(w=>w!==which);
+
+      const rows = list.length ? list.map(e=>{
+        const d = itemDef(e.id);
+        const art = d.gear ? `<img class="emo" src="${itemImg(e.id)}" style="width:24px;height:24px;object-fit:contain" onerror="this.replaceWith(Object.assign(document.createElement('span'),{className:'emo',textContent:'${d.emoji}'}))">` : `<span class="emo">${d.emoji}</span>`;
+        const mv = otherTargets.map(t=>{
+          const dest = read(keyOf(t));
+          const roomOk = invWeight(dest) + d.weight <= capOf(t);
+          const can = open && reachable(t) && roomOk;
+          const tip = !reachable(t) ? "locked — not in the same place" : !roomOk ? "no room there" : "move one to "+labelOf(t);
+          const arrowTo = t==="pawn"?"🎒":t==="ship"?"⚓":"🏚️";
+          return `<button data-id="${e.id}" data-from="${which}" data-to="${t}" ${can?"":"disabled"} title="${tip}">▶${arrowTo}</button>`;
+        }).join("");
+        return `<div class="item">${art}<div class="meta"><div class="nm">${d.name}</div><div class="wt">${fmtLb(d.weight)} ea · ${fmtLb(d.weight*e.qty)} total</div></div><span class="qty">×${e.qty}</span><div class="moves">${mv}</div></div>`;
+      }).join("") : `<div class="empty">empty</div>`;
+
+      // "stock" picker (beta) to add test items into an UNLOCKED inventory
+      const catalog = Object.keys(TRADE_GOODS).map(id=>`<option value="${id}">${TRADE_GOODS[id].emoji} ${TRADE_GOODS[id].name} (${TRADE_GOODS[id].weight} lb)</option>`).join("");
+      const addRow = open ? `<div class="addrow"><select data-add="${which}">${catalog}</select><button data-addbtn="${which}">➕ stock</button></div>` : "";
+
+      const lockOverlay = (!open && which!=="pawn") ? `<div class="lockmsg">🔒 ${which==="ship"?"Ship is "+shipAwayReason():"Warehouse is at <b>"+portName(whPort())+"</b> — you're at <b>"+portName(LOC.getLocation(pawnId()))+"</b>"}<br><span style="color:var(--muted)">${which==="ship"?"sail it back to your port to load it":"travel there to use this depot"}</span></div>` : "";
+
+      host.className = "col" + (open?"":" locked");
+      host.innerHTML = `
+        ${lockOverlay}
+        <div class="colhead"><div class="ico">${ico}</div><div><div class="nm">${c.title()}</div><div class="sub">${c.sub()}</div></div></div>
+        ${chip}
+        <div class="load ${loadClass(st)}"><b>${fmtLb(wt)}</b> / ${fmtLb(cap)} · ${st.tier}<div class="bar"><div class="fill" style="width:${st.pct}%"></div></div></div>
+        <div class="body">${rows}</div>
+        ${addRow}`;
+    }
+
+    // ── Selectors (pawn / ship / warehouse-port) ──────────────────────────────────────────
+    function fillSelectors(){
+      const ps = document.getElementById("pawnSel");
+      const c = crew();
+      ps.innerHTML = c.length ? c.map(p=>`<option value="${p.id}" ${String(p.id)===pawnId()?"selected":""}>${p.name||p.class||("Pawn "+p.id)}</option>`).join("")
+                              : `<option value="${pawnId()}" selected>Your pawn</option>`;
+      const ss = document.getElementById("shipSel");
+      ss.innerHTML = fleet().map(f=>`<option value="${f.id}" ${f.id===shipId()?"selected":""}>${shipIcon(f.id)} ${f.name}</option>`).join("");
+      const hs = document.getElementById("hullSel");
+      hs.innerHTML = HULLS.map(k=>`<option value="${k}" ${k===hullOf(shipId())?"selected":""}>${HULL_ICON[k]} ${HULL_NAMES[k]}</option>`).join("");
+      const ws = document.getElementById("whSel");
+      ws.innerHTML = Object.values(LOC.PORTS).map(p=>`<option value="${p.id}" ${p.id===whPort()?"selected":""}>${p.name}${p.id===LOC.getLocation(pawnId())?" (here)":""}</option>`).join("");
+      document.getElementById("herePort").textContent = portName(LOC.getLocation(pawnId()));
+    }
+
+    function render(){ if (LOC.tryArrive) fleet().forEach(f=>{ try{ LOC.tryArrive(f.id); }catch(e){ console.warn("[hold] tryArrive failed:", e); } }); fillSelectors(); COLS.forEach(renderCol); renderLocPanel(); bind(); }
+
+    function bind(){
+      document.querySelectorAll(".moves button").forEach(b=> b.onclick = ()=> move(b.dataset.id, b.dataset.from, b.dataset.to));
+      document.querySelectorAll("[data-addbtn]").forEach(b=> b.onclick = ()=>{
+        const which = b.dataset.addbtn;
+        const sel = document.querySelector(`[data-add="${which}"]`);
+        const id = sel.value, d = itemDef(id);
+        if (!reachable(which)) return toast("🔒 That inventory is locked.");
+        const list = read(keyOf(which));
+        if (invWeight(list) + d.weight > capOf(which)) return toast(`No room — ${d.name} is ${fmtLb(d.weight)}.`);
+        addItem(list, id, 1); write(keyOf(which), list); render();
+      });
+    }
+
+    document.getElementById("pawnSel").onchange = e=>{ localStorage.setItem("sts_active", e.target.value); _whPort=null; render(); };
+    document.getElementById("shipSel").onchange = e=>{ localStorage.setItem("sts_active_ship", e.target.value); render(); };
+    document.getElementById("hullSel").onchange = e=>{ localStorage.setItem("sts_ship_hull_"+shipId(), e.target.value); render(); };
+    document.getElementById("whSel").onchange   = e=>{ _whPort = e.target.value; render(); };
+
+    function toast(msg){ const t=document.getElementById("toast"); t.textContent=msg; t.classList.add("show"); clearTimeout(t._h); t._h=setTimeout(()=>t.classList.remove("show"),2600); }
+
+    // ── Location panel — exercise the gate. Two modes:
+    //    • STUB present: teleport the pawn/ship + toggle "at sea" (no voyage clock in the stub).
+    //    • REAL lib: drive the actual voyage time-lock via setSail() to charted destinations.
+    //      Sailing locks the active ship's hold; tryArrive() (polled in render) lands it.
+    function renderLocPanel(){
+      const panel = document.getElementById("locPanel");
+      const title = document.getElementById("locPanelTitle");
+      const body  = document.getElementById("locPanelBody");
+
+      if (usingStub){
+        panel.style.display = "block";
+        title.innerHTML = `⚓ Beta location controls <span class="hint">(stub — real game movement replaces this)</span>`;
+        const opts = sel => Object.values(LOC.PORTS).map(p=>`<option value="${p.id}" ${sel===p.id?"selected":""}>${p.name}</option>`).join("");
+        const atSea = LOC.isAtSea(shipId());
+        body.innerHTML = `
+          <p class="hint">No voyage clock in the stub — teleport entities to watch the co-location gate lock/unlock.</p>
+          <div class="row"><label>Pawn is at port</label><select id="stubPawnPort">${opts(LOC.getLocation(pawnId()))}</select></div>
+          <div class="row"><label>Ship is docked at</label><select id="stubShipPort" ${atSea?"disabled":""}>${opts(LOC.getLocation(shipId()))}</select>
+            <button class="sea" id="stubSea">${atSea?"⚓ Bring ship to port":"⛵ Send ship to sea"}</button></div>`;
+        body.querySelector("#stubPawnPort").onchange = e=>{ LOC._setPort(pawnId(), e.target.value); _whPort=null; render(); };
+        body.querySelector("#stubShipPort").onchange = e=>{ LOC._setPort(shipId(), e.target.value); render(); };
+        body.querySelector("#stubSea").onclick = ()=>{ LOC._setSea(shipId(), !LOC.isAtSea(shipId())); render(); };
+        return;
+      }
+
+      // Real lib: only show the voyage helper if it actually exposes setSail (spec only promised
+      // getLocation/areCoLocated/isAtSea/PORTS — degrade gracefully if voyages aren't there).
+      if (typeof LOC.setSail !== "function"){ panel.style.display = "none"; return; }
+      panel.style.display = "block";
+      title.innerHTML = `⚓ Voyages <span class="hint">(real time-lock — sailing locks that ship's hold until it arrives)</span>`;
+      const sid = shipId(), atSea = LOC.isAtSea(sid), loc = LOC.getLocation(sid);
+      let status;
+      if (atSea){ const j = LOC.journeyOf?LOC.journeyOf(sid):null; status = j?`⛵ <b>${shipName(sid)}</b> is at sea → <b>${portName(j.to)}</b> · ${j.secsLeft}s left`:`⛵ <b>${shipName(sid)}</b> is at sea`; }
+      else status = `⚓ <b>${shipName(sid)}</b> is docked at <b>${portName(loc)}</b>`;
+
+      let dests = "";
+      if (!atSea && Array.isArray(LOC.ROUTES)){
+        const charted = Object.values(LOC.PORTS).filter(p=>p.id!==loc && LOC.routeBetween && LOC.routeBetween(loc, p.id));
+        dests = charted.length
+          ? `<div class="row"><label>Set sail to</label>${charted.map(p=>`<button data-sail="${p.id}">⛵ ${p.name}</button>`).join(" ")}</div>`
+          : `<p class="hint">No charted routes from here.</p>`;
+      }
+      body.innerHTML = `<p class="hint">${status}</p>${dests}<p class="hint">Pawn is at <b>${portName(LOC.getLocation(pawnId()))}</b>. Sail the active ship away (or to another port) and its hold locks — you can't reach cargo that left without you.</p>`;
+      body.querySelectorAll("[data-sail]").forEach(b=> b.onclick = ()=>{
+        try{ LOC.setSail(sid, b.dataset.sail); render(); }
+        catch(e){ console.warn("[hold] setSail failed:", e); toast("Can't sail there: "+e.message); }
+      });
+    }
+
+    // Poll the voyage clock (the lib's intended tryArrive-on-tick pattern; no daemon). Each tick
+    // we finalize any arrivals — tryArrive() flips false→docked exactly once and returns true, so
+    // we MUST poll it (isAtSea goes false a tick before the move lands) and re-render on arrival
+    // OR while any ship is still at sea (to tick the countdown / re-lock the hold).
+    setInterval(()=>{
+      let arrived = false;
+      if (LOC.tryArrive) fleet().forEach(f=>{ try{ if (LOC.tryArrive(f.id)) arrived = true; }catch(e){ console.warn("[hold] tryArrive failed:", e); } });
+      if (arrived || (LOC.isAtSea && fleet().some(f=>LOC.isAtSea(f.id)))) render();
+    }, 1000);
+
+    // The fallback location lib — IDENTICAL public API to the real game/lib/location.js, backed
+    // by localStorage so this page is fully testable before the real lib ships. _setPort/_setSea
+    // are stub-only helpers (the real lib moves entities through gameplay, not these).
+    function makeStubLocation(){
+      const PORTS = {
+        saltmarsh: { id:"saltmarsh", name:"Saltmarsh" },
+        kardov:    { id:"kardov",    name:"Kardov's Gate" },
+        ironmaw:   { id:"ironmaw",   name:"Iron Maw" },
+        namaris:   { id:"namaris",   name:"Namaris Quay" },
+      };
+      const DEFAULT = "saltmarsh";
+      const locKey = id => "sts_loc_" + id, seaKey = id => "sts_atsea_" + id;
+      const getLocation = id => { const v = localStorage.getItem(locKey(id)); return (v && PORTS[v]) ? v : DEFAULT; };
+      const isAtSea = id => localStorage.getItem(seaKey(id)) === "1";
+      const areCoLocated = (a,b) => !isAtSea(a) && !isAtSea(b) && getLocation(a) === getLocation(b);
+      const _setPort = (id,port) => localStorage.setItem(locKey(id), port);
+      const _setSea  = (id,on)   => localStorage.setItem(seaKey(id), on?"1":"0");
+      return { PORTS, getLocation, isAtSea, areCoLocated, _setPort, _setSea };
+    }
+
+    render();
+    // Dev helpers (beta console): wipe seeded inventories / re-seed
+    window.holdReset = ()=>{ Object.keys(localStorage).filter(k=>/^sts_(inv_pawn|hold_|warehouse_|hold_seeded|loc_|atsea_)/.test(k)).forEach(k=>localStorage.removeItem(k)); location.reload(); };
+  </script>
+</body>
+</html>

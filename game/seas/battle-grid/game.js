@@ -16,6 +16,7 @@
  */
 
 import { makeStarterUnits, SPELLS } from "./units.js";
+import { readEncounter, resolveEncounter } from "./encounter.js";
 import { ITEMS, SLOTS, equipItem, equippedList, ownedGear, applyEquipment } from "./items.js";
 import { pawnCapacity, carriedWeight, loadState, LOAD } from "../../lib/weight.js";
 import {
@@ -41,7 +42,7 @@ const btnAttack = /** @type {HTMLButtonElement} */ (document.getElementById("btn
 const btnEnd = /** @type {HTMLButtonElement} */ (document.getElementById("btn-end"));
 const btnReset = /** @type {HTMLButtonElement} */ (document.getElementById("btn-reset"));
 
-/** @type {{units:any[], turnIdx:number, round:number, phase:string, reachable:Set<string>, targets:Set<string>, pendingSpell:any, stakes:boolean, arena:string}} */
+/** @type {{units:any[], turnIdx:number, round:number, phase:string, reachable:Set<string>, targets:Set<string>, pendingSpell:any, stakes:boolean, arena:string, mode:string}} */
 let state;
 
 // ── Log ───────────────────────────────────────────────────────────────────────
@@ -498,10 +499,31 @@ function checkWin() {
   if (sides.size <= 1) {
     state.phase = "over";
     const playerWon = sides.has(true);
-    const label = sides.size === 0 ? "DRAW" : playerWon ? "PLAYER WINS" : "ENEMY WINS";
-    bannerEl.textContent = label;
-    bannerEl.classList.add("show");
+    const draw = sides.size === 0;
+    const label = draw ? "DRAW" : playerWon ? "PLAYER WINS" : "ENEMY WINS";
     log(`=== ${label} ===`, "win");
+    // VOYAGE ENCOUNTER: route the player back toward the map/journey instead of a plain
+    // "ENEMY WINS" wall. PVP duels + training keep the unchanged textContent banner.
+    if (state.mode === "encounter") finishEncounter(playerWon, draw);
+    else bannerEl.textContent = label;
+    bannerEl.classList.add("show");
+  }
+}
+
+/** VOYAGE ENCOUNTER OUTCOME. The journey time-lock from setSail keeps running to arrival on
+ *  its OWN — this only steers the player back to the voyage and, on a loss, lets the
+ *  gear-loss sink the combat already applied stand. WIN → resume the voyage. */
+function finishEncounter(playerWon, draw) {
+  const ctx = resolveEncounter(playerWon ? "win" : draw ? "draw" : "loss") || readEncounter();
+  const back = (ctx && ctx.returnTo) || "/seas/";
+  if (playerWon) {
+    bannerEl.innerHTML = `RAIDERS REPELLED — <a href="${back}" style="color:#2ecc71;text-decoration:none">⛵ Continue the voyage →</a>`;
+    log("Raiders repelled! Your ship sails on — the voyage continues to its destination.", "win");
+  } else if (draw) {
+    bannerEl.innerHTML = `BOTH CREWS DOWN — <a href="${back}" style="color:#e6b422;text-decoration:none">⚓ Drift back to port →</a>`;
+  } else {
+    bannerEl.innerHTML = `RAIDERS TOOK THEIR CUT — <a href="${back}" style="color:#e6b422;text-decoration:none">⚓ Limp back to port →</a>`;
+    log("The raiders took their cut — gear lost to the water. Your ship still drifts on toward port.", "down");
   }
 }
 
@@ -639,7 +661,7 @@ function init() {
   // makeStarterUnits() may return EITHER a plain units[] (default training) or one of
   // several control shapes. Normalize into { units, stakes, arena } here so the default
   // single-player flow is untouched and PVP just flips the stakes/arena gate.
-  let units, stakes = false, arena = "deck", pvp = false;
+  let units, stakes = false, arena = "deck", pvp = false, mode = "training";
   if (Array.isArray(built)) {
     units = built;                                   // default TRAINING (player vs sparring)
   } else if (built && built.locked) {
@@ -655,11 +677,12 @@ function init() {
     bannerEl.classList.add("show");
     return;
   } else if (built && built.pvp) {
-    // OPEN-SEA PVP: fight a SNAPSHOT of another player's pawn → REAL stakes, loot sinks.
+    // OPEN-SEA fight (PVP duel OR a voyage PVE encounter) → REAL stakes, loot sinks.
     units = built.units;
-    stakes = true;       // open-sea PVP persists loot (vs harbor training which doesn't)
+    stakes = true;       // open-sea persists loot (vs harbor training which doesn't)
     arena = "water";     // water arena = 100% house (loot sinks) — open-sea rule
     pvp = true;
+    mode = built.mode || "pvp";   // "encounter" (raiders on a route) vs "pvp" (a duel)
   } else {
     log("Could not build the skirmish (no units returned).", "down");
     return;
@@ -674,8 +697,19 @@ function init() {
     stakes,
     // ARENA: "deck" (ship) = 50/50 found vs house · "water" = 100% house (loot sinks).
     arena,
+    // MODE: "training" | "pvp" (duel) | "encounter" (raiders on a sail route). Drives the
+    // framing + the win/return flow; stakes/arena are identical for pvp & encounter.
+    mode,
   };
-  if (pvp) {
+  if (pvp && mode === "encounter") {
+    // VOYAGE PVE ENCOUNTER — framed as raiders blocking the route, not a duel.
+    const foe = units.find((u) => !u.isPlayer);
+    const you = units.find((u) => u.isPlayer)?.name || "you";
+    const ctx = readEncounter();
+    log(`🏴‍☠️ Raiders on the route! ${foe?.name || "A raider crew"} blocks ${you}'s passage${ctx && ctx.danger != null ? ` (danger ${ctx.danger})` : ""}.`, "down");
+    log("Clear the deck to sail on — win and the voyage continues to its destination.", "info");
+    log("OPEN SEA — real stakes: gear that drops here is LOST to the water (no take-backs).", "down");
+  } else if (pvp) {
     const foe = units.find((u) => !u.isPlayer);
     log(`Open-sea PVP: ${units.find((u) => u.isPlayer)?.name || "you"} vs ${foe?.name || "a rival"} (AI-piloted snapshot).`, "info");
     log("Hex grid + d20 combat + spells reused from Tales-of-Tasern. Stats from the class engine.", "info");

@@ -1,0 +1,507 @@
+<!DOCTYPE html>
+<!--
+  game/seas/map.html — THE HEX-WORLD MAP / SAILING UI for "Seize the Seas".
+    • Renders the hand-drawn sea-map art (../art/world-map.jpg) as the backdrop with a SUBTLE
+      flat-top hex grid CALIBRATED to the painted hexes (HEX_SIZE / ORIGIN_* live in location.js).
+    • Ships FREE-FLOAT: click ANY hex — open water OR an island/port — to plot a course. The
+      course shows distance in HEXES, travel time (HEXES × 8h), and the crossing's danger.
+    • EACH HEX = 8 HOURS of travel. The real countdown is dev-scaled (MS_PER_HEX) so beta voyages
+      are quick; the "16h" style label always shows the true 8h-per-hex fiction.
+    • Setting sail may spawn a PVE ENCOUNTER (raiders) — handed off to the deck battle exactly as
+      before (?mode=encounter, sts_pvp_opponent + sts_encounter keys). PVP raiding is pinned.
+    • While at sea: a live ETA countdown + the ship marker drifting along its course; auto-arrives
+      on load if already past ETA.
+
+  Depends on the location core lib (game/lib/location.js), hex build contract:
+    PORTS{ id,name,q,r,x,y,region,danger }  SHIPS{ id,name }  ROUTES[{from,to}]
+    hexToPixel(hex)->{x,y}  hexPolygonPoints(cx,cy)->str  pixelToHex(px,py)->{q,r}
+    hexDistance(a,b)->n  hexDanger(q,r)->0..3  routeBetween(a,b)->{distance,danger,hours}|null
+    getHex(id)->{q,r}  setHex(id,q,r)  getLocation(id)->portId|null  isAtSea(id)->bool
+    journeyOf(id)->{from,to,fromHex,toHex,departAt,arriveAt,secsLeft,distance,hours}|null
+    canSetSail(id,target)->{ok,reason}  setSail(id,target,speed,crew)->{journey,encounter}  tryArrive(id)->bool
+    WORLD_W WORLD_H GRID_COLS GRID_ROWS EIGHT_HOURS DEFAULT_SAIL_SPEED
+
+  Game-layer / localStorage ONLY — no on-chain, no network.
+  Serve game/ and open /seas/map.html  (trailing path matters for art + nav links).
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>World Map — Seize the Seas</title>
+  <style>
+    :root{ --ink:#f3ead7; --muted:#b6a584; --gold:#e6b422; --rope:#caa45a; --green:#2ecc71; --sea:#1a3550; --lock:#c0563a; }
+    *{box-sizing:border-box}
+    body{ margin:0; min-height:100vh; font-family:"Segoe UI",system-ui,sans-serif; color:var(--ink);
+      background:linear-gradient(rgba(8,12,18,.78), rgba(8,12,18,.92)), url("../art/rooms/port.jpg") center/cover fixed, linear-gradient(#0e1a24,#0a0f14 70%);
+      padding:22px 16px 60px; }
+    .top{ display:flex; align-items:center; justify-content:space-between; max-width:1180px; margin:0 auto 8px; flex-wrap:wrap; gap:8px; }
+    h1{ font-size:26px; margin:0; letter-spacing:2px; color:var(--gold); text-transform:uppercase; }
+    .nav a{ color:var(--rope); text-decoration:none; font-size:13px; margin-left:14px; }
+    .nav a:hover{ color:var(--gold); }
+    .blurb{ max-width:1180px; margin:0 auto 12px; color:var(--muted); font-size:13px; line-height:1.55; }
+    .blurb b{color:var(--ink)}
+
+    .bar{ max-width:1180px; margin:0 auto 14px; font-size:13px; color:var(--muted); background:rgba(0,0,0,.30); border:1px solid #2a2114; border-radius:9px; padding:9px 13px; display:flex; align-items:center; gap:12px; flex-wrap:wrap; }
+    .bar b{ color:var(--gold); }
+    .bar select{ background:#1a2433; color:var(--ink); border:1px solid #34516b; border-radius:7px; padding:6px 9px; font-size:13px; }
+    .bar .where{ margin-left:auto; color:var(--rope); }
+    .bar .where b{ color:var(--ink); }
+
+    .banner{ max-width:1180px; margin:0 auto 14px; background:rgba(192,86,58,.14); border:1px solid var(--lock); border-radius:11px; padding:12px 15px; font-size:12.5px; color:#f0c9bb; line-height:1.55; display:none; }
+    .banner.show{ display:block; }
+    .banner b{ color:#ffd9cc; }  .banner code{ color:#ffe1a8; }
+
+    .wrap{ max-width:1180px; margin:0 auto; display:grid; grid-template-columns:1fr 300px; gap:16px; align-items:start; }
+    @media(max-width:880px){ .wrap{ grid-template-columns:1fr; } }
+
+    /* chart box matches the art's aspect ratio so the hex overlay lines up 1:1 (2048×1536 art) */
+    .chartbox{ position:relative; width:100%; aspect-ratio:2048/1536; background:#0a131d center/cover no-repeat; border:1px solid #2c4257; border-radius:14px; overflow:hidden; box-shadow:inset 0 0 60px rgba(0,0,0,.55); cursor:crosshair; }
+    .chartbox svg{ position:absolute; inset:0; width:100%; height:100%; display:block; }
+
+    .hexgrid{ stroke:rgba(232,224,196,.10); stroke-width:1; fill:transparent; }
+    .hexgrid.hot{ stroke:rgba(232,224,196,.16); }
+    .danger0{ fill:transparent; }
+    .danger1{ fill:rgba(230,180,34,.05); }
+    .danger2{ fill:rgba(214,120,40,.09); }
+    .danger3{ fill:rgba(200,60,50,.14); }
+    .routeline{ stroke:rgba(202,164,90,.30); stroke-width:2; stroke-dasharray:5 6; fill:none; }
+    .courseline{ stroke:#fff; stroke-width:3; stroke-dasharray:7 5; fill:none; opacity:.9; }
+    .hexsel{ fill:rgba(255,255,255,.10); stroke:#fff; stroke-width:3; }
+    .hexcur{ fill:rgba(230,180,34,.14); stroke:var(--gold); stroke-width:3; }
+    .hexcur-anim{ animation:pulse 1.8s ease-in-out infinite; }
+    @keyframes pulse{ 0%,100%{ stroke-opacity:.8 } 50%{ stroke-opacity:.35 } }
+
+    .port-chip{ position:absolute; transform:translate(-50%,-50%); display:flex; flex-direction:column; align-items:center; gap:2px; z-index:2; pointer-events:none; }
+    .port-chip .dot{ width:11px; height:11px; border-radius:50%; background:#cdbf99; border:2px solid #0a131d; box-shadow:0 0 0 1px #34516b; }
+    .port-chip.d0 .dot{ background:#7fe0a0; }  .port-chip.d1 .dot{ background:#e6d27f; }
+    .port-chip.d2 .dot{ background:#e0a35a; }  .port-chip.d3 .dot{ background:#e07a6a; }
+    .port-chip .lbl{ font-size:10px; color:var(--ink); background:rgba(8,14,20,.74); padding:1px 6px; border-radius:6px; white-space:nowrap; }
+
+    .ship-marker{ position:absolute; transform:translate(-50%,-60%); z-index:4; font-size:24px; filter:drop-shadow(0 2px 4px rgba(0,0,0,.85)); pointer-events:none; transition:left .4s linear, top .4s linear; }
+
+    .side{ display:flex; flex-direction:column; gap:14px; }
+    .panel{ background:linear-gradient(#1a2735,#101820); border:1px solid #2c4257; border-radius:14px; padding:15px; }
+    .panel h3{ margin:0 0 8px; font-size:13px; letter-spacing:1px; text-transform:uppercase; color:var(--rope); }
+    .panel .pname{ font-size:18px; font-weight:700; color:var(--ink); }
+    .panel .meta{ font-size:12px; color:var(--muted); margin-top:5px; line-height:1.6; }
+    .panel .meta b{ color:var(--ink); }
+    .panel .empty{ color:var(--muted); font-size:12.5px; line-height:1.55; }
+    .pill{ display:inline-block; font-size:10.5px; letter-spacing:.4px; text-transform:uppercase; padding:2px 8px; border-radius:999px; border:1px solid #34516b; color:var(--rope); margin-top:6px; }
+    .pill.calm{ color:#bfe9cd; border-color:rgba(46,204,113,.4); }
+    .pill.choppy{ color:#f0d49a; border-color:rgba(230,180,34,.4); }
+    .pill.perilous{ color:#f0c9bb; border-color:var(--lock); }
+
+    .btn{ width:100%; background:#2a5a2f; border:1px solid var(--green); color:#eafff0; border-radius:9px; font-size:14px; padding:11px 15px; cursor:pointer; margin-top:12px; }
+    .btn:hover{ background:#357039; }  .btn:disabled{ opacity:.5; cursor:default; }
+    .btn.warn{ background:#5a2f24; border-color:var(--lock); color:#ffe1d6; }
+    .btn.warn:hover{ background:#71382c; }
+    .reason{ font-size:12px; color:#f0c9bb; margin-top:10px; line-height:1.5; }
+
+    .journey{ background:linear-gradient(#16314a,#0e2034); border:1px solid #34516b; border-radius:14px; padding:16px; }
+    .journey h3{ margin:0 0 10px; color:var(--gold); font-size:14px; letter-spacing:1px; text-transform:uppercase; }
+    .journey .leg{ font-size:16px; font-weight:700; color:var(--ink); }
+    .journey .eta{ font-size:34px; font-weight:800; color:var(--gold); letter-spacing:1px; margin:8px 0 2px; font-variant-numeric:tabular-nums; }
+    .journey .etalbl{ font-size:11px; color:var(--muted); text-transform:uppercase; letter-spacing:1px; }
+    .journey .arrived{ color:var(--green); }
+
+    .raid{ background:linear-gradient(#3a1c16,#24100c); border:1px solid var(--lock); border-radius:14px; padding:16px; }
+    .raid h3{ margin:0 0 6px; color:#ff9d82; font-size:15px; letter-spacing:1px; text-transform:uppercase; }
+    .raid p{ font-size:12.5px; color:#f0c9bb; line-height:1.55; margin:0 0 4px; }
+    .raid .foe{ font-size:17px; font-weight:700; color:#ffd9cc; margin:6px 0; }
+
+    .legend{ max-width:1180px; margin:14px auto 0; display:flex; gap:18px; flex-wrap:wrap; font-size:11.5px; color:var(--muted); }
+    .legend span{ display:inline-flex; align-items:center; gap:6px; }
+    .legend .dotk{ width:13px; height:13px; border-radius:50%; border:2px solid #0a131d; }
+    .legend .sw{ width:18px; height:13px; border-radius:3px; display:inline-block; }
+
+    .foot{ max-width:1180px; margin:18px auto 0; color:var(--muted); font-size:11px; text-align:center; line-height:1.6; }
+    .toast{ position:fixed; left:50%; bottom:24px; transform:translateX(-50%); background:#15212e; border:1px solid var(--gold); color:var(--ink); border-radius:10px; padding:11px 18px; font-size:13px; box-shadow:0 8px 24px rgba(0,0,0,.5); opacity:0; transition:opacity .2s; pointer-events:none; max-width:90vw; text-align:center; }
+    .toast.show{ opacity:1; }
+  </style>
+</head>
+<body>
+  <div class="top">
+    <h1>🗺️ World Map</h1>
+    <div class="nav"><a href="./story.html">📜 Story</a><a href="./jobs/">⚓ Crew Work</a><a href="./crew/">👥 Crew</a><a href="./battle-grid/">⚔️ Decks</a><a href="../">⚓ Port</a></div>
+  </div>
+
+  <p class="blurb">
+    The open sea is yours to chart. Your ship <b>free-floats</b> — tap <b>any hex</b> (open water or an island) to plot a course.
+    Each hex is <b>8 hours</b> of sailing. The further from calm <b>Crown Waters</b>, the more <b>dangerous</b> the crossing —
+    and <b>raiders</b> work the deep water. Pick your hex, weigh the risk, and <b>set sail.</b>
+  </p>
+
+  <div class="bar">
+    🚢 Ship: <select id="shipPick"></select>
+    <span class="where">Position: <b id="whereAt">—</b></span>
+  </div>
+
+  <div class="banner" id="banner"></div>
+
+  <div class="wrap">
+    <div class="chartbox" id="chart">
+      <svg id="mapSvg" preserveAspectRatio="none">
+        <g id="hexLayer"></g>
+        <g id="routeLayer"></g>
+        <g id="courseLayer"></g>
+        <g id="highlightLayer"></g>
+      </svg>
+      <!-- port chips + ship marker injected here -->
+    </div>
+
+    <div class="side" id="side"><!-- chart / journey / raid panel injected here --></div>
+  </div>
+
+  <div class="legend">
+    <span><span class="sw" style="background:rgba(46,204,113,.35)"></span> calm waters</span>
+    <span><span class="sw" style="background:rgba(230,180,34,.4)"></span> choppy</span>
+    <span><span class="sw" style="background:rgba(200,60,50,.5)"></span> perilous</span>
+    <span><span class="dotk" style="background:#e6b422"></span> your ship's hex</span>
+    <span>tap any hex to chart a course (8h each)</span>
+  </div>
+
+  <div class="foot">super-early beta 🏴‍☠️ — sail speed is a flat 10 for now; later it reads your ship's locked-sail depth. Hex world is local-only (no chain, no network). 1 hex = 8 game-hours.</div>
+  <div class="toast" id="toast"></div>
+
+  <script type="module">
+    // ── Load the location core lib. Home is game/lib/. Failures are SURFACED, not swallowed.
+    const LIB_PATHS = ["../lib/location.js", "../../lib/location.js"];
+    let LOC = null; const libErrors = [];
+    for (const p of LIB_PATHS){
+      try { LOC = await import(p); break; }
+      catch (e){ libErrors.push(p + " → " + (e && e.message ? e.message : e)); }
+    }
+    const toast = (msg)=>{ const t=document.getElementById("toast"); t.textContent=msg; t.classList.add("show"); clearTimeout(t._h); t._h=setTimeout(()=>t.classList.remove("show"),2800); };
+
+    if (!LOC){
+      const b = document.getElementById("banner");
+      b.classList.add("show");
+      b.innerHTML = `⚓ <b>The charts aren't aboard yet.</b> The location core lib couldn't be loaded, so the map can't draw.
+        Needs <code>location.js</code> in <code>game/lib/</code>.<br>Tried: ${libErrors.map(e=>"<code>"+e.replace(/</g,"&lt;")+"</code>").join(" &nbsp;·&nbsp; ")}`;
+    } else {
+      runMap(LOC);
+    }
+
+    function runMap(LOC){
+      const {
+        PORTS, ROUTES, SHIPS, routeBetween, getLocation, getHex, isAtSea, journeyOf,
+        canSetSail, setSail, tryArrive, hexToPixel, hexPolygonPoints, pixelToHex,
+        hexDanger, WORLD_W, WORLD_H, GRID_COLS, GRID_ROWS, EIGHT_HOURS, DEFAULT_SAIL_SPEED,
+      } = LOC;
+
+      // Sail speed: flat default for beta. TODO: read the active ship's locked-sail depth.
+      const SAIL_SPEED = DEFAULT_SAIL_SPEED || 10;
+
+      // ── ship identity — share the SAME entity ids hold.html uses (LOC.SHIPS) so a ship sailed
+      //    here is genuinely "at sea" everywhere (cargo hold included). Active id in sts_active_ship.
+      const LS_SHIP = "sts_active_ship";
+      const FLEET = (SHIPS && Object.keys(SHIPS).length) ? Object.values(SHIPS) : [{ id:"ship_black_tide", name:"The Black Tide" }];
+      function activeShip(){
+        let s = localStorage.getItem(LS_SHIP);
+        if (!s || !FLEET.some(f=>f.id===s)){ s = FLEET[0].id; localStorage.setItem(LS_SHIP, s); }
+        return s;
+      }
+      const shipName = id => { const f = FLEET.find(x=>x.id===id); return f ? f.name : id; };
+
+      // Battle handoff keys (read by seas/battle-grid units.js / pvp harness) — UNCHANGED.
+      const LS_OPP = "sts_pvp_opponent", LS_MODE = "sts_pvp_mode";
+      const BATTLE_URL = "battle-grid/index.html?mode=encounter";
+
+      // ── SVG setup: viewBox == art pixel space so hex math maps 1:1 onto the backdrop ────────
+      const svg = document.getElementById("mapSvg");
+      svg.setAttribute("viewBox", `0 0 ${WORLD_W} ${WORLD_H}`);
+      document.getElementById("chart").style.backgroundImage = 'url("../art/world-map.jpg")';
+      const NS = "http://www.w3.org/2000/svg";
+
+      // pixel (image space) → percentage of the box, for HTML overlays (chips + marker)
+      const pctX = px => (px / WORLD_W) * 100;
+      const pctY = py => (py / WORLD_H) * 100;
+
+      // danger wording
+      function dangerWord(d){ return d<=1 ? "calm" : d===2 ? "choppy" : "perilous"; }
+      function portName(id){ return (PORTS[id] && PORTS[id].name) || id || "open water"; }
+      // a friendly label for a hex (port name when docked, else open-water coords)
+      function hexLabel(h){ const id = portIdAt(h); return id ? portName(id) : `open water (${h.q},${h.r})`; }
+      function portIdAt(h){ for (const id in PORTS) if (PORTS[id].q===h.q && PORTS[id].r===h.r) return id; return null; }
+
+      // ── state ───────────────────────────────────────────────────────────────────────────
+      let selected = null;   // selected destination {q,r}
+      let raid = null;       // pending encounter to hand off
+
+      // ── ship picker ───────────────────────────────────────────────────────────────────────
+      const shipPick = document.getElementById("shipPick");
+      function buildPicker(){
+        shipPick.innerHTML = "";
+        for (const f of FLEET){
+          const o = document.createElement("option");
+          o.value = f.id; o.textContent = f.name; if (f.id === activeShip()) o.selected = true;
+          shipPick.appendChild(o);
+        }
+      }
+      shipPick.addEventListener("change", ()=>{
+        localStorage.setItem(LS_SHIP, shipPick.value);
+        selected = null; raid = null; renderAll();
+      });
+
+      // ── STATIC hex layer (grid + danger tint) — built once ────────────────────────────────
+      function buildHexLayer(){
+        const layer = document.getElementById("hexLayer");
+        let s = "";
+        for (let q=0; q<GRID_COLS; q++){
+          for (let r=0; r<GRID_ROWS; r++){
+            const c = hexToPixel({q,r});
+            if (c.x < -LOC.HEX_SIZE || c.x > WORLD_W+LOC.HEX_SIZE || c.y < -LOC.HEX_SIZE || c.y > WORLD_H+LOC.HEX_SIZE) continue;
+            const d = hexDanger(q,r);
+            s += `<polygon class="hexgrid danger${d}" points="${hexPolygonPoints(c.x,c.y)}" data-q="${q}" data-r="${r}"></polygon>`;
+          }
+        }
+        layer.innerHTML = s;
+      }
+
+      // ── route flavour lines (suggested lanes between ports) — built once ───────────────────
+      function buildRouteLayer(){
+        const layer = document.getElementById("routeLayer");
+        let s = "";
+        for (const rt of (ROUTES||[])){
+          const a = PORTS[rt.from], b = PORTS[rt.to]; if (!a || !b) continue;
+          const pa = hexToPixel({q:a.q,r:a.r}), pb = hexToPixel({q:b.q,r:b.r});
+          s += `<line class="routeline" x1="${pa.x}" y1="${pa.y}" x2="${pb.x}" y2="${pb.y}"></line>`;
+        }
+        layer.innerHTML = s;
+      }
+
+      // ── port chips (HTML overlay) — built once ────────────────────────────────────────────
+      function buildPortChips(){
+        const chart = document.getElementById("chart");
+        chart.querySelectorAll(".port-chip").forEach(n=>n.remove());
+        for (const id in PORTS){
+          const p = PORTS[id]; const c = hexToPixel({q:p.q,r:p.r});
+          const chip = document.createElement("div");
+          chip.className = `port-chip d${p.danger||0}`;
+          chip.style.left = pctX(c.x)+"%"; chip.style.top = pctY(c.y)+"%";
+          chip.innerHTML = `<div class="dot"></div><div class="lbl">${p.name}</div>`;
+          chart.appendChild(chip);
+        }
+      }
+
+      // ── DYNAMIC layers: course line + highlights (current hex, selected hex) ───────────────
+      function renderHighlights(curHex, atSea){
+        const hl = document.getElementById("highlightLayer");
+        const course = document.getElementById("courseLayer");
+        let h = "", cs = "";
+
+        if (curHex){
+          const c = hexToPixel(curHex);
+          h += `<polygon class="hexcur ${atSea?"":"hexcur-anim"}" points="${hexPolygonPoints(c.x,c.y)}"></polygon>`;
+        }
+        if (!atSea && selected){
+          const c = hexToPixel(selected);
+          h += `<polygon class="hexsel" points="${hexPolygonPoints(c.x,c.y)}"></polygon>`;
+          if (curHex){
+            const a = hexToPixel(curHex);
+            cs = `<line class="courseline" x1="${a.x}" y1="${a.y}" x2="${c.x}" y2="${c.y}"></line>`;
+          }
+        }
+        hl.innerHTML = h; course.innerHTML = cs;
+      }
+
+      // ── ship marker (HTML overlay) — drifts along the course while at sea ──────────────────
+      function renderMarker(curHex, atSea){
+        const chart = document.getElementById("chart");
+        chart.querySelectorAll(".ship-marker").forEach(n=>n.remove());
+        const mark = document.createElement("div");
+        mark.className = "ship-marker"; mark.textContent = "🚢";
+        let px, py;
+        if (atSea){
+          const j = journeyOf(activeShip());
+          if (j && j.fromHex && j.toHex){
+            const a = hexToPixel(j.fromHex), b = hexToPixel(j.toHex);
+            const span = Math.max(1, j.arriveAt - j.departAt);
+            const prog = Math.min(1, Math.max(0, (Date.now() - j.departAt) / span));
+            px = a.x + (b.x-a.x)*prog; py = a.y + (b.y-a.y)*prog;
+          } else { px = WORLD_W/2; py = WORLD_H/2; }
+        } else {
+          const c = hexToPixel(curHex || {q:0,r:0}); px = c.x; py = c.y;
+        }
+        mark.style.left = pctX(px)+"%"; mark.style.top = pctY(py)+"%";
+        chart.appendChild(mark);
+      }
+
+      // ── click a hex on the chart → select it (free-float to ANY hex) ──────────────────────
+      document.getElementById("chart").addEventListener("click", (ev)=>{
+        if (isAtSea(activeShip())) return toast("You're at sea — wait to make port before charting a new course.");
+        const rect = svg.getBoundingClientRect();
+        const px = (ev.clientX - rect.left) / rect.width  * WORLD_W;
+        const py = (ev.clientY - rect.top)  / rect.height * WORLD_H;
+        const h = pixelToHex(px, py);
+        if (h.q<0 || h.q>=GRID_COLS || h.r<0 || h.r>=GRID_ROWS) return;
+        const cur = getHex(activeShip());
+        if (h.q===cur.q && h.r===cur.r){ selected=null; renderAll(); return toast(`You're already here — ${hexLabel(h)}.`); }
+        selected = h; renderAll();
+      });
+
+      // ── side panel: chart course / journey / raid ─────────────────────────────────────────
+      function renderSide(curHex, atSea){
+        const side = document.getElementById("side");
+
+        // 1) raider hand-off takes priority
+        if (raid){
+          side.innerHTML = `
+            <div class="raid">
+              <h3>⚔️ Raiders on the crossing!</h3>
+              <p>You slipped your mooring and ran straight into trouble in open water.</p>
+              <div class="foe">🏴‍☠️ ${(raid.enemy && raid.enemy.name) || "Unknown raiders"}</div>
+              <p>Beat them on the decks to keep your course — your voyage is already underway.</p>
+              <button class="btn warn" id="toBattle">⚔️ To the decks</button>
+              <button class="btn" id="skipBattle" style="background:#27405a;border-color:#34516b;color:#fff">Sail on (skip for now)</button>
+            </div>`;
+          document.getElementById("toBattle").addEventListener("click", ()=>{
+            localStorage.setItem(LS_OPP, JSON.stringify(raid.enemy));
+            localStorage.setItem(LS_MODE, "1");
+            localStorage.setItem("sts_encounter", JSON.stringify({
+              routeId: raid.routeId, danger: raid.danger,
+              enemyName: (raid.enemy && raid.enemy.name) || "raiders",
+              returnTo: location.pathname,
+            }));
+            window.location.href = BATTLE_URL;
+          });
+          document.getElementById("skipBattle").addEventListener("click", ()=>{ raid = null; renderAll(); });
+          return;
+        }
+
+        // 2) at sea → journey status
+        if (atSea){
+          const j = journeyOf(activeShip());
+          const dest = j ? (j.to ? portName(j.to) : hexLabel(j.toHex)) : "—";
+          const orig = j ? (j.from ? portName(j.from) : hexLabel(j.fromHex)) : "—";
+          side.innerHTML = `
+            <div class="journey" id="journeyPanel">
+              <h3>⛵ Underway</h3>
+              <div class="leg">${orig} → <b>${dest}</b></div>
+              <div class="meta" style="color:var(--muted);font-size:12px;margin:6px 0">${j?j.distance:"?"} hexes · ${j?j.hours:"?"}h voyage</div>
+              <div class="eta" id="etaClock">—:—</div>
+              <div class="etalbl" id="etaLbl">estimated arrival</div>
+              <button class="btn" id="arriveBtn" disabled>⚓ Arrive</button>
+            </div>`;
+          document.getElementById("arriveBtn").addEventListener("click", doArrive);
+          updateVoyageUI();   // fill the clock immediately; the 1s poll keeps it live
+          return;
+        }
+
+        // 3) docked / floating → chart panel for the selected hex
+        if (!selected){
+          side.innerHTML = `<div class="panel"><h3>Chart a course</h3>
+            <div class="empty">Tap <b style="color:var(--ink)">any hex</b> on the chart to plot a course from <b style="color:var(--ink)">${hexLabel(curHex)}</b>.
+            Each hex you cross is <b style="color:var(--ink)">8 hours</b> of sailing.</div></div>`;
+          return;
+        }
+
+        const route = routeBetween(curHex, selected);          // {distance,danger,hours}
+        const sail = canSetSail(activeShip(), selected);
+        const destId = portIdAt(selected);
+        const dWord = route ? dangerWord(route.danger) : "";
+
+        let action;
+        if (!route){
+          action = `<div class="reason">⚓ You're already here.</div>`;
+        } else if (!sail.ok){
+          action = `<div class="reason">🔒 ${sail.reason || "Can't set sail right now."}</div>`;
+        } else {
+          action = `<button class="btn" id="sailBtn">⛵ Set Sail — ${route.distance} hex · ${route.hours}h</button>`;
+        }
+
+        side.innerHTML = `
+          <div class="panel">
+            <h3>Set a course</h3>
+            <div class="pname">${destId ? portName(destId) : "Open Water"}</div>
+            <div class="meta">
+              ${destId && PORTS[destId].region ? `Region: <b>${PORTS[destId].region}</b><br>` : `Hex <b>${selected.q},${selected.r}</b><br>`}
+              ${route ? `From <b>${hexLabel(curHex)}</b><br>Distance <b>${route.distance} hex</b> · Travel <b>${route.hours}h</b> <span style="color:var(--muted)">(${route.distance}×${EIGHT_HOURS}h)</span>` : ""}
+            </div>
+            ${route ? `<span class="pill ${dWord}">${dWord} crossing · danger ${route.danger}</span>` : ""}
+            ${action}
+          </div>`;
+        const sb = document.getElementById("sailBtn");
+        if (sb) sb.addEventListener("click", ()=>doSail(selected));
+      }
+
+      // ── set sail (free-float to any hex) ──────────────────────────────────────────────────
+      function doSail(destHex){
+        const ship = activeShip();
+        const check = canSetSail(ship, destHex);
+        if (!check.ok) return toast(check.reason || "Can't set sail right now.");
+
+        let res;
+        try { res = setSail(ship, destHex, SAIL_SPEED); }
+        catch(e){ console.warn("[map] setSail failed:", e); return toast("Couldn't set sail: " + e.message); }
+        if (!res || !res.journey) return toast("Couldn't set sail — the harbour master refused the course.");
+
+        selected = null;
+        if (res.encounter){ raid = res.encounter; toast("⚔️ Raiders on the crossing!"); }
+        else { toast(`⛵ ${shipName(ship)} is underway to ${hexLabel(destHex)}.`); }
+        renderAll();
+      }
+
+      // ── arrive ────────────────────────────────────────────────────────────────────────────
+      function doArrive(){
+        const ship = activeShip();
+        if (!tryArrive(ship)) return toast("Not there yet — hold your course.");
+        const where = getLocation(ship);
+        toast(where ? `⚓ Made port at ${portName(where)}!` : `⚓ Dropped anchor in open water.`);
+        selected = null; raid = null; renderAll();
+      }
+
+      // ── countdown + arrival poll (the lib's intended tryArrive-on-tick pattern; no daemon) ──
+      function fmtETA(secs){ secs=Math.max(0,Math.floor(secs)); const m=Math.floor(secs/60),s=secs%60; return String(m).padStart(2,"0")+":"+String(s).padStart(2,"0"); }
+      // Live-update the journey panel's ETA clock + drift the marker, while at sea.
+      function updateVoyageUI(){
+        const ship = activeShip();
+        if (!isAtSea(ship)) return;
+        const j = journeyOf(ship);
+        renderMarker(j ? j.fromHex : null, true);
+        const clock = document.getElementById("etaClock");
+        const lbl = document.getElementById("etaLbl");
+        const btn = document.getElementById("arriveBtn");
+        if (!clock || !btn) return;          // panel not on screen (e.g. raid hand-off) — skip
+        const left = j ? j.secsLeft : 0;
+        if (left <= 0){ clock.textContent="00:00"; clock.classList.add("arrived"); lbl.textContent="ready to make port"; btn.disabled=false; }
+        else { clock.textContent=fmtETA(left); lbl.textContent="estimated arrival"; btn.disabled=true; }
+      }
+      // One persistent poll: FINALIZE any due arrival (moves the ship + crew), else tick the ETA.
+      // tryArrive() self-guards (false until past arriveAt), so this is safe to call every second.
+      function voyagePoll(){
+        const ship = activeShip();
+        if (tryArrive(ship)){
+          const w = getLocation(ship);
+          toast(w ? `⚓ Made port at ${portName(w)}!` : "⚓ Dropped anchor in open water.");
+          selected = null; renderAll(); return;
+        }
+        if (isAtSea(ship)) updateVoyageUI();
+      }
+
+      // ── full render ───────────────────────────────────────────────────────────────────────
+      function renderAll(){
+        const ship = activeShip();
+        const atSea = isAtSea(ship);
+        const curHex = getHex(ship);
+        document.getElementById("whereAt").textContent = atSea ? "at sea" : hexLabel(curHex);
+        renderHighlights(curHex, atSea);
+        renderMarker(curHex, atSea);
+        renderSide(curHex, atSea);
+        if (atSea) updateVoyageUI();
+      }
+
+      // ── init ──────────────────────────────────────────────────────────────────────────────
+      buildPicker();
+      buildHexLayer();
+      buildRouteLayer();
+      buildPortChips();
+      renderAll();
+      // Finalize any past-due voyage from a previous session, then keep polling every second.
+      voyagePoll();
+      setInterval(voyagePoll, 1000);
+    }
+  </script>
+</body>
+</html>
