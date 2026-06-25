@@ -1,16 +1,19 @@
 // game/lib/coins.js — THE one true coin denomination for the whole game.
 //
-// GOLD is the on-chain token (18 decimals). SILVER and COPPER are DISPLAY denominations
-// of that same GOLD — each step just moves the decimal one place:
+// GOLD, SILVER, and COPPER are THREE REAL on-chain ERC20 tokens (Base, all 18 decimals).
+// They are pegged in the in-game economy by their supplies (10B : 100B : 1T):
 //
 //     1 gold = 10 silver = 100 copper
 //
-// Display rule: GOLD and SILVER are always WHOLE; COPPER is the ONLY denomination shown
-// fractionally. So 3.45 gold → "3g 4s 5c", 0.075 gold → "7.5c", 10,000 gold → "10,000g".
+// They are NOT a display trick over one token — each denomination is its own token that a
+// game contract actually transfers. A payout of 3.45 gold-equivalent = 3 GOLD + 4 SILVER +
+// 5 COPPER tokens sent, rendered "3g 4s 5c".
 //
-// Payout rule: when a game contract pays out, it pays whole gold + whole silver + fractional
-// copper — i.e. any GOLD amount, just rendered as g/s/c here so it reads like coin, not a
-// decimal. There is NO separate silver/copper token; it's all the one GOLD token.
+// Display rule: GOLD and SILVER are always shown WHOLE; COPPER is the ONLY denomination shown
+// fractionally (it's the smallest coin). So 0.075 gold → "7.5c", 10,000 gold → "10,000g".
+//
+// Payout rule: convert any gold-equivalent value to whole GOLD + whole SILVER + (fractional)
+// COPPER token amounts via payoutSplit/splitCoins — each denomination maps 1:1 to its token.
 //
 // Single source of truth — import this everywhere (store, jobs, crew, hold payouts) so the
 // coin convention never drifts between screens.
