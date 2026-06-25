@@ -56,7 +56,8 @@ const store = (() => {
 
 const K = {
   loc: "sts_hexpos",        // { [entityId]: {q,r} }  — pawns AND ships share this map (free-float hex)
-  journeys: "sts_journeys", // { [shipId]: { fromHex,toHex,fromPort,toPort,departAt,arriveAt,sailSpeed,crewIds,distance,hours,encounter } }
+  journeys: "sts_journeys", // { [shipId]: { fromHex,toHex,fromPort,toPort,departAt,arriveAt,sailSpeed,crewIds,distance,hours,encounter,mode,medium } }
+  terrain: "sts_terrain",   // { "q,r": terrainType }  — per-hex land terrain overrides (default 'sea'; islands derive from region)
 };
 
 // no silent catches — warn loudly on bad data, never swallow
@@ -356,8 +357,14 @@ export function journeyOf(shipId) {
     secsLeft: Math.max(0, Math.ceil((j.arriveAt - now) / 1000)),
     distance: j.distance,
     hours: j.hours,
+    mode: j.mode || "ship",
+    medium: j.medium || "sea",
   };
 }
+
+/** True while an entity is in transit by ANY mode (sea OR land) — alias of isAtSea, read for
+ *  land travel where "at sea" reads wrong. In transit = locked: can't fight/work/trade/be reached. */
+export function isTraveling(entityId) { return isAtSea(entityId); }
 
 /** Two entities can interact iff same hex AND neither is at sea. */
 export function areCoLocated(idA, idB) {
@@ -376,70 +383,219 @@ export function canSetSail(shipId, target) {
   return { ok: true, reason: null };
 }
 
-// roll a PVE encounter for a leg, weighted by the crossing's danger. danger 0 → always null.
-function rollEncounter(danger, routeId) {
-  if (danger <= 0) return null;
-  const chance = Math.min(0.85, danger * 0.22); // 1→22%, 2→44%, 3→66%
-  if (Math.random() >= chance) return null;
-  const pool = ENEMY_POOL[danger] || ENEMY_POOL[3];
-  const t = pool[Math.floor(Math.random() * pool.length)];
-  const enemy = {
-    id: `pve-${t.slug}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`,
-    name: t.name,
-    endowment: { ...t.endowment },
-    loadout: { ...t.loadout },
-  };
-  return { type: "pve", danger, routeId, enemy };
-  // ── PINNED: PVP ship-raiding hook ──────────────────────────────────────────────────────
-  // When PVP is unpinned, this is where an open-water leg could instead roll a { type:'pvp',
-  // enemy:<another player's ship snapshot> } against ships sharing/adjacent to a hex. ALL PVE
-  // for now — do NOT build PVP raiding here yet.
+// ═════════════════════════════════════════════════════════════════════════════════════════
+//  LAND TRAVEL + TERRAIN (caravans : land :: ships : sea)
+//  Travel time per hex by mode: ship 8h (sea), MOUNT 8h (land), FOOT 24h (a full day on foot).
+//  ROUGH TERRAIN slows the WALK: each land hex costs base × TERRAIN_COST. So a man on foot
+//  crossing a mountain = 24h × 2.5 = 60h; on a mount = 8h × 2.5 = 20h. Sea is flat 8h/hex.
+// ═════════════════════════════════════════════════════════════════════════════════════════
+
+export const TRAVEL = {
+  ship:  { hoursPerHex: 8,  land: false, sea: true  }, // a rigged ship — open water only
+  mount: { hoursPerHex: 8,  land: true,  sea: false }, // horse / caravan team — back to 8h/hex
+  foot:  { hoursPerHex: 24, land: true,  sea: false }, // a pawn on foot — ONE DAY per hex
+};
+
+// terrain → walk-time multiplier (sea is the ship baseline). Rough ground (forest/hills/
+// mountain/swamp) makes the FOOT/MOUNT clock climb; a road is faster than open plains.
+export const TERRAIN_COST = {
+  sea: 1, road: 0.6, plains: 1, grass: 1, beach: 1.1, desert: 1.4,
+  jungle: 1.7, forest: 1.6, hills: 1.8, swamp: 2.2, mountain: 2.5,
+};
+// Default land terrain of each port's island (by region) — islands are walkable, the sea is not.
+const REGION_TERRAIN = {
+  "Crown Waters": "plains", "Buccaneer Shallows": "jungle", "Saltmarsh Reach": "swamp",
+  "Beacon Light": "hills", "Bonewater Atolls": "beach", "The Maw": "mountain", "The Black Reach": "mountain",
+};
+
+/** Terrain of a hex. Override registry wins; else a port hex / its neighbours are that island's
+ *  land; everything else is open 'sea'. setTerrain() lets future inland maps paint real ground. */
+function terrainAt(q, r) {
+  const ov = readJSON(K.terrain, {}) || {};
+  const key = `${q},${r}`;
+  if (ov[key]) return ov[key];
+  for (const id in PORTS) {
+    const p = PORTS[id];
+    if (hexDistance({ q, r }, { q: p.q, r: p.r }) <= 1) return REGION_TERRAIN[p.region] || "plains";
+  }
+  return "sea";
+}
+export function getTerrain(q, r) { return terrainAt(q, r); }
+export function setTerrain(q, r, type) {
+  if (!(type in TERRAIN_COST)) throw new Error(`[location] setTerrain: unknown terrain "${type}"`);
+  const ov = readJSON(K.terrain, {}) || {};
+  ov[`${q},${r}`] = type;
+  writeJSON(K.terrain, ov);
 }
 
+// ── cube helpers for a straight hex line (so per-hex terrain is summed along the real path) ──
+function cubeToOffset(c) { return { q: c.x, r: c.z + (c.x - (c.x & 1)) / 2 }; }
+function cubeRound(c) {
+  let rx = Math.round(c.x), ry = Math.round(c.y), rz = Math.round(c.z);
+  const dx = Math.abs(rx - c.x), dy = Math.abs(ry - c.y), dz = Math.abs(rz - c.z);
+  if (dx > dy && dx > dz) rx = -ry - rz; else if (dy > dz) ry = -rx - rz; else rz = -rx - ry;
+  return { x: rx, y: ry, z: rz };
+}
+function cubeLerp(a, b, t) { return { x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t, z: a.z + (b.z - a.z) * t }; }
+/** The ordered hexes a straight route from a→b passes through (inclusive). */
+function hexLine(a, b) {
+  const n = hexDistance(a, b);
+  if (n === 0) return [{ q: a.q, r: a.r }];
+  const ac = toCube(a), bc = toCube(b), out = [];
+  for (let i = 0; i <= n; i++) out.push(cubeToOffset(cubeRound(cubeLerp(ac, bc, i / n))));
+  return out;
+}
+/** Fiction hours for one leg by mode. Ship = flat 8h/hex; land = Σ per-hex (base × terrain). */
+function legHours(fromHex, toHex, mode) {
+  const m = TRAVEL[mode] || TRAVEL.ship;
+  if (!m.land) return hexDistance(fromHex, toHex) * m.hoursPerHex;
+  const line = hexLine(fromHex, toHex);
+  let h = 0;
+  for (let i = 1; i < line.length; i++) h += m.hoursPerHex * (TERRAIN_COST[terrainAt(line[i].q, line[i].r)] || 1);
+  return Math.round(h);
+}
+
+// ── LAND foes (bandits / brigands), shaped like the sea pool — the FALLBACK for land legs ────
+const LAND_ENEMY_POOL = {
+  1: [
+    { slug: "road-cutpurse", name: "Road Cutpurse", endowment: { egp: 8 },
+      loadout: { weapon: "dagger-iron", armor: "armor", trinket: null } },
+    { slug: "hedge-bandit", name: "Hedge Bandit", endowment: { burgers: 8 },
+      loadout: { weapon: "handaxe-iron", armor: "armor", trinket: null } },
+  ],
+  2: [
+    { slug: "highwayman", name: "Highwayman", endowment: { egp: 14, burgers: 4 },
+      loadout: { weapon: "scimitar-iron", armor: "armor-studded", trinket: "lantern" } },
+    { slug: "forest-stalker", name: "Forest Stalker", endowment: { burgers: 14 },
+      loadout: { weapon: "dagger-iron", armor: "armor-chain-shirt", trinket: null } },
+  ],
+  3: [
+    { slug: "brigand-captain", name: "Brigand Captain", endowment: { burgers: 24, egp: 6 },
+      loadout: { weapon: "greataxe-steel", armor: "armor-chainmail", trinket: "relic" } },
+    { slug: "mountain-reaver", name: "Mountain Reaver", endowment: { bluechip: 22 },
+      loadout: { weapon: "warhammer-steel", armor: "armor-breastplate", trinket: "relic" } },
+  ],
+};
+
+// ── rich-bestiary wiring (the "encounter depth" hook) ───────────────────────────────────────
+// area-encounters.js was BUILT to be location.js's roll source. Load it LAZILY + non-blocking so
+// a concurrent edit there can never break the map's load — until/unless it resolves, the inline
+// pools above stand in. Failure is logged (never silent).
+let _areaRoll = null, _areaHints = null;
+import("../seas/battle-grid/area-encounters.js")
+  .then((m) => { if (typeof m.rollEncounter === "function") { _areaRoll = m.rollEncounter; _areaHints = m.AREA_HINTS || null; } })
+  .catch((e) => console.warn("[location] area-encounters not loaded — using inline foe pools:", e.message));
+
+// pick the themed area id for a leg (sea: by danger; land: jungle landfall / caves in the deep).
+function pickArea(medium, danger, fromHex) {
+  if (medium === "land") return danger >= 3 ? "sea-caves" : "island-jungle";
+  const byD = _areaHints && _areaHints.byPortDanger;
+  return (byD && byD[Math.min(3, Math.max(0, danger))]) || "open-sea";
+}
+
+// roll ONE possible PVE encounter for a leg, weighted by danger + medium (sea raiders / land
+// bandits). Tries the rich bestiary first; falls back to the inline pool. danger 0 sea → calm.
+function rollLegEncounter(danger, routeId, medium, fromHex) {
+  if (danger <= 0 && medium === "sea") return null;
+  const chance = Math.min(0.85, Math.max(1, danger) * 0.22); // 1→22% 2→44% 3→66%
+  if (Math.random() >= chance) return null;
+  if (_areaRoll) {
+    try {
+      const enc = _areaRoll(pickArea(medium, danger, fromHex), danger + 1);
+      // accept the FULL rich result — raider leads (endowment) AND monster squads (group blob,
+      // built by units.js from monsterId). encounter.js routes group encs to the squad path.
+      if (enc && enc.type === "pve" && (enc.enemy || (Array.isArray(enc.group) && enc.group.length)))
+        return { ...enc, danger, routeId, medium };
+    } catch (e) { console.warn("[location] area roll failed — inline fallback:", e.message); }
+  }
+  const pool = (medium === "land" ? LAND_ENEMY_POOL : ENEMY_POOL)[danger] || (medium === "land" ? LAND_ENEMY_POOL[1] : ENEMY_POOL[3]);
+  const t = pool[Math.floor(Math.random() * pool.length)];
+  return {
+    type: "pve", danger, routeId, medium,
+    enemy: { id: `pve-${t.slug}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`,
+      name: t.name, endowment: { ...t.endowment }, loadout: { ...t.loadout } },
+  };
+  // ── PINNED: PVP raiding — an open leg could instead roll { type:'pvp', enemy:<ship snapshot> }
+  //    against ships sharing/adjacent to a hex. PVE only for now.
+}
+
+// ── CARAVANS (land cargo haulers — caravans : land :: ships : sea) ───────────────────────────
+// A caravan is just an entity in the shared hex map; it travels by 'mount' (8h/hex). Cargo
+// tonnage gates how much it hauls (weight.js), exactly like a ship's hold.
+export const CARAVANS = {
+  caravan_mule:  { id: "caravan_mule",  name: "Mule Train", cargoTons: 2,  mount: true },
+  caravan_wagon: { id: "caravan_wagon", name: "Ox Wagon",   cargoTons: 6,  mount: true },
+  caravan_train: { id: "caravan_train", name: "Trade Train", cargoTons: 14, mount: true },
+};
+
 /**
- * Start a voyage — stamps the time-lock. The ship FREE-FLOATS to ANY hex (open water) or port.
- * Optionally pass the ship's crew ids so they lock + land with the ship (the deck sails as one).
- * @param {string} shipId
- * @param {string|{q:number,r:number}} target  a portId OR a free-float {q,r} hex
- * @param {number} [sailSpeed=DEFAULT_SAIL_SPEED]
- * @param {string[]} [crewIds=[]]  pawn ids aboard — locked at sea, auto-moved on arrival
+ * Start a journey by ANY mode — the generalized time-lock under both ships AND land travel.
+ * Sea ('ship') = flat 8h/hex over open water. Land ('foot' 24h/hex, 'mount' 8h/hex) sums the
+ * per-hex terrain cost (mountains/forests slow the walk). Rolls one PVE encounter for the leg
+ * (sea raiders / land bandits). The party (crewIds) locks + lands together.
+ * @param {string} entityId  ship / pawn / caravan id
+ * @param {string|{q,r}} target  portId OR free-float {q,r}
+ * @param {{mode?:'ship'|'foot'|'mount', speed?:number, partyIds?:string[]}} [opts]
  * @returns {{ journey: object, encounter: object|null }}
  */
-export function setSail(shipId, target, sailSpeed = DEFAULT_SAIL_SPEED, crewIds = []) {
-  const can = canSetSail(shipId, target);
-  if (!can.ok) throw new Error(`[location] cannot set sail: ${can.reason}`); // visible, never silent
+export function setCourse(entityId, target, opts = {}) {
+  const mode = TRAVEL[opts.mode] ? opts.mode : "ship";
+  const speed = Number(opts.speed) > 0 ? Number(opts.speed) : DEFAULT_SAIL_SPEED;
+  const partyIds = Array.isArray(opts.partyIds) ? [...opts.partyIds] : [];
 
-  const fromHex = getHex(shipId);
+  if (isAtSea(entityId)) throw new Error("[location] cannot depart: already in transit");
+  const fromHex = getHex(entityId);
   const toHex = asHex(target);
   if (!toHex) throw new Error(`[location] unknown destination ${JSON.stringify(target)}`);
-  const speed = Number(sailSpeed) > 0 ? Number(sailSpeed) : DEFAULT_SAIL_SPEED;
+  if (toHex.q < 0 || toHex.q >= GRID_COLS || toHex.r < 0 || toHex.r >= GRID_ROWS) throw new Error("[location] destination off the chart");
+  if (sameHex(fromHex, toHex)) throw new Error("[location] already here");
 
-  const distance = hexDistance(fromHex, toHex);                 // hexes
-  const hours = distance * EIGHT_HOURS;                         // fiction: 8h per hex
+  const medium = TRAVEL[mode].sea ? "sea" : "land";
+  const distance = hexDistance(fromHex, toHex);
+  const hours = legHours(fromHex, toHex, mode);                 // fiction hours (terrain-aware on land)
   const danger = Math.max(hexDanger(fromHex.q, fromHex.r), hexDanger(toHex.q, toHex.r));
   const fromPort = portAtHex(fromHex), toPort = portAtHex(toHex);
 
   const departAt = Date.now();
-  const arriveAt = departAt + Math.round((distance * MS_PER_HEX) / speed); // dev-scaled wall clock
+  // wall-clock scales with the fiction hours (so a 24h foot hex takes 3× a ship hex), / speed.
+  const arriveAt = departAt + Math.round(((hours / EIGHT_HOURS) * MS_PER_HEX) / speed);
   const routeId = `${fromPort || `${fromHex.q},${fromHex.r}`}__${toPort || `${toHex.q},${toHex.r}`}`;
-  const encounter = rollEncounter(danger, routeId);
+  const encounter = rollLegEncounter(danger, routeId, medium, fromHex);
 
   const journeys = allJourneys();
-  journeys[shipId] = {
+  journeys[entityId] = {
     fromHex, toHex, fromPort, toPort, departAt, arriveAt, sailSpeed: speed,
-    crewIds: Array.isArray(crewIds) ? [...crewIds] : [],
-    distance, hours, encounter,
+    crewIds: partyIds, distance, hours, encounter, mode, medium,
   };
   writeJourneys(journeys);
 
   return {
     journey: {
-      from: fromPort, to: toPort, fromHex, toHex, departAt, arriveAt,
+      from: fromPort, to: toPort, fromHex, toHex, departAt, arriveAt, mode, medium,
       secsLeft: Math.max(0, Math.ceil((arriveAt - departAt) / 1000)),
       distance, hours,
     },
     encounter,
   };
+}
+
+/**
+ * Sail a ship (sea) — the original API, now a thin wrapper over setCourse(mode:'ship').
+ * @returns {{ journey: object, encounter: object|null }}
+ */
+export function setSail(shipId, target, sailSpeed = DEFAULT_SAIL_SPEED, crewIds = []) {
+  return setCourse(shipId, target, { mode: "ship", speed: sailSpeed, partyIds: crewIds });
+}
+
+/**
+ * Travel overland — a pawn or caravan. On FOOT by default (24h/hex); pass mounted:true (or a
+ * caravan) for 8h/hex. Rough terrain still slows it. Rolls a land (bandit) encounter for the leg.
+ * @param {string} entityId
+ * @param {string|{q,r}} target
+ * @param {{mounted?:boolean, speed?:number, partyIds?:string[]}} [opts]
+ */
+export function travelOverland(entityId, target, opts = {}) {
+  return setCourse(entityId, target, { mode: opts.mounted ? "mount" : "foot", speed: opts.speed, partyIds: opts.partyIds });
 }
 
 /**
