@@ -154,6 +154,12 @@ The 1% drip can never empty the pool (asymptotic), the feeder refills it continu
 and the feeder itself compounds 50% per harvest — so the inflow **accelerates forever**.
 A technically infinite, growth-accelerated prize made of three existing pieces.
 
+**Water is XP share (founder 2026-07-01):** EVERY pawn in the fight gets a drip, paid in
+order from **weakest to strongest**. Because each payout takes 1% of the *remaining* pot,
+the weakest pawn automatically gets the largest drop and each stronger teammate a little
+less — the contract balances team growth by ordering alone. Yes, the pool drains faster
+with big crews; accepted — faster feeder flows come as funding grows. That is the plan.
+
 Build notes: **the Money/WATER LP already exists** —
 `0xfd522AE3728dcAd5C46dd679749e79D520001780` (V3, WATER/Money, fee 0.01%, ~$4 at peg —
 enough to map and clear tiny trades). Remaining: **destinationRegistry approval** for the
