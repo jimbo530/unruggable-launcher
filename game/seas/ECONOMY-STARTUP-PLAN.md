@@ -45,6 +45,24 @@ Later (not startup): $1 lever per gear item (156 gear tokens ≈ $156) for forev
 gear prizes; $10+ per key water as the game proves fun (harvest cadence scales with
 deposits: $1 ≈ 2yr, $5 ≈ 3mo, $10 ≈ 6wk, $100 ≈ weekly).
 
+## Item tokens go out as LP SPREADS, not giveaways (founder 2026-07-01)
+
+We hold hundreds of item tokens — but **every injection is bleed we need to capture**. So
+the item supply mostly enters the world as **LP spreads for players to grind out**, rolled
+out town by town as we add them:
+
+- The house places goods in **location-gated LPs with a spread** — sell wall above par,
+  buy wall below. Players grind the gap: haul goods from where the wall sells cheap to
+  where a wall buys dear.
+- **The spread recaptures the bleed.** Every player trade against a wall pays the margin
+  back into the house side — goods flow out, value cycles back in. An injection through a
+  spread is a loan to the market, not a leak.
+- **New town = new spread surface.** Each town we open ships with its walls (the existing
+  94-wall pattern), and its price differences vs neighbors ARE the grind content.
+- Water levers stay for the CORE flows (coins, staples, the busy-10) — the heartbeats.
+  The long tail of items doesn't need $1 waters up front; it needs shelf space with a
+  margin. That keeps startup cost small and makes the item catalog self-funding.
+
 ## Why these numbers work
 
 - MIN_HARVEST is $0.10 of yield; Aave pays ~5%. Seeds this small are **maps, not motors** —
