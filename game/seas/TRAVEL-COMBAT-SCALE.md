@@ -86,6 +86,18 @@ real three-way choice:
 
 Waiting is deliberately "another choice on the table" — not a punishment.
 
+## The pawn rest cycle (founder 2026-07-01)
+
+Every pawn has an **energy budget: ~5 fights**, recharging **10 minutes per fight-energy**
+(~50 minutes empty to full). Levels and gear don't raise the cap — rest is universal.
+
+- **Eating well restores and extends energy** — rations are literally fight capacity.
+- **Chrono orbs can skip rest** — but re-grinding the same levels costs **two skips**:
+  one rest-timer skip + one level-timer skip (~100 gold ≈ $1 per repeat cycle at par).
+- **Buying time is a common, welcome in-game tactic** — every skip is a sink; orbs are a
+  floating trade good with an elastic supply valve (spike → release more → reset to par,
+  ~50 gold per orb; resetting costs the house nothing).
+
 ## Encumbrance — all pawns, no exceptions
 
 **Encumbrance must work for ALL pawns.** Carry weight limits what a walking crew can haul
