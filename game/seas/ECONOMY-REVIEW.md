@@ -74,6 +74,23 @@ size (over the 4-pawn walking limit), and price by the combat-scale bet.
 - New towns clone the staple set + pick a signature weapon + get a hiring hall — that's the
   "town starter kit" checklist (with the starter quest from TRAVEL-COMBAT-SCALE.md).
 
+## The membrane economy — sinks must outpace releases (founder 2026-07-01)
+
+Why the economy needs to be full and complex: **the slow trade is real funds slowly building
+endowments — every $1 trapped in game is $1 in an endowment to charity.** So:
+
+- **Inflation is paced by food and treasure releases** (what the world mints into play).
+- **Sinks must OUTPACE those releases** — gold that circulates out is charity flow lost;
+  gold that sinks (hires, water, gear, ships, buildings, rations) stays in the membrane.
+- **DAILY RATIONS is the huge lever**: a recurring, universal, every-pawn cost pulls in
+  funds that would otherwise circulate out. This is core game function, not flavor:
+  - Basic rations = the floor (every working pawn eats).
+  - **Morale bonuses for heroes that eat WELL** — better food = better work rates and
+    fight performance, rewarded in game accordingly. Eating well must genuinely pay,
+    so players choose the bigger sink willingly.
+- The hiring hall follows the same law: half of every hire waters the pawn's endowment
+  (200g → 100g water; 1000g veteran → 500g water = level 5).
+
 ## Build order suggestion (founder-gated, nothing deployed from this doc)
 
 1. **Hiring hall** (pawn sale rail per town) — unlocks "no pawn limit" + every-town starts.

@@ -35,24 +35,28 @@ Nothing new is invented; this is the ShipyardV5 pattern pointed at pawns:
    (refills the ladders), a share to water-flow (job wages). Buying pawns literally feeds
    the town's economy — more hiring = richer town.
 
-## Pricing (PROPOSED numbers — founder sets final)
+## Pricing (FOUNDER-SET, 2026-07-01)
 
-D&D-ratio anchored (ship ~10,000g, longsword 15g):
+The rule that makes it work: **half the price waters the pawn** (100g = 1 level = $1 of
+real endowment flow). Every hire arrives able to WORK — its water gives it job-wage flow
+from day one, however small. That's core: the slow trade is real funds slowly building
+endowments — every $1 trapped in game is $1 in a charity endowment.
 
-| Hire | Price | What you get |
-|---|---|---|
-| **Untrained pawn** | ~25g | level 1, no skills — the blank deckhand |
-| **Skilled pawn** | ~40-60g | level 1 + a starting skill lean (fisher/hauler/fighter) |
-| **Local specialist** | ~75g+ | the town's species/trade flavor, small stat lean |
+| Hire | Price | Water inside | What you get |
+|---|---|---|---|
+| **Deckhand** | **200g** (the minimum) | 100g (level 1) | a working pawn with starting flow |
+| **Veteran** | **1000g** | 500g (level 5) | level 5, ONE core stat at 5 (buyer picks) |
 
-Every town sells untrained pawns; skilled/specialist mixes vary by town — a real reason to
-sail somewhere to recruit.
+**The hall's ceiling is the veteran.** Pawns above level 5 / stat 5 are hard to find and
+come ONLY from special locations and in-game events — gold cannot buy past level 5.
+**P2P pawn trading comes later** (the found-pawn market).
 
-## Species by town (flavor layer — uses the 6 existing species)
+## Species by town
 
-Each town's hall lists 2-3 local species + human everywhere. Assignment TBD with the
-founder (this is world-lore, the founder's lane). The data lives in a simple
-`hiring-halls.csv`: `town, location_id, collection, species, tier, price_gold`.
+**For now: ALL towns carry ALL 6 species** (human, elf, dwarf, orc, dragonborn, goblin).
+Specialized towns come later, outside the world's central shipping. The data lives in
+`hiring-halls.csv`: `town, location_id, collection, species, tier, level, core_stat_at_5,
+price_gold, water_gold` — 84 rows live (7 towns × 6 species × 2 tiers).
 
 ## What the pawn gets at hire
 
