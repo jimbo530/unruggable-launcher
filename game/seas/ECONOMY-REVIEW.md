@@ -142,6 +142,22 @@ player wallet. No leak exists on that path by construction. The parked loose-wat
 bucket stays small in practice — with players or active AI claiming steadily, water moves
 through it into vaults faster than it sits.
 
+**The infinite prize (founder 2026-07-01, final design — existing tools only):**
+
+1. A **PrizePool pays 1%** of its water balance per verified win, poured onto the pawn
+   that did the fight (forever vault).
+2. **One planted water position points its flow at buying water for this prize pool** —
+   the feeder's 50% payout leg auto-refills the pool every harvest.
+3. **One water seeded in the pool** starts the drip.
+
+The 1% drip can never empty the pool (asymptotic), the feeder refills it continuously,
+and the feeder itself compounds 50% per harvest — so the inflow **accelerates forever**.
+A technically infinite, growth-accelerated prize made of three existing pieces.
+
+Build notes: the feeder's Money→water swap leg needs a small **Money/water LP** (both
+$1-backed → a tight 1:1 wall); the prize pool address needs **destinationRegistry
+approval**; the two-step verify → claim discipline stands.
+
 ## Build order suggestion (founder-gated, nothing deployed from this doc)
 
 1. **Hiring hall** (pawn sale rail per town) — unlocks "no pawn limit" + every-town starts.
