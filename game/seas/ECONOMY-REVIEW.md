@@ -99,6 +99,21 @@ endowments — every $1 trapped in game is $1 in an endowment to charity.** So:
   must check the membrane can cover it FIRST — e.g. pawn sales require the Money LP to
   hold more than $1. Never sell what the membrane can't back.
 
+## Cold-start: the engine runs on production, not prizes (founder 2026-07-01)
+
+Reality check: the launched tokens and pawns have **fictional flow** — token fees are 0
+until there's real volume. The engine only runs once started. The start is the pawns
+themselves **finding the path in game**: bring the markets back toward balance, buy what
+they can, expand as the membrane allows.
+
+**Low-level focus for the bootstrap:**
+1. **Fishing** — the loop is live (buy cheap at the ocean, sail, sell dear at Port Royal).
+2. **Crabbing** — the free zero-resource income; catch dispenser still needs wiring.
+3. **A few simple manufacturing flows** — log → lumber works; open 2-3 more conversions.
+
+Pawns work these → real trades → real fees → real flow → THEN the prize/wage crank has
+something to spin on. Production first, prizes second.
+
 ## Build order suggestion (founder-gated, nothing deployed from this doc)
 
 1. **Hiring hall** (pawn sale rail per town) — unlocks "no pawn limit" + every-town starts.
