@@ -130,6 +130,18 @@ however small:
 So the pawn's arc: **fight free → eat at the tavern → flow starts → take a job → work
 steady → row, fish, build.**
 
+**Prize destination mapping (founder 2026-07-01) — every prize declares its destination:**
+
+| Destination | What pays there | Who can touch it |
+|---|---|---|
+| **Pawn INVENTORY** | coin + trade goods (copper, salt, gear) | the player — tradeable, spendable |
+| **Pawn FOREVER VAULT** | WATER — poured straight into the pawn's endowment (`waterTree`) | **no one, ever** — locked forever, pure flow + endowment |
+
+Water prizes are always vault-addressed: pool → pawn's forever vault, never through a
+player wallet. No leak exists on that path by construction. The parked loose-water drip
+bucket stays small in practice — with players or active AI claiming steadily, water moves
+through it into vaults faster than it sits.
+
 ## Build order suggestion (founder-gated, nothing deployed from this doc)
 
 1. **Hiring hall** (pawn sale rail per town) — unlocks "no pawn limit" + every-town starts.
