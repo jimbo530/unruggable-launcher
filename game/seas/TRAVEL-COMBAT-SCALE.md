@@ -62,6 +62,19 @@ fight that any fresh pawn can run on day one, anywhere.
   idle engine running.
 - **Combat spaces are the opposite: shorter, more connected.** Get in, fight, get out.
 
+## Rowing — volume is boat speed (founder 2026-07-01)
+
+Every ship's token has a Row vault and a reactor catching fees. **Trading volume on a
+ship's token IS rowing**: a few **rowing pawns** per ship generate small, steady flow to
+get the ship moving. And it's openly gameable on purpose — a player may **row or
+wash-trade their own ship token to cross an ocean faster than a rival trader**. The fees
+flow to endowments, so "wash away for boat speed": what looks like wash trading is really
+buying speed with fees that plant trees. Volume-as-rowing is a sink, not manipulation.
+
+House rules: pawns enter the world ONLY through the in-game LP-gated hall flow (membrane
+gate). House bots keep small and steady — **the wild crypto waves are for teams of human
+players later, never ridden by us.**
+
 ## Location cooldowns — waiting is a move
 
 Locations carry **cooldown timers** after combat. When a spot is on cooldown the player has a
