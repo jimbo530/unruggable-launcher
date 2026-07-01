@@ -63,6 +63,21 @@ out town by town as we add them:
   The long tail of items doesn't need $1 waters up front; it needs shelf space with a
   margin. That keeps startup cost small and makes the item catalog self-funding.
 
+## The other side: flow-backed prizes (founder 2026-07-01)
+
+Spreads are the MARKET side. The PRIZE side works differently — **every item given as a
+prize should have a flow behind it that is NOT planted**:
+
+- Vault a few **flow tokens** (the mint-gated economy tokens) in each prize pool — that's
+  **actual money flowing into the pool, skinned as a crossbow**. The item is the costume;
+  the flow is the funding.
+- Because flows are unplanted and movable: **tailor** any pool's payout by how many flows
+  sit behind it, **rebalance seasonally** by moving flows between pools 1:1, and **never
+  come back to fix a pool** — flow-backed means self-funding forever.
+- **Many small injection points**: every venue and combat pool holds its own small flow
+  stack. Same item can live on both sides — a crossbow sold at a wall (spread) and a
+  crossbow won from a pool (flow-backed). The side determines the funding mechanic.
+
 ## Why these numbers work
 
 - MIN_HARVEST is $0.10 of yield; Aave pays ~5%. Seeds this small are **maps, not motors** —
