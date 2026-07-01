@@ -90,6 +90,14 @@ endowments — every $1 trapped in game is $1 in an endowment to charity.** So:
     so players choose the bigger sink willingly.
 - The hiring hall follows the same law: half of every hire waters the pawn's endowment
   (200g → 100g water; 1000g veteran → 500g water = level 5).
+- **The ONLY deliberate bleeding is seeding + food inflation** (founder 2026-07-01). Even
+  the imbalances we seed through the economy's back end stay INSIDE the membrane as long
+  as players aren't cashing out — seeded gold recirculates; it only leaks at the cash-out
+  boundary (throttled). Real-value prize pools (cbBTC) are **limited seed + player funded**
+  and refill only from endowment yield.
+- **Capacity gating**: anything that promises real value (pawn watering, prize payouts)
+  must check the membrane can cover it FIRST — e.g. pawn sales require the Money LP to
+  hold more than $1. Never sell what the membrane can't back.
 
 ## Build order suggestion (founder-gated, nothing deployed from this doc)
 

@@ -52,11 +52,21 @@ endowments — every $1 trapped in game is $1 in a charity endowment.
 come ONLY from special locations and in-game events — gold cannot buy past level 5.
 **P2P pawn trading comes later** (the found-pawn market).
 
-**The free path: training fights.** A few **level-1 fights at different ports each train a
-DIFFERENT stat** — play raises what gold would buy. The weak-sauce deckhand is the point:
-either pay 400g a point, or sail the training circuit and earn them. (Natural pairing: the
-6 town stat-jobs already map to the 6 stats — each town's training fight can match its
-job's stat, with Port Royal keeping the generic bilge rats. Founder to confirm the map.)
+**How pawns grow (founder-corrected 2026-07-01):** every place has the same three lanes —
+1. **The generic RAT path** — free grind fights, available everywhere (the starter quest).
+2. **PAID TRAINING, in town or nearby** — buy stat training for gold (400g per special stat
+   point). You pay with gold you **earned or bought** — either way it's a sink.
+3. **JOBS are grind-only** — you WORK them; gold cannot skip the clock.
+
+The weak-sauce deckhand is the point: grind the rats and jobs for free, or spend gold on
+training. Both roads feed the membrane.
+
+**⚠ MEMBRANE GATE ON EVERY PAWN SALE (founder 2026-07-01):** buying a new pawn requires
+the **Money LP to have more than $1 in it** — the 100g-into-water step needs the
+GOLD→Money→USDC path to actually function. The purchase processor MUST check real membrane
+capacity before selling; if the Money pool can't cover the watering, the hall says "no
+hands for hire today" instead of selling a hollow pawn. Sales are gated by what we
+actually have — never by what we wish we had.
 
 ## Species by town
 
