@@ -154,9 +154,11 @@ The 1% drip can never empty the pool (asymptotic), the feeder refills it continu
 and the feeder itself compounds 50% per harvest — so the inflow **accelerates forever**.
 A technically infinite, growth-accelerated prize made of three existing pieces.
 
-Build notes: the feeder's Money→water swap leg needs a small **Money/water LP** (both
-$1-backed → a tight 1:1 wall); the prize pool address needs **destinationRegistry
-approval**; the two-step verify → claim discipline stands.
+Build notes: **the Money/WATER LP already exists** —
+`0xfd522AE3728dcAd5C46dd679749e79D520001780` (V3, WATER/Money, fee 0.01%, ~$4 at peg —
+enough to map and clear tiny trades). Remaining: **destinationRegistry approval** for the
+prize pool as a flow destination; the two-step verify → claim discipline stands. Prize
+water = the generic WATER vault token, so a poured prize is a direct +level on the pawn.
 
 ## Build order suggestion (founder-gated, nothing deployed from this doc)
 
