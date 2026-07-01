@@ -114,6 +114,22 @@ they can, expand as the membrane allows.
 Pawns work these → real trades → real fees → real flow → THEN the prize/wage crank has
 something to spin on. Production first, prizes second.
 
+**The ignition sequence (founder 2026-07-01)** — production loops need a seed flow,
+however small:
+
+1. **Fighting is the only free on-ramp** — coin with zero capital.
+2. **Tavern food is the seed mechanism** — buying food/water at the tavern is what starts
+   a pawn's vault flow (this is what historically gave us water to start flows).
+3. **Flow unlocks jobs** — a watered pawn's job actually pays; then wages sustain the loop.
+4. **Water prizes prime the pump directly**: prize vaults can pay WATER TOKENS straight
+   into the winning pawn's vault — a self-funding prize that STARTS the winner's engine
+   instead of hoping they spend coin on water. Locked-forever water = a prize that can
+   never leak out of the membrane: pure endowment, pure flow. (Real $ sits behind water —
+   draw from the limited seed, pace them. The 13 existing prize waters are the inventory.)
+
+So the pawn's arc: **fight free → eat at the tavern → flow starts → take a job → work
+steady → row, fish, build.**
+
 ## Build order suggestion (founder-gated, nothing deployed from this doc)
 
 1. **Hiring hall** (pawn sale rail per town) — unlocks "no pawn limit" + every-town starts.
