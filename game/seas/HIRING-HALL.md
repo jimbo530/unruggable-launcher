@@ -44,12 +44,19 @@ endowments — every $1 trapped in game is $1 in a charity endowment.
 
 | Hire | Price | Water inside | What you get |
 |---|---|---|---|
-| **Deckhand** | **200g** (the minimum) | 100g (level 1) | a working pawn with starting flow |
+| **Deckhand** | **200g** (the minimum) | 100g (level 1) | level 1 but **1/6 of every stat** — a real weak-sauce starter, by design |
+| **Special stat point** | **400g each** | — | upcharged above our cost; buys a real stat point |
 | **Veteran** | **1000g** | 500g (level 5) | level 5, ONE core stat at 5 (buyer picks) |
 
 **The hall's ceiling is the veteran.** Pawns above level 5 / stat 5 are hard to find and
 come ONLY from special locations and in-game events — gold cannot buy past level 5.
 **P2P pawn trading comes later** (the found-pawn market).
+
+**The free path: training fights.** A few **level-1 fights at different ports each train a
+DIFFERENT stat** — play raises what gold would buy. The weak-sauce deckhand is the point:
+either pay 400g a point, or sail the training circuit and earn them. (Natural pairing: the
+6 town stat-jobs already map to the 6 stats — each town's training fight can match its
+job's stat, with Port Royal keeping the generic bilge rats. Founder to confirm the map.)
 
 ## Species by town
 
