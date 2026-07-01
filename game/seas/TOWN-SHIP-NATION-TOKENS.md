@@ -33,6 +33,32 @@ Old buildings don't die; they **transition upstream**:
    Every working building at the bottom feeds a ship; every ship feeds its nation. Kingdoms
    are literally fed by the smallest huts at the edge of the map.
 
+## The reactor IS the feudal map (founder 2026-07-01)
+
+The 10% upstream isn't just revenue — it's the **political map of the world**:
+
+- **The ship carries a REACTOR that pays 10% upstream.** Every token we launch gets this
+  reactor — it's standard equipment, not an add-on.
+- **The upstream target SHIFTS with war and allegiance.** Change your liege, and the
+  reactor re-routes. Fealty is not a label — it's where your 10% flows.
+- **Reading the reactor fees maps the fleets and nations**: who serves who in the feudal
+  wars is literally on-chain. The fee graph IS the org chart of every kingdom.
+- **Same king, still fighting**: two crews can serve the same king and war with each other
+  anyway — feudal life. Shared liege ≠ peace.
+- **Each High King sets his own laws on inter-kingdom wars.** War rules are per-crown, not
+  global — one king may forbid raiding allies, another may reward it. Law is a kingdom
+  feature, not a game constant.
+
+## AI players take the thrones first (founder 2026-07-01)
+
+Before humans hold these positions, **a few AI players each take up a position with
+DIFFERENT rules** — a High King with strict war-law, a warlord king who rewards raiding, a
+merchant-lord who taxes low and fights never. Same pattern as the First Citizen (charter +
+wallet + brain, playing by the real rules), but political: each holds a throne, sets its
+laws, and routes its reactors. That builds out the world of experiences players climb into —
+by the time a human swears fealty or starts a revolution, the kingdoms already have
+histories, laws, and grudges.
+
 ## National tokens + the revolution rule
 
 - **National tokens come later**, made like ship flags were.
