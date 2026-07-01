@@ -42,6 +42,19 @@ Rules that fall out of this:
 - **Map expansion adds time, not just space** — new far waters come with week+ voyages and
   prizes big enough to justify them.
 
+## Every town is a starting town (founder 2026-07-01)
+
+Any new town can be where a **pawn starts**. So the low-level quest set REPEATS in every
+port town — **rats in the bilge is the template**: a level-1, in-town, resolves-in-minutes
+fight that any fresh pawn can run on day one, anywhere.
+
+- **Standard starter kit per port town**: a bilge-rats-tier quest + day-1 jobs + the market.
+  A pawn born in ANY town has the full rung-0 loop without traveling.
+- Same quest, local flavor — the rats can live in a warehouse, a granary, a shipwreck —
+  same stats and loot tier, town-themed skin.
+- Starter quests are the LOCAL band (instant, repeatable, small copper + goods loot);
+  the town's unique 1–2-day adventures sit above them; the sea sits above that.
+
 ## Time is the resource
 
 - **Long sea voyages put REAL TIME into travel.** The voyage itself is when value builds —
