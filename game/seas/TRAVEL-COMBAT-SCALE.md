@@ -21,6 +21,27 @@ for the whole game, and every system should sit somewhere on it:
 A player should always have BOTH on the table: something fast to do right now at home, and
 something slow paying off out at sea.
 
+## The time bands (founder 2026-07-01)
+
+Every distance has a clock. These are the design targets when building content:
+
+| Band | Travel time | What lives there |
+|---|---|---|
+| **In town** | instant | venues: jobs, market, tavern, forge, quick fights |
+| **Local action on foot** | **1–2 days from town, TOPS** | every town gets its own nearby adventures — caves, wilds, camps. The walking-crew radius. |
+| **Across the sea** | **several days, most of the time** | port-to-port voyages, trade runs, big loot tiers |
+| **Expanded map (later)** | **weeks or longer** | the BIG scores — far waters worth planning for |
+
+Rules that fall out of this:
+- **Each town needs its own local action** — no town should be a dead menu; when we build a
+  town, we build its 1–2-day adventure radius with it.
+- **On-foot content caps at ~2 days out.** Anything further belongs to ships (and later,
+  mounts/wagons/caravans stretch the land radius).
+- **Sea = several days by default** — that's the normal cost of moving goods between ports,
+  and it's what makes geographic scarcity (and trade routes) real.
+- **Map expansion adds time, not just space** — new far waters come with week+ voyages and
+  prizes big enough to justify them.
+
 ## Time is the resource
 
 - **Long sea voyages put REAL TIME into travel.** The voyage itself is when value builds —
