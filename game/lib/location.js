@@ -151,7 +151,7 @@ export function sameHex(a, b) { return !!a && !!b && a.q === b.q && a.r === b.r;
 // Each port sits on its island's visible DOCK/pier (or harbour town) hex on the 2048×1536 art.
 const PORT_DEFS = [
   // id,                name,             q,  r,  region,                danger
-  ["port_royal",      "Port Royal",       7,  4, "Crown Waters",        0], // central isle, big SOUTH dock / harbour town
+  ["port_royal",      "Port Royal",       8,  3, "Crown Waters",        0], // central isle hub @ hex (8,3) = ON-CHAIN loc 8003 (q*1000+r); matches world-features.js TOWN + settlements.js loc:8003 (immutable anchor)
   ["tortuga_cove",    "Tortuga Cove",     2,  2, "Buccaneer Shallows",  1], // top-left forest isle, south harbour
   ["saltmarsh",       "Saltmarsh",       12,  2, "Saltmarsh Reach",     1], // top-right isle, south dock
   ["beacon_isle",     "Beacon Isle",     11,  5, "Beacon Light",        1], // lighthouse isle, west dock
@@ -205,11 +205,17 @@ export const MS_PER_HEX = 5000;
 
 const HUB_HEX = { q: PORTS[HUB_PORT].q, r: PORTS[HUB_PORT].r };
 
-// The three LIVE ships, by stable key. Seeded at the hub on first use.
+// The LIVE ships, by stable key. Seeded at the hub (Port Royal) on first use → fresh ships
+// start DOCKED at Port Royal (ensureSeed places them on HUB_HEX = the hub port's hex, so
+// getLocation() returns the hub port and the map shows them in port, ready to sail).
+// ADDITIVE: the original three keep their ids/names; species fields added for the Harbor's Log
+// (founder memory). Sol del Mar is the founder's gold-market test launch — its full ship card
+// (ticker/crewDist/species/hull/crewSize) is game-layer metadata only (no on-chain use here).
 export const SHIPS = {
-  ship_black_tide: { id: "ship_black_tide", name: "The Black Tide" },
-  ship_harbor_guard: { id: "ship_harbor_guard", name: "Harbor Guard" },
-  ship_redrum_raiders: { id: "ship_redrum_raiders", name: "Redrum Raiders" },
+  ship_black_tide: { id: "ship_black_tide", name: "The Black Tide", species: "orc", crewSize: 100 },     // big ship (founder)
+  ship_harbor_guard: { id: "ship_harbor_guard", name: "Harbor Guard", species: "human", crewSize: 100 }, // fee-share default (confirm)
+  ship_redrum_raiders: { id: "ship_redrum_raiders", name: "Redrum Raiders", species: "goblin", crewSize: 100 }, // founder: ~same as Black Tide
+  ship_sol_del_mar: { id: "ship_sol_del_mar", name: "Sol del Mar", ticker: "SOLM", species: "elf", hull: "schooner", crewSize: 12, crewDist: "0x9500880DEC9B310b4a728C75A271a25615A2443E" },
 };
 
 // ── DANGER FIELD (per hex) ───────────────────────────────────────────────────────────────

@@ -178,62 +178,18 @@
     // battle path lights up — instead of stuffing only the single enemy[0] into sts_pvp_opponent
     // (which is why the Kraken break-free fight never triggered before). Loaded non-blocking; on
     // failure the legacy single-foe write below stands so the map still works.
-    let ENC = null, AREA = null, EVT = null;
+    let ENC = null, AREA = null, EVT = null, HLOG = null;
     try { ENC = await import("./battle-grid/encounter.js"); }
     catch (e){ console.warn("[map] encounter bridge not loaded — single-foe fallback:", e && e.message); }
     try { AREA = await import("./battle-grid/area-encounters.js"); }   // area rolls + the dev kraken() helper
     catch (e){ console.warn("[map] area-encounters not loaded (dev helper only):", e && e.message); }
     try { EVT = await import("./battle-grid/event-resolver.js"); }     // NON-COMBAT voyage events (choice + outcome)
     catch (e){ console.warn("[map] event-resolver not loaded — non-combat events disabled:", e && e.message); }
-    // WORLD-MAP VISION: per-hex terrain (world-terrain.js) + the 1/2-hex sight rule (world-vision.js).
-    // Non-blocking — if absent, the sight ring just doesn't draw and the map is unchanged.
-    let TERR = null, VIS = null;
-    try { VIS = await import("./world-vision.js"); TERR = await import("./world-terrain.js"); }
-    catch (e){ console.warn("[map] world-vision/terrain not loaded — sight ring off:", e && e.message); }
-    // GOBLIN CAVE — a foot-reachable PVE dungeon site on the Port Royal island. Non-blocking: if it
-    // fails to load the cave chip/panel just don't draw and the map is unchanged (no regression).
-    let GCAVE = null;
-    try { GCAVE = await import("../lib/goblin-cave.js"); }
-    catch (e){ console.warn("[map] goblin-cave not loaded — cave site hidden:", e && e.message); }
+    // Harbor's Log: per-ship crew roster + the founder's rations rule. Non-blocking — if it
+    // can't load, the map still sails (crewless, no rations warning). Failure is logged, never silent.
+    try { HLOG = await import("../lib/harbor-log.js"); }
+    catch (e){ console.warn("[map] harbor-log not loaded — sailing crewless, no rations warning:", e && e.message); }
     const toast = (msg)=>{ const t=document.getElementById("toast"); t.textContent=msg; t.classList.add("show"); clearTimeout(t._h); t._h=setTimeout(()=>t.classList.remove("show"),2800); };
-
-    // ── SERVER cooldown skip (the REAL Chrono Orb spend) ──────────────────────────────────────────
-    // The server is the cooldown authority. To skip, we POST /seas/use-chrono-orb; the server verifies
-    // pawn ownership (on-chain) + a held orb (server-attributed), DEBITs 1, then clears the cooldown.
-    // We mirror locally ONLY on a 200 (caller does that), so the UI never fakes a skip the server refused.
-    // The pawn key derivation MUST match goblin.html's pawnRef() so both screens address the same pawn.
-    const SEAS_API = new URLSearchParams(location.search).get("api") || window.SEAS_API_BASE || "/seas-api";
-    const SEAS_PAWN_COLLECTION = "0x5ea50000000000000000000000000000000000a5"; // SEAS sentinel (free-play pawns; valid checksum)
-    async function seasPlayerKey(){
-      try { if (window.ethereum){ const a = await window.ethereum.request({ method:"eth_accounts" }); if (a && a[0]) return a[0]; } }
-      catch(e){ console.warn("[map] wallet probe failed (free-play key):", e); }
-      const leader = localStorage.getItem("sts_party_leader") || "free-hero";
-      const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode("goblin:" + leader));
-      return "0x" + [...new Uint8Array(buf)].map(b=>b.toString(16).padStart(2,"0")).join("").slice(0,40);
-    }
-    async function seasPawnRef(){
-      const leader = localStorage.getItem("sts_party_leader") || "free-hero";
-      const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode("seas-pawn:" + leader));
-      const bytes = new Uint8Array(buf); let tokenId = 0;
-      for (let i=0;i<6;i++) tokenId = tokenId*256 + bytes[i];
-      return { collection: SEAS_PAWN_COLLECTION, tokenId: String(tokenId || 1) };
-    }
-    /** POST the real server skip for `action`. Returns { ok:true, orbsLeft } | { ok:false, reason }. */
-    async function serverSkipCooldown(action){
-      let player, pawn;
-      try { player = await seasPlayerKey(); pawn = await seasPawnRef(); }
-      catch(e){ return { ok:false, reason:"couldn't derive pawn: " + e.message }; }
-      let resp, body;
-      try {
-        resp = await fetch(SEAS_API + "/seas/use-chrono-orb", {
-          method:"POST", headers:{ "content-type":"application/json" },
-          body: JSON.stringify({ player, collection: pawn.collection, tokenId: pawn.tokenId, action }),
-        });
-        body = await resp.json();
-      } catch(e){ return { ok:false, reason:"server unreachable: " + e.message }; }
-      if (!resp.ok || !body || body.ok !== true) return { ok:false, reason:(body && body.reason) ? body.reason : ("refused ("+resp.status+")") };
-      return { ok:true, orbsLeft: (typeof body.orbsLeft==="number") ? body.orbsLeft : null };
-    }
 
     if (!LOC){
       const b = document.getElementById("banner");
@@ -285,22 +241,6 @@
       // a friendly label for a hex (port name when docked, else open-water coords)
       function hexLabel(h){ const id = portIdAt(h); return id ? portName(id) : `open water (${h.q},${h.r})`; }
       function portIdAt(h){ for (const id in PORTS) if (PORTS[id].q===h.q && PORTS[id].r===h.r) return id; return null; }
-
-      // ── GOBLIN CAVE helpers ───────────────────────────────────────────────────────────────
-      // The pawn that "runs" the cave = the WALKING PARTY leader (sts_party_leader, else first party
-      // member) — the SAME pawn units.js fields. Used as the per-pawn weekly-cooldown key. Falls back
-      // to the active ship id so the cooldown still has a stable key in a fresh save (no party yet).
-      function caveLeaderId(){
-        try {
-          const party = JSON.parse(localStorage.getItem("sts_party") || "[]");
-          if (Array.isArray(party) && party.length){
-            const lead = localStorage.getItem("sts_party_leader");
-            return (lead && party.includes(lead)) ? lead : party[0];
-          }
-        } catch(e){ console.warn("[map] party read failed:", e); }   // visible, not silent
-        return activeShip();
-      }
-      function isCaveHex(h){ return !!(GCAVE && GCAVE.CAVE && h && h.q===GCAVE.CAVE.hex.q && h.r===GCAVE.CAVE.hex.r); }
 
       // ── state ───────────────────────────────────────────────────────────────────────────
       let selected = null;   // selected destination {q,r}
@@ -363,39 +303,11 @@
         }
       }
 
-      // ── goblin cave chip (HTML overlay on the PR-island land hex) — built once ─────────────
-      function buildCaveChips(){
-        const chart = document.getElementById("chart");
-        chart.querySelectorAll(".cave-chip").forEach(n=>n.remove());
-        if (!GCAVE || !GCAVE.CAVE) return;
-        const c = hexToPixel({ q: GCAVE.CAVE.hex.q, r: GCAVE.CAVE.hex.r });
-        const chip = document.createElement("div");
-        chip.className = "cave-chip";
-        chip.title = GCAVE.CAVE.name + " — tap to enter";
-        // inline-styled (no CSS edit needed): anchors to #chart like the port chips do.
-        chip.style.cssText = "position:absolute;transform:translate(-50%,-50%);z-index:6;pointer-events:none;"
-          + "left:"+pctX(c.x)+"%;top:"+pctY(c.y)+"%;font-size:12px;text-align:center;color:#ffd9a8;text-shadow:0 1px 3px #000;";
-        chip.innerHTML = '<div style="font-size:18px;line-height:1">\u{1F573}️</div><div style="font-weight:700">Goblin Cave</div>';
-        chart.appendChild(chip);
-      }
-
       // ── DYNAMIC layers: course line + highlights (current hex, selected hex) ───────────────
       function renderHighlights(curHex, atSea){
         const hl = document.getElementById("highlightLayer");
         const course = document.getElementById("courseLayer");
         let h = "", cs = "";
-
-        // SIGHT RING — your ship scouts 1 hex (its hex + the ring), 2 on OPEN terrain (sea/grass).
-        // Tints the scouted hexes so the rule is visible. Once the world is multiplayer, rival crews
-        // outside this ring stay hidden (world-vision visibleOthers). The MAP itself is always shown.
-        if (curHex && VIS && TERR){
-          const range = VIS.sightRange(TERR.terrainAt(curHex.q, curHex.r, PORTS));
-          for (let q=0; q<GRID_COLS; q++) for (let r=0; r<GRID_ROWS; r++){
-            if (VIS.worldHexDistance(curHex, {q,r}) > range) continue;
-            const c = hexToPixel({q,r});
-            h += `<polygon points="${hexPolygonPoints(c.x,c.y)}" fill="rgba(127,224,160,0.10)" stroke="rgba(127,224,160,0.28)" stroke-width="1"></polygon>`;
-          }
-        }
 
         if (curHex){
           const c = hexToPixel(curHex);
@@ -559,67 +471,6 @@
           return;
         }
 
-        // 2b) GOBLIN CAVE — the selected hex is the cave site. A foot-reachable PVE dungeon entry on
-        //     the Port Royal island. "Visiting" it = ENTERING the goblin fight, run through the EXISTING
-        //     encounter→battle bridge (same path as a sea raid). Weekly per-pawn cooldown gates re-entry.
-        if (isCaveHex(selected)){
-          const CV = GCAVE.CAVE;
-          const pawnId = caveLeaderId();
-          const can = GCAVE.canEnter(pawnId);
-          const readyLbl = GCAVE.readyInLabel(pawnId);
-          // CHRONO ORB skip — shown ONLY when the pawn is on cooldown AND the player holds an orb. The
-          // game-layer mirror (canSkipCooldown) gates the BUTTON; the SERVER is still the authority at
-          // fight-entry (issue-seed re-checks the server cooldown) + on the real on-chain orb debit.
-          const skip = (typeof GCAVE.canSkipCooldown === "function") ? GCAVE.canSkipCooldown(pawnId) : { ok:false, orbs:0 };
-          const enterBtn = can.ok
-            ? `<button class="btn warn" id="enterCave">\u{1F5E1}️ Enter the cave</button>`
-            : `<div class="reason">\u{23F3} This crew is spent — ${readyLbl}.</div>`
-              + (skip.ok ? `<button class="btn" id="skipCaveCd" style="margin-top:8px">\u{231B} Skip cooldown — 1 Chrono Orb <span style="opacity:.7">(${skip.orbs} held)</span></button>` : "");
-          side.innerHTML = `
-            <div class="panel">
-              <h3>\u{1F573}️ ${CV.name}</h3>
-              <div class="meta" style="color:#f0e6cf;font-size:13px;line-height:1.55">${CV.blurb}</div>
-              <div class="foe" style="margin-top:8px">\u{1F47A} Cave Goblins <span style="font-size:13px;color:#f0c9bb">×2–4</span></div>
-              <div class="meta" style="margin-top:6px;color:var(--muted);font-size:12px">
-                On foot it's a <b>1-hex, 24h</b> march from the harbour (3× slower than sailing).<br>
-                One run per crew per <b>week</b>. Win and you loot the den.
-              </div>
-              ${enterBtn}
-            </div>`;
-          // Skip: spend 1 CHRONO ORB to clear the SERVER cooldown so the crew can ENTER again now. The
-          // REAL skip is the server endpoint (POST /seas/use-chrono-orb) — it verifies you OWN the pawn
-          // (on-chain) + hold >=1 orb, DEBITs 1, then clears the SERVER cooldown. The local mirror is
-          // updated ONLY on a 200, so the UI never claims a skip the server refused. The orb buys the
-          // WAIT ONLY — you still have to RUN and WIN the cave for any loot.
-          const sk = document.getElementById("skipCaveCd");
-          if (sk) sk.addEventListener("click", async ()=>{
-            sk.disabled = true;
-            const r = await serverSkipCooldown("goblin-cave");
-            if (!r.ok){ sk.disabled = false; return toast("Can't skip: " + r.reason); }
-            try { GCAVE.spendChronoOrbToSkip(pawnId); } catch(e){ console.warn("[map] local mirror after server skip:", e); } // server is authority
-            toast("\u{231B} Chrono Orb spent — cooldown cleared. Run + win the cave for loot.");
-            renderAll();
-          });
-          const eb = document.getElementById("enterCave");
-          if (eb) eb.addEventListener("click", ()=>{
-            if (!ENC){ return toast("The deck bridge isn't aboard — can't enter the cave."); }
-            let run, enc;
-            try {
-              run = GCAVE.enterCave(pawnId);          // stamps the weekly cooldown (the run consumes the slot)
-              enc = GCAVE.rollCaveEncounter();        // guaranteed small goblin pack via area-encounters
-            } catch(e){ console.warn("[map] enter cave failed:", e); return toast("Can't enter: " + e.message); }
-            // marker so the return trip can credit the win to THIS pawn/run (ctx carries only routeId).
-            localStorage.setItem("sts_goblincave_active", JSON.stringify({ pawnId, runId: run.runId }));
-            try {
-              ENC.clearEncounter();                   // wipe any stale group from a prior fight
-              const url = ENC.armVoyageEncounterGroup(enc, { returnTo: location.pathname, battleUrl: BATTLE_URL });
-              localStorage.setItem(LS_MODE, "1");
-              window.location.href = url;
-            } catch(e){ console.warn("[map] arm cave encounter failed:", e); toast("Couldn't open the deck: " + e.message); }
-          });
-          return;
-        }
-
         const route = routeBetween(curHex, selected);          // {distance,danger,hours}
         const sail = canSetSail(activeShip(), selected);
         const destId = portIdAt(selected);
@@ -690,12 +541,22 @@
         const check = canSetSail(ship, destHex);
         if (!check.ok) return toast(check.reason || "Can't set sail right now.");
 
+        // The whole deck sails together: lock the ship's crew with it (setSail's 4th arg). At sea
+        // the crew has no mess hall → they burn rations. We WARN if anyone's unfed but never block
+        // the maiden voyage (founder: keep it playable). HLOG missing → sail crewless, no warning.
+        let crew = [], rationsWarn = null;
+        if (HLOG){
+          try { crew = HLOG.crewOf(ship); rationsWarn = HLOG.voyageRations(ship, { embarking:true }).warning; }
+          catch(e){ console.warn("[map] crew/rations lookup failed — sailing crewless:", e); crew = []; }
+        }
+
         let res;
-        try { res = setSail(ship, destHex, SAIL_SPEED); }
+        try { res = setSail(ship, destHex, SAIL_SPEED, crew); }
         catch(e){ console.warn("[map] setSail failed:", e); return toast("Couldn't set sail: " + e.message); }
         if (!res || !res.journey) return toast("Couldn't set sail — the harbour master refused the course.");
 
         selected = null;
+        if (rationsWarn) toast("⚠️ " + rationsWarn);
         if (res.encounter){ raid = res.encounter; toast("⚔️ Raiders on the crossing!"); }
         else {
           const ev = maybeRollVoyageEvent(destHex);   // additive: a non-combat interlude on a peaceful leg
@@ -742,32 +603,6 @@
         if (isAtSea(ship)) updateVoyageUI();
       }
 
-      // ── goblin-cave return trip: credit a WIN as a PENDING reward claim ─────────────────────
-      // After the deck fight the player lands back here. If a cave run was active and the encounter
-      // resolved (encounter.js wrote ctx.status), record the PENDING claim (copper floor + maybe an
-      // item) for the keeper, then clear the marker + encounter. Loss/draw = no claim. No fake payout.
-      function checkCaveReturn(){
-        if (!GCAVE || !ENC || typeof ENC.readEncounter !== "function") return;
-        let mark;
-        try { mark = JSON.parse(localStorage.getItem("sts_goblincave_active") || "null"); }
-        catch(e){ console.warn("[map] cave marker parse failed:", e); mark = null; }
-        if (!mark || !mark.pawnId) return;
-        const ctx = ENC.readEncounter();
-        if (!ctx || ctx.routeId !== GCAVE.CAVE.id) return;   // not the cave encounter (or none active)
-        if (ctx.status === "pending") return;                // fight not finished — keep the marker
-        if (ctx.status === "win"){
-          try {
-            const claim = GCAVE.completeCave(mark.pawnId, { runId: mark.runId });
-            const item = claim.itemLoot ? " + " + claim.itemLoot.label : "";
-            toast("\u{1F4B0} Cave cleared! Loot claim queued: 1% copper" + item + ".");
-          } catch(e){ console.warn("[map] record cave claim failed:", e); }
-        } else {
-          toast("\u{2620}️ The goblins held the cave — no loot this run.");
-        }
-        localStorage.removeItem("sts_goblincave_active");
-        try { ENC.clearEncounter(); } catch(e){ console.warn("[map] clear cave encounter failed:", e); }
-      }
-
       // ── full render ───────────────────────────────────────────────────────────────────────
       function renderAll(){
         const ship = activeShip();
@@ -785,8 +620,6 @@
       buildHexLayer();
       buildRouteLayer();
       buildPortChips();
-      buildCaveChips();
-      checkCaveReturn();   // credit a goblin-cave win (pending claim) if we just came back from one
       renderAll();
       // Finalize any past-due voyage from a previous session, then keep polling every second.
       voyagePoll();
