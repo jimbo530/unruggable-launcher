@@ -2,6 +2,12 @@
 /**
  * resolver.test.js — focused mechanic tests for the REAL v1 triad + CHAR
  * (node:test runner, zero deps). Run: node --test  (from game/class-engine/)
+ *
+ * ATOMIC SINGLE-STAT ROSTER (founder 2026-06-28 remap — see config/causes.js):
+ *   burgers→CON, tgn→CHA, egp→DEX, char→WIS(1.5x), ccc→STR(1.5x), pump→INT, bluechip→even 1/6.
+ * Each cause feeds ONE stat now (no STR/CON, WIS/CHA, DEX/INT splits). The split MACHINERY still
+ * exists (bluechip is a six-way split; splitWeights/validation tests below exercise it via inline
+ * configs) — only the v1 triad CAUSES became single-stat. Tests use that single-stat truth.
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -21,37 +27,39 @@ test("splitWeights: single stat → {stat:1.0}; valid split passes; bad sum thro
   assert.throws(() => splitWeights({ STR: 0.5, ZZZ: 0.5 }), /unknown stat/);
 });
 
-test("split math exact: $40 burgers → raw STR/CON 30 each (cap 20), others 10", () => {
-  const s = computeStats({ burgers: 40 }, config.causes);
-  assert.equal(s.raw.STR, 30, "raw STR = 10 + 40*0.5");
-  assert.equal(s.raw.CON, 30);
-  assert.equal(s.stats.STR, 20, "STR caps at 20");
-  assert.equal(s.stats.CON, 20);
+test("atomic math exact: $40 burgers → raw CON 50 (cap 20), others 10", () => {
+  const s = computeStats({ burgers: 40 }, config.causes); // burgers → CON (single, 1.0x)
+  assert.equal(s.raw.CON, 50, "raw CON = 10 + 40*1.0");
+  assert.equal(s.stats.CON, 20, "CON caps at 20");
+  assert.equal(s.stats.STR, 10, "burgers no longer feeds STR (atomic)");
   assert.equal(s.stats.INT, 10, "non-fed stats untouched");
 });
 
-test("smaller split stake stays under cap and is exact", () => {
-  const s = computeStats({ tgn: 12 }, config.causes); // WIS/CHA split
-  assert.equal(s.stats.WIS, 16);
-  assert.equal(s.stats.CHA, 16);
+test("smaller single-stat stake stays under cap and is exact", () => {
+  const s = computeStats({ tgn: 12 }, config.causes); // tgn → CHA (single, 1.0x)
+  assert.equal(s.stats.CHA, 22 > 20 ? 20 : 22, "10 + 12 = 22 → caps at 20");
+  assert.equal(s.stats.CHA, 20);
+  assert.equal(s.stats.WIS, 10, "tgn no longer feeds WIS (atomic)");
   assert.equal(s.stats.STR, 10);
+  const small = computeStats({ tgn: 6 }, config.causes); // under cap
+  assert.equal(small.stats.CHA, 16, "10 + 6 = 16, exact");
 });
 
-test("diffuse (1/6) is unchanged and distinct from split", () => {
+test("diffuse (1/6) is unchanged and distinct from a single-stat cause", () => {
   const d = computeStats({ [DIFFUSE_KEY]: 6 }, config.causes); // +1 to all six
   for (const s of ["STR", "DEX", "CON", "INT", "WIS", "CHA"]) assert.equal(d.stats[s], 11);
-  const e = computeStats({ egp: 6 }, config.causes); // DEX/INT split → +3 each
-  assert.equal(e.stats.DEX, 13);
-  assert.equal(e.stats.INT, 13);
+  const e = computeStats({ egp: 6 }, config.causes); // egp → DEX (single) → +6 DEX only
+  assert.equal(e.stats.DEX, 16);
+  assert.equal(e.stats.INT, 10, "egp no longer feeds INT (atomic)");
   assert.equal(e.stats.STR, 10);
 });
 
-test("god cap 30 applies to BOTH stats of a split cause", () => {
-  const s = computeStats({ burgers: { usd: 60, god: true } }, config.causes);
-  assert.equal(s.caps.STR, 30);
-  assert.equal(s.caps.CON, 30);
-  assert.equal(s.stats.STR, 30);
-  assert.equal(s.stats.CON, 30);
+test("god cap 30 applies to the cause's stat", () => {
+  const s = computeStats({ burgers: { usd: 60, god: true } }, config.causes); // burgers → CON
+  assert.equal(s.caps.CON, 30, "god lifts CON cap to 30");
+  assert.equal(s.stats.CON, 30, "raw 10 + 60 = 70 → god cap 30");
+  assert.equal(s.stats.STR, 10, "STR untouched (atomic), normal cap");
+  assert.equal(s.caps.STR, 20);
 });
 
 test("bluechip (even six-way earned split) raises all six stats equally", () => {
@@ -61,23 +69,22 @@ test("bluechip (even six-way earned split) raises all six stats equally", () => 
 
 // ───────────────────────────── pointRate ─────────────────────────────
 test("pointRate: default causes are 1.0x; CHAR is 1.5x per $1", () => {
-  // TGN (default 1.0x), WIS/CHA split → $20 gives 20*1.0*0.5 = +10 WIS.
+  // TGN (default 1.0x), single CHA → $20 gives 20*1.0 = +20 CHA raw.
   const tgn = computeStats({ tgn: 20 }, config.causes);
-  assert.equal(tgn.raw.WIS, 20, "1.0x: raw WIS = 10 + 10");
+  assert.equal(tgn.raw.CHA, 30, "1.0x: raw CHA = 10 + 20");
 
-  // CHAR (1.5x), WIS/CON split → 20*1.5 = 30 points, *0.5 = +15 WIS, +15 CON.
+  // CHAR (1.5x), single WIS → 20*1.5 = +30 WIS raw. (Atomic: CHAR no longer touches CON.)
   const char = computeStats({ char: 20 }, config.causes);
-  assert.equal(char.raw.WIS, 25, "1.5x: raw WIS = 10 + 15");
-  assert.equal(char.raw.CON, 25, "1.5x: raw CON = 10 + 15");
+  assert.equal(char.raw.WIS, 40, "1.5x: raw WIS = 10 + 30");
+  assert.equal(char.raw.CON, 10, "atomic: CHAR feeds WIS only, not CON");
 });
 
-test("pointRate is 1.5x more efficient than a 1.0x cause for the same $ and split shape", () => {
-  // Both WIS/CON-style: compare CHAR(1.5) to a hypothetical 1.0 cause via burgers-share math.
-  // CHAR $20 → +15 to each split stat; a 1.0 cause $20 with .5 weight → +10. 15/10 = 1.5x.
-  const char = computeStats({ char: 20 }, config.causes);
-  const charGainWIS = char.raw.WIS - 10;
-  const oneXGain = 20 * 1.0 * 0.5; // 1.0 rate, same 0.5 weight
-  assert.equal(charGainWIS / oneXGain, 1.5);
+test("pointRate is 1.5x more efficient than a 1.0x cause for the same $", () => {
+  // Single-stat now: CHAR(1.5) puts +30 WIS for $20; a 1.0 single-stat cause (pump) puts +20 INT.
+  // 30/20 = 1.5x. (No split weight in the comparison anymore — both are whole single-stat points.)
+  const charGainWIS = computeStats({ char: 20 }, config.causes).raw.WIS - 10;     // 30 (1.5x)
+  const pumpGainINT = computeStats({ pump: 20 }, config.causes).raw.INT - 10;     // 20 (1.0x)
+  assert.equal(charGainWIS / pumpGainINT, 1.5);
 });
 
 test("pointRate validation: <= 0 throws LOUD", () => {
@@ -120,13 +127,13 @@ test("pure-PUMP Wizard is a GLASS CANNON: high INT/DC, base 10 HP", () => {
   assert.ok(wz.saveDC >= 13, `high spell DC, was ${wz.saveDC}`);
 });
 
-test("PUMP + CHAR build keeps the nuke but raises HP via CHAR's CON", () => {
-  const v = resolve({ pump: 20, char: 16 }, config);
-  // CHAR $16 → 16*1.5 = 24 pts, *0.5 = +12 CON → CON 22 → cap 20 → HP 20.
+test("PUMP + BURGERS build keeps the nuke but raises HP via BURGERS' CON", () => {
+  // Atomic: CON comes from a CON cause (BURGERS), not CHAR (which is now WIS-only). Splash BURGERS
+  // to give the glass-cannon a body. PUMP $20 → INT 20 (cap); BURGERS $10 → CON 20 → HP 20.
+  const v = resolve({ pump: 20, burgers: 10 }, config);
   assert.ok(v.stats.INT >= 20, "still a strong nuke");
-  assert.ok(v.stats.CON > 10, "CON raised by CHAR");
+  assert.ok(v.stats.CON > 10, "CON raised by BURGERS");
   assert.ok(v.hp > 10, `HP raised above base (was ${v.hp})`);
-  // Both Wizard and Warden may qualify depending on shares; Wizard must be present.
   assert.ok(ids(v.qualified).includes("wizard"), "still a Wizard");
 });
 
@@ -141,18 +148,18 @@ test("CON drives HP: HP = 10 + (CON - 10)", () => {
   assert.equal(computeStats({ burgers: { usd: 60, god: true } }, config.causes).hp, 30);
 });
 
-test("CHAR raises both WIS and CON, so a CHAR build also gains HP", () => {
-  // $12 char → 12*1.5 = 18 pts, *0.5 = +9 WIS, +9 CON (under cap) → CON 19 → HP 19.
-  const under = resolve({ char: 12 }, config);
-  assert.equal(under.stats.WIS, 19);
-  assert.equal(under.stats.CON, 19);
-  assert.equal(under.hp, 19, "CON 19 → HP 10 + 9 = 19");
+test("CHAR is atomic WIS (1.5x): raises WIS only, gives NO HP (Warden takes its body from CON elsewhere)", () => {
+  // $12 char → 12*1.5 = +18 WIS → raw 28 → cap 20. CON untouched (10) → HP stays 10.
+  const v = resolve({ char: 12 }, config);
+  assert.equal(v.stats.WIS, 20, "raw 10 + 18 = 28 → caps at 20");
+  assert.equal(v.stats.CON, 10, "atomic: CHAR no longer feeds CON");
+  assert.equal(v.hp, 10, "no CON gain → base HP 10");
 
-  // $20 char → raw 25 each but normal cap 20 (no god flag) → CON 20 → HP 20.
-  const capped = resolve({ char: 20 }, config);
-  assert.equal(capped.stats.WIS, 20, "capped at 20");
-  assert.equal(capped.stats.CON, 20);
-  assert.equal(capped.hp, 20, "CON 20 → HP 20 (cap limits both stat and HP)");
+  // Small stake under cap proves the 1.5x WIS rate exactly: $6 char → +9 WIS → 19.
+  const small = resolve({ char: 6 }, config);
+  assert.equal(small.stats.WIS, 19, "10 + 6*1.5 = 19");
+  assert.equal(small.stats.CON, 10);
+  assert.equal(small.hp, 10);
 });
 
 // ───────────────────────────── TRIAD + CHAR QUALIFICATION ─────────────────────────────
@@ -162,17 +169,19 @@ test("focused BURGERS endower qualifies Barbarian; Fighter closes", () => {
   assert.ok(!ids(v.qualified).includes("fighter"));
 });
 
-test("focused TGN endower qualifies Shepherd (WIS primary), WIS & CHA up", () => {
+test("focused TGN endower qualifies Shepherd (CHA primary), CHA up", () => {
   const v = resolve({ tgn: 40 }, config);
   const shep = v.qualified.find((q) => q.id === "shepherd");
-  assert.ok(shep && shep.primaryStat === "WIS");
-  assert.ok(v.stats.WIS > 10 && v.stats.CHA > 10);
+  assert.ok(shep && shep.primaryStat === "CHA", "Shepherd's primary is CHA");
+  assert.ok(v.stats.CHA > 10, "CHA up from TGN");
+  assert.equal(v.stats.WIS, 10, "atomic: TGN no longer raises WIS");
 });
 
-test("focused EGP endower qualifies Spellblade (DEX & INT up)", () => {
+test("focused EGP endower qualifies Spellblade (DEX up)", () => {
   const v = resolve({ egp: 40 }, config);
   assert.ok(ids(v.qualified).includes("spellblade"));
-  assert.ok(v.stats.DEX > 10 && v.stats.INT > 10);
+  assert.ok(v.stats.DEX > 10, "DEX up from EGP");
+  assert.equal(v.stats.INT, 10, "atomic: EGP no longer raises INT");
 });
 
 test("focused CHAR endower qualifies Warden (not Barbarian/Shepherd)", () => {
@@ -204,11 +213,19 @@ test("drift — diluting Burgers below 30% drops Barbarian", () => {
   assert.ok(!ids(after.qualified).includes("barbarian"));
 });
 
-test("full-triad endower reaches all six stats", () => {
-  const v = resolve({ burgers: 30, tgn: 30, egp: 30 }, config);
-  const q = ids(v.qualified);
+test("the atomic v1 triad covers three stats (CON/CHA/DEX); all six needs the full roster", () => {
+  // Atomic: burgers→CON, tgn→CHA, egp→DEX. The triad alone lights exactly THOSE three.
+  const triad = resolve({ burgers: 30, tgn: 30, egp: 30 }, config);
+  const q = ids(triad.qualified);
   assert.ok(q.includes("barbarian") && q.includes("shepherd") && q.includes("spellblade"));
-  for (const s of ["STR", "DEX", "CON", "INT", "WIS", "CHA"]) assert.ok(v.stats[s] > 10);
+  assert.ok(triad.stats.CON > 10 && triad.stats.CHA > 10 && triad.stats.DEX > 10, "triad stats up");
+  assert.equal(triad.stats.STR, 10, "STR needs CCC");
+  assert.equal(triad.stats.INT, 10, "INT needs PUMP");
+  assert.equal(triad.stats.WIS, 10, "WIS needs CHAR");
+
+  // The FULL single-stat roster (one cause per stat) reaches all six.
+  const all = resolve({ ccc: 20, egp: 20, burgers: 20, pump: 20, char: 20, tgn: 20 }, config);
+  for (const s of ["STR", "DEX", "CON", "INT", "WIS", "CHA"]) assert.ok(all.stats[s] > 10, `${s} up`);
 });
 
 // ───────────────────────────── BRACKETS / TIERS / DC ─────────────────────────────
@@ -221,19 +238,22 @@ test("weight brackets bin total level", () => {
 });
 
 test("ability tiers unlock by class-level", () => {
-  const low = resolve({ burgers: 4 }, config);
+  // classLevel = $ in the class's required cause; abilities gate on minClassLevel. A class only
+  // appears once TOTAL level >= the FIRST_CLASS_LEVEL floor (5), so use $5+ stakes here.
+  const low = resolve({ burgers: 5 }, config); // classLevel 5: rage(1)+reckless_strike(5), not brutal_slam(10)
   const lowIds = low.qualified.find((q) => q.id === "barbarian").availableAbilities.map((a) => a.id);
   assert.ok(lowIds.includes("rage"));
   assert.ok(!lowIds.includes("brutal_slam"));
-  const high = resolve({ burgers: 12 }, config);
+  const high = resolve({ burgers: 12 }, config); // classLevel 12: all three unlocked
   const highIds = high.qualified.find((q) => q.id === "barbarian").availableAbilities.map((a) => a.id);
   assert.ok(highIds.includes("reckless_strike") && highIds.includes("brutal_slam"));
 });
 
 test("spell power = primary stat; save DC = 8 + mod", () => {
-  const v = resolve({ tgn: 12 }, config); // Shepherd WIS 16 → mod +3 → DC 11
+  // Shepherd's primary is CHA. tgn→CHA (single): $6 → CHA 16 (under cap) → mod +3 → DC 11.
+  const v = resolve({ tgn: 6 }, config);
   const shep = v.qualified.find((q) => q.id === "shepherd");
-  assert.equal(shep.spellPower, 16);
+  assert.equal(shep.spellPower, 16, "spellPower = CHA (Shepherd primary)");
   assert.equal(abilityMod(16), 3);
   assert.equal(shep.saveDC, 11);
   assert.equal(saveDC(16), 11);

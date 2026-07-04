@@ -283,10 +283,12 @@ export function resolve(endowment, config, opts = {}) {
   // Does any single cause dominate? (Used by the balance Fighter.)
   const topShare = levels.perCause.length ? levels.perCause[0].share : 0;
 
-  // First pass: ratio + balance gates (no prereqs yet).
+  // First pass: ratio + balance gates (no prereqs yet). GATED on the LEVEL-5 FLOOR (founder 2026-06-28:
+  // "level 5 is the 1st class level") — below TOTAL level 5 a pawn is base/unclassed; no class qualifies.
   /** @type {Map<string, { klass: ClassDef, classLevel: number, combinedShare: number, drift: number }>} */
   const ratioQualified = new Map();
-  for (const klass of classes) {
+  const FIRST_CLASS_LEVEL = 5;
+  if (levels.totalLevel + 1e-9 >= FIRST_CLASS_LEVEL) for (const klass of classes) {
     if (klass.balanceClass) {
       // Fighter is open only while DIFFUSE — no cause dominates past the diffuseMax.
       // diffuseMax derived from threshold: default 1/ (families) ≈ spread; we use 0.34

@@ -13,13 +13,15 @@
  * CRAFTING (craft.js): material + masterwork; ONLY masterwork items can be enchanted.
  */
 
-// material tiers. bonus = STAT bump (to attack/ac). priceMul = cost vs the iron baseline.
+// material tiers. bonus = STAT bump. priceMul = cost vs iron. weightMul = how heavy vs the base
+// D&D weight — WOOD IS LIGHTER than metal (founder 2026-06-25): a wooden longsword (4lb×0.5=2lb)
+// weighs half an iron one. So wood = cheap + light + weak (the starter tier).
 export const MATERIALS = {
-  wooden: { label: 'Wooden', bonus: 0, priceMul: 0.5, locked: false },
-  iron:   { label: 'Iron',   bonus: 1, priceMul: 1.0, locked: false },
-  bronze: { label: 'Bronze', bonus: 2, priceMul: 2.0, locked: false },
-  steel:  { label: 'Steel',  bonus: 3, priceMul: 4.0, locked: true },  // unlocks later
-  leather:{ label: 'Leather',bonus: 0, priceMul: 1.0, locked: false }, // helmet-leather / soft gear
+  wooden: { label: 'Wooden', bonus: 0, priceMul: 0.5, weightMul: 0.5, locked: false },
+  iron:   { label: 'Iron',   bonus: 1, priceMul: 1.0, weightMul: 1.0, locked: false },
+  bronze: { label: 'Bronze', bonus: 2, priceMul: 2.0, weightMul: 1.1, locked: false },
+  steel:  { label: 'Steel',  bonus: 3, priceMul: 4.0, weightMul: 1.0, locked: true },  // unlocks later
+  leather:{ label: 'Leather',bonus: 0, priceMul: 1.0, weightMul: 0.4, locked: false }, // helmet-leather / soft gear
 };
 
 // base weapon table: dmg=base flat attack, fin=finesse(+to-hit), reach=+1 range,
@@ -130,6 +132,10 @@ export const WEIGHTS = {
   spyglass:1, lantern:2, 'healers-kit':1, relic:1,
 };
 
+/** Final item weight (lb) = base type weight × material weight multiplier (wood lighter), 1-dp. */
+export const matWeight = (typeKey, mid) =>
+  Math.round(((WEIGHTS[typeKey] ?? 1) * ((MATERIALS[mid] && MATERIALS[mid].weightMul) ?? 1)) * 10) / 10;
+
 const TIERED = new Set(['battleaxe','club','dagger','flail','glaive','greataxe','greatclub','greatsword',
   'halberd','handaxe','lance','light-hammer','mace','pike','quarterstaff','rapier','scimitar','shortbow',
   'shortsword','sword','longsword','spear','crossbow','dart','javelin','sling','sickle','warhammer','shield','helmet']);
@@ -180,7 +186,7 @@ export function buildArmory() {
         if (mid === 'leather') continue;
         const id = `${key}-${mid}`;
         add(id, w, `${mat.label} ${w.name}`, weaponMods(w, mat.bonus, false, 0), priceCp(w.gp, mat.priceMul),
-          { material: mid, locked: mat.locked, masterwork: false, enchantable: false, enchant: 0, weight: WEIGHTS[key] });
+          { material: mid, locked: mat.locked, masterwork: false, enchantable: false, enchant: 0, weight: matWeight(key, mid) });
       }
     } else {
       add(key, w, w.name, weaponMods(w, 1, false, 0), priceCp(w.gp, 1),
@@ -195,7 +201,7 @@ export function buildArmory() {
         const id = `${key}-${mid}`;
         const mat = MATERIALS[mid];
         add(id, a, `${mat.label} ${a.name}`, armorMods(a, key === 'helmet' ? Math.floor(mat.bonus / 2) : mat.bonus, false, 0),
-          priceCp(a.gp, mat.priceMul), { material: mid, locked: mat.locked, masterwork: false, enchantable: false, enchant: 0, weight: WEIGHTS[key] });
+          priceCp(a.gp, mat.priceMul), { material: mid, locked: mat.locked, masterwork: false, enchantable: false, enchant: 0, weight: matWeight(key, mid) });
       }
     } else {
       add(key, a, a.name, armorMods(a, 0, false, 0), priceCp(a.gp, 1),

@@ -112,12 +112,18 @@ export function allHexes() {
 }
 
 // ── hexCombat.ts — dice + modifiers — PORTED VERBATIM ───────────────────────────
-export function rollD20() { return Math.floor(Math.random() * 20) + 1; }
+// DETERMINISM HOOK (seas combat-settlement): the dice take an injectable `rng`
+// (a function returning a float in [0,1), like Math.random). It DEFAULTS to
+// Math.random so the live game + any existing caller are byte-for-byte unchanged,
+// but the headless resolver (resolver.js) passes a SEEDED rng so the same
+// seed+actions replay identically in the browser AND on the server. The math below
+// is otherwise PORTED VERBATIM — only the entropy source is parameterized.
+export function rollD20(rng = Math.random) { return Math.floor(rng() * 20) + 1; }
 
 /** ToT convention: stats are D&D−10, so mod = floor(stat/2). */
 export function abilityMod(stat) { return Math.floor(Math.max(0, stat) / 2); }
 
-export function rollDice(expr, casterLevel = 1) {
+export function rollDice(expr, casterLevel = 1, rng = Math.random) {
   const trimmed = expr.trim();
   if (/^\d+$/.test(trimmed)) { const n = parseInt(trimmed); return { total: n, breakdown: `${n}` }; }
   const perLevel = trimmed.includes("/level");
@@ -131,7 +137,7 @@ export function rollDice(expr, casterLevel = 1) {
   let total = bonus;
   const rolls = [];
   for (let i = 0; i < numDice; i++) {
-    const roll = Math.floor(Math.random() * dieSize) + 1;
+    const roll = Math.floor(rng() * dieSize) + 1;
     rolls.push(roll); total += roll;
   }
   total = Math.max(1, total);
@@ -200,7 +206,12 @@ export function resolveAttack(attacker, target, natural, distance = 1) {
  *   DC = 10 + spellLevel + caster.castingAbilityMod
  *   save: target rolls d20 + abilityMod(save ability) vs DC; damage halves on save.
  */
-export function resolveSpellCast(caster, target, spellId, spellName, spellLevel, effect, isConcentration) {
+// DETERMINISM HOOK: `rng` (default Math.random) is threaded into the internal save roll
+// and damage/heal dice so the resolver can replay this deterministically. The DRAW ORDER
+// is load-bearing for replay parity: the SAVE roll (if any) is drawn BEFORE the damage
+// dice — both the live game and the server consume the rng in this exact order because
+// they call this one function.
+export function resolveSpellCast(caster, target, spellId, spellName, spellLevel, effect, isConcentration, rng = Math.random) {
   const casterLvl = caster.casterLevel ?? 1;
   const casterMod = caster.castingAbilityMod ?? 0;
   const dc = 10 + spellLevel + casterMod;
@@ -211,7 +222,7 @@ export function resolveSpellCast(caster, target, spellId, spellName, spellLevel,
       : effect.save === "ref" ? target.rawAbilities.dex
       : target.rawAbilities.wis;
     const saveMod = abilityMod(saveAbility) + sumEffects(target, "buffSave");
-    saveRoll = rollD20();
+    saveRoll = rollD20(rng);
     saveTotal = saveRoll + saveMod;
     saved = saveTotal >= dc;
   }
@@ -224,13 +235,13 @@ export function resolveSpellCast(caster, target, spellId, spellName, spellLevel,
     : ` (DC ${dc}, no save)`;
 
   if (effect.type === "damage" && effect.damage) {
-    const { total, breakdown } = rollDice(effect.damage, casterLvl);
+    const { total, breakdown } = rollDice(effect.damage, casterLvl, rng);
     const finalDmg = saved ? Math.max(1, Math.floor(total / 2)) : total;
     const dmgTypeStr = effect.damageType ? ` ${effect.damageType}` : "";
     return { success: true, damage: finalDmg, breakdown: `${spellName}: ${breakdown}${dmgTypeStr} damage${saved ? " (halved)" : ""}${saveStr}` };
   }
   if (effect.type === "healing" && effect.healing) {
-    const { total, breakdown } = rollDice(effect.healing, casterLvl);
+    const { total, breakdown } = rollDice(effect.healing, casterLvl, rng);
     return { success: true, healing: total, breakdown: `${spellName}: heals ${breakdown} HP` };
   }
   if (effect.type === "buff") {

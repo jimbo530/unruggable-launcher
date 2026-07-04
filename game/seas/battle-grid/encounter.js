@@ -28,6 +28,7 @@
 
 const LS_OPP = "sts_pvp_opponent";   // SAME key pvp.html + units.js use → reuse the foe-build path
 const LS_CTX = "sts_encounter";      // voyage-encounter context: framing + where to resume
+const LS_GRP = "sts_encounter_group"; // multi-enemy GROUP blob (units.js readEncounterGroup reads it)
 
 // Defaults assume the game is served from the `game/` root (e.g. `npx serve game/`), so
 // these absolute paths resolve from ANY departure/map page regardless of its folder depth.
@@ -80,6 +81,44 @@ export function armVoyageEncounter(encounter, opts = {}) {
 }
 
 /**
+ * ARM a MULTI-ENEMY VOYAGE GROUP (the rollEncounter() result from area-encounters.js, which
+ * carries a full `group` array + objective + map). Writes the whole result under a NEW key
+ * `sts_encounter_group` that units.js makeStarterUnits() reads FIRST (falling back to the
+ * single-enemy `sts_pvp_opponent` path if absent), plus the same context blob used today so the
+ * framing + win/return flow are unchanged. ADDITIVE — armVoyageEncounter()/handleSetSail() are
+ * untouched. THROWS (never silent) on a malformed group.
+ *
+ * @param {{type?:string, group?:object[], objective?:any, groupName?:string, map?:any, danger?:any, routeId?:any}} encounter
+ * @param {{ battleUrl?:string, returnTo?:string }} [opts]
+ * @returns {string} the battle URL (?mode=encounter)
+ */
+export function armVoyageEncounterGroup(encounter, opts = {}) {
+  if (!encounter || typeof encounter !== "object")
+    throw new Error("encounter.js: group encounter is missing / not an object.");
+  if (!Array.isArray(encounter.group) || encounter.group.length === 0)
+    throw new Error("encounter.js: group encounter needs a non-empty `group` array (from area-encounters rollEncounter()).");
+  if (!hasLS()) throw new Error("encounter.js: localStorage unavailable (this is a game-layer bridge).");
+  const battleUrl = opts.battleUrl || DEFAULT_BATTLE_URL;
+  const returnTo  = opts.returnTo  || DEFAULT_RETURN_TO;
+  // FULL group result → units.js readEncounterGroup() / makeSquadBattle() build the whole squad.
+  localStorage.setItem(LS_GRP, JSON.stringify(encounter));
+  const ctx = {
+    active: true,
+    status: "pending",                         // "pending" → "win" | "loss" | "draw"
+    group: true,
+    routeId: encounter.routeId ?? null,
+    danger: encounter.danger ?? null,
+    enemyName: encounter.groupName || "Raiders",
+    objective: encounter.objective ?? "wipe",
+    returnTo,
+    battleUrl,
+    startedAt: Date.now(),
+  };
+  localStorage.setItem(LS_CTX, JSON.stringify(ctx));
+  return battleUrl;
+}
+
+/**
  * ARM + NAVIGATE: store the encounter, then send the player into the battle deck framed as
  * "Raiders on the route!". On WIN the deck links back to `returnTo` (resume the voyage);
  * the journey time-lock from setSail keeps running to arrival on its own.
@@ -110,8 +149,14 @@ export function launchVoyageEncounter(encounter, opts = {}) {
  */
 export function handleSetSail(result, opts = {}) {
   const enc = result && result.encounter;
-  if (enc && enc.type === "pve") { launchVoyageEncounter(enc, opts); return true; }
-  return false;
+  if (!enc || enc.type !== "pve") return false;
+  // A rich area-encounters result carries a multi-foe `group` (monsters + raiders) → squad path.
+  // A single-foe (inline-pool) encounter has just enemy+endowment → original single-foe path.
+  let url;
+  if (Array.isArray(enc.group) && enc.group.length) url = armVoyageEncounterGroup(enc, opts);
+  else url = armVoyageEncounter(enc, opts);
+  if (typeof window !== "undefined" && window.location) window.location.href = url;
+  return true;
 }
 
 /** Read the active voyage-encounter context (framing + return), or null if none. */
@@ -155,6 +200,6 @@ export function resolveEncounter(outcome) {
  *  the player leaves the encounter for good (e.g. after resuming the voyage). */
 export function clearEncounter() {
   if (!hasLS()) return;
-  try { localStorage.removeItem(LS_CTX); localStorage.removeItem(LS_OPP); }
+  try { localStorage.removeItem(LS_CTX); localStorage.removeItem(LS_OPP); localStorage.removeItem(LS_GRP); }
   catch (e) { console.warn("encounter clear failed:", e); }   // visible, not silent
 }

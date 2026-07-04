@@ -20,25 +20,25 @@ export const CAUSES = [
     id: "burgers",
     name: "Burgers",
     family: "Melee-DPS",              // melee / tank body
-    stat: { STR: 0.5, CON: 0.5 },     // brawn + staying power
+    stat: "CON",                      // 1-stat atomic remap (founder 2026-06-28): a Barbarian is a CON character first — takes hits, no training. STR is secondary (they can also work the CCC/STR job).
     tokenRef: "BURGERS",
-    note: "v1 triad — frontline brute. Earned water splits STR/CON.",
+    note: "v1 triad — frontline brute → CON anchor (takes hits). STR via the CCC job.",
   },
   {
     id: "tgn",
     name: "TGN (Treegens)",
     family: "Nature",                 // nature / support
-    stat: { WIS: 0.5, CHA: 0.5 },     // grove wisdom + rallying presence
+    stat: "CHA",                      // 1-stat atomic remap: rallying presence (CHA). WIS via the CHAR job.
     tokenRef: "TGN",
-    note: "v1 triad — Grove orator/support. Earned water splits WIS/CHA.",
+    note: "v1 triad — Grove orator/support → CHA anchor.",
   },
   {
     id: "egp",
     name: "EGP",
     family: "Gish",                   // gish / skirmisher
-    stat: { DEX: 0.5, INT: 0.5 },     // finesse + arcane cunning
+    stat: "DEX",                      // 1-stat atomic remap: finesse/skirmisher (DEX). INT via the PUMP/BEACON job.
     tokenRef: "EGP",
-    note: "v1 triad — elven spellblade. Earned water splits DEX/INT.",
+    note: "v1 triad — elven spellblade → DEX anchor.",
   },
 
   // ── CHAR — forgone-airdrop burn cause (extra-impact, +50% stat rate) ──────
@@ -46,14 +46,14 @@ export const CAUSES = [
     id: "char",
     name: "CHAR",
     family: "Nature",
-    stat: { WIS: 0.5, CON: 0.5 },     // durable nature guardian → WIS/CON (maps to Warden)
-    pointRate: 1.5,                   // 1.5 stat points per $1 → net 0.75 WIS + 0.75 CON per $1
+    stat: "WIS",                      // 1-stat atomic remap: nature guardian (WIS, maps to Warden). CON via the BURGERS job.
+    pointRate: 1.5,                   // 1.5 WIS per $1 (forgone-airdrop +50%)
     tokenRef: "CHAR",
     note:
       "DESIGN: the player NEVER receives a CHAR airdrop. The forgone airdrop CHAR is " +
       "BURNED (removed from circulation) at the endowment rate. The +50% stat rate " +
       "(1.5 pts/$1) is the in-game reward for forgoing those tokens — no token ever " +
-      "goes to the player, only stats + a burn. Split WIS/CON (0.75 each per $1).",
+      "goes to the player, only stats + a burn. Pure WIS anchor (1.5 WIS per $1).",
   },
 
   // ── CCC — carbon-counting biochar cause (STR, +50% rate, burned impact) ───

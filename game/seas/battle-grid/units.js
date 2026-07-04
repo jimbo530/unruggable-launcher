@@ -36,11 +36,26 @@
  *                           the paper doll (game.js leaves a `cosmetics: []` slot).
  */
 
-import { resolve, makeConfig, abilityMod as engineMod } from "../class-engine/index.js";
-import { abilityMod as totMod, SPELLS } from "./tot-engine.js";
-import { equipItem } from "./items.js";
+import { resolve, makeConfig, abilityMod as engineMod, BASE_HP, BASE_STAT } from "../class-engine/index.js";
+import { applyStarvation, starvationPenalty } from "../../lib/upkeep.js";
+import { abilityMod as totMod, SPELLS as SPELLS_BASE } from "./tot-engine.js";
+import { equipItem, SLOTS } from "./items.js";
+import { deriveCombatStats } from "./stat-derive.js";
+import { SPELL_CATALOG } from "./spells-catalog.js";
+import { SEA_SPELLS } from "./bestiary-sea.js";
+import { makeMonsterById, enemySpawnHexes } from "./monster-bridge.js";
+import { GRID_PRESETS } from "./grid-config.js";
 
 const CONFIG = makeConfig();
+
+// ── MERGED SPELL REGISTRY ────────────────────────────────────────────────────────
+// game.js imports SPELLS from HERE (units.js owns the registry), so merging lights up the
+// whole catalog with NO game.js change and tot-engine.js stays VERBATIM. The 3 ToT spells
+// (magic_missile / burning_hands / ray_of_frost) are pinned by spreading SPELLS_BASE LAST —
+// the catalog reproduces them identically, so this is a strict, idempotent superset that
+// GUARANTEES the originals stay byte-for-byte even if the catalog ever drifts. SEA_SPELLS
+// adds the caster-monster spells (e.g. ink_spray) on top.
+export const SPELLS = { ...SPELL_CATALOG, ...SEA_SPELLS, ...SPELLS_BASE };
 
 /**
  * ART HOOKS — real Grok sprite PATHS to swap in for the emoji placeholders.
@@ -125,7 +140,16 @@ const toTScore = (s) => Math.max(0, s - 10);
 export function buildUnit(def) {
   // 1) STATS COME FROM THE CLASS ENGINE — nothing combat-relevant is hardcoded.
   const view = resolve(def.endowment, CONFIG);
-  const S = view.stats;                       // raw D&D scores
+  const baseScores = view.stats;              // raw D&D scores, BEFORE hunger
+  // UNIVERSAL EATING (founder 2026-06-28): a STARVING pawn fights WEAKER. Fold the all-stats
+  // starvation debuff (−1/all stats per unfed day, cumulative, floored at 1) into the scores HERE,
+  // at the ONE place a unit's scores are resolved — so EVERY downstream combat number (to-hit, dmg,
+  // AC, mAtk, def, mDef, speed, and HP below) drops together. Keyed by def.id (the crewId); a unit
+  // with NO upkeep record (monsters, sparring dummies, demo pawns) has hungryDays 0 → penalty 0 →
+  // scores pass through unchanged (byte-for-byte). Opt out per-build with def.noStarve (e.g. preview).
+  const now = def.now || Date.now();
+  const starvePen = def.noStarve ? 0 : starvationPenalty(def.id, now);   // ≤ 0
+  const S = starvePen === 0 ? baseScores : applyStarvation(baseScores, def.id, now);
   const klass = view.qualified[0] || null;
   const className = klass ? klass.name : "(no class)";
 
@@ -151,17 +175,25 @@ export function buildUnit(def) {
   //    (battleStats.ts computes far more; we provide the combat-relevant subset and
   //     keep the SAME meaning: attack = physical dmg, atkBonus = to-hit, ac = 10+DEX.)
   const isCaster = def.role === "caster";
+  // Derive the combat bridge via the SHARED formula (stat-derive.js) — the SAME function
+  // items.js applyEquipment() uses — so a unit's geared numbers re-derive from its base
+  // ability scores and a +2 STR ring really moves to-hit/dmg. With zero gear this yields
+  // byte-for-byte the previous inline result (attack/atkBonus/ac/speed unchanged).
+  const derived = deriveCombatStats({ scores: S, role: def.role, charLevel });
+  // HP from the (possibly starved) CON, via the SAME formula the class-engine resolver uses
+  //   HP = BASE_HP + max(0, round(CON - BASE_STAT))  (resolver.js ~L191)
+  // so a starved CON drops HP exactly as the engine would, and an UNFED pawn is also frailer. With
+  // no hunger S===baseScores so hp === view.hp (byte-for-byte). Floor at 1 — a pawn is never 0-HP here.
+  const hp = starvePen === 0 ? view.hp : Math.max(1, BASE_HP + Math.max(0, Math.round(S.CON - BASE_STAT)));
   const stats = {
-    attack:   isCaster ? Math.max(1, 1 + intMod) : Math.max(1, 4 + strMod), // melee hits harder (STR), caster weak in melee
-    mAtk:     S.INT,
-    def:      S.DEX,
-    mDef:     S.WIS,
-    hp:       view.hp,
-    ac:       10 + dexMod,                 // battleStats: 10 + dexMod (unarmored v1)
-    // to-hit = ability mod + a SMALL BAB. BAB is bracket-derived (not raw $), capped
-    // at +3 so a high-$ unit doesn't auto-hit — keeps the 2-unit demo swingy.
-    atkBonus: (isCaster ? intMod : strMod) + Math.min(3, charLevel),
-    speed:    Math.max(15, 25 + dexMod * 5), // ft; /5 → hexes of move (battleStats default 30)
+    attack:   derived.attack,              // melee hits harder (STR), caster weak in melee
+    mAtk:     derived.mAtk,
+    def:      derived.def,
+    mDef:     derived.mDef,
+    hp,
+    ac:       derived.ac,                  // battleStats: 10 + dexMod (unarmored v1)
+    atkBonus: derived.atkBonus,            // ability mod + small bracket BAB (capped +3)
+    speed:    derived.speed,               // ft; /5 → hexes of move
     // fields hexCombat reads but we don't use in v1 (kept zero/empty so ports run clean):
     lightningDmg: 0, fireDmg: 0, lightningDice: null, fireDice: null, retaliationDice: null,
     resistances: [], immunities: [], retaliationDmg: 0,
@@ -198,8 +230,8 @@ export function buildUnit(def) {
     stats,
     rawAbilities,
     subtypes: [],
-    currentHp: view.hp,
-    maxHp: view.hp,
+    currentHp: hp,
+    maxHp: hp,
     hasMoved: false,
     hasActed: false,
     activeEffects: [],
@@ -215,38 +247,112 @@ export function buildUnit(def) {
     //    equipped gear onto these to produce the live combat fields above, so
     //    equipping/removing is non-destructive (always recomputed from base).
     baseStats: { ...stats },
-    baseMaxHp: view.hp,
+    baseMaxHp: hp,
     baseAttackRange: isCaster ? 1 : 1,
     baseMovementHexes: Math.max(2, Math.floor(stats.speed / 5)),
     baseCastingMod: intMod,
-    equipped: { weapon: null, armor: null, trinket: null },
+    // RAW D&D scores → items.js applyEquipment() re-derives the bridge from these so
+    // ability-score gear (Gauntlets of Ogre Power, etc.) raises to-hit/dmg/HP + carry.
+    baseAbilities: { STR: S.STR, DEX: S.DEX, CON: S.CON, INT: S.INT, WIS: S.WIS, CHA: S.CHA },
+    // 7-slot paper doll — seed EVERY slot so the equip UI renders each row + applyEquipment is total.
+    equipped: { weapon: null, offhand: null, armor: null, helm: null, boots: null, ring: null, trinket: null },
   };
 }
 
 /**
- * Two starter units, hot-seat, on one ship deck.
- *
+ * DEMO FALLBACK (no party / no localStorage): a hot-seat pair on one ship deck —
  *   Barbarian — BURGERS endowment ($24 → STR/CON split) → STR 20 / CON 20,
  *               HP 20, AC 10. Melee bruiser; must close to swing.
  *   Wizard    — PUMP endowment ($12) + EGP splash ($4 → DEX/INT) → INT 20, DEX 12,
  *               CON 10. HP 10 glass cannon; casts real ToT spells at range.
+ * The PRIMARY path is the walking party below; this pair only spars when no party exists.
  */
-/** Read crew recruited at the Tavern (localStorage). Guarded so Node smoke tests
- *  (no localStorage) just fall back to the demo unit. */
-function readRecruited() {
+// ── WALKING PARTY (sts_party) — the source of who takes the field ───────────────
+// The Decks battle is built from the player's WALKING PARTY: the crewIds chosen in the
+// Crew View (sts_party, ≤4) with one designated LEADER (sts_party_leader). Each crewId
+// resolves to a unit the SAME way for OWNED (chain) and HIRED (rented house) pawns —
+// combat never cares about ownership, only the party list. (Ownership is enforced in the
+// Crew View, the only place a crewId is allowed into the party.) All reads are guarded so
+// the Node smoke tests — no localStorage — fall back to the demo skirmish.
+const PARTY_MAX = 4;
+
+// Distinct LEFT-side spawn hexes (player team) on the 9×7 deck (GRID q0-8 × r0-6). Leader
+// first → leader acts first (turn order == array order). All distinct + clear of the
+// sparring hex {q:7,r:1}. Leader hex {q:1,r:5} matches the single-player/demo position.
+const PLAYER_HEXES = [ { q: 1, r: 5 }, { q: 0, r: 4 }, { q: 1, r: 3 }, { q: 0, r: 2 } ];
+
+// Crew distributors → species/token (mirror of the Crew View). crewId = "<dist>:<tokenId>".
+// Species is display flavor; combat stats come from the class-engine endowment below.
+const CREW_SPECIES = {
+  "0x2e2ab7ae48876f1b4497a04d864c025f7df58e1f": { species: "Orc",    token: "BLACKTIDE" },
+  "0x9500880dec9b310b4a728c75a271a25615a2443e": { species: "Elf",    token: "SOLM" },
+  "0x4ece491951b759363bcbaf75389a202fe0584080": { species: "Goblin", token: "REDRUM" },
+  "0x8c1f935f6dbb17d593bf3ec8114a2f045e350545": { species: "Human",  token: "GUARD" },
+};
+// Default endowment until on-chain crew metadata is wired (matches the Crew View's
+// ownedToPawn/rentedToPawn). The class-engine needs an endowment to resolve stats.
+const DEFAULT_ENDOWMENT = { burgers: 10 };
+
+/** Read the walking party (sts_party = list of crewIds). Guarded so Node smoke tests
+ *  (no localStorage) fall back to the demo unit. */
+function readParty() {
   if (typeof localStorage === "undefined") return [];
   try {
-    const c = JSON.parse(localStorage.getItem("sts_crew") || "[]");
-    return Array.isArray(c) ? c.filter((p) => p && p.endowment) : [];
+    const p = JSON.parse(localStorage.getItem("sts_party") || "[]");
+    return Array.isArray(p) ? p.filter((id) => typeof id === "string" && id.includes(":")) : [];
   } catch (e) {
-    console.warn("recruited-crew parse failed:", e);   // visible, not silent
+    console.warn("party parse failed:", e);            // visible, not silent
     return [];
   }
 }
 
-/** Read the active-fighter pawn id chosen in the Crew View (localStorage). */
-function readActiveId() {
-  return typeof localStorage === "undefined" ? null : localStorage.getItem("sts_active");
+/** Read the designated party leader crewId (sts_party_leader). */
+function readPartyLeader() {
+  return typeof localStorage === "undefined" ? null : localStorage.getItem("sts_party_leader");
+}
+
+/** Read the off-chain display-name layer (sts_names), keyed by crewId (NOT ownership). */
+function readNames() {
+  if (typeof localStorage === "undefined") return {};
+  try { return JSON.parse(localStorage.getItem("sts_names") || "{}"); }
+  catch (e) { console.warn("names parse failed:", e); return {}; }   // visible, not silent
+}
+
+/** Read the HIRED list (sts_rented) as a Set of crewIds. A hired (house-owned) hero is
+ *  NOT the player's employee, so the town-job employment lock never applies to it. */
+function readRentedSet() {
+  if (typeof localStorage === "undefined") return new Set();
+  try {
+    const r = JSON.parse(localStorage.getItem("sts_rented") || "[]");
+    return new Set(Array.isArray(r) ? r.map((x) => x && x.crewId).filter(Boolean) : []);
+  } catch (e) { console.warn("rented parse failed:", e); return new Set(); } // visible, not silent
+}
+
+/** Resolve one party crewId → a pawn def for buildUnit. Species from the distributor,
+ *  display name from the off-chain name layer (else "<Species> #<tokenId>"), endowment
+ *  the wired default. Identical for owned + hired crewIds. */
+function partyPawnDef(crewId) {
+  const [dist, tokenId] = String(crewId).split(":");
+  const meta = CREW_SPECIES[(dist || "").toLowerCase()] || null;
+  const species = meta ? meta.species : "Crew";
+  const names = readNames();
+  const name = names[crewId] || (species + " #" + (tokenId ?? "?"));
+  return { crewId, endowment: DEFAULT_ENDOWMENT, name, species };
+}
+
+/** Build one walking-party member into a real battle unit (class-engine stats + paper-doll
+ *  render + the gear loadout saved in the Crew View). Same path for owned + hired — combat
+ *  is ownership-blind. Loadout applies across ALL 7 gear slots (canonical SLOTS). */
+function buildPartyMember(crewId, position) {
+  const def = partyPawnDef(crewId);
+  const r = pawnRole(def.endowment);
+  const unit = buildUnit({
+    id: crewId, isPlayer: true, name: def.name, emoji: r.emoji, endowment: def.endowment,
+    role: r.isCaster ? "caster" : "melee", position, spells: r.spells, crewId,
+  });
+  const lo = readLoadout(crewId);   // loadout is keyed by crewId in the Crew View
+  if (lo) for (const slot of SLOTS) if (lo[slot]) equipItem(unit, lo[slot]);
+  return unit;
 }
 
 // ── ASYNC PVP (crew-vs-crew) ─────────────────────────────────────────────────
@@ -316,9 +422,9 @@ function buildOpponentUnit(o) {
     position: { q: 7, r: 1 }, spells: r.spells,
     crewId: o.crewId || (SHIP_DIST + ":1"),   // paper-doll; default to a real Black Tide pawn
   });
-  // Equip the opponent's saved loadout snapshot so you fight their actual kit.
+  // Equip the opponent's saved loadout snapshot so you fight their actual kit (all 7 slots).
   const lo = o.loadout || null;
-  if (lo) for (const slot of ["weapon", "armor", "trinket"]) if (lo[slot]) equipItem(enemy, lo[slot]);
+  if (lo) for (const slot of SLOTS) if (lo[slot]) equipItem(enemy, lo[slot]);
   return enemy;
 }
 
@@ -360,16 +466,17 @@ export function employmentLockMessage(crewId, pawnLabel) {
 }
 
 /**
- * The crewId of the pawn that would take the field (active fighter, else first recruit),
- * or null if there's no recruited crew. game.js warms this pawn's on-chain JobClock
- * employment BEFORE building the skirmish, so the combat lock reads live chain state.
+ * The crewId of the pawn that leads the fight = the WALKING PARTY's LEADER
+ * (sts_party_leader, else the first party member), or null if there's no party.
+ * game.js warms THIS pawn's on-chain employment (union of WorkClock V2 + legacy JobClock)
+ * BEFORE building the skirmish, so the combat lock (checked on the leader in
+ * buildPlayerUnit/makeStarterUnits) reads live chain state.
  */
 export function activeFighterCrewId() {
-  const recruited = readRecruited();
-  if (!recruited.length) return null;
-  const activeId = readActiveId();
-  const p = recruited.find((x) => x.id === activeId) || recruited[0];
-  return (p && p.crewId) || null;
+  const party = readParty();
+  if (!party.length) return null;
+  const leader = readPartyLeader();
+  return (leader && party.includes(leader)) ? leader : party[0];
 }
 
 /** Infer combat role from a pawn's resolved stats: INT-leaning → caster, else melee. */
@@ -384,48 +491,148 @@ export function pawnRole(endowment) {
 }
 
 /**
- * Build the training skirmish at the port. The PLAYER unit is the first pawn you
- * recruited at the Tavern (rebuilt from its endowment via the class-engine); if you
- * haven't recruited anyone yet, you spar as a demo Barbarian. The opponent is a
- * sparring caster — the "good enough" basic fight used to TRAIN on the port narrative.
+ * Build the single PLAYER unit = the WALKING PARTY's LEADER (sts_party_leader, else first
+ * party member), rebuilt via the class-engine + its saved gear loadout, else the demo
+ * Barbarian when there's no party. Factored out so makeSquadBattle() (and the PVP/encounter
+ * paths) reuse the EXACT same player-build path. Returns { unit } on success, or
+ * { locked, message, pawn } when an OWNED leader is employed (on the job) and can't fight.
+ */
+function buildPlayerUnit() {
+  const party = readParty();
+  if (party.length) {
+    // The field leader chosen in the Crew View (else the first party member).
+    let leader = readPartyLeader();
+    if (!leader || !party.includes(leader)) leader = party[0];
+
+    // COMBAT LOCK: an EMPLOYED leader is on the job and cannot sail/fight. A HIRED
+    // (house-owned) leader is never the player's employee, so the lock never applies to it.
+    if (!readRentedSet().has(leader)) {
+      const lp = partyPawnDef(leader);
+      const lock = employmentLockMessage(leader, lp.name);
+      if (lock) return { locked: true, message: lock, pawn: { crewId: leader, name: lp.name } };
+    }
+
+    // buildPartyMember carries the leader's class-engine stats + saved gear loadout.
+    return { unit: buildPartyMember(leader, { q: 1, r: 5 }) };
+  }
+  // No party yet → spar as a demo deckhand whose paper-doll is a REAL Black Tide
+  // pawn (#0, a dev play-pawn) so the training fight always shows a real crew doll.
+  const player = buildUnit({
+    id: "u_barb", isPlayer: true, name: "Grokk", emoji: "\u{1FA93}",
+    endowment: { burgers: 24 }, role: "melee", position: { q: 1, r: 5 },
+    crewId: SHIP_DIST + ":0", art: ART.acornboy,
+  });
+  return { unit: player };
+}
+
+/** Read an armed VOYAGE GROUP (multi-enemy) blob — a rollEncounter()-style object with a
+ *  non-empty `group` array (encounter.js armVoyageEncounterGroup() writes it). Node-safe. */
+function readEncounterGroup() {
+  if (typeof localStorage === "undefined") return null;
+  try {
+    const raw = localStorage.getItem("sts_encounter_group");
+    if (!raw) return null;
+    const g = JSON.parse(raw);
+    return g && Array.isArray(g.group) && g.group.length ? g : null;
+  } catch (e) {
+    console.warn("encounter group parse failed:", e);   // visible, not silent
+    return null;
+  }
+}
+
+/** Normalize a group spec into foe refs. Accepts bestiary-key strings (["bilge_rat", …]) OR
+ *  the foe-snapshot objects area-encounters.js emits ({ build, monsterId, bestiary, … }). */
+function normalizeRefs(arr) {
+  return (arr || []).map((r) => (typeof r === "string" ? { monsterId: r, build: "monster" } : r));
+}
+
+/** Build an AI RAIDER (rival crew) from an encounter raider ref (endowment + loadout), placed
+ *  at `pos`. Mirrors buildOpponentUnit() but takes a board position + name from the group. */
+function buildRaiderUnit(ref, pos) {
+  const r = pawnRole(ref.endowment || {});
+  const role = ref.role ? (ref.role === "caster" ? "caster" : "melee") : (r.isCaster ? "caster" : "melee");
+  const u = buildUnit({
+    id: ref.id || "u_raider", isPlayer: false, name: ref.name || "Raider", emoji: r.emoji,
+    endowment: ref.endowment || {}, role,
+    position: { q: pos.q, r: pos.r }, spells: ref.spells || r.spells, crewId: ref.crewId || (SHIP_DIST + ":1"),
+  });
+  const lo = ref.loadout || null;
+  if (lo) for (const slot of SLOTS) if (lo[slot]) equipItem(u, lo[slot]);
+  if (ref.lead || ref.boss) u.lead = true;
+  return u;
+}
+
+/**
+ * Build a MULTI-ENEMY (N-vs-N) squad battle. The player builds via the SAME buildPlayerUnit()
+ * path; the enemy side is a whole GROUP — monsters (direct-stat, via monster-bridge → the
+ * bestiaries) and/or raiders (endowment+loadout) — each placed on a DISTINCT enemy hex. Returns
+ * the SAME `{ pvp:true, mode, units }` control shape game.js init() already understands (so
+ * init/checkWin/endTurn need ZERO change — a group is just a longer units[]). +objective/mapId
+ * are extra fields game.js can read for framing; unknown to it = ignored.
+ *
+ * @param {object[]|{group:object[]}} group  foe refs (strings or snapshots) or a rollEncounter() result
+ * @param {{ mode?:string, objective?:any, mapId?:any, player?:object }} [opts]
+ */
+export function makeSquadBattle(group, opts = {}) {
+  let player = opts.player;
+  if (!player) {
+    const pb = buildPlayerUnit();
+    if (pb.locked) return { locked: true, message: pb.message, pawn: pb.pawn };
+    player = pb.unit;
+  }
+  const refs = normalizeRefs(Array.isArray(group) ? group : (group && group.group) || []);
+  if (!refs.length) throw new Error("makeSquadBattle: no enemy templates/refs provided."); // loud, never silent
+  const taken = new Set([`${player.position.q},${player.position.r}`]);
+  // P5/P4 SPAWN WIDTH: a multi-pawn group (player + ≥2 foes) fights on the wider SQUAD deck (16×9)
+  // that game.js auto-selects when units.length>2 — so spawn the foes across THAT board, spreading
+  // them to the full width / water-edge instead of packing the engine's 9×7 right columns. A lone
+  // foe (1v1) stays on the verbatim duel board. Condition mirrors game.js init() exactly.
+  const wide = (refs.length + 1) > 2;
+  const hexes = enemySpawnHexes(refs.length, taken, wide ? GRID_PRESETS.squad : GRID_PRESETS.duel);
+  const enemies = refs.map((ref, i) => {
+    const pos = hexes[i];
+    if ((ref.build || "monster") === "raider") return buildRaiderUnit(ref, pos);
+    return makeMonsterById(ref.monsterId || ref.id, pos, {
+      bestiary: ref.bestiary, name: ref.name, id: ref.id, idx: i, groupN: refs.length,
+      telegraph: ref.telegraph, severable: ref.severable, lead: ref.lead, boss: ref.boss, hpBonus: ref.hpBonus,
+    });
+  });
+  return {
+    pvp: true, mode: opts.mode || "encounter", units: [player, ...enemies],
+    objective: opts.objective || (group && group.objective) || null,
+    mapId: opts.mapId || (group && group.map) || null,
+    groupName: (group && group.groupName) || null,
+  };
+}
+
+/**
+ * Build the skirmish at the port.
+ *
+ * • PVP / VOYAGE-ENCOUNTER (open sea, real stakes): the player is the party LEADER
+ *   (buildPlayerUnit) and the enemy is a SNAPSHOT of another player's pawn or an armed
+ *   voyage group — these paths are PRESERVED VERBATIM from the engine.
+ * • TRAINING (default harbor sparring): the player TEAM is the whole WALKING PARTY
+ *   (sts_party, ≤4, owned or hired), the LEADER first, vs a single sparring caster. The
+ *   hex grid + win check are N-vs-N safe (side-count, not unit-count), so a 1- or
+ *   4-member party both work. If there's NO party yet, fall back gracefully to a demo
+ *   Barbarian vs the sparring caster — no crash, just spar solo until you build a party
+ *   in the Crew View.
  */
 export function makeStarterUnits() {
-  const recruited = readRecruited();
-  let player;
-  if (recruited.length) {
-    // The active fighter chosen in the Crew View (else the first recruit).
-    const activeId = readActiveId();
-    const p = recruited.find((x) => x.id === activeId) || recruited[0];
-
-    // COMBAT LOCK: an EMPLOYED pawn is on the job and cannot sail/fight. Signal the
-    // caller (game.js) to show an in-world block instead of starting the skirmish.
-    const lock = employmentLockMessage(p.crewId, p.name || "Crew hand");
-    if (lock) return { locked: true, message: lock, pawn: p };
-
-    const r = pawnRole(p.endowment);
-    player = buildUnit({
-      id: "u_player", isPlayer: true, name: p.name || "Recruit", emoji: r.emoji,
-      endowment: p.endowment, role: r.isCaster ? "caster" : "melee",
-      position: { q: 1, r: 5 }, spells: r.spells, crewId: p.crewId || null,
-    });
-    // Pre-equip the gear loadout saved in the Crew View.
-    const lo = readLoadout(p.id);
-    if (lo) for (const slot of ["weapon", "armor", "trinket"]) if (lo[slot]) equipItem(player, lo[slot]);
-  } else {
-    // No recruit yet → spar as a demo deckhand whose paper-doll is a REAL Black Tide
-    // pawn (#0, a dev play-pawn) so the training fight always shows a real crew doll.
-    player = buildUnit({
-      id: "u_barb", isPlayer: true, name: "Grokk", emoji: "\u{1FA93}",
-      endowment: { burgers: 24 }, role: "melee", position: { q: 1, r: 5 },
-      crewId: SHIP_DIST + ":0", art: ART.acornboy,
-    });
-  }
+  const pb = buildPlayerUnit();
+  if (pb.locked) return { locked: true, message: pb.message, pawn: pb.pawn };
+  const player = pb.unit;
 
   // ── ENEMY: PVP opponent SNAPSHOT (open-sea, real stakes) OR harbor sparring dummy ──
   // In PVP mode the enemy is a SNAPSHOT of another player's pawn (their stats + loadout),
   // AI-piloted by the SAME enemy AI that drives the sparring caster — no real-time netcode.
   // Outside PVP mode the default harbor TRAINING flow is unchanged.
   if (isPvpMode()) {
+    // VOYAGE GROUP (multi-enemy) takes priority when a group blob is armed — ADDITIVE: the
+    // single-enemy snapshot path below is untouched and is still the fallback.
+    const grp = readEncounterGroup();
+    if (grp) return makeSquadBattle(grp, { mode: battleMode(), objective: grp.objective || null, mapId: grp.map || null, player });
+
     const opp = readPvpOpponent();
     if (opp) {
       // pvp:true tells game.js to set state.stakes=true + state.arena="water" (open sea).
@@ -445,7 +652,21 @@ export function makeStarterUnits() {
     position: { q: 7, r: 1 }, crewId: SHIP_DIST + ":1", art: ART.enemySpider,
   });
 
+  // ── TRAINING: the WHOLE walking party (leader first) takes the field vs the sparring caster ──
+  // The leader's employment lock was already enforced in buildPlayerUnit() above, so a locked
+  // leader returned early. Build each party member onto a distinct left-side hex, leader first.
+  const party = readParty().slice(0, PARTY_MAX);
+  if (party.length) {
+    let leader = readPartyLeader();
+    if (!leader || !party.includes(leader)) leader = party[0];
+    const ordered = [leader, ...party.filter((id) => id !== leader)];
+    const players = ordered.map((crewId, i) =>
+      buildPartyMember(crewId, PLAYER_HEXES[Math.min(i, PLAYER_HEXES.length - 1)]));
+    return [...players, sparring];
+  }
+
+  // No party → the demo Barbarian (built by buildPlayerUnit) spars solo.
   return [player, sparring];
 }
 
-export { CONFIG, SPELLS };
+export { CONFIG };

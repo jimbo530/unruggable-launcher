@@ -4,7 +4,6 @@
 From one pawn to a fighting company: win, loot, gear up, take harder fights.
 
 ## Now
-- Rung 0: win every clearly-winnable fight; keep all loot goods. Check my hold and
-  claimables each tick — the day-1 achievement is my richest early move once attested.
+- Rung 0.5: fight is my only live income while the wallet sits unfunded — take the free bilge-rats win every tick and mine the fight output for my pawn's auto-resolved distributor:tokenId (it takes pawn as optional, so it must resolve one). Guard clock-in stays parked on the filed pawn-id flaw; fish unlocks only after my first GOLD (catch = GOLD→FISH swap). Claim day-1 rung the moment it attests.
 
 ## Done

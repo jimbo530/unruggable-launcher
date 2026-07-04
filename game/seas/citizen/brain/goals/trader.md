@@ -4,7 +4,8 @@
 Buy low, carry, sell dear — then build the store the route deserves.
 
 ## Now
-- Rung 0-1: know my hold; quote before trading; close only real two-sided gaps within my
-  caps. Trade grows behind the building — if no gap is workable, earn by fight/job instead.
+- Extract Black Tide's distributor:tokenId from the barter clock-in probe (or its error), then clock in for real next tick.
+- Bank all wage copper toward the first foothold; trading stays DRY until the wallet is funded.
+- Re-check the achievement-scanner flaw (citizenOwnedGuardPawns=0) each tick — claim the spar-win backlog the moment it's fixed.
 
 ## Done

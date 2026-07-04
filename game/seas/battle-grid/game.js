@@ -18,13 +18,48 @@
 import { makeStarterUnits, SPELLS } from "./units.js";
 import { readEncounter, resolveEncounter } from "./encounter.js";
 import { ITEMS, SLOTS, equipItem, equippedList, ownedGear, applyEquipment } from "./items.js";
+// P6 FAIRNESS LAYER: the SINGLE attack/cast chokepoint. game.js no longer calls the engine
+// resolvers directly — strike()/castWrapped() own every swing + spell (so per-weapon crit ranges
+// + forecast live in one place), and planIntent()/chooseTarget() drive the squad AI + telegraph.
+import { strike, castWrapped, forecast, planIntent, chooseTarget, resolveOverboard } from "./combat-helpers.js";
+// COMBAT-SETTLEMENT (seas): the headless single source of combat truth. We mint a per-fight
+// SEED + a SEEDED rng here and thread that rng through every strike()/castWrapped()/resolveOverboard()
+// so the live fight is fully DETERMINISTIC from { seed + actions } — the server can replay this exact
+// codepath (resolver.resolveFight) and independently verify a claimed win. checkWin() delegates to the
+// resolver's evaluateOutcome() so the win rule is one shared definition. See project_seas_combat_settlement.
+import { makeRng, evaluateOutcome } from "./resolver.js";
+// P7 CAMERA: pan / zoom / fit / follow-active viewport over the SVG board (viewBox only).
+import { createCamera } from "./camera.js";
 import { pawnCapacity, carriedWeight, loadState, LOAD } from "../../lib/weight.js";
 import {
-  HEX_SIZE, GRID_COLS, GRID_ROWS, allHexes, hexToPixel, hexPolygonPoints,
-  gridPixelDimensions, hexDistance, hexNeighbors, hexesInRange, isAdjacent,
-  rollD20, resolveAttack, resolveSpellCast, isAlive, isConscious,
+  HEX_SIZE, GRID_COLS, GRID_ROWS, hexToPixel, hexPolygonPoints,
+  hexDistance, isAdjacent, isAlive, isConscious,
   isUnconscious, isDead,
 } from "./tot-engine.js";
+// P4 GRID-CONFIG SHADOW: the 4 grid-READING fns now come from the config-aware module so the
+// board can be ANY size (squad/ship/boarding) without touching the verbatim engine. The
+// hex/combat/spell primitives above still come straight from tot-engine.js. grid-parity.mjs
+// proves these match the engine byte-for-byte at the default 9×7.
+import {
+  allHexes, gridPixelDimensions, hexNeighbors, hexesInRange,
+  GRID, setGrid, GRID_PRESETS,
+} from "./grid-config.js";
+// MAP/TERRAIN DATA (COSMETIC): per-area deck terrain (cover/hazard/water-edge/wall/difficult)
+// authored in maps/<id>.js + resolved by maps/index.js. Read by an additive, non-interactive
+// overlay (drawTerrain) so a group fight reads its battlefield. Zero combat/engine impact; an
+// unknown/absent map id → no data → the deck renders exactly as before.
+import { getMap, terrainIndex, TERRAIN_TYPES } from "./maps/index.js";
+// TERRAIN EFFECTS (DATA-DRIVEN, ADDITIVE): the rules that make that terrain MATTER — COVER → +AC
+// (fed through the strike()/forecast() chokepoint), WALL → impassable (union'd into occupiedSet so
+// move reachability excludes it), HAZARD → on-enter damage/status, WATER-EDGE → reflex-save fall.
+// Pure + node-safe; no terrain data (duels/training) → every helper is a no-op (current behaviour).
+import { coverACAt, blockedKeys, tileEntryEffect } from "./terrain-effects.js";
+// P8 VISION · LINE-OF-SIGHT · FOG OF WAR — "your crew are your eyes." los.js computes the PLAYER
+// side's SHARED, wall-limited vision (visibleHexes); game.js dims fogged hexes + HIDES foe tokens
+// outside it, and gates RANGED attacks/spells on a clear line (losClear, completing the cut "cover
+// blocks the ranged line" rule). Fog engages only on the bigger squad/ship boards
+// (fogActiveForGrid); the 1v1 training/PVP duel stays fully visible. Additive + data-driven.
+import { losClear, visibleHexes, fogActiveForGrid } from "./los.js";
 
 const SVG_NS = "http://www.w3.org/2000/svg";
 const key = (h) => `${h.q},${h.r}`;
@@ -42,8 +77,18 @@ const btnAttack = /** @type {HTMLButtonElement} */ (document.getElementById("btn
 const btnEnd = /** @type {HTMLButtonElement} */ (document.getElementById("btn-end"));
 const btnReset = /** @type {HTMLButtonElement} */ (document.getElementById("btn-reset"));
 
-/** @type {{units:any[], turnIdx:number, round:number, phase:string, reachable:Set<string>, targets:Set<string>, pendingSpell:any, stakes:boolean, arena:string, mode:string}} */
+/** @type {{units:any[], turnIdx:number, round:number, phase:string, reachable:Set<string>, targets:Set<string>, pendingSpell:any, stakes:boolean, arena:string, mode:string, objective?:any, mapId?:any, mapData?:any, terrainIx?:Map<string,any>, groupName?:any, severed?:number, telegraph?:any[]}} */
 let state;
+
+// P7 CAMERA — created once on first init(), re-fit on each init / grid resize. Browser-only.
+let cam = null;
+
+// P8 FOG — the player side's currently-visible "q,r" keys (Set), recomputed each render(). null =
+// NO fog (the small 1v1 duel/training board, or any board ≤ the verbatim 9×7) → everything visible.
+let fogVisible = null;
+
+// Kraken "break free" default: survive this many full rounds (no count in the encounter data).
+const KRAKEN_SURVIVE_ROUNDS = 8;
 
 // ── Log ───────────────────────────────────────────────────────────────────────
 function log(text, cls = "info") {
@@ -56,9 +101,19 @@ function log(text, cls = "info") {
 
 // ── Helpers ─────────────────────────────────────────────────────────────────────
 const current = () => state.units[state.turnIdx];
-const occupiedSet = (exclude) =>
-  new Set(state.units.filter((u) => isAlive(u) && u !== exclude).map((u) => key(u.position)));
+const occupiedSet = (exclude) => {
+  const s = new Set(state.units.filter((u) => isAlive(u) && u !== exclude).map((u) => key(u.position)));
+  // TERRAIN: blocking tiles (walls) are solid too — union them so the move-range BFS can't enter
+  // or path through one (→ unreachable) and the occupied set treats it as occupied. No terrain → no-op.
+  if (state && state.terrainIx) for (const k of blockedKeys(state.terrainIx)) s.add(k);
+  return s;
+};
 const unitAtHex = (h) => state.units.find((u) => isAlive(u) && u.position.q === h.q && u.position.r === h.r);
+
+/** Record ONE player action into the verifiable log (move/attack/spell/end). Player-only by call
+ *  site (onHexClick only fires on a player turn; endTurn records 'end' only for a player). The
+ *  server replays this exact list — keep the shape EXACTLY what resolver.resolveEncounter expects. */
+function recAct(a) { if (state && Array.isArray(state.actionLog)) state.actionLog.push(a); }
 
 // ── Rendering ─────────────────────────────────────────────────────────────────
 function ensureBoardSize() {
@@ -92,6 +147,9 @@ function hexFill(h) {
   const k = key(h);
   if (state.targets.has(k)) return "rgba(231,76,60,0.55)";        // attack target
   if (state.reachable.has(k)) return "rgba(52,152,219,0.5)";      // reachable move
+  // P8 FOG: a hex OUTSIDE the crew's shared vision is dimmed to near-black (foe tokens there are
+  // hidden in render()). Move/attack highlights above keep priority so gameplay still reads first.
+  if (fogVisible && !fogVisible.has(k)) return "rgba(6,4,2,0.82)";
   // deck tile checker
   return ((h.q + h.r) % 2 === 0) ? "rgba(120,82,45,0.55)" : "rgba(96,66,36,0.55)";
 }
@@ -107,6 +165,45 @@ function drawHexes() {
     poly.style.cursor = "pointer";
     poly.addEventListener("click", () => onHexClick(h));
     boardEl.appendChild(poly);
+  }
+}
+
+/** COSMETIC TERRAIN OVERLAY (maps/<id>.js). Paints the deck's authored features — cover · hazard ·
+ *  water-edge · wall · difficult ground — as a subtle, NON-interactive layer so a group fight reads
+ *  its battlefield (the legibility win the area docs call for). PURE RENDER: it never touches combat,
+ *  units, or move math, and pointer-events stay OFF so clicks pass through to the hex below. No map
+ *  data (every duel/training/pvp fight, or an un-authored deck) → nothing is drawn. */
+function drawTerrain() {
+  const ix = state.terrainIx;
+  if (!ix || ix.size === 0) return;
+  for (const h of allHexes()) {
+    const cell = ix.get(key(h));
+    if (!cell) continue;
+    if (fogVisible && !fogVisible.has(key(h))) continue;   // P8: don't reveal terrain hidden in the fog
+    const style = TERRAIN_TYPES[cell.type];
+    if (!style) continue;
+    const { x, y } = hexToPixel(h);
+    // tinted hex face — skipped when the hex is a live move/attack highlight so gameplay reads first
+    if (!state.reachable.has(key(h)) && !state.targets.has(key(h))) {
+      const tile = document.createElementNS(SVG_NS, "polygon");
+      tile.setAttribute("points", hexPolygonPoints(x, y));
+      tile.setAttribute("fill", style.fill);
+      tile.setAttribute("stroke", style.stroke);
+      tile.setAttribute("stroke-width", "1.5");
+      tile.style.pointerEvents = "none";
+      boardEl.appendChild(tile);
+    }
+    // a small glyph so the feature stays legible even under a highlight or token edge
+    const mark = document.createElementNS(SVG_NS, "text");
+    mark.setAttribute("x", String(x));
+    mark.setAttribute("y", String(y + HEX_SIZE * 0.33));
+    mark.setAttribute("text-anchor", "middle");
+    mark.setAttribute("dominant-baseline", "central");
+    mark.setAttribute("font-size", String(HEX_SIZE * 0.5));
+    mark.setAttribute("opacity", "0.85");
+    mark.style.pointerEvents = "none";
+    mark.textContent = style.glyph;
+    boardEl.appendChild(mark);
   }
 }
 
@@ -178,11 +275,94 @@ function drawUnit(u) {
   boardEl.appendChild(g);
 }
 
+const samePos = (a, b) => a && b && a.q === b.q && a.r === b.r;
+
+/** P6 — Into-the-Breach intent TELEGRAPH. Paints each pending enemy's planned MOVE (amber dashed
+ *  path + destination outline) and its STRIKE hex(es) (red crosshair / blast zone) BEFORE the
+ *  enemy phase resolves, so the player can read the threat. Cleared the instant the enemy acts. */
+function drawTelegraph() {
+  for (const intent of state.telegraph || []) {
+    if (!intent) continue;
+    // P8 FOG: don't telegraph an enemy the player can't see — its origin hex is hidden in the fog.
+    if (fogVisible && intent.from && !fogVisible.has(key(intent.from))) continue;
+    if (intent.moveTo && intent.from && !samePos(intent.from, intent.moveTo)) {
+      const a = hexToPixel(intent.from), b = hexToPixel(intent.moveTo);
+      const ln = document.createElementNS(SVG_NS, "line");
+      ln.setAttribute("x1", String(a.x)); ln.setAttribute("y1", String(a.y));
+      ln.setAttribute("x2", String(b.x)); ln.setAttribute("y2", String(b.y));
+      ln.setAttribute("stroke", "#f1c40f"); ln.setAttribute("stroke-width", "3");
+      ln.setAttribute("stroke-dasharray", "5,5"); ln.setAttribute("opacity", "0.85");
+      boardEl.appendChild(ln);
+      const dot = document.createElementNS(SVG_NS, "circle");
+      dot.setAttribute("cx", String(b.x)); dot.setAttribute("cy", String(b.y));
+      dot.setAttribute("r", String(HEX_SIZE * 0.5)); dot.setAttribute("fill", "none");
+      dot.setAttribute("stroke", "#f1c40f"); dot.setAttribute("stroke-width", "2");
+      dot.setAttribute("stroke-dasharray", "4,4"); dot.setAttribute("opacity", "0.8");
+      boardEl.appendChild(dot);
+    }
+    for (const sh of intent.strikeHexes || []) {
+      const p = hexToPixel(sh);
+      const ring = document.createElementNS(SVG_NS, "circle");
+      ring.setAttribute("cx", String(p.x)); ring.setAttribute("cy", String(p.y));
+      ring.setAttribute("r", String(HEX_SIZE * 0.55)); ring.setAttribute("fill", "rgba(231,76,60,0.16)");
+      ring.setAttribute("stroke", "#e74c3c"); ring.setAttribute("stroke-width", "2.5"); ring.setAttribute("stroke-dasharray", "3,3");
+      boardEl.appendChild(ring);
+      for (const dx of [-1, 1]) {       // a small ✕ in the target hex
+        const c = document.createElementNS(SVG_NS, "line");
+        c.setAttribute("x1", String(p.x - dx * HEX_SIZE * 0.26)); c.setAttribute("y1", String(p.y - HEX_SIZE * 0.26));
+        c.setAttribute("x2", String(p.x + dx * HEX_SIZE * 0.26)); c.setAttribute("y2", String(p.y + HEX_SIZE * 0.26));
+        c.setAttribute("stroke", "#e74c3c"); c.setAttribute("stroke-width", "2"); c.setAttribute("opacity", "0.9");
+        boardEl.appendChild(c);
+      }
+    }
+  }
+}
+
+/** P6 — XCOM-style forecast HUD: a tiny hit% / damage (/ crit%) pill above each STRIKE target
+ *  during the player's attack phase. Numbers are the EXACT, no-mutation forecast() read-out. */
+function drawForecastBadges() {
+  if (state.phase !== "attack") return;
+  const u = current();
+  if (!u || !u.isPlayer) return;
+  for (const e of state.units) {
+    if (!isAlive(e) || e.isPlayer === u.isPlayer || !state.targets.has(key(e.position))) continue;
+    const f = forecast(u, e, { coverAC: coverACAt(state.terrainIx, e.position), terrainIx: state.terrainIx });   // TERRAIN: cover raises the foe's effective AC; P8: a walled-off ranged shot reads 0%
+    const { x, y } = hexToPixel(e.position);
+    const by = y - HEX_SIZE * 0.62 - 24;
+    const label = `${Math.round(f.hitPct * 100)}% ⚔${f.flatDmg}` + (f.critPct >= 0.1 ? ` ✷${Math.round(f.critPct * 100)}%` : "");
+    const w = Math.max(44, label.length * 6.6);
+    const bg = document.createElementNS(SVG_NS, "rect");
+    bg.setAttribute("x", String(x - w / 2)); bg.setAttribute("y", String(by - 9));
+    bg.setAttribute("width", String(w)); bg.setAttribute("height", "16"); bg.setAttribute("rx", "4");
+    bg.setAttribute("fill", "rgba(10,7,3,0.86)"); bg.setAttribute("stroke", "#e74c3c"); bg.setAttribute("stroke-width", "1");
+    boardEl.appendChild(bg);
+    const t = document.createElementNS(SVG_NS, "text");
+    t.setAttribute("x", String(x)); t.setAttribute("y", String(by));
+    t.setAttribute("text-anchor", "middle"); t.setAttribute("dominant-baseline", "central");
+    t.setAttribute("font-size", "11"); t.setAttribute("fill", "#ffe9c7"); t.setAttribute("font-weight", "bold");
+    t.textContent = label;
+    boardEl.appendChild(t);
+  }
+}
+
 function render() {
   while (boardEl.firstChild) boardEl.removeChild(boardEl.firstChild);
+  // P8 FOG: on the bigger squad/ship boards, compute the PLAYER side's SHARED vision = the UNION of
+  // each conscious crew's wall-limited sight (los.js). The 1v1 duel/training board (≤9×7) gets none
+  // → null = everything visible (NO regression). Recomputed each render so moving a pawn re-lights
+  // the map, and because it's a UNION, spreading the crew (one per ship) reveals more — emergent.
+  fogVisible = (state && fogActiveForGrid()) ? visibleHexes(state.units, true, state.terrainIx) : null;
   drawDeck();
   drawHexes();
-  for (const u of state.units) if (isAlive(u)) drawUnit(u);
+  drawTerrain();                                         // cosmetic map terrain ABOVE tiles, UNDER tokens
+  drawTelegraph();                                       // P6 intent ghosts UNDER the tokens
+  for (const u of state.units) {
+    if (!isAlive(u)) continue;
+    // ALWAYS show your OWN pawns (even in fog / on another ship — the founder payoff). A FOE token
+    // is drawn only when its hex is inside the crew's shared vision; otherwise it stays hidden.
+    if (u.isPlayer || !fogVisible || fogVisible.has(key(u.position))) drawUnit(u);
+  }
+  drawForecastBadges();                                  // P6 hit%/dmg HUD OVER the attack targets
   renderSidebar();
 }
 
@@ -332,10 +512,14 @@ function enterAttack() {
   state.phase = "attack";
   state.targets = new Set(
     state.units
-      .filter((e) => isAlive(e) && e.isPlayer !== u.isPlayer && hexDistance(u.position, e.position) <= u.attackRange)
+      .filter((e) => isAlive(e) && e.isPlayer !== u.isPlayer
+        && hexDistance(u.position, e.position) <= u.attackRange
+        // P8 LINE-OF-SIGHT: a RANGED strike (distance ≥ 2) needs a clear line — a foe behind a wall
+        // is NOT a valid target. Melee (adjacent, distance 1) is unaffected (no hex between to block).
+        && (hexDistance(u.position, e.position) <= 1 || losClear(u.position, e.position, state.terrainIx)))
       .map((e) => key(e.position)),
   );
-  if (state.targets.size === 0) log(`${u.name}: no foe adjacent to strike.`, "info");
+  if (state.targets.size === 0) log(`${u.name}: no foe in range and line-of-sight to strike.`, "info");
   render();
 }
 
@@ -346,13 +530,61 @@ function beginSpell(sp) {
   state.phase = "spell";
   state.pendingSpell = sp;
   const range = sp.battle.hexRange ?? 1;
+  // ALLY-TARGETING (deferred-spell wiring): a healing|buff spell targets ALLIES (incl. self —
+  // and a DOWNED ally, who's still isAlive at 0..−10, so a cure can revive them via healUnit);
+  // damage/control spells still target FOES. clicking an in-range highlighted unit resolves it.
+  const ally = sp.battle.type === "healing" || sp.battle.type === "buff";
   state.targets = new Set(
     state.units
-      .filter((e) => isAlive(e) && e.isPlayer !== u.isPlayer && hexDistance(u.position, e.position) <= range)
+      .filter((e) => isAlive(e)
+        && (ally ? e.isPlayer === u.isPlayer : e.isPlayer !== u.isPlayer)
+        && hexDistance(u.position, e.position) <= range
+        // P8 LINE-OF-SIGHT: you can't cast THROUGH a wall — a target at distance ≥ 2 needs a clear
+        // line (heals/buffs included). Touch/adjacent (distance ≤ 1) casts are never gated.
+        && (hexDistance(u.position, e.position) <= 1 || losClear(u.position, e.position, state.terrainIx)))
       .map((e) => key(e.position)),
   );
-  if (state.targets.size === 0) log(`${u.name}: no target within ${range} hexes for ${sp.name}.`, "info");
+  if (state.targets.size === 0) log(`${u.name}: no ${ally ? "ally" : "target"} in range and line-of-sight for ${sp.name}.`, "info");
   render();
+}
+
+/**
+ * Resolve a spell on a target through the CHOKEPOINT (castWrapped wraps the verbatim spell engine),
+ * then APPLY the result game-side. Used by BOTH the player cast and the enemy AI so AoE + heals
+ * behave identically either way:
+ *   • damage  → applyDamage(); plus an AoE hexArea SPLASH (fireball / cone_of_cold / burning_hands)
+ *               onto the caster's OTHER foes within hexArea of the struck hex (each rolls its own
+ *               save inside castWrapped). Friendly-fire is spared to keep squad play readable.
+ *   • healing → healUnit() (revives a downed ally from 0..−10, else tops HP up).
+ *   • buff    → push res.effect into target.activeEffects (ToT durationRounds tick in startTurn).
+ */
+function castSpellAt(caster, sp, target) {
+  const res = castWrapped(caster, target, sp, false, state.rng);
+  log(`${caster.name} casts ${sp.name} at ${target.name}: ${res.breakdown}`, res.damage ? "hit" : "info");
+  if (res.damage) {
+    applyDamage(target, res.damage);
+    const area = sp.battle && sp.battle.hexArea;
+    if (area && area > 0) {
+      for (const u2 of state.units) {
+        if (state.phase === "over") break;
+        if (!isAlive(u2) || u2 === target || u2.isPlayer === caster.isPlayer) continue;
+        if (hexDistance(target.position, u2.position) <= area) {
+          const r2 = castWrapped(caster, u2, sp, false, state.rng);
+          log(`  ↳ ${sp.name} splash hits ${u2.name}: ${r2.breakdown}`, r2.damage ? "hit" : "info");
+          if (r2.damage) applyDamage(u2, r2.damage);
+        }
+      }
+    }
+  } else if (res.healing) {
+    const before = target.currentHp;
+    if (!healUnit(target, res.healing)) {
+      log(`${target.name} is healed ${Math.max(0, target.currentHp - before)} HP (${target.currentHp}/${target.maxHp}).`, "info");
+    }
+  } else if (res.effect) {
+    target.activeEffects = target.activeEffects || [];
+    target.activeEffects.push(res.effect);
+    log(`${target.name} gains ${sp.name}.`, "info");
+  }
 }
 
 // ── Click resolution ────────────────────────────────────────────────────────────
@@ -365,16 +597,21 @@ function onHexClick(h) {
   if (state.phase === "move" && state.reachable.has(k)) {
     u.position = { q: h.q, r: h.r };
     u.hasMoved = true;
+    recAct({ unit: u.id, type: "move", to: { q: h.q, r: h.r } });   // SETTLEMENT: record the move
     log(`${u.name} moves to (${h.q},${h.r}).`, "info");
-    state.phase = "idle"; clearHighlights(); render();
+    applyTileEntry(u);                                   // TERRAIN: hazard/water-edge on entering
+    if (state.phase !== "over") state.phase = "idle";    // a fatal hazard may have ended the fight
+    clearHighlights(); render();
     return;
   }
 
   if (state.phase === "attack" && state.targets.has(k)) {
     const target = unitAtHex(h);
     if (!target) return;
-    const nat = rollD20();
-    const res = resolveAttack(u, target, nat, hexDistance(u.position, target.position));
+    // strike() = the SINGLE chokepoint: verbatim engine + weapon-dice + per-weapon crit ranges.
+    // TERRAIN: a target on a COVER tile gets +AC, applied inside the same chokepoint.
+    recAct({ unit: u.id, type: "attack", target: target.id });   // SETTLEMENT: record the strike (BEFORE the roll — the server re-rolls from the seed)
+    const res = strike(u, target, { distance: hexDistance(u.position, target.position), coverAC: coverACAt(state.terrainIx, target.position), terrainIx: state.terrainIx, rng: state.rng });
     log(`${u.name} strikes ${target.name}: ${res.breakdown}`, res.hit ? "hit" : "miss");
     if (res.hit) applyDamage(target, res.damage);
     u.hasActed = true;
@@ -385,10 +622,9 @@ function onHexClick(h) {
   if (state.phase === "spell" && state.targets.has(k)) {
     const target = unitAtHex(h);
     if (!target) return;
-    const sp = state.pendingSpell;
-    const res = resolveSpellCast(u, target, sp.id, sp.name, sp.level, sp.battle);
-    log(`${u.name} casts ${sp.name} at ${target.name}: ${res.breakdown}`, res.damage ? "hit" : "miss");
-    if (res.damage) applyDamage(target, res.damage);
+    recAct({ unit: u.id, type: "spell", spell: state.pendingSpell.id, target: target.id });   // SETTLEMENT: record the cast
+    // castSpellAt() = the chokepoint + AoE splash + heal/buff application (damage|healing|buff).
+    castSpellAt(u, state.pendingSpell, target);
     u.hasActed = true;
     state.phase = "idle"; clearHighlights(); render();
     return;
@@ -403,6 +639,26 @@ function onHexClick(h) {
 function applyDamage(target, dmg) {
   const wasConscious = isConscious(target);
   target.currentHp -= dmg;
+
+  // SEVERABLE / NO-BLEED (kraken arms, undead boarders): NO down/bleed clock — at ≤0 they are
+  // DESTROYED OUTRIGHT (a severed tentacle sinks back; a skeleton collapses to bones). Gated on
+  // the unit flags so player/normal pawns keep the verbatim 0-down / −10-dead mechanic untouched.
+  if ((target.severable || target.noBleed) && target.currentHp <= 0) {
+    if (target.currentHp > -10) target.currentHp = -10;        // force DEAD → leaves the fight, never bleeds
+    if (!target._severed) {
+      target._severed = true;
+      if (target.severable) {
+        state.severed = (state.severed || 0) + 1;
+        log(`${target.name} is SEVERED — it sinks back beneath the waves! (${state.severed} cut)`, "down");
+      } else {
+        log(`${target.name} is destroyed — no bleed-out.`, "down");
+      }
+    }
+    checkMortality(target);   // monsters carry no gear → no loot lines, just the safe stat reset
+    checkWin();
+    return;
+  }
+
   if (wasConscious && isUnconscious(target)) {
     // dropped from conscious to DOWN this hit (0..-10): out of the turn order, bleeding.
     log(`${target.name} falls! (${target.currentHp} HP — DOWN)`, "down");
@@ -412,6 +668,37 @@ function applyDamage(target, dmg) {
   }
   checkMortality(target);   // a hard hit can blow a downed unit past -10 → drop gear
   checkWin();
+}
+
+/** TERRAIN ON-ENTER: when a unit SETTLES on a hex, apply that tile's effect (data-driven,
+ *  terrain-effects.js) through the EXISTING damage/effect paths. HAZARD → small damage and/or a
+ *  status; WATER-EDGE → a reflex save (resolveOverboard owns the d20) or an overboard plunge.
+ *  COVER/WALL/DIFFICULT trigger nothing here. No terrain (duels/training) or a safe tile → no-op.
+ *  Called right after a move; applyDamage may end the fight, so callers re-check state.phase. */
+function applyTileEntry(u) {
+  if (!u || !isConscious(u) || state.phase === "over") return;
+  const fx = tileEntryEffect(state.terrainIx, u.position);
+  if (!fx) return;
+  if (fx.type === "water-edge") {
+    const save = resolveOverboard(u, { dc: fx.dc, rng: state.rng });
+    if (save.fell) {
+      log(`${u.name} loses footing at ${fx.label} — OVERBOARD! (Reflex ${save.total} vs DC ${save.dc}) −${fx.dmg}`, "down");
+      if (fx.dmg > 0) applyDamage(u, fx.dmg);
+    } else {
+      log(`${u.name} steadies at ${fx.label}. (Reflex ${save.total} vs DC ${save.dc})`, "info");
+    }
+    return;
+  }
+  // HAZARD: optional status (ToT activeEffects, ticked in startTurn) + small on-enter damage.
+  if (fx.status) {
+    u.activeEffects = u.activeEffects || [];
+    u.activeEffects.push({ ...fx.status });
+    log(`${u.name} is caught in ${fx.label}.`, "info");
+  }
+  if (fx.dmg > 0) {
+    log(`${u.name} stumbles through ${fx.label} — ${fx.dmg} dmg.`, "down");
+    applyDamage(u, fx.dmg);
+  }
 }
 
 /** HEAL HOOK (FFT-soft): a heal applied to a DOWNED unit (0..-10) brings it back UP.
@@ -495,12 +782,34 @@ function recordLoot(entry) {
 }
 
 function checkWin() {
-  const sides = new Set(state.units.filter((u) => isConscious(u)).map((u) => u.isPlayer));
-  if (sides.size <= 1) {
+  if (state.phase === "over") return;          // idempotent — never re-fire a finished battle
+
+  // KRAKEN "BREAK FREE" OBJECTIVE — checked BEFORE side-elimination: sever N arms OR survive M
+  // rounds and the player escapes (a non-wipe win condition). severable arms are counted in
+  // state.severed (applyDamage); survival counts full rounds elapsed. Honors unit.severable.
+  if (state.objective && state.objective.kind === "sever") {
+    const severed = state.severed || 0;
+    const need = state.objective.severTarget || 0;
+    const outlasted = state.objective.surviveRounds > 0 && state.round > state.objective.surviveRounds;
+    if ((need > 0 && severed >= need) || outlasted) {
+      state.phase = "over";
+      const why = need > 0 && severed >= need
+        ? `severed ${severed}/${need} arms` : `survived ${state.objective.surviveRounds} rounds`;
+      log(`=== BROKE FREE — ${why}! The kraken sinks away. ===`, "win");
+      if (state.mode === "encounter") finishEncounter(true, false);
+      else { bannerEl.textContent = "BROKE FREE"; bannerEl.classList.add("show"); }
+      return;
+    }
+  }
+
+  // SIDE-ELIMINATION = the resolver's evaluateOutcome() (the ONE shared win rule, so the
+  // server's replay verdict and the client's banner can never diverge on who won).
+  const outcome = evaluateOutcome(state.units);
+  if (outcome.over) {
     state.phase = "over";
-    const playerWon = sides.has(true);
-    const draw = sides.size === 0;
-    const label = draw ? "DRAW" : playerWon ? "PLAYER WINS" : "ENEMY WINS";
+    const playerWon = outcome.winner === "player";
+    const draw = outcome.winner === "draw";
+    const label = outcome.label;
     log(`=== ${label} ===`, "win");
     // VOYAGE ENCOUNTER: route the player back toward the map/journey instead of a plain
     // "ENEMY WINS" wall. PVP duels + training keep the unchanged textContent banner.
@@ -519,6 +828,9 @@ function finishEncounter(playerWon, draw) {
   if (playerWon) {
     bannerEl.innerHTML = `RAIDERS REPELLED — <a href="${back}" style="color:#2ecc71;text-decoration:none">⛵ Continue the voyage →</a>`;
     log("Raiders repelled! Your ship sails on — the voyage continues to its destination.", "win");
+    // STAKES FIGHT (bilge rats): ask the seas-server to verify the win + queue the loot payout.
+    // No-op for an unstamped encounter (state.settle null). Fire-and-forget; failures log visibly.
+    if (state.settle) verifyAndSettle();
   } else if (draw) {
     bannerEl.innerHTML = `BOTH CREWS DOWN — <a href="${back}" style="color:#e6b422;text-decoration:none">⚓ Drift back to port →</a>`;
   } else {
@@ -530,6 +842,9 @@ function finishEncounter(playerWon, draw) {
 // ── Turn flow ───────────────────────────────────────────────────────────────────
 function endTurn() {
   if (state.phase === "over") return;
+  // SETTLEMENT: close the PLAYER's turn in the verifiable log (the per-turn boundary the server's
+  // replay consumes). Only for a player whose turn is actually ending (enemy turns aren't recorded).
+  { const c = current(); if (c && c.isPlayer) recAct({ unit: c.id, type: "end" }); }
   // advance to next CONSCIOUS unit; bump round when we wrap. A DOWNED unit (0..-10) is
   // skipped in the turn order — but at the moment we pass over its slot it BLEEDS 1 HP,
   // drifting toward -10 (where it drops its gear). That's the death-sink clock running.
@@ -541,7 +856,8 @@ function endTurn() {
     if (isUnconscious(u)) bleed(u);   // downed but not yet dead → tick toward -10
     guard++;
   } while (!isConscious(state.units[state.turnIdx]) && guard <= state.units.length);
-  if (state.phase === "over") { render(); return; }   // bleed may have ended the fight
+  checkWin();                          // the round may have advanced → kraken survival / wipe check
+  if (state.phase === "over") { render(); return; }   // bleed/objective may have ended the fight
   startTurn();
 }
 
@@ -571,13 +887,21 @@ function startTurn() {
   });
   state.phase = "idle";
   clearHighlights();
+  // P6 TELEGRAPH: paint THIS enemy's planned move + strike BEFORE it acts (no ghost on a player turn).
+  state.telegraph = u.isPlayer ? [] : [planIntent(u, aiCtx(u))];
   log(`— ${u.name}'s turn (${u.className}) —`, "turn");
   render();
+  // P7 FOLLOW-ACTIVE: glide the camera onto the unit whose turn it is (clamped; small board barely moves).
+  if (cam) { const p = hexToPixel(u.position); cam.focusOn(p.x, p.y); }
   // Enemy units act on their own. Player units wait for input.
   if (!u.isPlayer && state.phase !== "over") setTimeout(aiTurn, 650);
 }
 
-// ── Enemy AI (simple: close to range, then strike/cast; casters prefer spells) ────
+// ── Enemy AI — driven by combat-helpers.planIntent() (focus-fire / kite / screen) + chokepoint ──
+// planIntent() is the SAME brain that feeds the telegraph, so the ghost the player saw is exactly
+// what the unit does. game.js supplies the board context (foes/allies/reach/ranges) and executes
+// the returned plan through strike()/castSpellAt(), re-validating the target after any kills.
+
 function nearestFoe(u) {
   const foes = state.units.filter((e) => isConscious(e) && e.isPlayer !== u.isPlayer);
   if (!foes.length) return null;
@@ -593,35 +917,51 @@ function actReach(u) {
   return r;
 }
 
-function aiMoveToward(u, target) {
-  const reach = hexesInRange(u.position, encMove(u), occupiedSet(u));   // encumbrance-aware
-  let best = u.position, bestD = hexDistance(u.position, target.position);
-  for (const h of reach) { const d = hexDistance(h, target.position); if (d < bestD) { bestD = d; best = h; } }
-  if (best === u.position) return false;
-  u.position = { q: best.q, r: best.r }; u.hasMoved = true;
-  log(`${u.name} advances to (${best.q},${best.r}).`, "info");
-  return true;
+/** Largest hexArea among a caster's in-kit DAMAGE spells (telegraph blast zone), else 0. */
+function bestSpellArea(u) {
+  if (u.role !== "caster" || !Array.isArray(u.availableSpells)) return 0;
+  let area = 0;
+  for (const sid of u.availableSpells) {
+    const sp = SPELLS[sid];
+    if (sp && sp.battle && sp.battle.type === "damage") area = Math.max(area, sp.battle.hexArea || 0);
+  }
+  return area;
+}
+
+/** Read-only board context the combat-helpers planner + target picker consume. */
+function aiCtx(u) {
+  const foes = state.units.filter((e) => isConscious(e) && e.isPlayer !== u.isPlayer);
+  const allies = state.units.filter((e) => isConscious(e) && e.isPlayer === u.isPlayer);
+  return {
+    foes, allies,
+    reach: (unit) => hexesInRange(unit.position, encMove(unit), occupiedSet(unit)),  // encumbrance-aware
+    dist: (a, b) => hexDistance(a, b),
+    actRange: (unit) => actReach(unit),
+    meleeRange: (unit) => unit.attackRange || 1,
+    ownCaster: allies.find((a) => a !== u && a.role === "caster") || null,
+    aoeArea: (unit) => bestSpellArea(unit),
+    // P8: a clear-line predicate so the planner KITES to a hex it can actually SEE the target from
+    // (and never telegraphs a shot through a wall). No terrain (duels/training) → always clear.
+    hasLos: (fromHex, targetPos) => losClear(fromHex, targetPos, state.terrainIx),
+  };
 }
 
 function aiAct(u, target) {
   if (!target || u.hasActed) return false;
+  if (!isConscious(u)) return false;   // TERRAIN GUARD: a unit downed mid-move (hazard/overboard on entry) does NOT also get to strike this turn
   const dist = hexDistance(u.position, target.position);
-  // caster: cast the first spell whose range reaches the target
+  // P8: a clear line is required to cast/shoot at distance ≥ 2 (can't reach THROUGH a wall).
+  const losOk = dist <= 1 || losClear(u.position, target.position, state.terrainIx);
+  // caster: cast the first DAMAGE spell whose range reaches the target (heal/buff AI not needed vs foes)
   if (u.role === "caster" && Array.isArray(u.availableSpells)) {
     for (const sid of u.availableSpells) {
-      const sp = SPELLS[sid]; if (!sp) continue;
-      if (dist <= (sp.battle.hexRange ?? 1)) {
-        const res = resolveSpellCast(u, target, sp.id, sp.name, sp.level, sp.battle);
-        log(`${u.name} casts ${sp.name} at ${target.name}: ${res.breakdown}`, res.damage ? "hit" : "miss");
-        if (res.damage) applyDamage(target, res.damage);
-        u.hasActed = true; return true;
-      }
+      const sp = SPELLS[sid]; if (!sp || !sp.battle || sp.battle.type !== "damage") continue;
+      if (losOk && dist <= (sp.battle.hexRange ?? 1)) { castSpellAt(u, sp, target); u.hasActed = true; return true; }
     }
   }
-  // weapon strike if in range
+  // weapon strike if in range (chokepoint: weapon-dice + per-weapon crit ranges; P8: wall blocks the ranged line)
   if (dist <= (u.attackRange || 1)) {
-    const nat = rollD20();
-    const res = resolveAttack(u, target, nat, dist);
+    const res = strike(u, target, { distance: dist, coverAC: coverACAt(state.terrainIx, target.position), terrainIx: state.terrainIx, rng: state.rng });   // TERRAIN: cover → +AC; P8: LOS gate
     log(`${u.name} strikes ${target.name}: ${res.breakdown}`, res.hit ? "hit" : "miss");
     if (res.hit) applyDamage(target, res.damage);
     u.hasActed = true; return true;
@@ -632,14 +972,26 @@ function aiAct(u, target) {
 function aiTurn() {
   const u = current();
   if (state.phase === "over" || u.isPlayer) return;
-  const target = nearestFoe(u);
-  if (!target) { checkWin(); return; }
-  // 1) out of reach → advance toward the foe
-  if (hexDistance(u.position, target.position) > actReach(u)) { aiMoveToward(u, target); render(); }
+  const ctx = aiCtx(u);
+  const intent = (state.telegraph && state.telegraph[0]) || planIntent(u, ctx);
+  // 1) MOVE along the telegraphed plan (the ghost the player just saw).
+  if (intent && intent.moveTo && !samePos(intent.moveTo, u.position) && !u.hasMoved) {
+    u.position = { q: intent.moveTo.q, r: intent.moveTo.r };
+    u.hasMoved = true;
+    log(`${u.name} advances to (${u.position.q},${u.position.r}).`, "info");
+    applyTileEntry(u);           // TERRAIN: hazard/water-edge on entering
+  }
+  state.telegraph = [];          // intent consumed → clear the ghost
+  render();
+  if (state.phase === "over") return;   // a fatal hazard/overboard on entry may have ended the fight
   // 2) act, then end the turn (short delays so the player can read it)
   setTimeout(() => {
     if (state.phase === "over") return;
-    aiAct(u, nearestFoe(u)); render();
+    // RE-VALIDATE the target after any kills this phase: the planned foe may be down → re-pick.
+    const foes = state.units.filter((e) => isConscious(e) && e.isPlayer !== u.isPlayer);
+    const target = intent && intent.target && isConscious(intent.target) ? intent.target : chooseTarget(u, foes);
+    if (!target) { checkWin(); render(); setTimeout(() => { if (state.phase !== "over") endTurn(); }, 300); return; }
+    aiAct(u, target); render();
     setTimeout(() => { if (state.phase !== "over") endTurn(); }, 600);
   }, 600);
 }
@@ -650,7 +1002,142 @@ btnAttack.addEventListener("click", enterAttack);
 btnEnd.addEventListener("click", endTurn);
 btnReset.addEventListener("click", init);
 
+/**
+ * Normalize a group objective (string | object | null) into a structured win-condition. For the
+ * kraken "sever" objective, resolve N (arms to sever) + M (rounds to survive): prefer values the
+ * encounter forwarded, else DERIVE N from the severable units on the board (≈0.6 of them, matching
+ * area-encounters' severFraction) and default M (KRAKEN_SURVIVE_ROUNDS). A "wipe"/unknown/absent
+ * objective → null = the plain last-side-standing win. ADDITIVE: callers that pass no objective
+ * (every fight today except the kraken) get null and the verbatim behaviour.
+ */
+function normalizeObjective(raw, units, extra = {}) {
+  if (!raw) return null;
+  const kind = typeof raw === "object" && raw ? (raw.kind || "wipe") : String(raw).toLowerCase();
+  if (kind !== "sever") return kind === "wipe" ? null : { kind };
+  const sevCount = (units || []).filter((u) => u && u.severable).length;
+  const derivedN = Math.max(2, Math.ceil(sevCount * 0.6));
+  const pick = (a, b, dflt) => (Number.isFinite(a) && a > 0 ? Math.floor(a) : (Number.isFinite(b) && b > 0 ? Math.floor(b) : dflt));
+  return {
+    kind: "sever",
+    severTarget: pick(extra.severTarget, raw.severTarget, derivedN),
+    surviveRounds: pick(extra.surviveRounds, raw.surviveRounds, KRAKEN_SURVIVE_ROUNDS),
+  };
+}
+
 // ── Boot ─────────────────────────────────────────────────────────────────────
+/**
+ * fightSeed — the rng seed for THIS fight. Priority:
+ *   1. a SERVER-ISSUED seed (the sign-to-enter anchor / fight nonce) exposed as
+ *      window.SEAS_FIGHT_SEED, or a ?seed= URL param — so the seas-server can later
+ *      pin the seed (anti-grind) and replay this exact fight to verify the win.
+ *   2. else a locally-minted per-fight seed (still fully deterministic FROM that seed;
+ *      the seed itself is just unique-per-fight here). Math.random/Date live in the
+ *      CLIENT seed mint only — never inside the resolver (which is pure + headless).
+ * @returns {string}
+ */
+function fightSeed() {
+  if (typeof window !== "undefined") {
+    if (window.SEAS_FIGHT_SEED != null) return String(window.SEAS_FIGHT_SEED);
+    if (window.location && window.location.search) {
+      try {
+        const q = new URLSearchParams(window.location.search).get("seed");
+        if (q) return q;
+      } catch (e) { console.warn("fight seed url parse failed:", e); }  // visible, not silent
+    }
+  }
+  return `seas-fight-${Date.now().toString(36)}-${Math.floor(Math.random() * 0xffffffff).toString(36)}`;
+}
+
+/**
+ * SETTLEMENT CONTEXT — a STAKES fight (bilge rats) is launched (bilge.html) with a SERVER-ISSUED
+ * seed + nonce, stamped on window so this deck knows to ask the seas-server to VERIFY the win.
+ * Returns { fight, nonce, player, verifyUrl } or null (training/PVP/duels never set these → no-op).
+ */
+function readSettleContext(fightSeedVal) {
+  if (typeof window === "undefined") return null;
+  // The bilge launcher stamps the fight on window OR (across navigation) in localStorage.
+  let ctx = window.SEAS_FIGHT_NONCE ? {
+    fight: window.SEAS_FIGHT_KIND || "bilge-rats", nonce: String(window.SEAS_FIGHT_NONCE), seed: window.SEAS_FIGHT_SEED || null,
+    player: window.SEAS_FIGHT_PLAYER || null, pawnId: window.SEAS_FIGHT_PAWN || null, verifyUrl: window.SEAS_VERIFY_URL || null,
+  } : null;
+  if (!ctx && typeof localStorage !== "undefined") {
+    try { const raw = localStorage.getItem("sts_fight_settle"); if (raw) ctx = JSON.parse(raw); }
+    catch (e) { console.warn("settle context parse failed:", e); }   // visible, not silent
+  }
+  if (!ctx || !ctx.nonce) return null;
+  // SCOPE TO THIS FIGHT: only treat it as a stakes fight when the launcher's seed matches the seed
+  // THIS battle is running on. Otherwise a stale context would make the NEXT (training) win try to
+  // settle. A training spar mints its own local seed (no launcher) → no match → null (no settle).
+  if (fightSeedVal != null && ctx.seed && String(ctx.seed) !== String(fightSeedVal)) return null;
+  return {
+    fight: ctx.fight || "bilge-rats",
+    nonce: String(ctx.nonce),
+    player: ctx.player ? String(ctx.player) : null,
+    pawnId: ctx.pawnId ? String(ctx.pawnId) : null,
+    verifyUrl: ctx.verifyUrl || ((window.SEAS_API_BASE || "/seas-api") + "/seas/verify-fight"),
+  };
+}
+
+/**
+ * VERIFY + SETTLE a stakes win with the seas-server: submit { player, nonce, playerTeam, playerActions }
+ * → the server REPLAYS resolver.resolveEncounter (re-computing the rats) and returns the AUTHORITATIVE
+ * winner. Only a server-confirmed player win records a PENDING loot claim (the keeper pays later). NO
+ * silent catch — a network/verify failure is shown in the log (the player still keeps their on-screen win).
+ */
+async function verifyAndSettle() {
+  const s = state.settle;
+  if (!s || !s.player) return;                          // not a stakes fight (or no wallet/pawn) → nothing to settle
+  // Submit the START snapshot (muster positions + full HP) — the server replays from there with the
+  // recorded actions; the live units have since moved/taken damage, which would desync the replay.
+  const playerTeam = state.startSnapshot || state.units.filter((u) => u.isPlayer);
+  try {
+    log("Asking the harbour authority to verify the fight…", "info");
+    const resp = await fetch(s.verifyUrl, {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ player: s.player, nonce: s.nonce, playerTeam, playerActions: state.actionLog }),
+    });
+    const body = await resp.json();
+    if (!resp.ok || !body.ok) { log(`Verify failed: ${body && body.reason ? body.reason : resp.status}`, "down"); return; }
+    if (body.winner === "player" && body.payoutEligible) {
+      log("✅ Verified WIN — your cut is logged. Loot is queued for payout.", "win");
+      recordStakesClaim(s, body);
+    } else {
+      log(`Server verdict: ${body.winner} (payout ${body.payoutEligible ? "eligible" : "not eligible"}).`, "info");
+    }
+  } catch (e) {
+    log(`Could not reach the verify service: ${e.message}`, "down");   // visible, not silent
+  }
+}
+
+/** Per-fight settlement wiring: which localStorage claims key + which deployed LootPool the keeper pays
+ *  from. Keeps each fight's win in its OWN claims store + pool so the right keeper settles it. Mirrors the
+ *  lib modules (bilge-rats.js / goblin-cave.js LOOT_POOL + K_CLAIMS). New stakes fights add a row here. */
+const STAKES_SITES = {
+  "bilge-rats":  { key: "sts_bilge_claims",     lootPool: "0xE07CE9Ec642d42C5c8A0068203068BAc6042bF57" },
+  "goblin-cave": { key: "sts_goblincave_claims", lootPool: "0xf917d1660c72F2D48141a965c82CCBE8a2A175A6" },
+};
+
+/** Record a PENDING loot claim (game-layer) for the keeper to settle via LootPool.payout, routed to the
+ *  RIGHT store + pool for THIS fight (bilge arena vs goblin cave). collection/tokenId are left for the
+ *  founder/keeper to resolve from the pawn (free-play heroes are house-owned → no player NFT yet). */
+function recordStakesClaim(s, body) {
+  if (typeof localStorage === "undefined") return;
+  const fight = s.fight || "bilge-rats";
+  const site = STAKES_SITES[fight];
+  if (!site) { console.warn("no claim store for fight kind:", fight); return; }   // visible, not silent
+  try {
+    const claims = JSON.parse(localStorage.getItem(site.key) || "[]");
+    claims.push({
+      site: fight, pawnId: s.pawnId || s.player, runId: `${fight}-${s.nonce}`,
+      status: "pending", wonAt: Date.now(), lootPool: site.lootPool,
+      collection: null, tokenId: null,            // founder/keeper resolves the pawn NFT for ownerOf
+      seed: body.seed || null, nonce: s.nonce, verifiedWinner: "player",
+    });
+    localStorage.setItem(site.key, JSON.stringify(claims));
+    localStorage.removeItem("sts_fight_settle");   // consumed — don't re-verify on a Reset/replay
+  } catch (e) { console.warn("stakes claim persist failed:", e); }   // visible, not silent
+}
+
 function init() {
   logEl.innerHTML = "";
   bannerEl.classList.remove("show");
@@ -662,6 +1149,8 @@ function init() {
   // several control shapes. Normalize into { units, stakes, arena } here so the default
   // single-player flow is untouched and PVP just flips the stakes/arena gate.
   let units, stakes = false, arena = "deck", pvp = false, mode = "training";
+  let objective = null, mapId = null, groupName = null;   // multi-enemy GROUP framing (additive)
+  let severTarget = null, surviveRounds = null;           // optional kraken break-free params (else derived)
   if (Array.isArray(built)) {
     units = built;                                   // default TRAINING (player vs sparring)
   } else if (built && built.locked) {
@@ -683,13 +1172,47 @@ function init() {
     arena = "water";     // water arena = 100% house (loot sinks) — open-sea rule
     pvp = true;
     mode = built.mode || "pvp";   // "encounter" (raiders on a route) vs "pvp" (a duel)
+    objective = built.objective || null;   // group win-condition (null/"wipe" = current behaviour)
+    mapId = built.mapId || null;           // battle-map id from the encounter (terrain art hook)
+    groupName = built.groupName || null;   // e.g. "Cave Goblin Pack" (framing only)
+    severTarget = built.severTarget || null;     // kraken N (optional; else derived from severable count)
+    surviveRounds = built.surviveRounds || null; // kraken M (optional; else KRAKEN_SURVIVE_ROUNDS)
   } else {
     log("Could not build the skirmish (no units returned).", "down");
     return;
   }
 
+  // ── P4 GRID-SIZE: fit the board to the fight. A 1v1 duel (training/PVP) keeps the VERBATIM
+  // 9×7 deck; a multi-pawn skirmish (a voyage GROUP encounter, and future squads) gets the
+  // roomier ~16×9 squad deck. 1 hex = 5 ft. The grid-config SHADOW makes the board any size
+  // without touching the engine; ship-scale (20×6) + boarding (20×14) presets wait on the
+  // camera (P7). (Spawn placement still packs the engine-side right columns — refining spawns
+  // to the full squad width is P5; the bigger board is a strict superset, so it's safe now.)
+  const squadBoard = units.length > 2;
+  setGrid(
+    squadBoard ? GRID_PRESETS.squad.cols : GRID_PRESETS.duel.cols,
+    squadBoard ? GRID_PRESETS.squad.rows : GRID_PRESETS.duel.rows,
+  );
+  ensureBoardSize();
+  // P7 CAMERA: attach the pan/zoom/recenter viewport ONCE, then (re)fit it to this board size.
+  if (!cam) cam = createCamera(boardEl);
+  cam.onResize();
+
+  // COSMETIC TERRAIN: resolve the deck's authored terrain data from the encounter's map id
+  // (null for duels/training/PVP or an un-authored deck → drawTerrain() draws nothing).
+  const mapData = getMap(mapId);
+
+  // COMBAT-SETTLEMENT SEED: mint THIS fight's rng seed. A server-issued seed (sign-to-enter
+  // anchor, anti-grind) takes priority via ?seed= / window.SEAS_FIGHT_SEED; absent one we mint a
+  // local per-fight seed so the client is still deterministic-from-seed today (the server-replay
+  // wiring lands later — that step only needs the SAME seed to recompute this fight). makeRng()
+  // gives a Math.random-shaped fn that every strike()/castWrapped()/resolveOverboard() consumes.
+  const seed = fightSeed();
+  const rng = makeRng(seed);
+
   state = {
     units, turnIdx: 0, round: 1, phase: "idle",
+    seed, rng,            // per-fight deterministic rng (server can replay with the same seed)
     reachable: new Set(), targets: new Set(), pendingSpell: null,
     // STAKES GATE: harbor battles are TRAINING → stakes:false. The gear-drop is shown +
     // mechanical but NOT persisted, so a sparring loss never destroys real owned gear.
@@ -700,13 +1223,40 @@ function init() {
     // MODE: "training" | "pvp" (duel) | "encounter" (raiders on a sail route). Drives the
     // framing + the win/return flow; stakes/arena are identical for pvp & encounter.
     mode,
+    // GROUP framing (multi-enemy voyage encounters). objective is NORMALIZED into a structured
+    // win-condition ({kind:"sever",severTarget,surviveRounds} for the kraken, else null = wipe).
+    objective: normalizeObjective(objective, units, { severTarget, surviveRounds }), mapId, groupName,
+    mapData, terrainIx: terrainIndex(mapData),   // cosmetic per-deck terrain overlay (maps/<id>.js)
+    severed: 0,           // severable arms cut this fight (kraken break-free objective)
+    telegraph: [],        // P6 Into-the-Breach intent ghosts (rebuilt each enemy turn)
+    // COMBAT SETTLEMENT: record the PLAYER's actions (move/attack/spell/end) in order so a STAKES
+    // encounter can be SERVER-VERIFIED (seas-server /seas/verify-fight replays resolver.resolveEncounter
+    // from { seed, playerActions } — the rats are re-computed, never trusted). Enemy turns are NOT
+    // recorded (the server derives them). Harmless for training/PVP (just an array nobody submits).
+    actionLog: [],
+    // a bilge (or future stakes) fight stamps these from the launcher (window.SEAS_FIGHT_*) so the
+    // win path knows to ask the server to verify + settle. null for training/PVP/duels.
+    settle: readSettleContext(seed),
+    // START-OF-FIGHT player snapshot — the server replays from THIS (muster positions + full HP),
+    // re-computing the rats from the seed + these start hexes, then applies the recorded actions.
+    // Must be the pre-turn state (the live units move/take damage during play). Deep-cloned.
+    startSnapshot: null,
   };
+  state.startSnapshot = JSON.parse(JSON.stringify(state.units.filter((u) => u.isPlayer)));
   if (pvp && mode === "encounter") {
-    // VOYAGE PVE ENCOUNTER — framed as raiders blocking the route, not a duel.
-    const foe = units.find((u) => !u.isPlayer);
+    // VOYAGE PVE ENCOUNTER — framed as raiders blocking the route, not a duel. Now N-vs-N aware:
+    // a whole GROUP (rats / goblin pack / kraken arms) reads from groupName + foe count.
+    const foes = units.filter((u) => !u.isPlayer);
     const you = units.find((u) => u.isPlayer)?.name || "you";
     const ctx = readEncounter();
-    log(`🏴‍☠️ Raiders on the route! ${foe?.name || "A raider crew"} blocks ${you}'s passage${ctx && ctx.danger != null ? ` (danger ${ctx.danger})` : ""}.`, "down");
+    const crew = groupName || foes[0]?.name || "A raider crew";
+    const countStr = foes.length > 1 ? ` (${foes.length} foes)` : "";
+    log(`🏴‍☠️ Raiders on the route! ${crew}${countStr} blocks ${you}'s passage${ctx && ctx.danger != null ? ` (danger ${ctx.danger})` : ""}.`, "down");
+    if (state.objective && state.objective.kind === "sever") {
+      log(`Objective: BREAK FREE — sever ${state.objective.severTarget} arms OR survive ${state.objective.surviveRounds} rounds.`, "info");
+    } else if (objective && objective !== "wipe") {
+      log(`Objective: ${String(objective)} — then clear or break free.`, "info");
+    }
     log("Clear the deck to sail on — win and the voyage continues to its destination.", "info");
     log("OPEN SEA — real stakes: gear that drops here is LOST to the water (no take-backs).", "down");
   } else if (pvp) {

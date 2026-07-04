@@ -1,0 +1,293 @@
+<!DOCTYPE html>
+<!--
+  game/seas/town/goods-market.html — THE PORT ROYAL GOODS MARKET (one-sided, game-layer).
+
+  WHAT IT IS: a SHOP. Port Royal holds huge stores of every good and offers them FOR SALE at a set
+  coin price. Players bring COINS and BUY goods (coin → good). It is NOT an x*y=k pool and seeds NO
+  coin reserve — the core is the sell-side (good-only). Buy-back (good → coin) is NOT offered (the
+  live market has no safe two-sided sell side — see gap-scan.js — so a buy-back would be a drain).
+
+  SINGLE SOURCE OF TRUTH for goods + prices = ./port-royal-market.js (the SAME object that will later
+  seed the on-chain gated LocationPool LPs — see PORT-ROYAL-MARKET-MIGRATION.md). Don't hardcode
+  prices here.
+
+  PRESENCE GATE: the seas-server is the location authority. We ask GET /seas/location?player=… and
+  only open the BUY buttons when the wallet is genuinely AT Port Royal (location 8003). Same trust
+  boundary trade-attest uses; never fakes presence. (Mirrors store/index.html's beta model + the
+  jobs page's wallet-connect + balanceOf reads.)
+
+  WHOLE NUMBERS ONLY: goods trade in whole units (game rule). Quantity is rounded/clamped to an
+  integer ≥ 1; fractional input is rejected (port-royal-market.js normalizeQty).
+
+  HIDE CRYPTO (hard rule): the UI speaks COINS (🟤 copper / ⚪ silver / 🟡 gold) + whole units. No
+  USD, no yield/LP/token tickers in the main UI. (An "advanced" line shows the raw token address.)
+
+  BETA: like the General Store, a confirmed buy is marked in your kit off-chain (localStorage). The
+  on-chain coin→good buy (gated LocationPool.swap) is wired at migration; until then the page reads
+  your REAL coin balances on-chain and your REAL location from the server, and never fakes a trade.
+
+  Serve game/ → open /town/goods-market.html (loads ethers from CDN; talks to Base 8453 + seas-api).
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>Port Royal Market — buy goods</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/ethers/6.13.2/ethers.umd.min.js"></script>
+  <style>
+    :root{ --sea:#0e1a24; --ink:#f3ead7; --muted:#b6a584; --gold:#e6b422; --rope:#caa45a; --green:#2ecc71; --red:#e06b6b; }
+    *{box-sizing:border-box}
+    body{ margin:0; min-height:100vh; font-family:"Segoe UI",system-ui,sans-serif; color:var(--ink);
+      background:linear-gradient(rgba(8,12,18,.74), rgba(8,12,18,.88)), url("../art/rooms/port.jpg") center/cover fixed, linear-gradient(#0e1a24,#0a0f14 70%);
+      padding:22px 16px 70px; }
+    .top{ display:flex; align-items:center; justify-content:space-between; max-width:1000px; margin:0 auto 8px; flex-wrap:wrap; gap:8px; }
+    h1{ font-size:26px; margin:0; letter-spacing:2px; color:var(--gold); text-transform:uppercase; }
+    .nav a{ color:var(--rope); text-decoration:none; font-size:13px; margin-left:14px; }
+    .nav a:hover{ color:var(--gold); }
+    .connect-bar{ max-width:1000px; margin:0 auto 10px; display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
+    button{ background:#2a5a2f; border:1px solid var(--green); color:#eafff0; border-radius:8px; font-size:13px; padding:8px 14px; cursor:pointer; font-family:inherit; }
+    button:hover{ background:#357039; }
+    button:disabled{ background:#2a2417; border-color:#4a3a22; color:#6a7a63; cursor:default; }
+    button.secondary{ background:#241a10; border:1px solid #4a3a22; color:var(--ink); }
+    .blurb{ max-width:1000px; margin:0 auto 14px; color:var(--muted); font-size:13px; line-height:1.5; }
+    .blurb b{color:var(--ink)}
+
+    /* purse + location banner */
+    .purse{ max-width:1000px; margin:0 auto 12px; display:flex; gap:18px; align-items:center; flex-wrap:wrap;
+      background:rgba(0,0,0,.28); border:1px solid #2a2114; border-radius:11px; padding:11px 14px; font-size:13px; }
+    .purse .coin{ color:var(--ink); } .purse .coin b{ color:var(--gold); }
+    .here{ max-width:1000px; margin:0 auto 16px; border-radius:11px; padding:11px 14px; font-size:13px; line-height:1.5; }
+    .here.ok{ background:rgba(46,204,113,.08); border:1px solid rgba(46,204,113,.4); color:#bff0cf; }
+    .here.away{ background:rgba(224,107,107,.08); border:1px solid rgba(224,107,107,.4); color:#f0c9c9; }
+    .here.unknown{ background:rgba(202,164,90,.08); border:1px solid rgba(202,164,90,.4); color:#e8d6ad; }
+    .here b{ color:var(--gold); }
+
+    /* goods grid */
+    .grid{ max-width:1000px; margin:0 auto; display:grid; grid-template-columns:repeat(auto-fill,minmax(230px,1fr)); gap:13px; }
+    .good{ background:linear-gradient(#211810,#17110a); border:1px solid #3c2f1b; border-radius:13px; padding:14px; display:flex; flex-direction:column; gap:9px; }
+    .good .head{ display:flex; align-items:center; gap:11px; }
+    .ico{ font-size:30px; width:62px; height:62px; display:flex; align-items:center; justify-content:center;
+      background:radial-gradient(circle at 50% 42%, #5a4d30, #18120a); border:1px solid #4a3a22; border-radius:10px; flex:none; }
+    .nm{ font-weight:700; font-size:16px; }
+    .price{ color:var(--gold); font-weight:700; font-size:14px; }
+    .price .unit{ color:var(--muted); font-weight:400; font-size:12px; }
+    .qtyrow{ display:flex; align-items:center; gap:8px; margin-top:2px; }
+    .qtyrow input{ width:78px; background:#0a0f08; color:var(--ink); border:1px solid #4a3a22; border-radius:8px; padding:8px 10px; font-family:inherit; font-size:14px; }
+    .qtyrow .total{ font-size:12.5px; color:var(--rope); }
+    .qtyrow .total b{ color:var(--gold); }
+    .buy{ margin-top:2px; }
+    .adv{ font-size:10.5px; color:var(--muted); margin-top:2px; }
+    .adv code{ color:var(--rope); }
+
+    #status{ position:fixed; bottom:16px; left:50%; transform:translateX(-50%); background:#1a130c; border:1px solid #4a3a22; color:var(--ink); padding:10px 18px; border-radius:10px; display:none; max-width:92vw; z-index:60; font-size:13px; }
+    .foot{ max-width:1000px; margin:24px auto 0; color:var(--muted); font-size:11px; text-align:center; line-height:1.6; }
+  </style>
+</head>
+<body>
+  <div class="top">
+    <h1>⚖️ Port Royal Market</h1>
+    <div class="nav"><a href="../">⚓ Port</a><a href="./">🗺️ Town</a><a href="../store/">🏪 Store</a><a href="../jobs/">⚓ Work</a><a href="../map.html">🧭 Sail</a></div>
+  </div>
+  <div class="connect-bar">
+    <button id="btnConnect" class="secondary">Connect a wallet</button>
+    <span id="walletLabel" style="color:var(--muted);font-size:12px"></span>
+  </div>
+  <p class="blurb">
+    The greatest market on the cold sea. <b>Port Royal stocks every good</b> and sells it for coin.
+    Fill your hold here, then sail it out and sell it dear at the smaller ports. <b>Goods sell in
+    whole units</b> — bring copper, silver &amp; gold.
+  </p>
+
+  <div class="purse" id="purse"><span class="coin">Connect a wallet to see your purse.</span></div>
+  <div class="here unknown" id="here">📍 Checking whether you're standing in Port Royal…</div>
+
+  <div class="grid" id="grid"></div>
+  <div id="status"></div>
+
+  <div class="foot">super-early beta 🏴‍☠️ · prices set by the harbormaster · buy in whole units, coin only</div>
+
+<script type="module">
+import { COINS, GOODS, PORT_ROYAL_LOCATION, normalizeQty, totalCost, isAtPortRoyal } from "./port-royal-market.js";
+
+// ───────────────────────── config ─────────────────────────
+const PAWNS = '0x2E2AB7ae48876f1b4497A04d864C025f7DF58e1f'; // Black Tide crew (same as jobs page)
+// seas-server base: prod nginx route, overridable for local dev (matches citizen/lib/seas-api.js).
+const SEAS_API = (typeof window !== 'undefined' && window.SEAS_API_BASE) || 'https://tasern.quest/seas-api';
+const ERC20_ABI = ['function balanceOf(address) view returns (uint256)'];
+
+// rotating read RPC (lifted from jobs/index.html)
+const RPCS = ['https://base-rpc.publicnode.com','https://mainnet.base.org','https://base.llamarpc.com','https://1rpc.io/base'];
+let rpcIdx = 0, read;
+function bindProvider(){ read = new ethers.JsonRpcProvider(RPCS[rpcIdx], 8453, { staticNetwork:true }); }
+bindProvider();
+async function withRetry(fn, tries = RPCS.length){
+  let lastErr;
+  for (let i=0;i<tries;i++){
+    try { return await fn(); }
+    catch(e){ lastErr = e; rpcIdx = (rpcIdx+1)%RPCS.length; bindProvider(); await new Promise(r=>setTimeout(r,500)); }
+  }
+  throw lastErr;
+}
+
+let signer = null, account = null;
+let coinBal = { copper: 0, silver: 0, gold: 0 }; // whole-coin balances (18-dec → human)
+let atPortRoyal = false;                         // server-authoritative presence
+
+function setStatus(msg, ms = 4500){
+  const el = document.getElementById('status');
+  el.textContent = msg; el.style.display = 'block';
+  if (ms) setTimeout(()=>{ el.style.display='none'; }, ms);
+}
+const fmtCoin = (n) => Number(n).toLocaleString(undefined,{maximumFractionDigits:0});
+
+// ───────────────────────── connect + reads ─────────────────────────
+document.getElementById('btnConnect').addEventListener('click', connect);
+async function connect(){
+  if (!window.ethereum){ setStatus('No wallet found — open in a wallet browser or install one.'); return; }
+  try {
+    const provider = new ethers.BrowserProvider(window.ethereum);
+    const net = await provider.getNetwork();
+    if (net.chainId !== 8453n){
+      try { await window.ethereum.request({ method:'wallet_switchEthereumChain', params:[{ chainId:'0x2105' }] }); }
+      catch(e){ setStatus('Please switch your wallet to Base.'); return; }
+    }
+    signer = await provider.getSigner();
+    account = await signer.getAddress();
+    try { localStorage.setItem('sts_account', account); } catch(_){}
+    document.getElementById('walletLabel').textContent = account.slice(0,6)+'…'+account.slice(-4);
+    document.getElementById('btnConnect').textContent = 'Connected';
+    await Promise.all([ refreshPurse(), refreshLocation() ]);
+    renderGrid();
+  } catch(e){ setStatus('Connect failed: ' + (e.shortMessage || e.message)); }
+}
+
+// REAL on-chain coin balances (never faked). 18-dec → whole coins (display, no fractions).
+async function refreshPurse(){
+  const purse = document.getElementById('purse');
+  if (!account){ purse.innerHTML = '<span class="coin">Connect a wallet to see your purse.</span>'; return; }
+  try {
+    const [c,s,g] = await withRetry(()=> Promise.all([
+      new ethers.Contract(COINS.copper.addr, ERC20_ABI, read).balanceOf(account),
+      new ethers.Contract(COINS.silver.addr, ERC20_ABI, read).balanceOf(account),
+      new ethers.Contract(COINS.gold.addr,   ERC20_ABI, read).balanceOf(account),
+    ]));
+    coinBal = {
+      copper: Math.floor(Number(ethers.formatUnits(c,18))),
+      silver: Math.floor(Number(ethers.formatUnits(s,18))),
+      gold:   Math.floor(Number(ethers.formatUnits(g,18))),
+    };
+    purse.innerHTML =
+        '<span class="coin">'+COINS.copper.emoji+' <b>'+fmtCoin(coinBal.copper)+'</b> copper</span>'
+      + '<span class="coin">'+COINS.silver.emoji+' <b>'+fmtCoin(coinBal.silver)+'</b> silver</span>'
+      + '<span class="coin">'+COINS.gold.emoji+' <b>'+fmtCoin(coinBal.gold)+'</b> gold</span>';
+  } catch(e){ purse.innerHTML = '<span class="coin">Could not read your purse right now — reconnect.</span>'; }
+}
+
+// SERVER-AUTHORITATIVE presence. We are only "in Port Royal" if the seas-server says so. If the
+// server is unreachable we say so honestly (no fake presence, but the catalog still shows).
+async function refreshLocation(){
+  const here = document.getElementById('here');
+  if (!account){ atPortRoyal = false; here.className='here unknown'; here.innerHTML = '📍 Connect a wallet to check where you are.'; return; }
+  try {
+    const res = await fetch(SEAS_API + '/seas/location?player=' + encodeURIComponent(account));
+    const loc = await res.json();
+    if (loc && loc.atSea){
+      atPortRoyal = false; here.className='here away';
+      here.innerHTML = '⛵ You are <b>at sea</b> — you cannot trade until you land. Sail to <b>Port Royal</b>.';
+    } else if (loc && isAtPortRoyal(loc.location)){
+      atPortRoyal = true; here.className='here ok';
+      here.innerHTML = '📍 You are standing in <b>Port Royal</b> — the market is open. Buy in whole units.';
+    } else {
+      atPortRoyal = false; here.className='here away';
+      const where = (loc && loc.port) ? loc.port.replace(/_/g,' ') : 'another port';
+      here.innerHTML = '📍 You are at <b>'+where+'</b>, not Port Royal. <b>Sail to Port Royal</b> to buy here.';
+    }
+  } catch(e){
+    // Server unreachable — surface it, don't fake presence. Buttons stay gated closed.
+    atPortRoyal = false; here.className='here unknown';
+    here.innerHTML = '📍 Could not reach the harbormaster to confirm you are in Port Royal — try again shortly.';
+  }
+  renderGrid(); // re-gate buttons on the new presence
+}
+
+// ───────────────────────── render goods ─────────────────────────
+function renderGrid(){
+  const grid = document.getElementById('grid');
+  grid.innerHTML = GOODS.map(g => {
+    const ce = COINS[g.coin].emoji;
+    return ''
+      + '<div class="good" data-id="'+g.id+'">'
+      + '  <div class="head"><div class="ico">'+g.emoji+'</div>'
+      + '    <div><div class="nm">'+g.name+'</div>'
+      + '      <div class="price">'+ce+' '+fmtCoin(g.price)+' '+g.coin+' <span class="unit">/ each</span></div></div></div>'
+      + '  <div class="qtyrow">'
+      + '    <input id="qty-'+g.id+'" inputmode="numeric" autocomplete="off" value="1" aria-label="quantity">'
+      + '    <span class="total" id="total-'+g.id+'">'+ce+' <b>'+fmtCoin(g.price)+'</b> '+g.coin+'</span>'
+      + '  </div>'
+      + '  <button class="buy" id="buy-'+g.id+'">Buy</button>'
+      + '  <div class="adv">token <code>'+g.token.slice(0,6)+'…'+g.token.slice(-4)+'</code></div>'
+      + '</div>';
+  }).join('');
+
+  for (const g of GOODS){
+    const qtyEl = document.getElementById('qty-'+g.id);
+    const totEl = document.getElementById('total-'+g.id);
+    const buyEl = document.getElementById('buy-'+g.id);
+    const ce = COINS[g.coin].emoji;
+
+    const recomputeTotal = ()=>{
+      const v = normalizeQty(qtyEl.value);
+      if (!v.ok){ totEl.innerHTML = '<span style="color:var(--red)">'+v.reason+'</span>'; buyEl.disabled = true; return; }
+      totEl.innerHTML = ce+' <b>'+fmtCoin(g.price * v.qty)+'</b> '+g.coin;
+      gateBuyButton(g, v.qty, buyEl);
+    };
+    qtyEl.addEventListener('input', recomputeTotal);
+    // snap to a whole number on blur (WHOLE NUMBERS ONLY — round, don't silently accept fractions)
+    qtyEl.addEventListener('blur', ()=>{
+      const n = Math.max(1, Math.round(Number(qtyEl.value) || 1));
+      qtyEl.value = String(n); recomputeTotal();
+    });
+    buyEl.addEventListener('click', ()=> buy(g, qtyEl.value));
+    recomputeTotal();
+  }
+}
+
+// A buy is allowed only if: connected + AT Port Royal (server) + whole qty + enough coin on hand.
+function gateBuyButton(g, qty, buyEl){
+  if (!account){ buyEl.disabled = true; buyEl.textContent = 'Connect to buy'; return; }
+  if (!atPortRoyal){ buyEl.disabled = true; buyEl.textContent = 'Sail to Port Royal'; return; }
+  const cost = g.price * qty;
+  if (coinBal[g.coin] < cost){ buyEl.disabled = true; buyEl.textContent = 'Need more '+g.coin; return; }
+  buyEl.disabled = false; buyEl.textContent = 'Buy';
+}
+
+// ───────────────────────── buy (beta: off-chain mark; on-chain wired at migration) ─────────────
+function buy(g, rawQty){
+  // re-validate everything at click time (never trust the disabled state alone — real-or-nothing)
+  const v = normalizeQty(rawQty);
+  if (!v.ok){ setStatus(v.reason); return; }
+  if (!account){ setStatus('Connect a wallet to buy.'); return; }
+  if (!atPortRoyal){ setStatus('You must be standing in Port Royal to buy here. Sail there first.'); return; }
+  let cost;
+  try { cost = totalCost(g, v.qty); } catch(e){ setStatus(e.message); return; }
+  if (coinBal[g.coin] < cost){ setStatus('Not enough '+g.coin+' — you need '+fmtCoin(cost)+'.'); return; }
+
+  // BETA: mark the goods owned off-chain (like the General Store). The on-chain coin→good buy
+  // (gated LocationPool.swap via /seas/trade-attest) is wired at migration — see the migration doc.
+  try {
+    const key = 'sts_hold';
+    const hold = JSON.parse(localStorage.getItem(key) || '{}');
+    hold[g.id] = (hold[g.id] || 0) + v.qty;
+    localStorage.setItem(key, JSON.stringify(hold));
+  } catch(_){}
+  setStatus('🛒 Marked '+v.qty+' '+g.name+' to your hold (beta) for '+fmtCoin(cost)+' '+g.coin+'. On-chain pay comes online with the gated market.');
+}
+
+// ───────────────────────── boot ─────────────────────────
+renderGrid();
+if (window.ethereum){
+  window.ethereum.request({ method:'eth_accounts' }).then(accts=>{ if (accts && accts.length) connect(); }).catch(()=>{});
+}
+</script>
+</body>
+</html>

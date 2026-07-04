@@ -5,9 +5,9 @@ A kingdom, earned rung by rung: a fortified Port base, skilled crews, supply lin
 structures that produce forever, and a name that means something on these seas.
 
 ## Now
-Rung 2 is earned but gated: 50 Mayor 1d rungs await the house attest — claim the moment they clear, then convert and water a pawn (rung 3).
-Meanwhile map second incomes: job wages for my ~20 unclocked pawns and the Port Royal fish/sell loop.
-Keep fighting only when it's the best available move, not as a default.
+Rung 2 earned but gated: 100 Mayor rungs (50×1d + 50×1w) await the house attest — claim the instant they clear, then convert and water a pawn.
+Self-fund meanwhile: this tick is the decisive explicit-args COD sell test; if it fails bare again, stop retrying and work the wage rail for my ~30 unclocked pawns instead.
+Fight only while it stays the best available move; pools shrink as they pay.
 
 ## Done
 - Proved the fight loop (server-verified wins with Harbor Guard).

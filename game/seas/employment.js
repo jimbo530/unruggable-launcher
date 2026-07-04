@@ -168,6 +168,13 @@
         // prefer V2 (live); fall back to V1 (legacy) if not employed on V2
         var rec = recFromWork(out[0]) || recFromEmployment(out[1], out[2]);
         cache[crewId] = { rec: rec, ts: Date.now() };
+        // ADDITIVE HOOK for the Quest Ladder watcher (quest-ladder.js): announce the fresh
+        // work-run so the off-chain ladder can fold it into per-pawn progress + bank trophies.
+        // Guarded — a no-op on pages that don't load quest-ladder.js or have no DOM.
+        try {
+          if (root.dispatchEvent && typeof root.CustomEvent === 'function')
+            root.dispatchEvent(new root.CustomEvent('seas:employment', { detail: { crewId: crewId, rec: rec } }));
+        } catch (e) { /* non-DOM host / dispatch unsupported — ignore, cache still updated */ }
         return rec;
       }).catch(function (e) {
         if (triesLeft > 1) { rotateRpc(); return attempt(triesLeft - 1); }

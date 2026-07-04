@@ -1,0 +1,138 @@
+<!DOCTYPE html>
+<!--
+  battle-grid/bilge.html — THE FIRST REAL FIGHT launcher: "Bilge Rats".
+  After the no-stakes training spar, this is fight #2 — the first REAL scrap, with stakes + loot.
+
+  THE HARDENED FLOW (project_seas_combat_settlement):
+    1) issue-seed — the seas-server pins this fight's RNG seed + a one-time nonce (anti-grind: the
+       client can't pre-roll the dice OR the rat composition).
+    2) roll the rats DETERMINISTICALLY from that seed (game/lib/bilge-rats.js → the SAME builder the
+       server uses to reconstruct them) and ARM the encounter for the battle deck.
+    3) play it on the deck (battle-grid). game.js records the player's actions.
+    4) on a win the deck asks the server to VERIFY (replay) the fight → only a server-confirmed win
+       queues the LootPool payout. The server never trusts the client's claim.
+
+  Mobile-first (friends test on phones): svh/dvh, safe-area, big tap targets.
+  Free-play note: heroes are house-owned; the player's "key" is derived from the hero id so verify
+  works without a wallet. Loot payout to a player-owned pawn NFT is the founder's later wiring.
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>Bilge Rats — Your First Real Fight</title>
+  <style>
+    :root{ --ink:#f3ead7; --muted:#b6a584; --gold:#e6b422; --rope:#caa45a; --green:#2ecc71; --red:#c0563a; }
+    *{ box-sizing:border-box; -webkit-tap-highlight-color:rgba(230,180,34,.2); }
+    body{ margin:0; font-family:"Segoe UI",system-ui,sans-serif; color:var(--ink);
+      min-height:100vh; min-height:100svh; min-height:100dvh; display:flex; flex-direction:column;
+      background:linear-gradient(rgba(8,12,18,.86), rgba(6,10,14,.95)), #0a0f14;
+      padding:max(22px,env(safe-area-inset-top)) 16px calc(28px + env(safe-area-inset-bottom)); }
+    .wrap{ max-width:560px; margin:0 auto; width:100%; }
+    .rat{ font-size:64px; text-align:center; margin:6px 0 2px; }
+    h1{ text-align:center; color:var(--gold); font-size:clamp(22px,7vw,30px); letter-spacing:.05em; text-transform:uppercase; margin:0; text-shadow:0 2px 0 #6b4e10; }
+    .tag{ text-align:center; color:var(--green); font-size:13px; letter-spacing:.05em; margin:6px 0 16px; }
+    .card{ background:linear-gradient(#241a10,#19120a); border:1px solid #4a3a22; border-radius:16px; padding:16px 16px 18px; }
+    .card p{ color:var(--ink); font-size:15px; line-height:1.55; margin:0 0 12px; }
+    .card .lore{ color:var(--muted); font-size:13px; line-height:1.5; }
+    .reward{ display:flex; gap:10px; align-items:center; background:#1a1206; border:1px solid #3a2c12; border-radius:12px; padding:10px 12px; margin:12px 0; }
+    .reward .i{ font-size:26px; } .reward .t{ font-size:13px; color:var(--muted); } .reward .t b{ color:var(--gold); }
+    .go{ display:block; width:100%; min-height:54px; margin-top:14px; border:1px solid #8a6b16; border-radius:13px; cursor:pointer;
+      background:linear-gradient(#f0c645,#caa033); color:#1a1206; font-weight:800; font-size:17px; letter-spacing:.02em; }
+    .go:active{ transform:translateY(1px); } .go[disabled]{ opacity:.6; cursor:default; }
+    .status{ text-align:center; color:var(--muted); font-size:13px; min-height:20px; margin-top:12px; }
+    .status.err{ color:var(--red); }
+    .back{ display:block; text-align:center; margin:18px auto 0; color:var(--rope); text-decoration:none; font-size:13px; }
+    .foot{ color:var(--muted); font-size:11px; text-align:center; line-height:1.6; margin-top:18px; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="rat">🐀</div>
+    <h1>Bilge Rats</h1>
+    <p class="tag">✦ your first REAL fight — stakes &amp; loot ✦</p>
+
+    <div class="card">
+      <p>The training bout taught you the ropes. Now it's for real: a swarm of <b>bilge rats</b> boils up from the flooded under-hold. Clear them and the <b>Rogue Network</b> pays your cut.</p>
+      <div class="reward">
+        <span class="i">🪙</span>
+        <span class="t">Win and the harbour authority <b>verifies your fight</b>, then the loot pool drops your cut — coin, trade goods, maybe a rare gem.</span>
+      </div>
+      <p class="lore">A few rats, ankle-deep water, barrels for cover. Use them. Down the swarm — last one standing takes the hold.</p>
+      <button class="go" id="go">⚔️ Enter the Bilge</button>
+      <div class="status" id="status"></div>
+    </div>
+
+    <a class="back" href="../play/">‹ back</a>
+    <p class="foot">The fight's dice + the rats are pinned by the server (no re-rolls). Your win is replayed &amp; verified before any loot — skill, not luck.</p>
+  </div>
+
+  <script type="module">
+    import { rollBilgeEncounter, ARENA } from "../../lib/bilge-rats.js";
+    import { armVoyageEncounterGroup } from "./encounter.js";
+
+    const $ = (id) => document.getElementById(id);
+    const status = (msg, err = false) => { const s = $("status"); s.textContent = msg; s.classList.toggle("err", !!err); };
+
+    // API base: nginx proxies /seas-api/ → the seas-server. Override with ?api= for local dev.
+    const params = new URLSearchParams(location.search);
+    const API = params.get("api") || window.SEAS_API_BASE || "/seas-api";
+
+    const read = (k, d) => { try { return JSON.parse(localStorage.getItem(k) || "null") ?? d; } catch { return d; } };
+
+    /** The player's "key" for issue/verify: a connected wallet if present, else a deterministic
+     *  address derived from the hero id (free play has no wallet). MUST be the SAME for issue + verify
+     *  (the nonce is bound to it). All-lowercase 0x+40hex is a valid input to the server's getAddress. */
+    async function playerKey() {
+      try {
+        if (window.ethereum) {
+          const accs = await window.ethereum.request({ method: "eth_accounts" });
+          if (accs && accs[0]) return accs[0];
+        }
+      } catch (e) { console.warn("wallet probe failed (free-play key used):", e); }
+      const leader = localStorage.getItem("sts_party_leader") || "free-hero";
+      const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode("bilge:" + leader));
+      const hex = [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, "0")).join("");
+      return "0x" + hex.slice(0, 40);   // deterministic per-hero address (lowercase → server accepts)
+    }
+
+    async function enter() {
+      const btn = $("go"); btn.disabled = true;
+      try {
+        const player = await playerKey();
+        const pawnId = localStorage.getItem("sts_party_leader") || player;
+
+        // 1) issue-seed — the server pins the seed + nonce (anti-grind anchor)
+        status("Sealing the fight with the harbour authority…");
+        const resp = await fetch(API + "/seas/issue-seed", {
+          method: "POST", headers: { "content-type": "application/json" },
+          body: JSON.stringify({ player, fight: "bilge-rats" }),
+        });
+        const iss = await resp.json();
+        if (!resp.ok || !iss.ok) throw new Error(iss && iss.reason ? iss.reason : "issue-seed failed (" + resp.status + ")");
+
+        // 2) roll the rats DETERMINISTICALLY from that seed (same builder the server reconstructs from)
+        const enc = rollBilgeEncounter(iss.seed);
+        enc.groupName = "Bilge Rats";
+
+        // 3) ARM the encounter for the battle deck (writes sts_encounter_group) + the settle context
+        armVoyageEncounterGroup(enc, { returnTo: "../play/", battleUrl: "index.html?mode=encounter&seed=" + encodeURIComponent(iss.seed) });
+        localStorage.setItem("sts_fight_settle", JSON.stringify({
+          fight: "bilge-rats", nonce: iss.nonce, seed: iss.seed, player, pawnId, verifyUrl: API + "/seas/verify-fight",
+        }));
+
+        // 4) into the deck — game.js plays the pinned seed + records the actions for verification
+        status("To the hold! 🗡️");
+        location.href = "index.html?mode=encounter&seed=" + encodeURIComponent(iss.seed);
+      } catch (e) {
+        status("Couldn't start the fight: " + e.message, true);
+        btn.disabled = false;
+      }
+    }
+
+    $("go").addEventListener("click", enter);
+    // gentle gate: need a chosen hero first
+    if (!localStorage.getItem("sts_party_leader")) status("Choose a hero first — tap ‹ back, then pick one.", true);
+  </script>
+</body>
+</html>
