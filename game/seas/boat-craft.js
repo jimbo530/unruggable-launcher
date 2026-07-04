@@ -34,19 +34,20 @@
  * as the rest of seas (see craftBoatOnChainPlan() — it DESCRIBES the tx, never fakes one). Real-or-nothing.
  */
 
-// ── the hull ladder (mirrors game/lib/ship-catalog.js priceGold; kept here so this module is usable
-// standalone in the browser without importing the ESM catalog). If you change a price, change it in the
-// catalog FIRST — that is the single source of truth — then mirror it here. ──
-export const BOAT_HULLS = {
-  rowboat:     { key: 'rowboat',    name: 'Rowboat',    priceGold: 50,    itemOnly: true  },
-  sloop:       { key: 'sloop',      name: 'Sloop',      priceGold: 500,   itemOnly: false },
-  schooner:    { key: 'schooner',   name: 'Schooner',   priceGold: 1500,  itemOnly: false },
-  brigantine:  { key: 'brigantine', name: 'Brigantine', priceGold: 4000,  itemOnly: false },
-  galleon:     { key: 'galleon',    name: 'Galleon',    priceGold: 10000, itemOnly: false },
-  'man-o-war': { key: 'man-o-war',  name: 'Man-o-War',  priceGold: 25000, itemOnly: false },
-};
+// ── the hull ladder — DERIVED from the single source of truth (game/lib/ship-catalog.js). No mirrored
+// price table lives here anymore: a hull's key/name/priceGold come straight from SHIP_CATALOG, so a price
+// can never drift out of sync with the store/launcher. `itemOnly` (rowboat = a plain owned item, no crew/
+// sails) is a boat-craft rule, not a catalog price, so it stays here — the rowboat is the only item-only
+// hull ("row boats may just need to be items"). ──
+import { SHIP_CATALOG, SHIP_ORDER } from '../lib/ship-catalog.js';
 
-export const BOAT_ORDER = ['rowboat', 'sloop', 'schooner', 'brigantine', 'galleon', 'man-o-war'];
+export const BOAT_ORDER = SHIP_ORDER.slice();
+
+export const BOAT_HULLS = SHIP_ORDER.reduce(function (acc, k) {
+  const s = SHIP_CATALOG[k];
+  acc[k] = { key: s.key, name: s.name, priceGold: s.priceGold, itemOnly: k === 'rowboat' };
+  return acc;
+}, {});
 
 // LUMBER token (refined) — the ONLY input a boat craft consumes (deploy/materials-deployed.json).
 export const LUMBER_TOKEN = '0x7a97e5e76C93267e1FF2EBc38DCC7C7B6f40fF4c';

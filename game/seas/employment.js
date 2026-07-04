@@ -54,17 +54,20 @@
     'https://1rpc.io/base',
   ];
 
-  // job vault → jobKey map (mirror of the jobs page JOBS config). Lets crew/battle pages
-  // show a friendly job name. If a vault isn't in here we still work (job = raw address).
-  var VAULT_TO_KEY = {
-    '0xd6d793628dc6eed71eb37dd6c51678e8a9c25f22': 'str', // Haul cargo
-    '0xb303c91724485462e3450a0bd4513a521df997cb': 'dex', // Mend the nets
-    '0x893531a85f249cc38da772be9056762e188302f6': 'con', // Stock the rations
-    '0x90b54da4ac020fb163c51237e169feceac2369be': 'int', // Tend the beacon
-    '0x8c121fc0171944c3ea40d14fe549dff7107bdf39': 'wis', // Sea-calling rites
-    '0xc0813524820df5c6bb9a63a521fe218ff974b1b4': 'cha', // Barter & haggle
-    '0x44c504ce08635536635f153b6ae5d9d6d8b3131f': 'guard', // Guard the Port (Mayor's civic job)
-  };
+  // job vault → jobKey map. SINGLE SOURCE = config/seas-config.js (SeasConfig.VAULT_TO_KEY) — the SAME
+  // table quest-ladder.js reads, so a vault address can never disagree between the two. Lets crew/battle
+  // pages show a friendly job name; if a vault isn't in the map we still work (job = raw address).
+  //   • Browser: window.SeasConfig, set by <script src=".../config/seas-config.js"> loaded BEFORE this.
+  //   • Node: require the same module.
+  // If the config is missing we DEGRADE (visible warn) to an empty map (jobs show as raw addresses) —
+  // never a hidden duplicate copy that could drift.
+  var SeasConfig = (typeof module !== 'undefined' && module.exports)
+    ? require('./config/seas-config.js')
+    : root.SeasConfig;
+  var VAULT_TO_KEY = (SeasConfig && SeasConfig.VAULT_TO_KEY) || {};
+  if (!SeasConfig || !SeasConfig.VAULT_TO_KEY) {
+    (root.console || console).warn('employment.js: SeasConfig not loaded — job vaults will show as raw addresses. Load config/seas-config.js before employment.js.');
+  }
 
   // JobClock V1 ABI (the bits this reader/writer uses).
   var JOBCLOCK_ABI = [

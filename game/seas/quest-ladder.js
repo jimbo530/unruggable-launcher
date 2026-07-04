@@ -43,6 +43,17 @@
   var STORE_PREFIX = 'seas.quest.v1.';     // localStorage key prefix, per crewId
   var DAY = 86400;
 
+  // ── SHARED CONFIG (single source for job→vault→stat): config/seas-config.js. employment.js reads the
+  //    SAME table (SeasConfig.VAULT_TO_KEY), so the ladder's vaults can never drift from the JobClock.
+  //    Browser: window.SeasConfig (load config/seas-config.js BEFORE this file). Node: require it.
+  //    Vaults/stats are REQUIRED here (the watcher resolves jobs by vault) — fail loudly if absent.
+  var SeasConfig = (typeof module !== 'undefined' && module.exports)
+    ? require('./config/seas-config.js')
+    : root.SeasConfig;
+  if (!SeasConfig || !SeasConfig.KEY_TO_VAULT || !SeasConfig.KEY_TO_STAT) {
+    throw new Error('quest-ladder.js: SeasConfig not loaded — load config/seas-config.js before quest-ladder.js (single source for job vaults/stats).');
+  }
+
   // ── TIER POOLS (cbBTC court purses). addr verified from register-achievements.cjs + seas-watcher.cjs.
   var POOLS = {
     Mayor:     { addr: '0xB10fbbCB67d68d1f43E566089FFa0f36Bd057193', tag: 1 },
@@ -65,24 +76,34 @@
 
   // ── JOB LADDERS. id = jobNum*100 + rung (jobNum 10 → 1001..1006, same formula).
   //    metric 'jobRun' = continuous seconds employed at THIS job's vault (lose-on-switch).
-  //    vault addrs mirror jobs/index.html JOBS + seas-watcher.cjs JOB_VAULTS.
+  //    stat + vault are INJECTED from SeasConfig (single source) below — never hand-copied here, so they
+  //    can never drift from employment.js. Only the quest-specific rung names/group/emoji live here.
   var JOB_LADDERS = {
-    1:  { jobKey: 'str',   stat: 'STR',   group: 'Haul Cargo',        emoji: '📦', vault: '0xD6D793628dc6Eed71EB37dd6c51678E8a9c25f22',
+    1:  { jobKey: 'str',   group: 'Haul Cargo',        emoji: '📦',
           names: ['Signed On the Docks', 'Crate Hauler', 'Stevedore', 'Dockmaster', 'Harbor Foreman', 'Cargo Baron'] },
-    2:  { jobKey: 'dex',   stat: 'DEX',   group: 'Mend the Nets',     emoji: '🪢', vault: '0xb303c91724485462e3450A0Bd4513a521df997cB',
+    2:  { jobKey: 'dex',   group: 'Mend the Nets',     emoji: '🪢',
           names: ['Net Threader', 'Net Mender', 'Rigging Hand', 'Sailmaker', 'Master of the Weave', 'Net Lord'] },
-    3:  { jobKey: 'con',   stat: 'CON',   group: 'Stock the Rations', emoji: '🛢️', vault: '0x893531A85f249cC38Da772be9056762E188302F6',
+    3:  { jobKey: 'con',   group: 'Stock the Rations', emoji: '🛢️',
           names: ['Cellar Boy', 'Rationer', 'Provisioner', 'Steward', 'Quartermaster', 'Larder King'] },
-    4:  { jobKey: 'int',   stat: 'INT',   group: 'Tend the Beacon',   emoji: '🗼', vault: '0x90B54DA4Ac020fB163C51237e169FecEaC2369be',
+    4:  { jobKey: 'int',   group: 'Tend the Beacon',   emoji: '🗼',
           names: ['Lamp Lighter', 'Beacon Keeper', 'Chart Reader', 'Lorekeeper', 'Master Cartographer', 'Lord of the Light'] },
-    5:  { jobKey: 'wis',   stat: 'WIS',   group: 'Sea-Rites',         emoji: '🐚', vault: '0x8C121fC0171944C3EA40d14FE549dFf7107BDf39',
+    5:  { jobKey: 'wis',   group: 'Sea-Rites',         emoji: '🐚',
           names: ['Shell Gatherer', 'Shell Listener', 'Tide Reader', 'Sea-Caller', 'Oracle of the Deep', 'Lord of Tides'] },
-    6:  { jobKey: 'cha',   stat: 'CHA',   group: 'Barter at Market',  emoji: '⚖️', vault: '0xc0813524820df5C6bb9a63a521fE218ff974b1B4',
+    6:  { jobKey: 'cha',   group: 'Barter at Market',  emoji: '⚖️',
           names: ['Stall Hand', 'Haggler', 'Trader', 'Broker', 'Market Master', 'Merchant Prince'] },
-    10: { jobKey: 'guard', stat: 'GUARD', group: 'Guard the Port',    emoji: '🛡️', vault: '0x44c504Ce08635536635f153B6Ae5d9D6d8b3131F',
+    10: { jobKey: 'guard', group: 'Guard the Port',    emoji: '🛡️',
           names: ['Posted to the Watch', 'Harbor Watchman', 'Port Warden', 'Watch Captain', 'Harbor Marshal', 'Lord Protector of the Port'] },
   };
   var JOB_ORDER = [1, 2, 3, 4, 5, 6, 10];
+
+  // inject the SHARED stat + vault (single source: SeasConfig) onto each ladder, keyed by jobKey, so
+  // these values are identical to employment.js by construction. Missing key = loud failure (never silent).
+  JOB_ORDER.forEach(function (n) {
+    var L = JOB_LADDERS[n];
+    L.stat  = SeasConfig.KEY_TO_STAT[L.jobKey];
+    L.vault = SeasConfig.KEY_TO_VAULT[L.jobKey];
+    if (!L.stat || !L.vault) throw new Error('quest-ladder.js: no SeasConfig entry for jobKey "' + L.jobKey + '"');
+  });
 
   // ── SHIP LADDERS (700/800/900). Names mirror register-achievements.cjs SHIP_LADDERS (’ kept verbatim).
   //    metric: 'loyaltyTime' / 'mercTime' = ship-allegiance time (NOT yet sourced in-game — see GAPS);
