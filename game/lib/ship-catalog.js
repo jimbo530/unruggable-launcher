@@ -13,6 +13,9 @@
 //   priceGold — build price in GOLD (render with coins() from coins.js — never hardcode coin text)
 //   cargoTons — hold tonnage the empty hull carries (cargo-vs-rooms budget; see weight.js)
 //   desc      — one-line plain-language pitch
+//   tokenAddr — the BOAT OWNERSHIP token (one ERC20 per hull, crafted from LUMBER = priceGold/2).
+//               DEPLOYED 2026-07-04 (deploy/boats-deployed.json, Base mainnet, LaunchToken fixed-supply
+//               ERC20s, 1B each, 100% to the treasury). Recipe: game/seas/boat-craft.js.
 //
 // Game-layer ONLY — NO on-chain anything lives here. The browser does the player-signed GOLD
 // payment; the agent does the launch. This file just describes the ladder.
@@ -20,32 +23,32 @@
 export const SHIP_CATALOG = {
   rowboat: {
     key: "rowboat", name: "Rowboat", icon: "🛶",
-    crewCount: 1, priceGold: 50, cargoTons: 0.1,
+    crewCount: 1, priceGold: 50, cargoTons: 0.1, tokenAddr: "0xBC1E8515A23D86da7d9fE6Fb1091198a7a9F4EEA",
     desc: "A starter hull to get you on the water. One pair of hands — your first command.",
   },
   sloop: {
     key: "sloop", name: "Sloop", icon: "⛵",
-    crewCount: 6, priceGold: 500, cargoTons: 5,
+    crewCount: 6, priceGold: 500, cargoTons: 5, tokenAddr: "0x60D038e5Fff01Ca3232EAe48fa1a4CBDf5050846",
     desc: "A nimble first ship. A working crew of six and a hold worth filling.",
   },
   schooner: {
     key: "schooner", name: "Schooner", icon: "🚤",
-    crewCount: 12, priceGold: 1500, cargoTons: 20,
+    crewCount: 12, priceGold: 1500, cargoTons: 20, tokenAddr: "0x4fcDC3c37d36ddB362404B6e3fC6197D9DBD2855",
     desc: "Fast and roomy. A dozen crew and real cargo for the trade routes.",
   },
   brigantine: {
     key: "brigantine", name: "Brigantine", icon: "🚢",
-    crewCount: 24, priceGold: 4000, cargoTons: 50,
+    crewCount: 24, priceGold: 4000, cargoTons: 50, tokenAddr: "0x7b2903d047486625f01F8A800E3ed269733C7DB7",
     desc: "The “you've made it” boat. A proper crew, a proper sail, a proper business.",
   },
   galleon: {
     key: "galleon", name: "Galleon", icon: "🛳️",
-    crewCount: 50, priceGold: 10000, cargoTons: 100,
+    crewCount: 50, priceGold: 10000, cargoTons: 100, tokenAddr: "0x3E8BF712F7b9E007fA6245d9839183Ab0fb39D8d",
     desc: "A heavy merchant hull. Fifty hands at work — a fleet's worth of throughput.",
   },
   "man-o-war": {
     key: "man-o-war", name: "Man-o-War", icon: "🏴‍☠️",
-    crewCount: 100, priceGold: 25000, cargoTons: 150,
+    crewCount: 100, priceGold: 25000, cargoTons: 150, tokenAddr: "0x9Cb68c469E6ae9E6575A510A6E00baDe4910A834",
     desc: "The flagship. The full 100-bunk crew — the apex of a captain's career.",
   },
 };
