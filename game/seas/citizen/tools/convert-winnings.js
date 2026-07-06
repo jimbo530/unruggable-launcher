@@ -88,7 +88,7 @@ async function quotePath(cbbtcHuman) {
   // Reference price to size a USD-denominated run (quote a tiny fixed amount first).
   const refCbbtc = 0.00001; // ~$0.60
   const ref = await quotePath(refCbbtc);
-  if (!ref.ok) { out({ ok: false, tool: 'convert-winnings', error: `route leg failed: ${ref.failedLeg}`, note: 'NOT faking a route — a leg does not fill right now.' }); process.exit(1); }
+  if (!ref.ok) { out({ ok: false, tool: 'convert-winnings', error: `route leg failed: ${ref.failedLeg}`, hint: 'the cbBTC→USDC→Money→GOLD path has a leg that will not fill right now — wait and retry; not faking a route.' }); process.exit(1); }
   const cbbtcUsd = ref.impliedCbbtcUsd; // USD per 1 cbBTC
 
   // Decide the cbBTC amount for THIS run.
@@ -104,7 +104,7 @@ async function quotePath(cbbtcHuman) {
 
   const runUsd = cbbtcAmount * cbbtcUsd;
   // Founder hard-stop: never auto-move more than $50 in one run.
-  if (runUsd > HARD_STOP_USD) { out({ ok: false, tool: 'convert-winnings', error: `run is $${runUsd.toFixed(2)} > $${HARD_STOP_USD} hard stop — founder-gated`, cbbtcMarketUsd: Number(cbbtcUsd.toFixed(2)) }); process.exit(1); }
+  if (runUsd > HARD_STOP_USD) { out({ ok: false, tool: 'convert-winnings', error: `run is $${runUsd.toFixed(2)} > $${HARD_STOP_USD} hard stop — founder-gated`, hint: `pass a smaller --usd/--cbbtc (≤ $${HARD_STOP_USD}) or ask the founder before moving this much.`, cbbtcMarketUsd: Number(cbbtcUsd.toFixed(2)) }); process.exit(1); }
   // Threshold gate (only on the auto path; explicit --usd/--cbbtc are allowed for testing).
   const belowThreshold = sizing === 'threshold-batch' && runUsd < THRESHOLD_USD;
 
@@ -160,4 +160,4 @@ async function quotePath(cbbtcHuman) {
   const tx3 = await chain.executeSwap({ tokenIn: ADDR.money, tokenOut: ADDR.gold, fee: FEE_MONEY_GOLD, amountInWei: moneyBal, quotedOutWei: goldQuoted });
 
   out({ ok: true, tool: 'convert-winnings', mode: 'LIVE', txs: { cbbtcToUsdc: tx1, usdcToMoney: txm.hash, moneyToGold: tx3 }, cbbtcIn: cbbtcAmount, goldOut: plan.goldOut });
-})().catch((e) => { out({ ok: false, tool: 'convert-winnings', error: e.message }); process.exit(1); });
+})().catch((e) => { out({ ok: false, tool: 'convert-winnings', error: e.message || String(e), hint: 'run DRY (no --execute) to see the cbBTC→GOLD quote; needs cbBTC winnings in the wallet and a filling route. Live needs --execute AND CITIZEN_ALLOW_LIVE=1.' }); process.exit(1); });

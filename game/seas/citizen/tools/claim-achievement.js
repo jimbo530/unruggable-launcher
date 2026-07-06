@@ -283,4 +283,4 @@ async function main() {
         note: fired >= maxBatch ? 'hit the per-run batch cap — re-run to claim more (hasClaimed prevents double-claim).' : 'claim run complete; GOLD reward(s) landed on the Citizen wallet.' });
 }
 
-main().catch((e) => { out({ ok: false, tool: 'claim-achievement', error: e.message }); process.exit(1); });
+main().catch((e) => { out({ ok: false, tool: 'claim-achievement', error: e.message || String(e), hint: 'run `node citizen/tools/claim-achievement.js` (no args) to see earned+attested rungs; claiming needs --pawns "0,1,.." + --execute (live).' }); process.exit(1); });

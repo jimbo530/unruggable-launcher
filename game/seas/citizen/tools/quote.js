@@ -53,6 +53,6 @@ function resolve(sym) {
       return;
     }
   }
-  out({ ok: false, tool: 'quote', error: `no V3 pool filled for ${tin.sym}→${tout.sym} at fees [${fees}]`, note: 'pair may be LocationPool-gated or a custom AMM (use scan-gaps for those)' });
+  out({ ok: false, tool: 'quote', error: `no V3 pool filled for ${tin.sym}→${tout.sym} at fees [${fees}]`, hint: 'this pair may be LocationPool-gated or a custom AMM — use `node citizen/tools/scan-gaps.js` for those, or try a different fee tier.' });
   process.exit(1);
-})().catch(e => { out({ ok: false, tool: 'quote', error: e.message }); process.exit(1); });
+})().catch(e => { out({ ok: false, tool: 'quote', error: e.message || String(e), hint: 'usage: quote.js <tokenIn> <tokenOut> <amountHuman> [fee] — pass token addresses or known symbols.' }); process.exit(1); });

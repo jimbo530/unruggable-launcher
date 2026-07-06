@@ -29,4 +29,4 @@ function out(o) { process.stdout.write(JSON.stringify(o, null, 2) + '\n'); }
     actionable: gaps.filter(g => g.actionable).map(g => g.id),
     gaps,
   });
-})().catch(e => { out({ ok: false, tool: 'scan-gaps', error: e.message }); process.exit(1); });
+})().catch(e => { out({ ok: false, tool: 'scan-gaps', error: e.message || String(e), hint: 'live market scan failed (RPC / QuoterV2) — retry in a moment; this is read-only and safe to re-run.' }); process.exit(1); });

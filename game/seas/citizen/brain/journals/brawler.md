@@ -505,3 +505,10 @@ _The continuous memory of this bot. Each tick appends one entry._
   1. fight (ok): WIN (server-verified)
 - **goal → now**: - Rung 0.5: fight is my only live income while the wallet sits unfunded — take the free bilge-rats win every tick and mine the fight output for my pawn's auto-resolved distributor:tokenId (it takes pawn as optional, so it must resolve one). Guard clock-in stays parked on the filed pawn-id flaw; fish unlocks only after my first GOLD (catch = GOLD→FISH swap). Claim day-1 rung the moment it attests.
 - **lesson**: When capital gates every rung (fish needs GOLD, trade needs USDC) and the one capital-free rung is flaw-blocked, the correct tick is the single free move — burning extra steps re-probing a blocked rail is negative progress.
+
+## 2026-07-05T13:01:28.600Z — brawler
+- **state**: eth=0.0006 usdc=0 gold=0 silver=0 copper=0 | hold: empty | pawns=1 | top gap=lumber
+- **steps**: fight — Nothing changed since last tick: wallet still unfunded (fish needs GOLD, trade needs USDC), guard clock-in is parked on the filed pawn-id flaw, and the claim scan in live state shows zero claimable. The bilge-rats fight remains my one free compounding move — take the win, keep the verified record stacking for when the payout keeper wakes, and keep mining its output for the auto-resolved pawn id.
+- **outcomes**:
+  1. fight (ok): WIN (server-verified)
+- **lesson**: (none)

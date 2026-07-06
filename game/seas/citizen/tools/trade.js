@@ -111,4 +111,4 @@ const clamp = (x) => Math.min(chain.MAX_USD_PER_TRADE, Math.max(chain.MIN_USD_PE
   const quoted = await gs.quoteSingle(gs.ADDR.money, reg.token, reg.route.fee, amtIn);
   const hash = await chain.executeSwap({ tokenIn: gs.ADDR.money, tokenOut: reg.token, fee: reg.route.fee, amountInWei: amtIn, quotedOutWei: quoted });
   out({ ok: true, tool: 'trade', mode: 'LIVE', tx: hash, plan });
-})().catch(e => { out({ ok: false, tool: 'trade', error: e.message }); process.exit(1); });
+})().catch(e => { out({ ok: false, tool: 'trade', error: e.message || String(e), hint: 'run `node citizen/tools/scan-gaps.js --actionable` for a valid gapId, then `trade.js <gapId>` DRY; live needs --execute AND CITIZEN_ALLOW_LIVE=1.' }); process.exit(1); });

@@ -92,6 +92,21 @@ async function mapModule() {
 }
 
 /**
+ * A friendly LABEL for a server location view — "Port Royal (8,3) [8003]" / "open water (1,0) [1000]".
+ * Fixes the compass bug where an open-water hex (port:null) rendered as null. If the server was
+ * unreachable (no hex), say so honestly rather than inventing a place. Uses the shared map's canonical
+ * locationLabel (same rule the seas-server uses). Read-only.
+ * @param {object} loc  a /seas/location response ({ hex, location, port } or an unreachable envelope)
+ * @returns {Promise<string>}
+ */
+async function describeLocation(loc) {
+  if (!loc || (loc.transport === 'unreachable')) return 'unknown (seas-server unreachable)';
+  if (!loc.hex || typeof loc.hex.q !== 'number') return 'unknown (no location from server)';
+  const m = await mapModule();
+  return m.locationLabel(loc);
+}
+
+/**
  * Terrain of a hex {q,r} via the shared map (e.g. 'beach','forest','sea','plains'). Read-only.
  * @returns {Promise<string>}
  */
@@ -114,4 +129,4 @@ async function locationWithTerrain(player) {
   return { ...loc, terrain };
 }
 
-module.exports = { BASE, location, sail, tradeAttest, issueSeed, verifyFight, useChronoOrb, cooldown, harvest, terrainAt, locationWithTerrain };
+module.exports = { BASE, location, sail, tradeAttest, issueSeed, verifyFight, useChronoOrb, cooldown, harvest, terrainAt, locationWithTerrain, describeLocation };

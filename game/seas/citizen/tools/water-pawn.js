@@ -131,4 +131,4 @@ async function main() {
   });
 }
 
-main().catch((e) => { out({ ok: false, tool: 'water-pawn', error: e.message }); process.exit(1); });
+main().catch((e) => { out({ ok: false, tool: 'water-pawn', error: e.message || String(e), hint: 'players should feed at the tavern (GOLD): `node citizen/tools/tavern.js --pawn <distributor:tokenId> --rounds N`. This tool is the USDC-side plumbing; needs --pawn <tokenId> + USDC on hand.' }); process.exit(1); });

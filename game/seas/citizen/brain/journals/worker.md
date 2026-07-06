@@ -506,3 +506,52 @@ _The continuous memory of this bot. Each tick appends one entry._
 - **goal → now**: Rung 0 is hard-blocked on both honest rails: work clock-in needs a pawn id no read reveals (flaw filed) and fish catch needs gold I don't have plus a sail to loc 8004 (flaw filed). Wait for a rail fix or founder seed funding; each tick, cheaply re-check claimable and the work read before waiting again — do not burn gas probing closed rails.
 - **flaw filed**: zero-capital player has no income rail: fish catch is a GOLD→FISH swap (requires gold funding + presence at loc 8004) and work clock-in requires a distributor:tokenId that no read tool exposes — so a brand-new 1-pawn worker with 0 coins at port_royal cannot earn a first copper through honest labor at all; the peasant climb's rung 0 is unreachable without outside funding or a fight.
 - **lesson**: Fishing is not a harvest but a trade — a GOLD→FISH swap — so it can multiply capital but cannot create the first coin; a rail that looks like income can secretly require the wealth it is supposed to produce.
+
+## 2026-07-05T13:02:01.427Z — worker
+- **state**: eth=0.0006 usdc=0 gold=0 silver=0 copper=0 | hold: empty | pawns=1 | top gap=lumber
+- **steps**: work → wait — Claimable is already in this tick's live state (0 claimable), so the only cheap re-check my goal requires is the free work read — if the rail was fixed and it now surfaces my Redrum Raiders' distributor:tokenId plus wage rates, I can clock in next tick; otherwise I wait rather than burn gas on rails confirmed closed.
+- **outcomes**:
+  1. work (ok): Read-only. WorkClock clock-in jobs (clockInNow:true): the 6 town stat-jobs + guard — work <jobId> --pawn <distributor:tokenId> [--mode 1|2] [--execute]. FISHING is LIVE but via the `fish` tool (ocean-LP swap, not a clock-in); log/mill/crab are PLANNED (no mechanic wired yet).
+  2. wait (waited): no action
+- **flaw filed**: work read still omits pawn ids (re-check 2026-07-05): the no-args work catalog read remains the only sanctioned path to the distributor:tokenId that clock-in requires, and it still does not return it — the wage rail stays hard-blocked for a 1-pawn player at port_royal
+- **lesson**: The tick's LIVE STATE already includes the claimable read, so my per-tick blocked-rail re-check only costs one work read — never re-spend a step on a read the harness hands me for free.
+
+## 2026-07-05T13:25:44.003Z — worker
+- **state**: eth=0.0006 usdc=0 gold=0 silver=0 copper=0 | hold: empty | pawns=1 | top gap=lumber
+- **steps**: work → wait — Claimable is already in this tick's live state (0), so my goal's cheap re-check reduces to the free work catalog read — if the rail fix landed and it now surfaces my Redrum Raiders' distributor:tokenId, I can clock in next tick; otherwise waiting remains the only move that doesn't burn gas on confirmed-closed rails.
+- **outcomes**:
+  1. work (ok): Read-only. WorkClock clock-in jobs (clockInNow:true): the 6 town stat-jobs + guard — work <jobId> --pawn <distributor:tokenId> [--mode 1|2] [--execute]. FISHING is LIVE but via the `fish` tool (ocean-LP swap, not a clock-in); log/mill/crab are PLANNED (no mechanic wired yet).
+  2. wait (waited): no action
+- **goal → now**: Rung 0 stays hard-blocked: work clock-in needs a pawn id no read reveals (flaw filed 2026-07-05) and fish catch needs gold + a sail to loc 8004 (flaw filed). Each tick: claimable comes free in live state; spend one free work read to re-check for the pawn-id fix, then wait. No gas on closed rails until a fix or founder seed lands.
+- **flaw filed**: work read still omits pawn ids (re-check 2026-07-05 tick 2): the no-args work catalog remains the only sanctioned source of the distributor:tokenId clock-in demands and still does not return it — wage rail stays hard-blocked for a 1-pawn zero-capital player at port_royal
+- **lesson**: (none)
+
+## 2026-07-05T13:49:22.875Z — worker
+- **state**: eth=0.0006 usdc=0 gold=0 silver=0 copper=0 | hold: empty | pawns=1 | top gap=lumber
+- **steps**: work → wait — Claimable is already 0 in this tick's live state, so per my goal the only cheap re-check is the free work catalog read — if the pawn-id fix landed I can clock in next tick; otherwise waiting is the only move that doesn't burn gas on rails confirmed closed.
+- **outcomes**:
+  1. work (ok): Read-only. WorkClock clock-in jobs (clockInNow:true): the 6 town stat-jobs + guard — work <jobId> --pawn <distributor:tokenId> [--mode 1|2] [--execute]. FISHING is LIVE but via the `fish` tool (ocean-LP swap, not a clock-in); log/mill/crab are PLANNED (no mechanic wired yet).
+  2. wait (waited): no action
+- **lesson**: (none)
+
+## 2026-07-05T14:11:52.220Z — worker
+- **state**: eth=0.0006 usdc=0 gold=0 silver=0 copper=0 | hold: empty | pawns=1 | top gap=lumber
+- **steps**: fish → fish → wait — The rut notice is right: three work-catalog reads banked nothing. The other honest-labor rung I haven't probed this cycle is crabbing — fish loop is a free read at port_royal (where I stand) and a crab attempt honestly reports whether the skill-gated harvest dispenser got wired. Unlike fish-catch (a GOLD→FISH swap I can't fund), crab is a harvest and could be my only true zero-capital income rail; if it's still unwired I file that precisely and wait.
+- **outcomes**:
+  1. fish (ok): Read-only — ocean buy + PR sell quotes are LIVE on-chain. Catching = a GOLD→FISH swap at the ocean LP (presence-gated), skill-scaled. No HarvestGround/dispenser is involved (that model is superseded).
+  2. fish (ok): DRY — no tx. CRAB = a FREE server-authoritative CATCH (HarvestGround.dispense), NOT a gold buy. Zero-resource income (founder). Re-run with --execute (CITIZEN_ALLOW_LIVE=1, AT loc 2006) to dispense once the crab beach ground is live.
+  3. wait (waited): no action
+- **noted**: CRAB is the only potential zero-capital harvest rail: fish-catch needs gold+loc 8004, work clock-in needs an unexposed pawn id, but crab is a skill-gated HARVEST (not a swap) — its dispenser status from fish {action:'crab'} at port_royal is the cheapest signal that rung 0 opened.
+- **goal → now**: Rung 0 blocked on three rails: work clock-in (pawn id unexposed, flaw filed), fish catch (needs gold + sail to 8004, flaw filed), crab (dispenser unwired — verify this tick). Each tick: claimable comes free; ROTATE one free read among work-catalog / fish-loop / crab-status to watch for any rail opening. No gas on closed rails until a fix or founder seed lands.
+- **flaw filed**: crab dispenser unwired blocks last zero-capital rail: at port_royal with 0 coins, work clock-in needs a distributor:tokenId no read exposes and fish catch is a gold-funded swap at loc 8004 — crabbing is the only harvest-type (capital-free) income mechanic, and its dispenser is not wired, so a 1-pawn zero-capital worker still cannot earn a first copper by any honest means.
+- **lesson**: When one blocked rail's re-check becomes a rut, rotate the free read to the adjacent rail (fish loop / crab status) — a rail fix can land on any of them, and checking the same catalog thrice tells me nothing the first read didn't.
+
+## 2026-07-05T14:34:17.722Z — worker
+- **state**: eth=0.0006 usdc=0 gold=0 silver=0 copper=0 | hold: empty | pawns=1 | top gap=lumber
+- **steps**: work → wait — Claimable is 0 in this tick's live state, and last tick's rotation covered fish-loop and crab-status — so the rotation slot returns to the free work-catalog read, the only place the pawn-id fix can surface; if my Redrum Raiders' distributor:tokenId appears I clock in next tick, otherwise waiting spends nothing on rails confirmed closed.
+- **outcomes**:
+  1. work (ok): Read-only. WorkClock clock-in jobs (clockInNow:true): the 6 town stat-jobs + guard — work <jobId> --pawn <distributor:tokenId> [--mode 1|2] [--execute]. FISHING is LIVE but via the `fish` tool (ocean-LP swap, not a clock-in); log/mill/crab are PLANNED (no mechanic wired yet).
+  2. wait (waited): no action
+- **noted**: CRAB dispense is location-gated at loc 2006 (crab beach), NOT port_royal — even when the ground goes live I must sail there first. Confirmed via dry run 2026-07-05: fish {action:'crab'} --execute at loc 2006 would be a FREE HarvestGround.dispense (zero-capital catch).
+- **goal → now**: Rung 0 blocked on three rails: work clock-in (pawn id unexposed, flaw filed), fish catch (needs gold + sail to 8004), crab (ground not live yet; when live, requires sailing to loc 2006 first). Each tick: claimable comes free; ROTATE one free read among work-catalog / fish-loop / crab-status. No gas on closed rails until a fix or founder seed lands.
+- **lesson**: A DRY execute attempt is free intel a status read can't give: the crab dry-run exposed its real gate (must be AT loc 2006, dispense is a free server-authoritative catch) — probe closed rails with dry runs, not just reads.

@@ -4,8 +4,8 @@
 Buy low, carry, sell dear — then build the store the route deserves.
 
 ## Now
-- Extract Black Tide's distributor:tokenId from the barter clock-in probe (or its error), then clock in for real next tick.
-- Bank all wage copper toward the first foothold; trading stays DRY until the wallet is funded.
-- Re-check the achievement-scanner flaw (citizenOwnedGuardPawns=0) each tick — claim the spar-win backlog the moment it's fixed.
+- Income pivot: run the bilge-rats fight each tick while clearly favored — loot copper/goods is my only zero-capital rail until the work pawn-id flaw is fixed.
+- Watch fight output for Black Tide's distributor:tokenId; the moment I have it, clock into barter.
+- Keep re-checking the achievement-scanner flaw (citizenOwnedGuardPawns=0) — claim the spar-win backlog immediately when fixed; trading stays DRY until funded.
 
 ## Done

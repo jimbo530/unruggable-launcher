@@ -5,9 +5,7 @@ A kingdom, earned rung by rung: a fortified Port base, skilled crews, supply lin
 structures that produce forever, and a name that means something on these seas.
 
 ## Now
-Rung 2 earned but gated: 100 Mayor rungs (50×1d + 50×1w) await the house attest — claim the instant they clear, then convert and water a pawn.
-Self-fund meanwhile: this tick is the decisive explicit-args COD sell test; if it fails bare again, stop retrying and work the wage rail for my ~30 unclocked pawns instead.
-Fight only while it stays the best available move; pools shrink as they pay.
+Drain Mayor rungs 5/tick (~85 remain, ~480 GOLD each, compounding down). Watering stays BLOCKED on missing GOLD→USDC rail (flaw filed). Each tick: claim batch → one fight → advance the mill/farm build plan as the GOLD spend path; get the mill priced and ask the founder before committing if ≥$50.
 
 ## Done
 - Proved the fight loop (server-verified wins with Harbor Guard).

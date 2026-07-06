@@ -235,4 +235,4 @@ function catalog() {
     pawn: pawnArg, target: job.target, payoutMode: mode, tx: hash,
     verified: { employed: after.employed, onTarget: after.target.toLowerCase() === job.target.toLowerCase(), currentRun: fmtDur(after.currentRunSecs) },
   });
-})().catch((e) => { out({ ok: false, tool: 'work', error: e.message }); process.exit(1); });
+})().catch((e) => { out({ ok: false, tool: 'work', error: e.message || String(e), hint: 'run `node citizen/tools/work.js` (no args) to see the job catalog + your pawns; clock in needs --pawn <distributor:tokenId> from pawns.js myCrewIds.' }); process.exit(1); });

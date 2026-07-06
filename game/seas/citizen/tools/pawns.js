@@ -102,19 +102,35 @@ function toPawn(o, heldBy, role) {
     const byShip = {};
     for (const p of pawns) byShip[p.ship] = (byShip[p.ship] || 0) + 1;
     total += pawns.length;
+    // EVERY owned pawn's clock-in id "distributor:tokenId" — the wage rail needs these to clock in
+    // (work.js / tavern.js take --pawn <distributor:tokenId>). We ALWAYS list them all (no more
+    // 3-id sample that hid the ids the players needed). Grouped by ship for readability.
+    const crewIds = pawns.map((p) => p.crewId);
+    const crewIdsByShip = {};
+    for (const p of pawns) (crewIdsByShip[p.ship] = crewIdsByShip[p.ship] || []).push(p.crewId);
     command.push({
       ...entry,
       location: loc && loc.location !== undefined ? loc : { note: 'no server location (non-player wallet or server unreachable)' },
       pawnCount: pawns.length, byShip,
-      sampleCrewIds: pawns.slice(0, 3).map((p) => p.crewId),
-      pawns: full ? pawns : undefined,   // omit the heavy roster unless --full
+      crewIds,           // ← the full list of "distributor:tokenId" — pass one to work.js/tavern.js --pawn
+      crewIdsByShip,     // same ids, grouped by ship
+      sampleCrewIds: crewIds.slice(0, 3), // kept for back-compat (first 3)
+      pawns: full ? pawns : undefined,   // omit the heavy per-pawn roster (with metadata) unless --full
       error,
     });
   }
 
+  // The ids of the pawns THIS profile actually OWNS (role own|queried) — the wage rail's starting
+  // point. A player clocks any of these into a job (work.js) or feeds it at the tavern (tavern.js).
+  const myCrewIds = command
+    .filter((c) => c.role === 'own' || c.role === 'queried')
+    .flatMap((c) => c.crewIds || []);
+
   out({
     ok: true, tool: 'pawns', citizenWallet: citizen, totalPawnsUnderCommand: total,
     rosterIncluded: full ? 'full' : 'summary (pass --full for every pawn)',
+    myCrewIds,           // ← quick access: every pawn you can clock in / feed (distributor:tokenId)
+    pawnIdHint: 'Use any id from myCrewIds as --pawn <distributor:tokenId> for work.js (clock into a job) or tavern.js (feed & water at the tavern).',
     command,
     guardLadder: GUARD_LADup,
     statsSource: 'class-engine derives D&D stats (STR/DEX/CON/INT/WIS/CHA, HP) from each pawn\'s earned endowment; full on-chain stat decode per crewId is TODO (game uses crew/render + class-engine)',
@@ -125,4 +141,4 @@ function toPawn(o, heldBy, role) {
     ],
     note: 'READ-ONLY command picture. Pawns are NOT moved — any transfer is a founder-gated on-chain decision.',
   });
-})().catch((e) => { out({ ok: false, tool: 'pawns', error: e.message }); process.exit(1); });
+})().catch((e) => { out({ ok: false, tool: 'pawns', error: e.message || String(e), hint: 'read failed (often the Alchemy NFT API or the rules server) — retry in a moment; the citizen wallet + treasury are the default command set.' }); process.exit(1); });

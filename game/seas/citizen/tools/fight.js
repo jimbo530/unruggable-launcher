@@ -88,9 +88,10 @@ async function cmdPlay() {
   const iss = await seas.issueSeed(player, fight);
   if (iss.ok === false || !iss.seed || !iss.nonce) {
     out({ ok: false, tool: 'fight', step: 'issue-seed', player, serverBase: seas.BASE, result: iss,
-          note: iss.transport === 'unreachable'
-            ? 'seas-server unreachable — set SEAS_API_BASE (prod: https://tasern.quest/seas-api). NOT faking a fight.'
-            : 'issue-seed did not return a seed/nonce.' });
+          error: iss.transport === 'unreachable' ? 'seas-server unreachable' : 'issue-seed returned no seed/nonce',
+          hint: iss.transport === 'unreachable'
+            ? 'set SEAS_API_BASE to the rules server (prod: https://tasern.quest/seas-api) and retry. NOT faking a fight.'
+            : 'the referee did not pin a seed — retry; if it persists the seas-server needs a look (coordinator).' });
     process.exit(1);
   }
   steps.push({ step: 'issue-seed', seed: iss.seed, nonce: iss.nonce, fight: iss.fight });
@@ -158,4 +159,4 @@ async function cmdIssue(fightArg) {
   if (cmd === 'issue') return cmdIssue(process.argv[3]);
   if (cmd === 'play' || cmd === 'dry' || cmd === undefined) return cmdPlay();
   throw new Error(`unknown command "${cmd}" — use: play | issue`);
-})().catch((e) => { out({ ok: false, tool: 'fight', error: e.message }); process.exit(1); });
+})().catch((e) => { out({ ok: false, tool: 'fight', error: e.message || String(e), hint: 'run `node citizen/tools/fight.js play --pawn <distributor:tokenId>`; needs the seas-server reachable (set SEAS_API_BASE, prod https://tasern.quest/seas-api). A predicted loss is declined, not an error.' }); process.exit(1); });

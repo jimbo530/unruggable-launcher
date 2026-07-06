@@ -179,6 +179,31 @@ function portAtHex(hex) {
   return null;
 }
 
+/**
+ * A human location LABEL for a hex — the same rule the seas-server uses in its gate messages:
+ * a PORT hex reads as its name ("Port Royal"), any other hex is "open water". Always shows the
+ * hex + on-chain loc id so a bot knows where to sail. NEVER returns null (that was the compass bug:
+ * open-water port:null rendered as "null" instead of "open water (q,r)").
+ *
+ *   locationLabel({ hex:{q:8,r:3} })          -> "Port Royal (8,3) [8003]"
+ *   locationLabel({ hex:{q:1,r:0} })          -> "open water (1,0) [1000]"
+ *   locationLabel({ hex:{q:8,r:4}, port:null })-> "open water (8,4) [8004]"
+ *
+ * Accepts either a raw {q,r} hex or a server location view { hex:{q,r}, location?, port? }.
+ * @param {{q?:number,r?:number,hex?:{q:number,r:number},location?:number,port?:string|null}} loc
+ * @returns {string}
+ */
+export function locationLabel(loc) {
+  if (!loc) return "unknown location";
+  const hex = (loc.hex && typeof loc.hex.q === "number") ? loc.hex
+    : (typeof loc.q === "number" ? { q: loc.q, r: loc.r } : null);
+  if (!hex) return "unknown location";
+  const portId = loc.port !== undefined ? loc.port : portAtHex(hex);
+  const name = portId ? (PORTS[portId] ? PORTS[portId].name : portId) : "open water";
+  const locId = (loc.location != null) ? loc.location : (hex.q * 1000 + hex.r);
+  return `${name} (${hex.q},${hex.r}) [${locId}]`;
+}
+
 // Suggested sea-lanes between ports — now MAP FLAVOUR ONLY (lines to draw), NOT a travel
 // restriction (free-float lets you sail anywhere). distance/danger are recomputed live.
 export const ROUTES = [

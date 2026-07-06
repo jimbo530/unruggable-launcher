@@ -50,4 +50,4 @@ function main() {
   });
 }
 
-try { main(); } catch (e) { out({ ok: false, error: e.message }); process.exit(1); }
+try { main(); } catch (e) { out({ ok: false, tool: 'init-wallet', error: e.message || String(e), hint: 'check write permission on the wallet env file; init is idempotent and never overwrites an existing key.' }); process.exit(1); }

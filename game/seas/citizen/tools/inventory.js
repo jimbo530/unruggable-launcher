@@ -65,7 +65,7 @@ async function sweep(addr, goods) {
 (async () => {
   const argAddr = process.argv.find((a) => /^0x[0-9a-fA-F]{40}$/.test(a));
   const addr = argAddr || chain.walletAddress();
-  if (!addr) { out({ ok: false, tool: 'inventory', error: 'no wallet address' }); process.exit(1); }
+  if (!addr) { out({ ok: false, tool: 'inventory', error: 'no wallet address', hint: 'pass a 0x address, or run init-wallet.js / set CITIZEN_WALLET_ENV + CITIZEN_KEY_NAME for a profile.' }); process.exit(1); }
   const fresh = process.argv.includes('--fresh');
 
   const cachePath = path.join(CACHE_DIR, `inventory-${addr.toLowerCase()}.json`);
@@ -88,4 +88,4 @@ async function sweep(addr, goods) {
   fs.mkdirSync(CACHE_DIR, { recursive: true });
   fs.writeFileSync(cachePath, JSON.stringify(result, null, 2));
   out(result);
-})().catch((e) => { out({ ok: false, tool: 'inventory', error: e.message }); process.exit(1); });
+})().catch((e) => { out({ ok: false, tool: 'inventory', error: e.message || String(e), hint: 'read failed (RPC) — retry, or pass --fresh to bypass the cache; this is read-only.' }); process.exit(1); });

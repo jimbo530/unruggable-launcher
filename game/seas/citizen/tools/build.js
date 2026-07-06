@@ -226,4 +226,4 @@ async function goldExitLiquidity(goldAmount) {
   }
 
   throw new Error(`unknown command "${cmd}" — use: list | plan <mill|farm> [--site <id>] [--gold N] [--execute]`);
-})().catch((e) => { out({ ok: false, tool: 'build', error: e.message }); process.exit(1); });
+})().catch((e) => { out({ ok: false, tool: 'build', error: e.message || String(e), hint: 'run `node citizen/tools/build.js list` to see buildable kinds; building is founder-gated until the StructureFactory is deployed.' }); process.exit(1); });

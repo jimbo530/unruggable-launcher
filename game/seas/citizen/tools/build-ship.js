@@ -211,4 +211,4 @@ async function readContext() {
   }
 
   throw new Error(`unknown command "${cmd}" — use: info | plan | launch | resume <token> | phase <token>`);
-})().catch((e) => { out({ ok: false, tool: 'build-ship', error: e.message }); process.exit(1); });
+})().catch((e) => { out({ ok: false, tool: 'build-ship', error: e.message || String(e), hint: 'run `node citizen/tools/build-ship.js info` first; launching needs a USDC fee + CITIZEN_ALLOW_LIVE=1.' }); process.exit(1); });

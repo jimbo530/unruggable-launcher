@@ -527,3 +527,59 @@ _The continuous memory of this bot. Each tick appends one entry._
   2. fish (exit 1): fish
 - **goal → now**: Rung 2 earned but gated: 100 Mayor rungs (50×1d + 50×1w) await the house attest — claim the instant they clear, then convert and water a pawn. / Self-fund meanwhile: this tick is the decisive explicit-args COD sell test; if it fails bare again, stop retrying and work the wage rail for my ~30 unclocked pawns instead. / Fight only while it stays the best available move; pools shrink as they pay.
 - **lesson**: An explicit-args retry is the final diagnostic: if a tool still exits 1 bare with action and usd fully specified, the failure is the rail, not my call — escalate the filed flaw from 'opaque error' to 'broken sell rail' rather than retrying a third time.
+
+## 2026-07-05T13:00:02.296Z — citizen
+- **state**: eth=0.00259873503146933 usdc=0 gold=0 silver=0 copper=100 | hold: SALT:50 RATIONS:30 APPLE:20 HONEY:15 COD:12 ALE:10 | pawns=100 | top gap=lumber
+- **steps**: claim-achievement → water-pawn — The house attest finally cleared — blockedOnHouseAttest is empty and all 100 Mayor rungs are CLAIMABLE at ~500 GOLD (~$5) each. This is rung 2, the richest move in the game: claim a small paced batch of 2 now (~$10, well under limits), then read the watering cost on pawn 0 to prep the GOLD→USDC→level step next tick.
+- **outcomes**:
+  1. claim-achievement (ok): hit the per-run batch cap — re-run to claim more (hasClaimed prevents double-claim).
+  2. water-pawn (ok): READ-ONLY — no transaction sent. Live needs --execute AND CITIZEN_ALLOW_LIVE=1, an owner-held pawn, and enough USDC.
+- **noted**: As of 2026-07-05 the house attest RAN: all 100 Mayor rungs (50×1d + 50×1w) are attested and claimable at ~1% of live pool (~500 GOLD ≈ $5 first claim, compounding down). Claiming is capped 5/run, paced small batches; GOLD lands on the Citizen wallet, then convert-winnings handles the GOLD→USDC hop for water-pawn.
+- **goal → now**: Attest cleared — CLAIM the 100 Mayor rungs in small paced batches (2-5/tick, ~$10-25) until drained or diminishing; each claim self-funds the wallet past the $0.10 floor. / Convert first GOLD to USDC and water pawn 0 a level once claims land. / Fight/COD-sell drop to fallback status; the claim rail is strictly richer while it pays.
+- **lesson**: A blocked rail can unblock silently between ticks — always check the live claimable state before defaulting to the fallback plan, or you'll keep working the second-best rung while the richest one sits open.
+
+## 2026-07-05T13:24:13.422Z — citizen
+- **state**: eth=0.002592926967303703 usdc=0 gold=995 silver=0 copper=100 | hold: SALT:50 RATIONS:30 APPLE:20 HONEY:15 COD:12 ALE:10 | pawns=100 | top gap=lumber
+- **steps**: claim-achievement → convert-winnings → water-pawn — Last tick's first 2 claims landed (wallet gold=995 ≈ 500+495, exactly 1% compounding), so the rail is proven live — claim the next paced batch of 3 (~$15, within 2-5/tick), then run the GOLD→USDC hop and water pawn 0 its first level, completing the full rung-2→rung-3 chain in one tick. Passing a wider pawn list with max:3 is safe because hasClaimed skips already-claimed rungs.
+- **outcomes**:
+  1. claim-achievement (ok): hit the per-run batch cap — re-run to claim more (hasClaimed prevents double-claim).
+  2. convert-winnings (ok): convert-winnings
+  3. water-pawn (exit 1): water-pawn
+- **noted**: Claims land as GOLD on the Citizen wallet at 1% of live pool, compounding down (500, 495, ~490...); ~97 rungs remain as of 2026-07-05, worth front-loading before the pool drains.
+- **goal → now**: Claims are LIVE and landing — keep draining the Mayor rungs 3-5/tick (~$15-25) while each pays ~490+ GOLD. Each tick: claim batch → convert-winnings GOLD→USDC → water a pawn a level (pawn 0 first). When rewards thin or rungs run out, pivot new levels into harder fights and the work/wage rail.
+- **lesson**: Verify a claim actually paid by reconciling the wallet delta against pool math: 995 GOLD = 500 + 495 matches two 1%-of-live-pool draws exactly, so the wallet itself is the receipt — no need to trust the tool's ok status alone.
+
+## 2026-07-05T13:47:09.416Z — citizen
+- **state**: eth=0.002569441119755037 usdc=0 gold=2550.552894589423 silver=0 copper=100 | hold: SALT:50 RATIONS:30 APPLE:20 HONEY:15 COD:12 ALE:10 | pawns=100 | top gap=lumber
+- **steps**: claim-achievement → convert-winnings → water-pawn — Five claims (~$25 at ~490 GOLD each) keep front-loading the draining Mayor pool — hasClaimed skips the rungs already taken so a wide pawn list with max 5 is safe. Then the missing middle leg: last tick water-pawn failed with usdc=0, so this time I pass convert-winnings an explicit usd:1 to actually land the GOLD→USDC hop before watering pawn 0 its first level.
+- **outcomes**:
+  1. claim-achievement (ok): hit the per-run batch cap — re-run to claim more (hasClaimed prevents double-claim).
+  2. convert-winnings (ok): convert-winnings
+  3. water-pawn (exit 1): water-pawn
+- **noted**: Wallet gold=2550 confirms ~5 Mayor claims landed by 2026-07-05T13:47; ~95 rungs remain. The rung-3 chain is claim → convert-winnings (needs explicit usd to move GOLD→USDC) → water-pawn (needs USDC on wallet, $1/level).
+- **goal → now**: Keep draining Mayor rungs 5/tick (~$25) while each pays ~490 GOLD. Each tick: claim batch → convert-winnings with EXPLICIT usd → water pawn 0 (then 1,2,...) a level, verifying the USDC delta between steps. If convert still no-ops with explicit usd, escalate the flaw and keep claiming anyway — GOLD stacking is still real progress.
+- **flaw filed**: convert-winnings silent no-op: returned ok with no usd arg but wallet USDC stayed 0, which made the dependent water-pawn exit 1 — if it also no-ops with explicit usd:1 this tick, the GOLD→USDC leg of the runSequence is broken.
+- **lesson**: convert-winnings returned 'ok' last tick but USDC stayed 0 — a threshold-batched tool's ok can be a silent no-op. Pass an explicit usd amount and verify the wallet's USDC delta before running the step that depends on it.
+
+## 2026-07-05T14:09:56.836Z — citizen
+- **state**: eth=0.002541957862786537 usdc=0 gold=4980.962518916745 silver=0 copper=100 | hold: SALT:50 RATIONS:30 APPLE:20 HONEY:15 COD:12 ALE:10 | pawns=100 | top gap=lumber
+- **steps**: claim-achievement → fight → build — Wallet gold=4980 (~10 claims landed) but USDC is still 0 after last tick's explicit usd:1 convert — the menu says convert-winnings is cbBTC→GOLD, not GOLD→USDC, so watering is blocked on a missing rail; per the climbing rules I file the flaw and work other rungs. This tick: drain 5 more Mayor rungs (~90 left, front-loading the shrinking pool), run one free skill-gated fight as a second earner, and LIST buildable structures since builds cost GOLD directly — the one spend path my stacked GOLD can actually reach.
+- **outcomes**:
+  1. claim-achievement (ok): hit the per-run batch cap — re-run to claim more (hasClaimed prevents double-claim).
+  2. fight (ok): WIN (server-verified)
+  3. build (ok): Read-only. Use `build plan <mill|farm>` to design + price a specific build (still DRY — no factory deployed).
+- **noted**: Water-pawn (rung 3) is BLOCKED as of 2026-07-05: it needs USDC ($1/level) but the only converter exposed, convert-winnings, is cbBTC→GOLD (threshold-batched) — there is no GOLD→USDC rail in the action menu. GOLD can still be spent directly via build (mill/farm), which is the live path for accumulated winnings.
+- **goal → now**: Drain Mayor rungs 5/tick (~90 remain, ~490 GOLD each, compounding down) — this is the richest rail. Watering is BLOCKED on the missing GOLD→USDC rail (flaw filed); until it exists, run one fight/tick as second earner and scout build (mill/farm) as the GOLD spend path. Ask the founder before any build ≥$50.
+- **flaw filed**: GOLD→USDC rail missing: water-pawn requires USDC but convert-winnings converts cbBTC→GOLD only (per its own menu description) — it returned ok twice (no-arg and explicit usd:1) while wallet USDC stayed 0, so rung 3 (levels) is unreachable for a GOLD-rich, cbBTC-poor player until a GOLD→USDC hop is wired.
+- **lesson**: Cross-check a failing step against the tool's own description, not just the runSequence doc: convert-winnings declares cbBTC→GOLD, so its 'ok' no-op with usd args wasn't bad arguments — the GOLD→USDC hop simply doesn't exist in my menu, and the fix is a flaw report, not another retry.
+
+## 2026-07-05T14:32:55.242Z — citizen
+- **state**: eth=0.002530641125861775 usdc=0 gold=7197.148537292543 silver=0 copper=100 | hold: SALT:50 RATIONS:30 APPLE:20 HONEY:15 COD:12 ALE:10 | pawns=100 | top gap=lumber
+- **steps**: claim-achievement → fight → build — Gold=7197 (~15 claims landed) and ~85 rungs still pay ~1% of a live pool each — front-loading the draining Mayor pool stays the richest move, so claim another capped batch of 5 with a wide pawn list (hasClaimed skips the taken rungs). One skill-gated fight keeps the second earner running, and 'build plan mill' prices the one live spend path for my stacked GOLD so I know the cost before asking the founder if it crosses $50.
+- **outcomes**:
+  1. claim-achievement (ok): hit the per-run batch cap — re-run to claim more (hasClaimed prevents double-claim).
+  2. fight (ok): WIN (server-verified)
+  3. build (ok): DRY by definition until the founder approves + deploys the StructureFactory. This tool never deploys a contract and never fabricates a structure.
+- **noted**: As of 2026-07-05T14:32 wallet gold=7197 (~15 Mayor claims landed, ~85 rungs left); build is the only live GOLD sink (mill/farm via 'build plan <kind>'), so pricing a mill is the prerequisite for turning claim income into permanent production.
+- **goal → now**: Drain Mayor rungs 5/tick (~85 remain, ~480 GOLD each, compounding down). Watering stays BLOCKED on missing GOLD→USDC rail (flaw filed). Each tick: claim batch → one fight → advance the mill/farm build plan as the GOLD spend path; get the mill priced and ask the founder before committing if ≥$50.
+- **lesson**: The claimable read arrives cached:true and still lists rungs already drained this session — size claim batches off the wallet's GOLD delta (claims landed ≈ gold/~490), not off the cached claimable count.

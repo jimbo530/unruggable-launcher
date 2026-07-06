@@ -38,6 +38,7 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { spawnSync } from 'child_process';
+import { locationLabel } from '../../../lib/location.js'; // shared map: friendly "open water (q,r) [loc]" / port names
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const BRAIN_DIR = __dirname;                                   // game/seas/citizen/brain
@@ -324,7 +325,14 @@ export async function runTick(profileId, opts = {}) {
   state.wallet = wal.json || { error: 'wallet read failed', stderr: wal.stderr };
   const selfAddr = (wal.json && wal.json.address) || null;
   const pwn = runTool(['citizen/tools/pawns.js', ...(selfAddr ? [selfAddr] : [])], childEnv);
-  state.pawns = pwn.json ? { total: pwn.json.totalPawnsUnderCommand, command: (pwn.json.command || []).map((c) => ({ wallet: c.wallet, pawnCount: c.pawnCount, byShip: c.byShip, location: c.location && c.location.port })) } : { error: 'pawns read failed', stderr: pwn.stderr };
+  state.pawns = pwn.json ? {
+    total: pwn.json.totalPawnsUnderCommand,
+    // the ids I can actually clock in / feed — the wage rail's starting point (was hidden before)
+    myCrewIds: (pwn.json.myCrewIds || []).slice(0, 12),
+    myPawnCount: (pwn.json.myCrewIds || []).length,
+    // location as a READABLE label (open-water hexes read "open water (q,r) [loc]", not null — the compass bug)
+    command: (pwn.json.command || []).map((c) => ({ wallet: c.wallet, pawnCount: c.pawnCount, byShip: c.byShip, location: (c.location && c.location.hex) ? locationLabel(c.location) : ((c.location && c.location.note) || null) })),
+  } : { error: 'pawns read failed', stderr: pwn.stderr };
   const gaps = runTool(['citizen/tools/scan-gaps.js', '--top', '5'], childEnv);
   state.portReport = gaps.json ? { coinUsd: gaps.json.coinUsd, actionable: gaps.json.actionable, top: (gaps.json.gaps || []).slice(0, 5).map((g) => ({ id: g.id, actionable: g.actionable })) } : { error: 'scan-gaps failed', stderr: gaps.stderr };
   const inv = runTool(['citizen/tools/inventory.js'], childEnv, 150000);

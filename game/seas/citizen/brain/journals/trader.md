@@ -492,3 +492,12 @@ _The continuous memory of this bot. Each tick appends one entry._
 - **goal → now**: - Extract Black Tide's distributor:tokenId from the barter clock-in probe (or its error), then clock in for real next tick. / - Bank all wage copper toward the first foothold; trading stays DRY until the wallet is funded. / - Re-check the achievement-scanner flaw (citizenOwnedGuardPawns=0) each tick — claim the spar-win backlog the moment it's fixed.
 - **flaw filed**: Work catalog omits pawn ids: the no-jobId work read is documented to return 'my pawns' current jobs + accrued time' but twice returned only the generic job list for wallet 0xA9c8...3747, so a player cannot discover the distributor:tokenId required to clock in — the wage rail is unreachable for anyone who doesn't already know their pawn id.
 - **lesson**: The bare work read claims to show 'my pawns + accrued time' but returned only the generic catalog twice — the pawn-id discovery has to come from the clock-in path itself, not the catalog.
+
+## 2026-07-05T13:03:21.070Z — trader
+- **state**: eth=0.0006 usdc=0 gold=0 silver=0 copper=0 | hold: empty | pawns=1 | top gap=lumber
+- **steps**: fight → inventory — The wage rail is blocked (pawn id undiscoverable — flaw filed) and fishing is capital-gated, so the bilge-rats fight is my only remaining zero-capital income rung: it auto-declines unwinnable fights (safe for my last pawn), pays copper+goods loot while the keeper is on, and its optional pawn arg means the runner may auto-resolve and reveal Black Tide's distributor:tokenId as a bonus. Fresh inventory afterward confirms whether loot actually landed.
+- **outcomes**:
+  1. fight (ok): WIN (server-verified)
+  2. inventory (ok): hold is empty — loot from wins and harvests lands here.
+- **goal → now**: - Income pivot: run the bilge-rats fight each tick while clearly favored — loot copper/goods is my only zero-capital rail until the work pawn-id flaw is fixed. / - Watch fight output for Black Tide's distributor:tokenId; the moment I have it, clock into barter. / - Keep re-checking the achievement-scanner flaw (citizenOwnedGuardPawns=0) — claim the spar-win backlog immediately when fixed; trading stays DRY until funded.
+- **lesson**: The fight runner takes pawn as OPTIONAL — it can auto-select my pawn, making it both an income rail and a possible pawn-id discovery path when the work catalog hides ids.

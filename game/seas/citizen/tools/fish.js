@@ -143,7 +143,7 @@ function parsePawn(str) {
       sellAtPortRoyal: { loc: pr.s.loc, pool: pr.s.pool, goldPerFish: Number(goldPerFishPR.toFixed(4)),
         projectedGold: Number(sellGold.toFixed(4)), projectedUsd: Number((sellGold * GOLD_USD).toFixed(4)) },
       grossMultiple: goldSpend > 0 ? Number((sellGold / goldSpend).toFixed(2)) : null,
-      theLoop: '1) sail to the OCEAN (loc 8004) → BUY fish from the ocean LP with swept-flow GOLD (skill-scaled) ; 2) sail to PORT ROYAL (loc 8003) → SELL the fish dear into the PR LP. The ocean→PR price gap (~0.1g → ~1g) is the fisher\'s wage.',
+      theLoop: '1) sail to the OCEAN fishing grounds — loc 8004, hex (8,4) [`sail.js 8 4`] → BUY fish from the ocean LP with swept-flow GOLD (skill-scaled) ; 2) sail to PORT ROYAL — loc 8003, hex (8,3) [`sail.js 8 3`] → SELL the fish dear into the PR LP. The ocean→PR price gap (~0.1g → ~1g) is the fisher\'s wage.',
       note: 'Read-only — ocean buy + PR sell quotes are LIVE on-chain. Catching = a GOLD→FISH swap at the ocean LP (presence-gated), skill-scaled. No HarvestGround/dispenser is involved (that model is superseded).',
     });
     return;
@@ -174,7 +174,7 @@ function parsePawn(str) {
       if (!execute) {
         let would;
         if (!addr) would = 'NOTHING — no crabber wallet';
-        else if (!ready) would = `NOTHING — ${auth.reason || auth.transport || 'no catch authorization'} (${auth.httpStatus || 'n/a'}). ${auth.status === 503 ? 'The crab beach ground is not deployed yet (founder-gated) OR the signer key is on the VPS.' : 'Sail to the crab beach (Bonewater Atoll, loc 2006) first.'}`;
+        else if (!ready) would = `NOTHING — ${auth.reason || auth.transport || 'no catch authorization'} (${auth.httpStatus || 'n/a'}). ${auth.status === 503 ? 'The crab beach ground / signer is unavailable on this host (signer key lives on the VPS).' : 'Sail to the crab beach — Bonewater Atoll, loc 2006, hex (2,6) [`sail.js 2 6`] — first.'}`;
         else would = `CATCH ${auth.catch.amount} CRAB for FREE at the beach ground (skill-scaled, cooldown-gated) — no gold, no gear. Trade-good progress you sell later for coin.`;
         out({
           ok: true, tool: 'fish', action: 'crab', mode: 'DRY',
@@ -183,7 +183,7 @@ function parsePawn(str) {
           catch: ready ? auth.catch : null,
           gate: { authorized: ready, serverBase: seas.BASE, detail: ready ? { ground: auth.ground, resource: auth.resource, supplyUnits: auth.supplyUnits } : { reason: auth.reason || auth.transport || 'unavailable', httpStatus: auth.httpStatus, status: auth.status } },
           free: true, executable: ready, would,
-          note: 'DRY — no tx. CRAB = a FREE server-authoritative CATCH (HarvestGround.dispense), NOT a gold buy. Zero-resource income (founder). Re-run with --execute (CITIZEN_ALLOW_LIVE=1, AT loc 2006) to dispense once the crab beach ground is live.',
+          note: 'DRY — no tx. CRAB = a FREE server-authoritative CATCH (HarvestGround.dispense), NOT a gold buy. Zero-resource income (founder). The crab beach ground is LIVE. Re-run with --execute (CITIZEN_ALLOW_LIVE=1, AT the crab beach — loc 2006, hex (2,6) [`sail.js 2 6`]) to dispense.',
         });
         return;
       }
@@ -191,7 +191,7 @@ function parsePawn(str) {
       // ── LIVE: dispense the free crab catch against the server authorization ──
       if (process.env.CITIZEN_ALLOW_LIVE !== '1') throw new Error('live disabled — set CITIZEN_ALLOW_LIVE=1 after founder approval');
       if (!chain.loadWallet()) throw new Error('no crabber wallet — run init-wallet.js + fund gas');
-      if (!ready) throw new Error(`no catch authorization: ${auth.reason || auth.transport || 'unavailable'} (status ${auth.status || 'n/a'}) — must be AT the crab beach (loc 2006) AND the crab ground must be deployed; NOT forging a catch.`);
+      if (!ready) throw new Error(`no catch authorization: ${auth.reason || auth.transport || 'unavailable'} (status ${auth.status || 'n/a'}) — must be AT the crab beach (loc 2006, hex (2,6) — sail 2 6) AND the crab ground live; NOT forging a catch.`);
       const a = auth.authorization;
       const hash = await chain.dispenseHarvest({ ground: a.ground, collection: a.collection, tokenId: a.tokenId, resource: a.resource, amount: a.amount, expiry: a.expiry, nonce: a.nonce, sig: a.sig });
       out({ ok: true, tool: 'fish', mode: 'LIVE', action: 'crab', crabber: addr, catch: auth.catch, tx: hash,
@@ -289,4 +289,4 @@ function parsePawn(str) {
   }
 
   throw new Error(`unknown action "${action}" — use: loop | catch | crab | sell. Fishing = flow→GOLD→buy-fish-from-the-ocean-LP (skill-scaled, presence-gated), then sell dear at Port Royal.`);
-})().catch((e) => { out({ ok: false, tool: 'fish', error: e.message }); process.exit(1); });
+})().catch((e) => { out({ ok: false, tool: 'fish', error: e.message || String(e), hint: 'run `node citizen/tools/fish.js loop` to see flow-supply + your WIS skill + the catch/sell plan; catch/sell take --pawn <distributor:tokenId> and are location-gated (must be at the ocean / Port Royal).' }); process.exit(1); });
