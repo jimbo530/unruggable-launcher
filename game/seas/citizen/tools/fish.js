@@ -20,17 +20,15 @@
  *                    higher WIS level sweeps more flow, so buys a larger notional per action.
  *   3) sail → PORT ROYAL : SELL the fish into the Port Royal LP (loc 8003) for the ~10x
  *                    (ocean ~0.1g/fish → Port Royal ~1g/fish). That spread is the fisher's wage.
- *   CRABBING is DIFFERENT — it is the FREE, zero-resource income path (founder 2026-07-01: "they need
- *   NOTHING to go crabbing and make coin"). Crab is a HARVEST (server-authoritative CATCH dispenser,
- *   /seas/harvest → HarvestGround.dispense), NOT a gold buy: no gold, no gear, no approval — the ground
- *   releases the server-signed amount to the pawn's owner. Live the instant the beach crab ground is
- *   deployed (config-driven, deploy/harvest-grounds.json crab entry); honest 503 until then.
+ *   CRABBING: SHELVED (founder 2026-07-06). There are NO zero-capital income rails — "no pawn should
+ *   have zero capital": pawns FIGHT to earn coin, get WATERED so capital flows, or ROW the ship for
+ *   crew flow. The free crab dispenser was retired (seed recovered, ground paused); the crab command
+ *   below returns the server's honest 503 until the founder designs the real crab flow.
  *
  *   node citizen/tools/fish.js                       # loop: ocean buy price + skill-scaled size + PR sell value (DRY)
  *   node citizen/tools/fish.js catch [--pawn d:t]    # DRY plan: flow→GOLD→buy fish at the ocean LP (skill-scaled)
  *   node citizen/tools/fish.js catch --execute       # LIVE buy (needs CITIZEN_ALLOW_LIVE=1, gold on hand, AT loc 8004)
- *   node citizen/tools/fish.js crab  [--pawn d:t]    # DRY: FREE catch at the beach crab ground (no gold; 503 until deployed)
- *   node citizen/tools/fish.js crab  --execute       # LIVE FREE dispense (needs CITIZEN_ALLOW_LIVE=1, AT loc 2006, crab ground live)
+ *   node citizen/tools/fish.js crab  [--pawn d:t]    # SHELVED by founder design — returns the server's honest 503
  *   node citizen/tools/fish.js sell  [--usd N]       # sell caught FISH dear at Port Royal (real buyer)
  *   node citizen/tools/fish.js sell  --execute       # LIVE sell (needs CITIZEN_ALLOW_LIVE=1 AND AT loc 8003)
  */
