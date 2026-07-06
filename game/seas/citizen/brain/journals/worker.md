@@ -576,3 +576,24 @@ _The continuous memory of this bot. Each tick appends one entry._
 - **noted**: SALT (48 units) is my largest held good — first sell candidate; quote SALT→COPPER before any sell, and only sell one good at a time to keep the rest of the hold as savings.
 - **goal → now**: Verify my pawn is clocked into haul and wages accrue; if not clocked in, clock in next tick with work {jobId:'haul', pawn:'0x4ECe491951B759363bCBAF75389a202Fe0584080:0', mode:1}. In parallel: quote SALT→copper, then sell a small lot at a fair price to start banking copper toward first gold.
 - **lesson**: When an execute step returns an ambiguous 'ok' with no receipt details, verify it with the matching free read next tick before repeating it — a duplicate clock-in tx would burn gas on a rail that may already be earning.
+
+## 2026-07-06T13:49:26.737Z — worker
+- **state**: eth=0.000598480028250097 usdc=0 gold=0 silver=0 copper=97 | hold: SALT:48 RATIONS:29 APPLE:19 HONEY:14 COD:11 ALE:9 | pawns=1 | top gap=lumber
+- **steps**: work → quote → wait — Two work reads in a row returned only the catalog blurb and never my pawn's job status, so read-only verification of the ambiguous clock-in is impossible — one deliberate clock-in with my verbatim pawn id (tiny Base gas, well within cushion) settles it with a real receipt. The quote retries pricing a small 10-SALT lot toward my first sell after last tick's exit-1 failure.
+- **outcomes**:
+  1. work (ok): work
+  2. quote (exit 1): quote
+- **noted**: work {} (no jobId) returns ONLY the job catalog — it never shows whether my pawn is clocked in or its accrued time; clock-in success can only be confirmed by the clock-in call's own receipt.
+- **goal → now**: Confirm this tick's haul clock-in receipt (jobId=haul, pawn 0x4ECe...4080:0, mode 1) — do NOT re-clock again after this attempt. In parallel: get a working SALT→COPPER quote for a 10-unit lot, then sell that small lot at a fair price to start banking copper toward first gold. If quote fails exit 1 again, file a flaw with the exact error and try quoting RATIONS instead.
+- **flaw filed**: work read hides pawn job status: work {} at Port Royal returns only the job catalog + clock-in usage line — it never reports whether a given pawn is clocked in, on which job, or accrued time, so a player cannot verify a clock-in without spending gas on a duplicate attempt.
+- **lesson**: When the verifying read structurally can't disclose the state I need (work {} never shows my pawn's job or accrued time), one capped re-execute with a recorded receipt beats re-reading the same blind catalog every tick — retry once, then treat further ambiguity as a flaw, not a loop.
+
+## 2026-07-06T14:12:51.990Z — worker
+- **state**: eth=0.00059761056048186 usdc=0 gold=0 silver=0 copper=97 | hold: SALT:48 RATIONS:29 APPLE:19 HONEY:14 COD:11 ALE:9 | pawns=1 | top gap=lumber
+- **steps**: quote → quote → quote — Honoring my do-not-reclock rule after last tick's capped haul attempt, this tick isolates the quote rail failure by varying one leg at a time: same route retried (SALT→COPPER), different tokenIn (RATIONS→COPPER), different tokenOut (SALT→GOLD). Whichever quote returns a price becomes my first sell candidate toward banking copper.
+- **outcomes**:
+  1. quote (exit 1): quote
+- **noted**: The action menu has NO generic goods-sell tool: quote is read-only, trade only BUYS gap goods, and fish sell only sells caught fish — so even a successful SALT quote cannot be converted to copper until a sell rail is exposed. Verify a sell path exists before treating any held good as liquid.
+- **goal → now**: Diagnose the quote rail: find any working route among SALT→COPPER, RATIONS→COPPER, SALT→GOLD (10-unit lots). If a quote lands, next tick find/confirm the SELL rail before acting on it — no sell tool is currently in the menu. Haul clock-in is parked (attempted twice, no readable receipt); do not re-clock unless a read can confirm status.
+- **flaw filed**: quote rail exits 1 with no error text: quote {tokenIn:'SALT', tokenOut:'COPPER', amount:10} failed exit 1 on two consecutive ticks at Port Royal with no diagnostic output, so a player cannot price held goods or tell a broken route from a bad symbol — and the menu exposes no goods-sell tool to act on a quote anyway.
+- **lesson**: When one tool fails exit-1 twice on identical args, stop retrying verbatim — vary exactly one argument per attempt (tokenIn, then tokenOut) to isolate which leg of the route is unsupported instead of which retry got lucky.

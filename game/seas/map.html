@@ -79,6 +79,10 @@
     .port-chip .lbl{ font-size:10px; color:var(--ink); background:rgba(8,14,20,.74); padding:1px 6px; border-radius:6px; white-space:nowrap; }
 
     .ship-marker{ position:absolute; transform:translate(-50%,-60%); z-index:4; font-size:24px; filter:drop-shadow(0 2px 4px rgba(0,0,0,.85)); pointer-events:none; transition:left .4s linear, top .4s linear; }
+    .party-marker{ position:absolute; transform:translate(-14%,10%); z-index:5; font-size:19px; filter:drop-shadow(0 2px 4px rgba(0,0,0,.9)); pointer-events:none; transition:left .4s linear, top .4s linear; }
+    .party-marker .plbl{ position:absolute; left:50%; top:100%; transform:translateX(-50%); font-size:9px; color:#eafff0; background:rgba(8,14,20,.78); padding:0 5px; border-radius:5px; white-space:nowrap; }
+    .courseline.foot{ stroke:#7fe0a0; stroke-dasharray:3 5; opacity:.85; }
+    .hexsel.foot{ fill:rgba(127,224,160,.10); stroke:#7fe0a0; }
 
     .side{ display:flex; flex-direction:column; gap:14px; }
     .panel{ background:linear-gradient(#1a2735,#101820); border:1px solid #2c4257; border-radius:14px; padding:15px; }
@@ -127,9 +131,9 @@
   </div>
 
   <p class="blurb">
-    The open sea is yours to chart. Your ship <b>free-floats</b> — tap <b>any hex</b> (open water or an island) to plot a course.
-    Each hex is <b>8 hours</b> of sailing. The further from calm <b>Crown Waters</b>, the more <b>dangerous</b> the crossing —
-    and <b>raiders</b> work the deep water. Pick your hex, weigh the risk, and <b>set sail.</b>
+    The open sea is yours to chart. Your ship <b>free-floats</b> — tap a <b>sea hex</b> to plot a course (<b>8 hours</b> each).
+    The <b>walking party</b> 🥾 roams the land — tap any <b>reachable land hex</b> to march there on foot (<b>12 hours</b> each, slower than sailing).
+    Land is where the beaches, caves, and camps live — and the only way to reach them is to <b>walk</b>. Pick a hex, weigh the time, and set out.
   </p>
 
   <div class="bar">
@@ -158,7 +162,8 @@
     <span><span class="sw" style="background:rgba(230,180,34,.4)"></span> choppy</span>
     <span><span class="sw" style="background:rgba(200,60,50,.5)"></span> perilous</span>
     <span><span class="dotk" style="background:#e6b422"></span> your ship's hex</span>
-    <span>tap any hex to chart a course (8h each)</span>
+    <span>🚢 ship · 🥾 walking party</span>
+    <span>tap a sea hex to sail (8h) · a land hex to walk (12h)</span>
   </div>
 
   <div class="foot">super-early beta 🏴‍☠️ — sail speed is a flat 10 for now; later it reads your ship's locked-sail depth. Hex world is local-only (no chain, no network). 1 hex = 8 game-hours.</div>
@@ -195,6 +200,14 @@
     let GCAVE = null;
     try { GCAVE = await import("../lib/goblin-cave.js"); }
     catch (e){ console.warn("[map] goblin-cave not loaded — cave site hidden:", e && e.message); }
+    // PARTY LAND FREE-ROAM — the walking party (crew/index.html sts_party + sts_party_leader) roams
+    // any reachable LAND hex; travel just takes time (12h/hex, slower than sailing). This is the ONLY
+    // way to reach land content (goblin cave now; beaches/mines/mills later). land-journey.js holds
+    // the PURE walk math (reachability + clock); map.html wires it to location.js's shared hex map.
+    // Non-blocking: if it fails to load the party marker/walk panel just don't draw (map unchanged).
+    let LAND = null;
+    try { LAND = await import("./land-journey.js"); }
+    catch (e){ console.warn("[map] land-journey not loaded — party walk disabled:", e && e.message); }
     const toast = (msg)=>{ const t=document.getElementById("toast"); t.textContent=msg; t.classList.add("show"); clearTimeout(t._h); t._h=setTimeout(()=>t.classList.remove("show"),2800); };
 
     // ── SERVER cooldown skip (the REAL Chrono Orb spend) ──────────────────────────────────────────
@@ -246,9 +259,9 @@
 
     function runMap(LOC){
       const {
-        PORTS, ROUTES, SHIPS, routeBetween, getLocation, getHex, isAtSea, journeyOf,
+        PORTS, ROUTES, SHIPS, routeBetween, getLocation, getHex, setHex, isAtSea, journeyOf,
         canSetSail, setSail, tryArrive, hexToPixel, hexPolygonPoints, pixelToHex,
-        hexDanger, WORLD_W, WORLD_H, GRID_COLS, GRID_ROWS, EIGHT_HOURS, DEFAULT_SAIL_SPEED,
+        hexDanger, getTerrain, WORLD_W, WORLD_H, GRID_COLS, GRID_ROWS, EIGHT_HOURS, DEFAULT_SAIL_SPEED, MS_PER_HEX,
       } = LOC;
 
       // Sail speed: flat default for beta. TODO: read the active ship's locked-sail depth.
@@ -301,6 +314,135 @@
         return activeShip();
       }
       function isCaveHex(h){ return !!(GCAVE && GCAVE.CAVE && h && h.q===GCAVE.CAVE.hex.q && h.r===GCAVE.CAVE.hex.r); }
+
+      // ═══════════════════════════════════════════════════════════════════════════════════════
+      //  PARTY LAND FREE-ROAM — the walking party as its OWN entity on the shared hex map.
+      //  The party (crew/index.html sts_party + sts_party_leader) roams reachable LAND hexes; the
+      //  walk is a TIME-LOCK exactly like a ship voyage, but slower (12h/hex vs 8h/hex). It's the
+      //  ONLY way to reach land content — the goblin cave today, beaches/mines/mills later.
+      //  land-journey.js is the pure math; here we bind it to location.js's hex map + a small
+      //  party-journey store (sts_party_journey), mirroring the ship journey code paths.
+      // ═══════════════════════════════════════════════════════════════════════════════════════
+      const PARTY = LAND ? LAND.PARTY_ENTITY : "party";     // the party's entity id in the shared hex map
+      const LS_PARTY_J = "sts_party_journey";               // the party's foot journey (own store; ships use sts_journeys)
+      const WALK_SPEED = 1;                                 // flat for beta (no mounts yet); land-journey scales by MS_PER_HEX
+
+      // terrain for a hex — location.js getTerrain is the walkability source (same model the
+      // travel-time engine uses: a port hex + its neighbours are that island's land; else 'sea').
+      function terrainOf(q, r){ return (typeof getTerrain === "function") ? getTerrain(q, r) : "sea"; }
+      // the party's current LAND hex (defaults to Port Royal's hex via location.js's hub-seed fallback).
+      function partyHex(){ return getHex(PARTY); }
+
+      // ── PARTY FOOT-JOURNEY store (own time-lock; structurally the same as a ship journey) ──
+      function readPartyJourney(){
+        const raw = localStorage.getItem(LS_PARTY_J);
+        if (raw == null) return null;
+        try { return JSON.parse(raw); }
+        catch(e){ console.warn("[map] bad party-journey JSON, clearing:", e); localStorage.removeItem(LS_PARTY_J); return null; }
+      }
+      /** The party's active walk → {fromHex,toHex,departAt,arriveAt,distance,hours,secsLeft} | null (null once past ETA). */
+      function partyJourney(){
+        const j = readPartyJourney();
+        if (!j) return null;
+        const now = Date.now();
+        if (now >= j.arriveAt) return null;   // arrived (or past) — tryPartyArrive() finalizes it
+        return { ...j, secsLeft: Math.max(0, Math.ceil((j.arriveAt - now) / 1000)) };
+      }
+      /** True while the party is mid-walk (locked: can't start another walk / board a ship). */
+      function partyIsWalking(){ const j = readPartyJourney(); return !!(j && Date.now() < j.arriveAt); }
+      /** Finalize a due walk: move the party's hex to the destination, clear the journey. Returns true if it landed. */
+      function tryPartyArrive(){
+        const j = readPartyJourney();
+        if (!j) return false;
+        if (Date.now() < j.arriveAt) return false;          // still walking — locked
+        setHex(PARTY, j.toHex.q, j.toHex.r);
+        localStorage.removeItem(LS_PARTY_J);
+        return true;
+      }
+      /** Start a walk to a land hex (reachability already checked by canStartWalk). Writes the time-lock. */
+      function startWalk(toHex){
+        const from = partyHex();
+        const plan = LAND.planWalk(from, toHex, { msPerHex: MS_PER_HEX || 5000, speed: WALK_SPEED });
+        const departAt = Date.now();
+        const j = { fromHex: from, toHex: { q:toHex.q, r:toHex.r }, departAt, arriveAt: departAt + plan.ms, distance: plan.distance, hours: plan.hours };
+        localStorage.setItem(LS_PARTY_J, JSON.stringify(j));
+        return j;
+      }
+      /** Can the party walk to `toHex` right now? Combines the walk math with the mid-walk lock. */
+      function canStartWalk(toHex){
+        if (!LAND) return { ok:false, reason:"walking isn't available" };
+        if (partyIsWalking()) return { ok:false, reason:"the party is already on the march" };
+        return LAND.canWalk(partyHex(), toHex, terrainOf, { cols:GRID_COLS, rows:GRID_ROWS });
+      }
+      function isLandHex(h){ return !!(LAND && LAND.isLandTerrain(terrainOf(h.q, h.r))); }
+      // a party-aware label for a hex: a port/KNOWN-content name, else a plain land/water coord. Uses
+      // knownContentAt so an undiscovered rumor-gated place stays anonymous ("the wilds") on labels.
+      function landLabel(h){
+        const pid = portIdAt(h);
+        if (pid) return portName(pid);
+        const c = knownContentAt(h);
+        if (c) return c.label;
+        return isLandHex(h) ? `the wilds (${h.q},${h.r})` : `open water (${h.q},${h.r})`;
+      }
+
+      // ── RUMOR GATING — destinations are LEARNED from NPCs (onboarding/locals.js), not offered.
+      //   locals.js writes sts_rumors = { key: firstHeardTs } when a local tells you about a place.
+      //   The map READS that flag to decide what to REVEAL. Exploration never dead-ends: walking to
+      //   a rumor-gated hex without the rumor DISCOVERS it (records the flag), so the world is never
+      //   locked away — a rumor is a shortcut to knowing, not a wall. Same key/shape as locals.js so
+      //   the two share one source of truth (the map doesn't load the locals UI — just the flag).
+      const RUMOR_KEY = "sts_rumors";
+      function heardRumors(){ try { return JSON.parse(localStorage.getItem(RUMOR_KEY) || "{}") || {}; } catch(e){ console.warn("[map] bad sts_rumors, resetting:", e); return {}; } }
+      function rumorHeard(key){ return !!heardRumors()[key]; }
+      /** Record a rumor as heard (first time only). Returns true if NEW. Used for walk-there discovery. */
+      function learnRumor(key){
+        const r = heardRumors();
+        if (r[key]) return false;
+        r[key] = Date.now();
+        localStorage.setItem(RUMOR_KEY, JSON.stringify(r));
+        if (window.SeasRumors && typeof window.SeasRumors.hear === "function"){ try { window.SeasRumors.hear(key); } catch(e){ /* map's write already stands */ } }
+        return true;
+      }
+
+      // ── LAND CONTENT REGISTRY — what the party finds when it arrives on a hex ───────────────
+      // Add a hex→content entry to plug in future land content (beach/crab, mines, mills, campaign
+      // lands) WITHOUT new code: just push a row here. `enter` is the on-arrival action link
+      // (a launcher/page); omit it for a lore-only stop. `requiresRumor` (a sts_rumors key) GATES the
+      // hex's marker/label until that rumor is heard — but walking there anyway DISCOVERS it (learns
+      // the rumor), so content is revealed, never locked out. Ports resolve via PORTS; the goblin cave
+      // resolves via GCAVE.CAVE (gated on the "goblin" rumor). contentAt() layers registry over those.
+      const LAND_CONTENT = [
+        // { q, r, label, blurb, enter:{ text, href }, requiresRumor:"crab" }  ← future content plugs in here
+      ];
+      /** Resolve what's on a land hex → { label, blurb, enter?, requiresRumor? } | null (open wilds). */
+      function contentAt(h){
+        const pid = portIdAt(h);
+        if (pid){
+          const p = PORTS[pid];
+          return { label: p.name, blurb: `The harbour town of ${p.name}. Its market, jobs, and quays are here.`, enter: { text: "Enter the port", href: "../" } };
+        }
+        if (isCaveHex(h) && GCAVE && GCAVE.CAVE){
+          return { label: GCAVE.CAVE.name, blurb: GCAVE.CAVE.blurb, enter: { text: "Enter the goblin cave", href: "battle-grid/goblin.html" }, requiresRumor: "goblin" };
+        }
+        const reg = LAND_CONTENT.find(c => c.q===h.q && c.r===h.r);
+        if (reg) return { label: reg.label, blurb: reg.blurb, enter: reg.enter || null, requiresRumor: reg.requiresRumor || null };
+        return null;   // open wilds — nothing built here yet
+      }
+      /** Is this hex's content KNOWN to the player? (No rumor gate, or its rumor has been heard.) A hex
+       *  the party is STANDING on always counts as known — arriving IS discovery. */
+      function contentKnown(h, c){
+        c = c || contentAt(h);
+        if (!c || !c.requiresRumor) return true;
+        const pHex = LAND ? partyHex() : null;
+        if (pHex && pHex.q===h.q && pHex.r===h.r) return true;   // on the hex = discovered
+        return rumorHeard(c.requiresRumor);
+      }
+      /** contentAt, but only if the player KNOWS it — a rumor-gated hex reads as anonymous wilds until
+       *  the rumor is heard (or the party stands on it). Used for the pre-arrival walk/label copy so a
+       *  place isn't named before it's discovered. */
+      function knownContentAt(h){ const c = contentAt(h); return contentKnown(h, c) ? c : null; }
+      /** On ARRIVAL at a rumor-gated hex, learn its rumor (discovery — exploration never dead-ends). */
+      function discoverContentAt(h){ const c = contentAt(h); if (c && c.requiresRumor) return learnRumor(c.requiresRumor); return false; }
 
       // ── state ───────────────────────────────────────────────────────────────────────────
       let selected = null;   // selected destination {q,r}
@@ -363,15 +505,19 @@
         }
       }
 
-      // ── goblin cave chip (HTML overlay on the PR-island land hex) — built once ─────────────
+      // ── goblin cave chip (HTML overlay on the PR-island land hex) — rebuilt on rumor change ──
+      // GATED: the cave marker/label only appears once the "goblin" rumor is heard (One-Ear Tam in
+      // the tavern) — OR the party has walked onto the cave hex and discovered it. Before that the hex
+      // is just anonymous land (walking there is still allowed; arriving reveals + learns the cave).
       function buildCaveChips(){
         const chart = document.getElementById("chart");
         chart.querySelectorAll(".cave-chip").forEach(n=>n.remove());
         if (!GCAVE || !GCAVE.CAVE) return;
+        if (!contentKnown(GCAVE.CAVE.hex)) return;   // rumor not heard + party not there → hidden
         const c = hexToPixel({ q: GCAVE.CAVE.hex.q, r: GCAVE.CAVE.hex.r });
         const chip = document.createElement("div");
         chip.className = "cave-chip";
-        chip.title = GCAVE.CAVE.name + " — tap to enter";
+        chip.title = GCAVE.CAVE.name + " — march the party here to enter";
         // inline-styled (no CSS edit needed): anchors to #chart like the port chips do.
         chip.style.cssText = "position:absolute;transform:translate(-50%,-50%);z-index:6;pointer-events:none;"
           + "left:"+pctX(c.x)+"%;top:"+pctY(c.y)+"%;font-size:12px;text-align:center;color:#ffd9a8;text-shadow:0 1px 3px #000;";
@@ -401,12 +547,28 @@
           const c = hexToPixel(curHex);
           h += `<polygon class="hexcur ${atSea?"":"hexcur-anim"}" points="${hexPolygonPoints(c.x,c.y)}"></polygon>`;
         }
-        if (!atSea && selected){
+        // A LAND selection draws a GREEN foot-course from the PARTY's hex; a SEA selection draws the
+        // WHITE ship course from the ship's hex (only when the ship is free to sail). The two modes
+        // are visually distinct so the player reads which crew is about to move.
+        if (selected){
+          // A selection the PARTY can reach on foot → GREEN foot-course from the party's hex. Open sea
+          // (or a port the party can't reach on foot) → the WHITE ship course. Mirrors renderSide's route.
+          const pHex = LAND ? partyHex() : null;
+          const onSel = pHex && pHex.q===selected.q && pHex.r===selected.r;
+          const footSel = !!(LAND && !onSel && isLandHex(selected) && (portIdAt(selected) ? canStartWalk(selected).ok : true));
           const c = hexToPixel(selected);
-          h += `<polygon class="hexsel" points="${hexPolygonPoints(c.x,c.y)}"></polygon>`;
-          if (curHex){
-            const a = hexToPixel(curHex);
-            cs = `<line class="courseline" x1="${a.x}" y1="${a.y}" x2="${c.x}" y2="${c.y}"></line>`;
+          if (footSel){
+            h += `<polygon class="hexsel foot" points="${hexPolygonPoints(c.x,c.y)}"></polygon>`;
+            const a = hexToPixel(pHex);
+            cs = `<line class="courseline foot" x1="${a.x}" y1="${a.y}" x2="${c.x}" y2="${c.y}"></line>`;
+          } else if (onSel){
+            /* party standing on the selected hex → no course line (arrival panel) */
+          } else if (!atSea){
+            h += `<polygon class="hexsel" points="${hexPolygonPoints(c.x,c.y)}"></polygon>`;
+            if (curHex){
+              const a = hexToPixel(curHex);
+              cs = `<line class="courseline" x1="${a.x}" y1="${a.y}" x2="${c.x}" y2="${c.y}"></line>`;
+            }
           }
         }
         hl.innerHTML = h; course.innerHTML = cs;
@@ -434,18 +596,122 @@
         chart.appendChild(mark);
       }
 
+      // ── PARTY marker (🥾) — drifts along the foot-course while walking; stands on the hex else ──
+      function renderPartyMarker(){
+        const chart = document.getElementById("chart");
+        chart.querySelectorAll(".party-marker").forEach(n=>n.remove());
+        if (!LAND) return;   // walking not available → no party marker
+        const mark = document.createElement("div");
+        mark.className = "party-marker";
+        let px, py;
+        const j = partyJourney();
+        if (j && j.fromHex && j.toHex){
+          const a = hexToPixel(j.fromHex), b = hexToPixel(j.toHex);
+          const span = Math.max(1, j.arriveAt - j.departAt);
+          const prog = Math.min(1, Math.max(0, (Date.now() - j.departAt) / span));
+          px = a.x + (b.x-a.x)*prog; py = a.y + (b.y-a.y)*prog;
+        } else {
+          const c = hexToPixel(partyHex()); px = c.x; py = c.y;
+        }
+        mark.innerHTML = '\u{1F97E}<span class="plbl">Party</span>';   // 🥾 hiking boot = the walking crew
+        mark.style.left = pctX(px)+"%"; mark.style.top = pctY(py)+"%";
+        chart.appendChild(mark);
+      }
+
       // ── click a hex on the chart → select it (free-float to ANY hex) ──────────────────────
       document.getElementById("chart").addEventListener("click", (ev)=>{
-        if (isAtSea(activeShip())) return toast("You're at sea — wait to make port before charting a new course.");
         const rect = svg.getBoundingClientRect();
         const px = (ev.clientX - rect.left) / rect.width  * WORLD_W;
         const py = (ev.clientY - rect.top)  / rect.height * WORLD_H;
         const h = pixelToHex(px, py);
         if (h.q<0 || h.q>=GRID_COLS || h.r<0 || h.r>=GRID_ROWS) return;
-        const cur = getHex(activeShip());
-        if (h.q===cur.q && h.r===cur.r){ selected=null; renderAll(); return toast(`You're already here — ${hexLabel(h)}.`); }
+        // The party can chart a WALK even while the ship is at sea (they're independent). Only the
+        // SHIP's chart is blocked mid-voyage. A sea hex OR a port (both sail destinations) is blocked
+        // while at sea; a non-port land hex (a walk destination) is always selectable.
+        const walkDest = LAND && isLandHex(h) && !portIdAt(h);
+        if (isAtSea(activeShip()) && !walkDest)
+          return toast("Your ship is at sea — wait to make port before charting a new sea course.");
         selected = h; renderAll();
       });
+
+      // ── enter the goblin cave (arms the deck fight) — shared by the arrival panel ───────────
+      // Runs the EXACT existing bridge (weekly cooldown stamp → guaranteed goblin group → deck).
+      function enterGoblinCave(){
+        const pawnId = caveLeaderId();
+        if (!ENC){ return toast("The deck bridge isn't aboard — can't enter the cave."); }
+        let run, enc;
+        try {
+          run = GCAVE.enterCave(pawnId);          // stamps the weekly cooldown (the run consumes the slot)
+          enc = GCAVE.rollCaveEncounter();        // guaranteed small goblin pack via area-encounters
+        } catch(e){ console.warn("[map] enter cave failed:", e); return toast("Can't enter: " + e.message); }
+        localStorage.setItem("sts_goblincave_active", JSON.stringify({ pawnId, runId: run.runId }));
+        try {
+          ENC.clearEncounter();
+          const url = ENC.armVoyageEncounterGroup(enc, { returnTo: location.pathname, battleUrl: BATTLE_URL });
+          localStorage.setItem(LS_MODE, "1");
+          window.location.href = url;
+        } catch(e){ console.warn("[map] arm cave encounter failed:", e); toast("Couldn't open the deck: " + e.message); }
+      }
+
+      // ── the goblin-cave ENTRY panel (cooldown + Chrono-Orb skip + Enter) — shown when the party
+      //    is STANDING on the cave hex. Returns the panel HTML; wireCavePanel() binds its buttons.
+      function caveEntryPanelHTML(){
+        const CV = GCAVE.CAVE;
+        const pawnId = caveLeaderId();
+        const can = GCAVE.canEnter(pawnId);
+        const readyLbl = GCAVE.readyInLabel(pawnId);
+        const skip = (typeof GCAVE.canSkipCooldown === "function") ? GCAVE.canSkipCooldown(pawnId) : { ok:false, orbs:0 };
+        const enterBtn = can.ok
+          ? `<button class="btn warn" id="enterCave">\u{1F5E1}️ Enter the cave</button>`
+          : `<div class="reason">\u{23F3} This crew is spent — ${readyLbl}.</div>`
+            + (skip.ok ? `<button class="btn" id="skipCaveCd" style="margin-top:8px">\u{231B} Skip cooldown — 1 Chrono Orb <span style="opacity:.7">(${skip.orbs} held)</span></button>` : "");
+        return `
+          <div class="panel">
+            <h3>\u{1F573}️ ${CV.name}</h3>
+            <div class="meta" style="color:#f0e6cf;font-size:13px;line-height:1.55">${CV.blurb}</div>
+            <div class="foe" style="margin-top:8px">\u{1F47A} Cave Goblins <span style="font-size:13px;color:#f0c9bb">×2–4</span></div>
+            <div class="meta" style="margin-top:6px;color:var(--muted);font-size:12px">
+              The party is at the cave mouth. One run per crew per <b>week</b> — win and you loot the den.
+            </div>
+            ${enterBtn}
+          </div>`;
+      }
+      function wireCavePanel(){
+        const pawnId = caveLeaderId();
+        const sk = document.getElementById("skipCaveCd");
+        if (sk) sk.addEventListener("click", async ()=>{
+          sk.disabled = true;
+          const r = await serverSkipCooldown("goblin-cave");
+          if (!r.ok){ sk.disabled = false; return toast("Can't skip: " + r.reason); }
+          try { GCAVE.spendChronoOrbToSkip(pawnId); } catch(e){ console.warn("[map] local mirror after server skip:", e); }
+          toast("\u{231B} Chrono Orb spent — cooldown cleared. Run + win the cave for loot.");
+          renderAll();
+        });
+        const eb = document.getElementById("enterCave");
+        if (eb) eb.addEventListener("click", enterGoblinCave);
+      }
+
+      // ── the PARTY WALK panel: a live foot-journey clock (mirrors the ship "Underway" panel) ──
+      function partyWalkPanelHTML(){
+        const j = partyJourney();
+        if (!j) return "";
+        const destLbl = landLabel(j.toHex);
+        const origLbl = landLabel(j.fromHex);
+        return `
+          <div class="journey" id="partyJourneyPanel" style="background:linear-gradient(#183a28,#0e2418);border-color:#2e6b45">
+            <h3 style="color:#7fe0a0">\u{1F97E} On the march</h3>
+            <div class="leg">${origLbl} → <b>${destLbl}</b></div>
+            <div class="meta" style="color:var(--muted);font-size:12px;margin:6px 0">${j.distance} hex on foot · ${j.hours}h march <span style="color:var(--muted)">(${j.distance}×${LAND ? LAND.WALK_HOURS_PER_HEX : 12}h)</span></div>
+            <div class="eta" id="walkClock" style="color:#7fe0a0">—:—</div>
+            <div class="etalbl" id="walkLbl">estimated arrival on foot</div>
+            <button class="btn" id="walkArriveBtn" disabled>\u{1F3C1} Arrive on foot</button>
+          </div>`;
+      }
+      function wirePartyWalkPanel(){
+        const btn = document.getElementById("walkArriveBtn");
+        if (btn) btn.addEventListener("click", doWalkArrive);
+        updateWalkUI();
+      }
 
       // ── side panel: chart course / journey / raid ─────────────────────────────────────────
       function renderSide(curHex, atSea){
@@ -532,12 +798,29 @@
           return;
         }
 
-        // 2) at sea → journey status
-        if (atSea){
+        // 1c) PARTY ON THE MARCH — the walking party's live foot-journey clock. Shown whenever the
+        //     party is walking (independent of the ship); if the ship is ALSO at sea its panel stacks
+        //     below. The party arrives on foot via its own poll (walkPoll), same as the ship.
+        const walking = partyIsWalking();
+        // Selection routing: a hex the PARTY can march to (land + a clear straight foot-path) opens the
+        // WALK chart (branch 2b), which takes priority over the ship's at-sea panel since the party moves
+        // independently of the ship. A PORT the party can walk to shows BOTH a walk AND a sail option (it's
+        // a valid destination for either crew). Everything else (open sea, or a port the party can't reach
+        // on foot) is a SHIP destination (branch 2c). The party's OWN hex opens its arrival panel.
+        const pStandingOnSel = !!(selected && LAND && (()=>{ const p=partyHex(); return p.q===selected.q && p.r===selected.r; })());
+        const walkReachable = !!(selected && LAND && !walking && !pStandingOnSel && canStartWalk(selected).ok);
+        // route to the walk panel when: the party stands on the selected hex (arrival), OR it's a
+        // non-port land hex the party can reach, OR it's a port the party can reach (walk+sail panel).
+        const walkableSel = !!(selected && LAND && (pStandingOnSel || (isLandHex(selected) && (walkReachable || !portIdAt(selected)))));
+        const landChart = !!(walkableSel && !walking);
+
+        // 2) at sea → journey status (stack the party-walk panel above it if also walking).
+        //    Skipped when charting a walk so the land selection can render its own panel.
+        if (atSea && !landChart){
           const j = journeyOf(activeShip());
           const dest = j ? (j.to ? portName(j.to) : hexLabel(j.toHex)) : "—";
           const orig = j ? (j.from ? portName(j.from) : hexLabel(j.fromHex)) : "—";
-          side.innerHTML = `
+          side.innerHTML = (walking ? partyWalkPanelHTML() : "") + `
             <div class="journey" id="journeyPanel">
               <h3>⛵ Underway</h3>
               <div class="leg">${orig} → <b>${dest}</b></div>
@@ -547,79 +830,101 @@
               <button class="btn" id="arriveBtn" disabled>⚓ Arrive</button>
             </div>`;
           document.getElementById("arriveBtn").addEventListener("click", doArrive);
+          if (walking) wirePartyWalkPanel();
           updateVoyageUI();   // fill the clock immediately; the 1s poll keeps it live
+          return;
+        }
+
+        // 2·party) The party is on the march and the ship is in port → the walk panel owns the side.
+        if (walking){
+          side.innerHTML = partyWalkPanelHTML();
+          wirePartyWalkPanel();
           return;
         }
 
         // 3) docked / floating → chart panel for the selected hex
         if (!selected){
-          side.innerHTML = `<div class="panel"><h3>Chart a course</h3>
-            <div class="empty">Tap <b style="color:var(--ink)">any hex</b> on the chart to plot a course from <b style="color:var(--ink)">${hexLabel(curHex)}</b>.
-            Each hex you cross is <b style="color:var(--ink)">8 hours</b> of sailing.</div></div>`;
+          // If the PARTY is standing ON a content hex (the goblin cave now; beaches/mines later),
+          // surface that hex's arrival panel so the player can act on foot without re-selecting it.
+          const pHex = partyHex();
+          if (LAND && isCaveHex(pHex) && GCAVE && GCAVE.CAVE){
+            side.innerHTML = caveEntryPanelHTML();
+            wireCavePanel();
+            return;
+          }
+          const here = LAND ? contentAt(pHex) : null;
+          const wildStop = (LAND && !here && !portIdAt(pHex) && isLandHex(pHex))
+            ? `<div class="panel"><h3>\u{1F97E} Open wilds</h3><div class="empty">The party stands in the open wilds at hex <b style="color:var(--ink)">${pHex.q},${pHex.r}</b>. Nothing is built here yet — tap a land hex to march on, or a sea hex to sail.</div></div>`
+            : "";
+          side.innerHTML = wildStop + `<div class="panel"><h3>Chart a course</h3>
+            <div class="empty">Tap <b style="color:var(--ink)">any hex</b> on the chart. A sea hex plots a <b style="color:var(--ink)">ship course</b> (8h/hex); a reachable land hex plots a <b style="color:var(--ink)">walk</b> for the party (12h/hex).</div></div>`;
           return;
         }
 
-        // 2b) GOBLIN CAVE — the selected hex is the cave site. A foot-reachable PVE dungeon entry on
-        //     the Port Royal island. "Visiting" it = ENTERING the goblin fight, run through the EXISTING
-        //     encounter→battle bridge (same path as a sea raid). Weekly per-pawn cooldown gates re-entry.
-        if (isCaveHex(selected)){
-          const CV = GCAVE.CAVE;
-          const pawnId = caveLeaderId();
-          const can = GCAVE.canEnter(pawnId);
-          const readyLbl = GCAVE.readyInLabel(pawnId);
-          // CHRONO ORB skip — shown ONLY when the pawn is on cooldown AND the player holds an orb. The
-          // game-layer mirror (canSkipCooldown) gates the BUTTON; the SERVER is still the authority at
-          // fight-entry (issue-seed re-checks the server cooldown) + on the real on-chain orb debit.
-          const skip = (typeof GCAVE.canSkipCooldown === "function") ? GCAVE.canSkipCooldown(pawnId) : { ok:false, orbs:0 };
-          const enterBtn = can.ok
-            ? `<button class="btn warn" id="enterCave">\u{1F5E1}️ Enter the cave</button>`
-            : `<div class="reason">\u{23F3} This crew is spent — ${readyLbl}.</div>`
-              + (skip.ok ? `<button class="btn" id="skipCaveCd" style="margin-top:8px">\u{231B} Skip cooldown — 1 Chrono Orb <span style="opacity:.7">(${skip.orbs} held)</span></button>` : "");
+        // 2b) WALKABLE HEX SELECTED → the party can WALK there (the ONLY way to reach land content).
+        //     Ports are excluded (they're sail destinations) unless the party is standing on one. If
+        //     the party is already STANDING on the hex, show its arrival panel (cave/content) instead
+        //     of a walk. Otherwise plot a foot-course (mirrors the ship "Set a course" panel).
+        if (walkableSel){
+          const pHex = partyHex();
+          const partyHere = selected.q===pHex.q && selected.r===pHex.r;
+
+          // party already here → arrival action for this hex
+          if (partyHere){
+            if (isCaveHex(selected) && GCAVE && GCAVE.CAVE){
+              side.innerHTML = caveEntryPanelHTML(); wireCavePanel(); return;
+            }
+            const c = contentAt(selected);
+            const portHere = portIdAt(selected);
+            const enter = (c && c.enter && !portHere)   // ports have their own "Enter the port" via the app; keep the map clean
+              ? `<a class="btn" style="display:block;text-align:center;text-decoration:none" href="${c.enter.href}">${c.enter.text}</a>` : "";
+            side.innerHTML = `
+              <div class="panel">
+                <h3>\u{1F97E} ${c ? c.label : "Open wilds"}</h3>
+                <div class="meta" style="color:#f0e6cf;font-size:13px;line-height:1.55">${c ? c.blurb : `The party stands in the open wilds at hex <b>${selected.q},${selected.r}</b>. Nothing is built here yet.`}</div>
+                ${enter}
+              </div>`;
+            return;
+          }
+
+          // plot a WALK to this land hex. Use KNOWN content only — a rumor-gated place (e.g. the goblin
+          // cave you haven't heard of) reads as anonymous "Open Wilds" until you discover it by arriving.
+          const plan = LAND.planWalk(pHex, selected, { msPerHex: MS_PER_HEX || 5000, speed: WALK_SPEED });
+          const walkOk = canStartWalk(selected);
+          const c = knownContentAt(selected);
+          const destLbl = c ? c.label : "Open Wilds";
+          let walkAction;
+          if (walkOk.ok) walkAction = `<button class="btn" id="walkBtn" style="background:#2a5a3f;border-color:#7fe0a0">\u{1F97E} Walk here — ${plan.distance} hex · ${plan.hours}h</button>`;
+          else walkAction = `<div class="reason">\u{1F512} ${walkOk.reason || "Can't walk there right now."}</div>`;
+          // If this walkable hex is ALSO a port, the SHIP can sail there too — offer both crews' moves.
+          const portId = portIdAt(selected);
+          let sailAction = "";
+          if (portId){
+            const sail = canSetSail(activeShip(), selected);
+            const route = routeBetween(getHex(activeShip()), selected);
+            if (sail.ok && route) sailAction = `<button class="btn" id="sailBtn" style="margin-top:8px">⛵ Sail the ship here — ${route.distance} hex · ${route.hours}h</button>`;
+          }
           side.innerHTML = `
             <div class="panel">
-              <h3>\u{1F573}️ ${CV.name}</h3>
-              <div class="meta" style="color:#f0e6cf;font-size:13px;line-height:1.55">${CV.blurb}</div>
-              <div class="foe" style="margin-top:8px">\u{1F47A} Cave Goblins <span style="font-size:13px;color:#f0c9bb">×2–4</span></div>
-              <div class="meta" style="margin-top:6px;color:var(--muted);font-size:12px">
-                On foot it's a <b>1-hex, 24h</b> march from the harbour (3× slower than sailing).<br>
-                One run per crew per <b>week</b>. Win and you loot the den.
+              <h3>March overland</h3>
+              <div class="pname">${destLbl}</div>
+              <div class="meta">
+                Hex <b>${selected.q},${selected.r}</b><br>
+                From <b>${landLabel(pHex)}</b><br>
+                On foot <b>${plan.distance} hex</b> · March <b>${plan.hours}h</b> <span style="color:var(--muted)">(${plan.distance}×${LAND.WALK_HOURS_PER_HEX}h — 1.5× slower than sailing)</span>
+                ${c && c.blurb ? `<br><span style="color:var(--muted)">${c.blurb}</span>` : ""}
               </div>
-              ${enterBtn}
+              ${walkAction}
+              ${sailAction}
             </div>`;
-          // Skip: spend 1 CHRONO ORB to clear the SERVER cooldown so the crew can ENTER again now. The
-          // REAL skip is the server endpoint (POST /seas/use-chrono-orb) — it verifies you OWN the pawn
-          // (on-chain) + hold >=1 orb, DEBITs 1, then clears the SERVER cooldown. The local mirror is
-          // updated ONLY on a 200, so the UI never claims a skip the server refused. The orb buys the
-          // WAIT ONLY — you still have to RUN and WIN the cave for any loot.
-          const sk = document.getElementById("skipCaveCd");
-          if (sk) sk.addEventListener("click", async ()=>{
-            sk.disabled = true;
-            const r = await serverSkipCooldown("goblin-cave");
-            if (!r.ok){ sk.disabled = false; return toast("Can't skip: " + r.reason); }
-            try { GCAVE.spendChronoOrbToSkip(pawnId); } catch(e){ console.warn("[map] local mirror after server skip:", e); } // server is authority
-            toast("\u{231B} Chrono Orb spent — cooldown cleared. Run + win the cave for loot.");
-            renderAll();
-          });
-          const eb = document.getElementById("enterCave");
-          if (eb) eb.addEventListener("click", ()=>{
-            if (!ENC){ return toast("The deck bridge isn't aboard — can't enter the cave."); }
-            let run, enc;
-            try {
-              run = GCAVE.enterCave(pawnId);          // stamps the weekly cooldown (the run consumes the slot)
-              enc = GCAVE.rollCaveEncounter();        // guaranteed small goblin pack via area-encounters
-            } catch(e){ console.warn("[map] enter cave failed:", e); return toast("Can't enter: " + e.message); }
-            // marker so the return trip can credit the win to THIS pawn/run (ctx carries only routeId).
-            localStorage.setItem("sts_goblincave_active", JSON.stringify({ pawnId, runId: run.runId }));
-            try {
-              ENC.clearEncounter();                   // wipe any stale group from a prior fight
-              const url = ENC.armVoyageEncounterGroup(enc, { returnTo: location.pathname, battleUrl: BATTLE_URL });
-              localStorage.setItem(LS_MODE, "1");
-              window.location.href = url;
-            } catch(e){ console.warn("[map] arm cave encounter failed:", e); toast("Couldn't open the deck: " + e.message); }
-          });
+          const wb = document.getElementById("walkBtn");
+          if (wb) wb.addEventListener("click", ()=>doWalk(selected));
+          const sb2 = document.getElementById("sailBtn");
+          if (sb2) sb2.addEventListener("click", ()=>doSail(selected));
           return;
         }
 
+        // 2c) SEA HEX SELECTED → chart a ship course (the original panel, unchanged behavior).
         const route = routeBetween(curHex, selected);          // {distance,danger,hours}
         const sail = canSetSail(activeShip(), selected);
         const destId = portIdAt(selected);
@@ -714,6 +1019,35 @@
         selected = null; raid = null; renderAll();
       }
 
+      // ── PARTY WALK: start a march overland (the party's foot equivalent of doSail) ──────────
+      function doWalk(destHex){
+        const check = canStartWalk(destHex);
+        if (!check.ok) return toast(check.reason || "Can't walk there right now.");
+        let j;
+        try { j = startWalk(destHex); }
+        catch(e){ console.warn("[map] startWalk failed:", e); return toast("Couldn't set out: " + e.message); }
+        selected = null;
+        const c = knownContentAt(destHex);   // don't spoil an undiscovered place's name in the toast
+        toast(`\u{1F97E} The party marches for ${c ? c.label : "the wilds"} — ${j.distance} hex on foot.`);
+        renderAll();
+      }
+      // ── PARTY ARRIVE ON FOOT (the party's equivalent of doArrive) ──────────────────────────
+      // Arriving DISCOVERS a rumor-gated hex (learns the rumor) so exploration never dead-ends.
+      function doWalkArrive(){
+        if (!tryPartyArrive()) return toast("Not there yet — the party is still on the road.");
+        onPartyArrived();
+      }
+      // shared arrival handler (used by doWalkArrive + walkPoll): discover, announce, re-render.
+      function onPartyArrived(){
+        const here = partyHex();
+        const isNew = discoverContentAt(here);        // learn the rumor if this hex was gated
+        buildCaveChips();                             // reveal a just-discovered marker immediately
+        const c = contentAt(here);                    // now known (standing on it)
+        if (c && isNew) toast(`\u{1F50D} The party discovers ${c.label}!`);
+        else toast(c ? `\u{1F97E} The party reaches ${c.label}.` : "\u{1F97E} The party reaches the wilds.");
+        selected = null; renderAll();
+      }
+
       // ── countdown + arrival poll (the lib's intended tryArrive-on-tick pattern; no daemon) ──
       function fmtETA(secs){ secs=Math.max(0,Math.floor(secs)); const m=Math.floor(secs/60),s=secs%60; return String(m).padStart(2,"0")+":"+String(s).padStart(2,"0"); }
       // Live-update the journey panel's ETA clock + drift the marker, while at sea.
@@ -740,6 +1074,26 @@
           selected = null; renderAll(); return;
         }
         if (isAtSea(ship)) updateVoyageUI();
+      }
+
+      // ── PARTY WALK: live foot-ETA clock + marker drift (mirrors updateVoyageUI) ─────────────
+      function updateWalkUI(){
+        if (!partyIsWalking()) return;
+        const j = partyJourney();
+        renderPartyMarker();   // drift the boot along the foot-course
+        const clock = document.getElementById("walkClock");
+        const lbl = document.getElementById("walkLbl");
+        const btn = document.getElementById("walkArriveBtn");
+        if (!clock || !btn) return;         // walk panel not on screen — skip
+        const left = j ? j.secsLeft : 0;
+        if (left <= 0){ clock.textContent="00:00"; clock.classList.add("arrived"); lbl.textContent="ready to arrive on foot"; btn.disabled=false; }
+        else { clock.textContent=fmtETA(left); lbl.textContent="estimated arrival on foot"; btn.disabled=true; }
+      }
+      // Persistent poll for the party: finalize a due WALK (moves the party's hex), else tick the ETA.
+      // tryPartyArrive() self-guards (false until past arriveAt), safe to call every second.
+      function walkPoll(){
+        if (tryPartyArrive()){ onPartyArrived(); return; }
+        if (partyIsWalking()) updateWalkUI();
       }
 
       // ── goblin-cave return trip: credit a WIN as a PENDING reward claim ─────────────────────
@@ -776,8 +1130,10 @@
         document.getElementById("whereAt").textContent = atSea ? "at sea" : hexLabel(curHex);
         renderHighlights(curHex, atSea);
         renderMarker(curHex, atSea);
+        renderPartyMarker();          // the walking party's boot marker (drifts while on the march)
         renderSide(curHex, atSea);
         if (atSea) updateVoyageUI();
+        if (partyIsWalking()) updateWalkUI();
       }
 
       // ── init ──────────────────────────────────────────────────────────────────────────────
@@ -788,9 +1144,11 @@
       buildCaveChips();
       checkCaveReturn();   // credit a goblin-cave win (pending claim) if we just came back from one
       renderAll();
-      // Finalize any past-due voyage from a previous session, then keep polling every second.
+      // Finalize any past-due voyage/walk from a previous session, then keep polling every second.
       voyagePoll();
+      walkPoll();
       setInterval(voyagePoll, 1000);
+      setInterval(walkPoll, 1000);
 
       // ── DEV (beta): force the Kraken break-free encounter from the deep, for QA / a demo
       // screenshot. From the console:  kraken()  — rolls a REAL deep-sea kraken group, arms the

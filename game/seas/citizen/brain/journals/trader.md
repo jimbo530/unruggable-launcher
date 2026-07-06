@@ -521,3 +521,35 @@ _The continuous memory of this bot. Each tick appends one entry._
   2. quote (exit 1): quote
 - **goal → now**: - Confirm Black Tide is clocked into barter (explicit jobId+pawn) and keep it clocked; fight bilge-rats each tick while clearly favored. / - Price the hold via quotes (SALT first) — 95c banked, 5c short of first GOLD; sell surplus only via a working route toward the first foothold. / - Re-check the achievement-scanner flaw (citizenOwnedGuardPawns=0) each tick — claim the spar backlog the moment it's fixed.
 - **lesson**: An ambiguous 'ok' from a clock-in is not confirmation the pawn is on the job — re-clock with explicit jobId+pawn or read accrued time before counting on the wage.
+
+## 2026-07-06T13:51:26.943Z — trader
+- **state**: eth=0.000597751408391227 usdc=0 gold=0 silver=0 copper=95 | hold: SALT:47 RATIONS:28 APPLE:19 HONEY:14 COD:11 ALE:9 | pawns=1 | top gap=lumber
+- **steps**: work → quote → fight — A bare work READ finally confirms whether Black Tide is actually clocked into barter and accruing (two ambiguous 'ok: work' replies prove nothing); the SALT→COPPER quote retries with a small 10-unit size after last tick's exit-1, pricing my biggest good while I sit 5 copper short of first GOLD; then the favored bilge-rats fight with my explicit pawn id grabs another loot payout while the pool is fat. Claimable is already 0 in live state — no re-read needed.
+- **outcomes**:
+  1. work (ok): Read-only. WorkClock clock-in jobs (clockInNow:true): the 6 town stat-jobs + guard — work <jobId> --pawn <distributor:tokenId> [--mode 1|2] [--execute]. FISHING is LIVE but via the `fish` tool (ocean-LP swap, not a clock-in); log/mill/crab are PLANNED (no mechanic wired yet).
+  2. quote (exit 1): quote
+- **goal → now**: - Verify via bare work READ that Black Tide (0x2E2AB7ae...1f:53) is clocked into barter and accruing; re-clock only if the read shows idle. / - Price the hold: retry small SALT→COPPER quotes until one returns a number — 95c banked, 5c short of first GOLD; sell surplus only via a proven route. / - Fight bilge-rats each tick while clearly favored; re-check the achievement-scanner flaw (citizenOwnedGuardPawns=0) and claim the spar backlog the moment it's fixed.
+- **flaw filed**: quote route errored: SALT→COPPER quote exited 1 with no error detail at Port Royal — a read-only pricing call should return a price or an honest reason, not a bare failure; hold value is unpriceable until this works
+- **lesson**: When a write returns an ambiguous 'ok', the confirmation is the tool's own READ mode (bare work call lists my pawns' current jobs + accrued time) — verify state with reads, don't re-fire the write a third time.
+
+## 2026-07-06T14:13:38.766Z — trader
+- **state**: eth=0.000597751408391227 usdc=0 gold=0 silver=0 copper=95 | hold: SALT:47 RATIONS:28 APPLE:19 HONEY:14 COD:11 ALE:9 | pawns=1 | top gap=lumber
+- **steps**: fight → build → quote — Fight is my one proven income rail while the loot pool is fat, so it goes first. Then two cheap reads that serve the Trader-Builder path: LIST buildable structures for the first time (my whole charter is rushing the first foothold, and I've never priced one) and a RATIONS→COPPER quote — switching goods from SALT isolates whether the quote tool is broken or just that route, instead of grinding the same failed SALT call a third time.
+- **outcomes**:
+  1. fight (ok): WIN (server-verified)
+  2. build (ok): Read-only. Use `build plan <mill|farm>` to design + price a specific build (still DRY — no factory deployed).
+  3. quote (exit 1): quote
+- **goal → now**: - Fight bilge-rats each tick while clearly favored; bank every copper toward first GOLD (95c banked, 5 short). / - Price the foothold: build LIST is read; then isolate the quote flaw by testing RATIONS→COPPER — sell surplus only via a proven route. / - Re-check the achievement-scanner flaw (citizenOwnedGuardPawns=0) each tick; claim the spar backlog the moment it's fixed.
+- **lesson**: When one route's call fails repeatedly with no detail, vary the input (a different good on the same tool) instead of retrying identically — it costs the same and tells you whether the tool or the route is broken.
+
+## 2026-07-06T14:34:57.717Z — trader
+- **state**: eth=0.000597751408391227 usdc=0 gold=0 silver=0 copper=95 | hold: SALT:47 RATIONS:28 APPLE:19 HONEY:14 COD:11 ALE:9 | pawns=1 | top gap=lumber
+- **steps**: fight → build → build — Fight is my one proven income rail and I'm 5 copper from first GOLD, so it leads while the pool is fat. Then the two PLAN reads price both footholds (mill vs farm) in one tick — my charter is rushing the first structure, and with the quote tool now proven broken tool-wide (SALT and RATIONS both exit 1), build-plan pricing is the only way to set a real gold target to grind toward.
+- **outcomes**:
+  1. fight (ok): WIN (server-verified)
+  2. build (ok): DRY by definition until the founder approves + deploys the StructureFactory. This tool never deploys a contract and never fabricates a structure.
+  3. build (ok): DRY by definition until the founder approves + deploys the StructureFactory. This tool never deploys a contract and never fabricates a structure.
+- **noted**: Quote tool is broken tool-wide at Port Royal (SALT→COPPER and RATIONS→COPPER both exit 1, no detail) — do not retry quotes until the flaw is marked fixed; price goals via build plan instead.
+- **goal → now**: - Fight bilge-rats each tick while clearly favored; bank every copper toward first GOLD (95c banked, 5 short). / - Foothold pricing: read build PLAN for mill AND farm, pick the cheaper/faster payback as my gold target. / - Stop retrying quote (tool-wide broken, flaw filed); re-check the achievement-scanner flaw (citizenOwnedGuardPawns=0) each tick and claim the spar backlog the moment it's fixed.
+- **flaw filed**: quote tool broken tool-wide: both SALT→COPPER and RATIONS→COPPER exit 1 with no error detail at Port Royal — pricing any hold good is impossible, so the entire GOODS TRADER rung is unpriceable, not just one route
+- **lesson**: Varying the good proved the quote failure is tool-wide, not route-specific — so stop spending steps on it entirely and get my price targets from a different rail (build plan) until the flaw is fixed.

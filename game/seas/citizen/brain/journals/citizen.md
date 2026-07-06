@@ -617,3 +617,25 @@ _The continuous memory of this bot. Each tick appends one entry._
 - **noted**: Fishing model as of 2026-07-06: catching = GOLD→FISH swap at the ocean LP (presence-gated, skill-scaled); selling = fish→USDC at Port Royal, live on-chain. No HarvestGround/dispenser — that model is superseded. Sell is the USDC self-fund path for watering.
 - **goal → now**: Drain Mayor rungs 5/tick (~80 remain, ~409 GOLD each, compounding down). Each tick: claim batch → one fight → fish-sell COD at Port Royal (explicit action:sell + usd) until first USDC lands, then route it to water-pawn. Build stays parked until the founder deploys the StructureFactory (ask before any spend ≥$50).
 - **lesson**: The bare 'exit 1' on fish came from calling it without an explicit action arg; multi-mode tools need action + amount spelled out — read-mode proved the sell rail live, so this retry is targeted, not blind.
+
+## 2026-07-06T14:12:07.633Z — citizen
+- **state**: eth=0.002496682349383478 usdc=0 gold=13215.047599942947 silver=0 copper=199 | hold: SALT:99 RATIONS:59 APPLE:39 HONEY:29 COD:23 ALE:19 | pawns=100 | top gap=lumber
+- **steps**: claim-achievement → fight → quote — Front-load another capped batch of 5 Mayor rungs on the freshly-listed claimable pawns (10-12, ~409 GOLD each, compounding down) and keep the fight as the second earner. The fish sell has now failed twice with a bare exit 1 — once blind, once with explicit action:sell+usd — so instead of a third blind shot I'm testing the underlying COD→USDC route with the generic read-only quote tool to see if the route itself prices, isolating whether the fault is the fish wrapper or the rail.
+- **outcomes**:
+  1. claim-achievement (ok): nothing claimable for the given --pawns (either not attested by the house yet, already claimed, or not earned).
+  2. fight (ok): DECLINE
+  3. quote (exit 1): quote
+- **noted**: As of 2026-07-06T14:12 gold=13215 (~30 claims landed, 80 rungs left at ~409 GOLD; claimable tokenIds now start at 10). Fish sell failed with bare exit 1 TWICE — including with explicit action:sell + usd:0.25 — so the fault is in the fish tool or its sell wiring, not my args; quote COD→USDC is the isolation test.
+- **flaw filed**: fish sell exit-1 persists with explicit args: 'fish' with action:sell, usd:0.25 at Port Royal still exits 1 printing only the word 'fish' — the wrapper itself appears broken (read-mode loop works, act-mode dies before any error body), blocking the only USDC self-fund path for watering.
+- **lesson**: When a wrapper tool fails opaquely twice (fish sell, bare exit 1 even with explicit args), stop retrying it and probe the underlying route with a different read-only tool (quote COD→USDC) — same rail, different code path — to isolate wrapper bug from missing route.
+
+## 2026-07-06T14:34:17.129Z — citizen
+- **state**: eth=0.002496682349383478 usdc=0 gold=13215.047599942947 silver=0 copper=199 | hold: SALT:99 RATIONS:59 APPLE:39 HONEY:29 COD:23 ALE:19 | pawns=100 | top gap=lumber
+- **steps**: claim-achievement → fight → quote — Front-load another capped batch of 5 Mayor rungs on the freshly-claimable pawns 10-12 (~409 GOLD each, compounding down) and keep the fight as the second earner. Last tick the generic quote of COD→USDC died with the same bare exit 1 as fish sell — two different tools failing on the same route points below the wrappers — so this tick I swap the output leg (quote COD→GOLD) to isolate whether the fault is the USDC token/route resolution or the COD side itself.
+- **outcomes**:
+  1. claim-achievement (ok): nothing claimable for the given --pawns (either not attested by the house yet, already claimed, or not earned).
+  2. fight (ok): WIN (server-verified)
+  3. quote (exit 1): quote
+- **noted**: As of 2026-07-06T14:34: quote COD→USDC ALSO exits 1 bare (same as fish sell) — the USDC self-fund path is blocked below the wrapper layer, likely in COD→USDC route/symbol resolution. Claimable Mayor rungs now start at tokenId 10 (80 left at ~409 GOLD).
+- **flaw filed**: quote exits 1 with no error body: read-only 'quote' with tokenIn:COD tokenOut:USDC amount printed only the word 'quote' and died — same opaque failure as fish sell, so the whole COD→USDC pricing path fails silently, blocking the only USDC self-fund rail and giving the player nothing to correct.
+- **lesson**: When two independent tools (fish sell, quote) fail identically on the same token pair, the fault is likely in shared route/symbol resolution, not either wrapper — vary one leg of the pair (COD→GOLD instead of COD→USDC) to bisect which token breaks it.

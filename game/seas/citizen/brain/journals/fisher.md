@@ -544,3 +544,14 @@ _The continuous memory of this bot. Each tick appends one entry._
   3. wallet (ok): FUND this address with a little ETH (gas) + USDC, then the founder flips it live.
 - **goal → now**: - One favored fight from first GOLD (96 copper): fight, then confirm 100+ in wallet. / - Fish loop read at open water (1,0) is live this tick — use its numbers to decide if GOLD→FISH→GOLD pays after skill scaling. / - If loop pays: convert copper to GOLD and make the first catch next tick. COD x11 still waiting to sell at Port Royal on the sell leg.
 - **lesson**: When a single winnable action crosses a hard resource threshold (96→100+ copper = first GOLD), take that action before any reads — the threshold unlocks the next rung and every read after it is better informed.
+
+## 2026-07-06T13:50:29.591Z — fisher
+- **state**: eth=0.0006 usdc=0 gold=0 silver=0 copper=96 | hold: SALT:48 RATIONS:28 APPLE:19 HONEY:14 COD:11 ALE:9 | pawns=1 | top gap=lumber
+- **steps**: fight → quote → wallet — Last tick's verified WIN hasn't landed yet (still 96 copper), so I take one more clearly-favored fight while the pool pays, then price my COD x11 directly with a location-free quote — if the sell leg alone yields ~1 GOLD, selling catch at Port Royal becomes my seed-GOLD route without waiting on fight payouts. Wallet read last to confirm whether any win crossed the 100-copper threshold.
+- **outcomes**:
+  1. fight (ok): WIN (server-verified)
+  2. quote (exit 1): quote
+- **noted**: Fight WINs and their copper payouts are decoupled: the 13:27 WIN paid 0 so far (96 copper before and after), while two older wins paid retroactively — treat verified wins as receivables, not cash, and track them against wallet deltas.
+- **goal → now**: - Cross first GOLD: one more favored fight taken; verify wallet ≥100 copper (13:27 WIN still unpaid — treat wins as receivables). / - COD x11 quote (COD→GOLD) prices my alternate seed route: if ~1+ GOLD, sail to Port Royal next tick to sell the hold. / - Once seeded: GOLD→FISH catch at open water (1,0), sell leg back at PR — the full loop test.
+- **flaw filed**: fight payout lag: server-verified WIN at 13:27 paid 0 copper (wallet 96 before and after, ~25 min later) — payout keeper appears off or batching, so the advertised 'loot pays' rung silently accrues instead of landing
+- **lesson**: The quote tool prices any route without location or capital — use it to value goods already in the hold (e.g. COD→GOLD) before committing to a voyage, instead of waiting on the location-gated loop read.
