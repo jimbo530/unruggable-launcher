@@ -583,3 +583,37 @@ _The continuous memory of this bot. Each tick appends one entry._
 - **noted**: As of 2026-07-05T14:32 wallet gold=7197 (~15 Mayor claims landed, ~85 rungs left); build is the only live GOLD sink (mill/farm via 'build plan <kind>'), so pricing a mill is the prerequisite for turning claim income into permanent production.
 - **goal → now**: Drain Mayor rungs 5/tick (~85 remain, ~480 GOLD each, compounding down). Watering stays BLOCKED on missing GOLD→USDC rail (flaw filed). Each tick: claim batch → one fight → advance the mill/farm build plan as the GOLD spend path; get the mill priced and ask the founder before committing if ≥$50.
 - **lesson**: The claimable read arrives cached:true and still lists rungs already drained this session — size claim batches off the wallet's GOLD delta (claims landed ≈ gold/~490), not off the cached claimable count.
+
+## 2026-07-06T13:00:01.829Z — citizen
+- **state**: eth=0.002519325712144333 usdc=0 gold=9304.719389495425 silver=0 copper=199 | hold: SALT:99 RATIONS:59 APPLE:39 HONEY:29 COD:23 ALE:19 | pawns=100 | top gap=lumber
+- **steps**: claim-achievement → fight → fish — Front-load the draining Mayor pool (80 rungs at ~409 GOLD, compounding down) with another capped batch of 5, keep the fight as the second earner, and test the live-capable fish-sell rail at Port Royal with 23 COD in hold — a successful $0.25 sale would be my first USDC, cracking open the blocked water-pawn rung the missing GOLD→USDC rail can't reach.
+- **outcomes**:
+  1. claim-achievement (ok): hit the per-run batch cap — re-run to claim more (hasClaimed prevents double-claim).
+  2. fight (ok): WIN (server-verified)
+  3. fish (exit 1): fish
+- **noted**: As of 2026-07-06 gold=9304 (~20 claims landed, ~80 rungs left at ~409 GOLD). Build remains DRY (StructureFactory not deployed), so GOLD has no live sink; fish-sell at Port Royal (COD:23 in hold) is the candidate USDC self-fund path for watering.
+- **goal → now**: Drain Mayor rungs 5/tick (~80 remain, ~409 GOLD each, compounding down). Each tick: claim batch → one fight. Third slot: prove the fish-sell rail (COD→USDC at Port Royal) to self-fund watering; build stays parked until the founder deploys the StructureFactory (ask before any spend ≥$50).
+- **flaw filed**: GOLD sink dry: 'build plan mill' prices a structure but cannot execute — StructureFactory is not deployed, so a GOLD-rich player (9.3k GOLD) has no live path to convert claim income into production; both compounding rails (water-pawn via USDC, build via factory) are blocked at once.
+- **lesson**: When a spend rail is blocked (GOLD→USDC missing, build factory undeployed), look for a goods rail that outputs the blocked currency — selling held COD at Port Royal is a possible USDC source that bypasses the broken converter entirely.
+
+## 2026-07-06T13:25:21.892Z — citizen
+- **state**: eth=0.002508005567981903 usdc=0 gold=11308.998299399631 silver=0 copper=199 | hold: SALT:99 RATIONS:59 APPLE:39 HONEY:29 COD:23 ALE:19 | pawns=100 | top gap=lumber
+- **steps**: claim-achievement → fight → fish — Front-load the draining Mayor pool with another capped batch of 5 (80 rungs attested at ~409 GOLD each), keep the fight as the second earner, and — since last tick's blind fish call died with exit 1 — run fish in read-mode 'loop' first to see supply/skill/projected sell value before retrying the COD→USDC sell that would crack open the blocked watering rung.
+- **outcomes**:
+  1. claim-achievement (ok): hit the per-run batch cap — re-run to claim more (hasClaimed prevents double-claim).
+  2. fight (ok): WIN (server-verified)
+  3. fish (ok): Read-only — ocean buy + PR sell quotes are LIVE on-chain. Catching = a GOLD→FISH swap at the ocean LP (presence-gated), skill-scaled. No HarvestGround/dispenser is involved (that model is superseded).
+- **noted**: As of 2026-07-06T13:25 gold=11308 (~25 claims landed, ~80 rungs left at ~409 GOLD). Fish rail errored opaquely (exit 1, no message) on first sell attempt; diagnosing via fish loop before retrying sell.
+- **flaw filed**: fish tool opaque failure: 'fish' exited 1 at Port Royal with no error body — just the word 'fish' — giving the player nothing to correct (args? location? wiring?); the sell rail can't be proven until it fails loudly.
+- **lesson**: Don't retry a failed action blind: fish crashed with a bare 'exit 1' last tick, so the next move is its read-mode (loop) to see what the rail actually expects, not another act-mode shot.
+
+## 2026-07-06T13:48:48.360Z — citizen
+- **state**: eth=0.002496682349383478 usdc=0 gold=13215.047599942947 silver=0 copper=199 | hold: SALT:99 RATIONS:59 APPLE:39 HONEY:29 COD:23 ALE:19 | pawns=100 | top gap=lumber
+- **steps**: claim-achievement → fight → fish — Front-load another capped batch of 5 Mayor rungs (~409 GOLD each, compounding down) and keep the fight as the second earner. The fish read-mode confirmed the Port Royal sell rail is live on-chain, so now retry the sell with explicit args (action:sell, usd:0.25) — 23 COD in hold, and a successful sale is my first USDC, cracking open the blocked water-pawn rung without the missing GOLD→USDC converter.
+- **outcomes**:
+  1. claim-achievement (ok): nothing claimable for the given --pawns (either not attested by the house yet, already claimed, or not earned).
+  2. fight (ok): DECLINE
+  3. fish (exit 1): fish
+- **noted**: Fishing model as of 2026-07-06: catching = GOLD→FISH swap at the ocean LP (presence-gated, skill-scaled); selling = fish→USDC at Port Royal, live on-chain. No HarvestGround/dispenser — that model is superseded. Sell is the USDC self-fund path for watering.
+- **goal → now**: Drain Mayor rungs 5/tick (~80 remain, ~409 GOLD each, compounding down). Each tick: claim batch → one fight → fish-sell COD at Port Royal (explicit action:sell + usd) until first USDC lands, then route it to water-pawn. Build stays parked until the founder deploys the StructureFactory (ask before any spend ≥$50).
+- **lesson**: The bare 'exit 1' on fish came from calling it without an explicit action arg; multi-mode tools need action + amount spelled out — read-mode proved the sell rail live, so this retry is targeted, not blind.

@@ -4,6 +4,6 @@
 Steady hands build kingdoms too: wages, savings, then a structure of my own.
 
 ## Now
-Rung 0 blocked on three rails: work clock-in (pawn id unexposed, flaw filed), fish catch (needs gold + sail to 8004), crab (ground not live yet; when live, requires sailing to loc 2006 first). Each tick: claimable comes free; ROTATE one free read among work-catalog / fish-loop / crab-status. No gas on closed rails until a fix or founder seed lands.
+Verify my pawn is clocked into haul and wages accrue; if not clocked in, clock in next tick with work {jobId:'haul', pawn:'0x4ECe491951B759363bCBAF75389a202Fe0584080:0', mode:1}. In parallel: quote SALT→copper, then sell a small lot at a fair price to start banking copper toward first gold.
 
 ## Done

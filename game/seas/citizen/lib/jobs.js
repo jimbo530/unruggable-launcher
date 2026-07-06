@@ -65,6 +65,16 @@ const JOBS = [
   // ── LIVE civic job (the Harbor Guard's WorkClock target = the cbBTC MayorVault; guard ladder pays it) ──
   { id: 'guard',  name: 'Guard the Port',    stat: 'GUARD', status: 'live', ttype: TT_JOB, target: '0x44c504Ce08635536635f153B6Ae5d9D6d8b3131F', produces: 'cbBTC/GOLD', terrainGate: null, note: "the Mayor's civic post — funds the prize purse; guard ladder ids 1001-1006" },
 
+  // ── LIVE ship job — MAN THE OARS. A WorkClock JOB clock-in like guard, but the target is PER-SHIP
+  // (the pawn's own ship's rowVault), so it is resolved by the dedicated `row` tool, not a static
+  // target here. Aboard = crew membership; oars move with the ship (no port gate). The rowVault's
+  // harvest buys the ship token (flow -> ship-token volume -> wakes the crew's loyalist flow). The
+  // flow-FUNDING of the oars (turning a pawn's existing flow into rowVault principal) is the founder-
+  // gated sail->row bridge — NOT wired. work.js redirects here (mechanism != 'workclock'). ──
+  { id: 'row',   name: 'Man the oars', stat: 'STR', status: 'live', mechanism: 'row-vault', tool: 'row', ttype: TT_JOB, target: null,
+    produces: 'ship-token buys', terrainGate: null,
+    note: "Row a ship — your OWN crew ship (`node citizen/tools/row.js --pawn <distributor:tokenId>`) OR any ship you signed onto at the DOCK (mixed crew: `node citizen/tools/dock.js sign-on --pawn <d:t> --ship \"<name>\"` at the ship's port, then `row --pawn <d:t> --ship \"<name>\"`). Either way the pawn earns the ROW TOKEN of the ship it rows. Per-ship target (the ship's rowVault) resolved by the `row` tool; the oars move with the ship (location-keyed but location moves). Rowing marks the pawn at the oars; the rowVault harvest turns row-water flow into ship-token buys. Flow-funding the oars from an existing flow = founder-gated bridge (row-fund-from-sails.cjs)." },
+
   // ── HARVEST jobs — founder 2026-06-27 (CORRECTED): production is gated to a pawn's WATER FLOW +
   // SKILL, NEVER a market-buy. A "catch" = a deterministic skill-scaled, supply-capped HARVEST of the
   // resource a WATER source's flow has produced (citizen/lib/harvest.js). Run with the `fish` tool,

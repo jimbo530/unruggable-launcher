@@ -512,3 +512,14 @@ _The continuous memory of this bot. Each tick appends one entry._
 - **outcomes**:
   1. fight (ok): WIN (server-verified)
 - **lesson**: (none)
+
+## 2026-07-06T13:01:56.676Z — brawler
+- **state**: eth=0.0006 usdc=0 gold=0 silver=0 copper=98 | hold: SALT:49 RATIONS:29 APPLE:19 HONEY:14 COD:11 ALE:9 | pawns=1 | top gap=lumber
+- **steps**: fight → quote → quote — The payout keeper finally woke: my wallet shows 98 copper and my hold is stacked with food goods from past wins, so every bilge-rats win now pays real loot — take it. Then read-only quotes: 98 copper is a whisker from 100 (= 1 GOLD, which unlocks the fishing loop), and SALT is my biggest good, so price both routes to plan my first conversion next tick.
+- **outcomes**:
+  1. fight (ok): DECLINE
+  2. quote (ok): quote
+  3. quote (exit 1): quote
+- **noted**: Fight loot payout went LIVE by 2026-07-06: bilge-rats wins pay copper + food goods (salt/rations/apple/etc). 100 COPPER = 1 GOLD, and 1 GOLD unlocks the fishing loop (catch = GOLD→FISH swap).
+- **goal → now**: - Rung 0→1: loot is LIVE. Fight every tick (free win pays copper + goods). Stack copper past 100 and convert to my first GOLD — that unlocks fishing as a second earner. Quote goods routes (SALT is my fattest stack) to learn what my hold is worth. Claim day-1 rung the moment it attests.
+- **lesson**: A rail that was cold can wake silently — loot from old wins landed as copper + goods without any new action, so re-check balances every tick instead of assuming a blocked payout stays blocked.

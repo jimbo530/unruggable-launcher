@@ -461,12 +461,41 @@ async function waterPawn(a) {
   return { plantTx, waterTx: wtx.hash, treeId };
 }
 
+/**
+ * Plant a pawn as a tree in a WaterV2 vault (REGISTER only — no watering, no USDC). LIVE owner tx.
+ * Used by the dockside sign-on flow: WaterV2.plantTree is PERMISSIONLESS + idempotent (see WaterV2.sol
+ * — no admin gate), so a mixed-crew rower's (collection,tokenId) is planted by the PLAYER's own wallet.
+ * Registering a tree gives it 0 shares (no backing, no free income) — the row-token PAYOUT only flows
+ * once the oars are FUNDED (the founder-gated sail->row bridge), so this never creates income by itself.
+ * Refuses unless CITIZEN_ALLOW_LIVE=1; verifies the wallet OWNS the pawn first (clear error, not a revert).
+ * @param {{vault:string, collection:string, tokenId:number|bigint}} a
+ * @returns {Promise<{plantTx:string|null, treeId:bigint, alreadyPlanted:boolean}>}
+ */
+async function plantPawn(a) {
+  if (process.env.CITIZEN_ALLOW_LIVE !== '1') throw new Error('live disabled — set CITIZEN_ALLOW_LIVE=1 only after the founder funds + approves');
+  if (!a || !a.vault || !a.collection || a.tokenId === undefined) throw new Error('plantPawn needs { vault, collection, tokenId }');
+  const w = loadWallet();
+  if (!w) throw new Error('no wallet loaded — run init-wallet.js + fund');
+  const owner = await pawnOwner(a.collection).ownerOf(a.tokenId);
+  if (owner.toLowerCase() !== w.address.toLowerCase()) throw new Error(`refusing plant: pawn #${a.tokenId} owner ${owner} != this wallet ${w.address} (plant only pawns you hold)`);
+  const vaultW = new ethers.Contract(a.vault, WATER_ABI, w);
+  let tp = await vaultW.treeIdFor(a.collection, a.tokenId); // treeId+1 (0 = unplanted)
+  if (tp !== 0n) return { plantTx: null, treeId: tp - 1n, alreadyPlanted: true }; // idempotent — already a tree
+  const fees = { maxFeePerGas: ethers.parseUnits('0.15', 'gwei'), maxPriorityFeePerGas: ethers.parseUnits('0.02', 'gwei') };
+  const nonce = await provider().getTransactionCount(w.address, 'pending');
+  const ptx = await vaultW.plantTree(a.collection, a.tokenId, { ...fees, nonce, gasLimit: 240000 });
+  await ptx.wait();
+  tp = await vaultW.treeIdFor(a.collection, a.tokenId);
+  if (tp === 0n) throw new Error('plant failed (treeIdFor still 0) — refusing to report a fake plant');
+  return { plantTx: ptx.hash, treeId: tp - 1n, alreadyPlanted: false };
+}
+
 module.exports = {
   provider, loadWallet, walletAddress, balances, ensureAllowance, executeSwap, erc,
   ROUTER, MONEY_ABI, MONEY_ADDR: gs.ADDR.money, USDC_ADDR: gs.ADDR.usdc,
   MAX_USD_PER_TRADE, MIN_USD_PER_TRADE, SLIP_BPS, ENV_PATH,
   // WaterV2 vaults (level + flow)
-  WATER_LEVEL_VAULT, WATER_FLOW_VAULT, WATER_ABI, waterVault, readWater, waterPawn,
+  WATER_LEVEL_VAULT, WATER_FLOW_VAULT, WATER_ABI, waterVault, readWater, waterPawn, plantPawn,
   // WorkClock V2
   WORKCLOCK, workClock, pawnOwner, readWork, setWork, clockOut,
   // LocationPool (ocean fish wall etc.)

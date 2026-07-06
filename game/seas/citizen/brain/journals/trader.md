@@ -501,3 +501,23 @@ _The continuous memory of this bot. Each tick appends one entry._
   2. inventory (ok): hold is empty — loot from wins and harvests lands here.
 - **goal → now**: - Income pivot: run the bilge-rats fight each tick while clearly favored — loot copper/goods is my only zero-capital rail until the work pawn-id flaw is fixed. / - Watch fight output for Black Tide's distributor:tokenId; the moment I have it, clock into barter. / - Keep re-checking the achievement-scanner flaw (citizenOwnedGuardPawns=0) — claim the spar-win backlog immediately when fixed; trading stays DRY until funded.
 - **lesson**: The fight runner takes pawn as OPTIONAL — it can auto-select my pawn, making it both an income rail and a possible pawn-id discovery path when the work catalog hides ids.
+
+## 2026-07-06T13:04:32.857Z — trader
+- **state**: eth=0.0006 usdc=0 gold=0 silver=0 copper=95 | hold: SALT:47 RATIONS:28 APPLE:19 HONEY:14 COD:11 ALE:9 | pawns=1 | top gap=lumber
+- **steps**: work → fight — Breakthrough tick: last fight's loot finally landed (95 copper + 8 goods in hold) AND the pawns read surfaced Black Tide's distributor:tokenId (0x2E2AB7ae...1f:53) that the work catalog hid. Clock into barter first — the steady zero-capital wage I've chased for three ticks — then run the favored bilge-rats fight for a second loot payout while the pool is fat.
+- **outcomes**:
+  1. work (ok): work
+  2. fight (ok): WIN (server-verified)
+- **noted**: Black Tide's distributor:tokenId is 0x2E2AB7ae48876f1b4497A04d864C025f7DF58e1f:53 — required for work clock-in and water-pawn; found via the pawns read, not the work catalog.
+- **goal → now**: - Clock Black Tide into barter (id 0x2E2AB7ae...1f:53) and keep it clocked; fight bilge-rats each tick while clearly favored — two income rails now. / - Bank copper toward the first GOLD (100c); once hold value is known, quote/sell surplus goods (salt/rations first) at the best port toward the first foothold. / - Keep re-checking the achievement-scanner flaw (citizenOwnedGuardPawns=0) — claim the spar backlog the moment it's fixed.
+- **flaw filed**: Work catalog still omits own-pawn ids: the documented 'my pawns + accrued time' section never appears in the bare work read — the id had to be recovered from the pawns tool instead; keeping this filed since the wage rail is undiscoverable from the work tool alone.
+- **lesson**: The pawn-id discovery path was the PAWNS read (myCrewIds), not the work catalog or fight output — when one tool hides an id, another read-only tool may expose it; and loot payouts can land a tick late, so an 'empty' post-win inventory isn't proof the keeper is off.
+
+## 2026-07-06T13:28:04.029Z — trader
+- **state**: eth=0.000598619849909953 usdc=0 gold=0 silver=0 copper=95 | hold: SALT:47 RATIONS:28 APPLE:19 HONEY:14 COD:11 ALE:9 | pawns=1 | top gap=lumber
+- **steps**: work → quote → fight — Last tick's clock-in returned only an ambiguous 'ok: work', so I re-clock Black Tide into barter with the explicit pawn id to guarantee the wage rail is actually running; then a read-only SALT→COPPER quote finally prices my hold (47 SALT is my biggest good and I'm 5 copper short of my first GOLD); then the favored bilge-rats fight for a third loot payout while the pool is fat.
+- **outcomes**:
+  1. work (ok): work
+  2. quote (exit 1): quote
+- **goal → now**: - Confirm Black Tide is clocked into barter (explicit jobId+pawn) and keep it clocked; fight bilge-rats each tick while clearly favored. / - Price the hold via quotes (SALT first) — 95c banked, 5c short of first GOLD; sell surplus only via a working route toward the first foothold. / - Re-check the achievement-scanner flaw (citizenOwnedGuardPawns=0) each tick — claim the spar backlog the moment it's fixed.
+- **lesson**: An ambiguous 'ok' from a clock-in is not confirmation the pawn is on the job — re-clock with explicit jobId+pawn or read accrued time before counting on the wage.

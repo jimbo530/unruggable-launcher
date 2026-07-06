@@ -555,3 +555,24 @@ _The continuous memory of this bot. Each tick appends one entry._
 - **noted**: CRAB dispense is location-gated at loc 2006 (crab beach), NOT port_royal — even when the ground goes live I must sail there first. Confirmed via dry run 2026-07-05: fish {action:'crab'} --execute at loc 2006 would be a FREE HarvestGround.dispense (zero-capital catch).
 - **goal → now**: Rung 0 blocked on three rails: work clock-in (pawn id unexposed, flaw filed), fish catch (needs gold + sail to 8004), crab (ground not live yet; when live, requires sailing to loc 2006 first). Each tick: claimable comes free; ROTATE one free read among work-catalog / fish-loop / crab-status. No gas on closed rails until a fix or founder seed lands.
 - **lesson**: A DRY execute attempt is free intel a status read can't give: the crab dry-run exposed its real gate (must be AT loc 2006, dispense is a free server-authoritative catch) — probe closed rails with dry runs, not just reads.
+
+## 2026-07-06T13:02:38.436Z — worker
+- **state**: eth=0.0006 usdc=0 gold=0 silver=0 copper=97 | hold: SALT:48 RATIONS:29 APPLE:19 HONEY:14 COD:11 ALE:9 | pawns=1 | top gap=lumber
+- **steps**: work → work → wait — Two rails just opened in live state: my pawn's distributor:tokenId is finally exposed (myCrewIds: 0x4ECe...4080:0) and a seed landed (97 copper + a hold full of food goods). The free work read confirms the catalog/wages and that my pawn is idle, then I clock into haul — the archetypal deckhand job — turning my one pawn into a wage earner at last; one Base tx on 0.0006 ETH is within my gas cushion per my own notes.
+- **outcomes**:
+  1. work (ok): Read-only. WorkClock clock-in jobs (clockInNow:true): the 6 town stat-jobs + guard — work <jobId> --pawn <distributor:tokenId> [--mode 1|2] [--execute]. FISHING is LIVE but via the `fish` tool (ocean-LP swap, not a clock-in); log/mill/crab are PLANNED (no mechanic wired yet).
+  2. work (ok): work
+  3. wait (waited): no action
+- **noted**: My pawn's distributor:tokenId (verbatim, for all work/fight/water calls): 0x4ECe491951B759363bCBAF75389a202Fe0584080:0 — Redrum Raiders at Port Royal. Seed landed 2026-07-06: 97 copper + hold of food goods (48 SALT, 29 RATIONS, 19 APPLE, 14 HONEY, 11 COD, 9 ALE, 7 JERKY, 4 CINNAMON) — I am no longer zero-capital.
+- **goal → now**: UNBLOCKED: pawn id now exposed — clock my Redrum Raiders into a live WorkClock job (haul first) and let wages accrue. Then: sell one held food good only at a fair quote (quote before sell), bank copper toward first gold. Crab (loc 2006) and fish (needs gold, loc 8004) stay parked until wages stack.
+- **lesson**: Blocked rails can open silently between ticks — the pawn id appeared in the pawns read and a copper+goods seed landed with no announcement; always re-derive gates from THIS tick's live state instead of trusting last tick's 'blocked' verdict.
+
+## 2026-07-06T13:26:45.325Z — worker
+- **state**: eth=0.000598480028250097 usdc=0 gold=0 silver=0 copper=97 | hold: SALT:48 RATIONS:29 APPLE:19 HONEY:14 COD:11 ALE:9 | pawns=1 | top gap=lumber
+- **steps**: work → quote → wait — Last tick's clock-in returned an ambiguous 'ok' — the free work read verifies my Redrum Raiders is actually on haul and shows accrued wage time before I risk any gas re-clocking. Meanwhile the quote prices my biggest held good (48 SALT) in copper, the read-before-sell step my goal requires before converting any hold into coin.
+- **outcomes**:
+  1. work (ok): Read-only. WorkClock clock-in jobs (clockInNow:true): the 6 town stat-jobs + guard — work <jobId> --pawn <distributor:tokenId> [--mode 1|2] [--execute]. FISHING is LIVE but via the `fish` tool (ocean-LP swap, not a clock-in); log/mill/crab are PLANNED (no mechanic wired yet).
+  2. quote (exit 1): quote
+- **noted**: SALT (48 units) is my largest held good — first sell candidate; quote SALT→COPPER before any sell, and only sell one good at a time to keep the rest of the hold as savings.
+- **goal → now**: Verify my pawn is clocked into haul and wages accrue; if not clocked in, clock in next tick with work {jobId:'haul', pawn:'0x4ECe491951B759363bCBAF75389a202Fe0584080:0', mode:1}. In parallel: quote SALT→copper, then sell a small lot at a fair price to start banking copper toward first gold.
+- **lesson**: When an execute step returns an ambiguous 'ok' with no receipt details, verify it with the matching free read next tick before repeating it — a duplicate clock-in tx would burn gas on a rail that may already be earning.

@@ -523,3 +523,24 @@ _The continuous memory of this bot. Each tick appends one entry._
 - **goal → now**: - Price the fish loop with quotes (GOLD→FISH ocean, FISH→GOLD PR): is the spread positive after skill scaling? / - Blocked on capital + rails: no gold (fights unpaid, nothing claimable) and location never registers (sail flaw) — so no fishing until a rail fix or seed gold appears. / - Next tick: if quotes show a live positive spread, ask the founder for a one-time tiny seed (within caps) to prove the loop; otherwise wait.
 - **flaw filed**: pawn id undiscoverable: work clock-in requires --pawn <distributor:tokenId> but no read anywhere (pawns, work catalog, wallet) prints my Sol del Mar's distributor:tokenId — the wage rail is unusable because its required key is never exposed to the player.
 - **lesson**: For a swap-based economy, the viability of a path can be fully priced with read-only quotes before owning any capital — quote both legs of the loop (buy dear-side, sell dear-side) and the spread tells you if the grind is worth starting.
+
+## 2026-07-06T13:03:34.288Z — fisher
+- **state**: eth=0.0006 usdc=0 gold=0 silver=0 copper=96 | hold: SALT:48 RATIONS:28 APPLE:19 HONEY:14 COD:11 ALE:9 | pawns=1 | top gap=lumber
+- **steps**: fish → fight → inventory — Both dead rails woke up: my location finally registers (open water 1,0) and the fight loot landed retroactively — 96 copper plus a hold full of goods (salt, rations, cod...) from my two verified WINs. So: re-read the fish loop now that presence works (it's the read that prices my path), take one more clearly-favored fight while the pool pays, then fresh-inventory to verify the new loot landed same-tick.
+- **outcomes**:
+  1. fish (ok): Read-only — ocean buy + PR sell quotes are LIVE on-chain. Catching = a GOLD→FISH swap at the ocean LP (presence-gated), skill-scaled. No HarvestGround/dispenser is involved (that model is superseded).
+  2. fight (ok): WIN (server-verified)
+  3. inventory (ok): these goods are real tradeable wealth — sell dear at the right port, or keep what feeds/equips the crew.
+- **noted**: SAIL RAIL FIXED (2026-07-06): location now registers — pawn shows 'open water (1,0)'; and fight loot pays retroactively (2 old WINs landed as 96 copper + food goods). Supersedes the 'location never leaves null' note.
+- **goal → now**: - Rails live again: location registers and fight loot pays (96 copper + goods landed). Fight while clearly favored — stack copper toward my first GOLD (100 copper) as fishing seed. / - Price the fish loop at open water (1,0) now that presence works; catch needs GOLD up front, so seed comes first. / - COD x11 in hold: sail to Port Royal to sell once the fishing read confirms the sell leg pays.
+- **lesson**: A rail flagged dead can pay retroactively when its keeper restarts — recheck wallet and hold balances each tick before permanently writing off an earner, since 'confirmed unpaid' only means unpaid so far.
+
+## 2026-07-06T13:27:24.019Z — fisher
+- **state**: eth=0.0006 usdc=0 gold=0 silver=0 copper=96 | hold: SALT:48 RATIONS:28 APPLE:19 HONEY:14 COD:11 ALE:9 | pawns=1 | top gap=lumber
+- **steps**: fight → fish → wallet — At 96 copper I'm one favored fight from my first GOLD (100 copper = fishing seed), so fight first while the pool still pays fat. Then run the fish loop read at open water (1,0) — presence finally registers, so this read prices my whole path (projected catch + PR sell value) — and re-read the wallet to confirm the win crossed the 100-copper threshold.
+- **outcomes**:
+  1. fight (ok): WIN (server-verified)
+  2. fish (ok): Read-only — ocean buy + PR sell quotes are LIVE on-chain. Catching = a GOLD→FISH swap at the ocean LP (presence-gated), skill-scaled. No HarvestGround/dispenser is involved (that model is superseded).
+  3. wallet (ok): FUND this address with a little ETH (gas) + USDC, then the founder flips it live.
+- **goal → now**: - One favored fight from first GOLD (96 copper): fight, then confirm 100+ in wallet. / - Fish loop read at open water (1,0) is live this tick — use its numbers to decide if GOLD→FISH→GOLD pays after skill scaling. / - If loop pays: convert copper to GOLD and make the first catch next tick. COD x11 still waiting to sell at Port Royal on the sell leg.
+- **lesson**: When a single winnable action crosses a hard resource threshold (96→100+ copper = first GOLD), take that action before any reads — the threshold unlocks the next rung and every read after it is better informed.

@@ -76,6 +76,27 @@ const cooldown = (collection, tokenId, action) =>
 const harvest = (player, collection, tokenId, resource, location) =>
   call('POST', 'harvest', { player, collection, tokenId, resource, location });
 
+// ── dockside sign-on (rowing / taking-on-hands board) ───────────────────────────────────────────
+/** Ships "taking on hands" at a port. Pass a locId (?port=) OR a player addr (uses their hex). */
+const dock = ({ port, player } = {}) => {
+  const qs = port !== undefined && port !== null && `${port}` !== ''
+    ? `port=${encodeURIComponent(port)}`
+    : (player ? `player=${encodeURIComponent(player)}` : '');
+  return call('GET', `dock${qs ? `?${qs}` : ''}`);
+};
+
+/** Read a pawn's ABOARD record (which ship it signed onto, or null). ?pawn=<collection>:<tokenId>. */
+const aboard = (collection, tokenId) =>
+  call('GET', `aboard?pawn=${encodeURIComponent(`${collection}:${tokenId}`)}`);
+
+/** Put an owned pawn ABOARD a ship taking hands at the player's current port. 403 not there / not owner. */
+const signOn = (player, collection, tokenId, ship) =>
+  call('POST', 'sign-on', { player, collection, tokenId, ship });
+
+/** Take an owned pawn off its ship (leave the crew job). 409 if not aboard; 403 if not owner. */
+const signOff = (player, collection, tokenId) =>
+  call('POST', 'sign-off', { player, collection, tokenId });
+
 // ── terrain (for location-gated jobs like crabbing) ─────────────────────────────────────────────
 // The seas-server is the location AUTHORITY (it gives the wallet's hex), but terrain is derived from
 // the shared map module game/lib/location.js (getTerrain(q,r) — REGION_TERRAIN says Bonewater Atolls
@@ -129,4 +150,4 @@ async function locationWithTerrain(player) {
   return { ...loc, terrain };
 }
 
-module.exports = { BASE, location, sail, tradeAttest, issueSeed, verifyFight, useChronoOrb, cooldown, harvest, terrainAt, locationWithTerrain, describeLocation };
+module.exports = { BASE, location, sail, tradeAttest, issueSeed, verifyFight, useChronoOrb, cooldown, harvest, dock, aboard, signOn, signOff, terrainAt, locationWithTerrain, describeLocation };
