@@ -22,6 +22,8 @@ import { ITEMS, SLOTS, equipItem, equippedList, ownedGear, applyEquipment } from
 // resolvers directly — strike()/castWrapped() own every swing + spell (so per-weapon crit ranges
 // + forecast live in one place), and planIntent()/chooseTarget() drive the squad AI + telegraph.
 import { strike, castWrapped, forecast, planIntent, chooseTarget, resolveOverboard } from "./combat-helpers.js";
+// SHARED effects (AoE shapes + conditions) — the resolver replays these exact rules server-side.
+import { aoeSecondaryTargets, tickConditions, tryApplyOnHit, resolveControl } from "./effects.js";
 // COMBAT-SETTLEMENT (seas): the headless single source of combat truth. We mint a per-fight
 // SEED + a SEEDED rng here and thread that rng through every strike()/castWrapped()/resolveOverboard()
 // so the live fight is fully DETERMINISTIC from { seed + actions } — the server can replay this exact
@@ -563,18 +565,16 @@ function castSpellAt(caster, sp, target) {
   log(`${caster.name} casts ${sp.name} at ${target.name}: ${res.breakdown}`, res.damage ? "hit" : "info");
   if (res.damage) {
     applyDamage(target, res.damage);
-    const area = sp.battle && sp.battle.hexArea;
-    if (area && area > 0) {
-      for (const u2 of state.units) {
-        if (state.phase === "over") break;
-        if (!isAlive(u2) || u2 === target || u2.isPlayer === caster.isPlayer) continue;
-        if (hexDistance(target.position, u2.position) <= area) {
-          const r2 = castWrapped(caster, u2, sp, false, state.rng);
-          log(`  ↳ ${sp.name} splash hits ${u2.name}: ${r2.breakdown}`, r2.damage ? "hit" : "info");
-          if (r2.damage) applyDamage(u2, r2.damage);
-        }
-      }
+    // SHARED AoE (radius/cone/line) — membership + victim order from effects.js (server parity)
+    for (const u2 of aoeSecondaryTargets(sp, caster, target, state.units, isAlive)) {
+      if (state.phase === "over") break;
+      const r2 = castWrapped(caster, u2, sp, false, state.rng);
+      log(`  ↳ ${sp.name} splash hits ${u2.name}: ${r2.breakdown}`, r2.damage ? "hit" : "info");
+      if (r2.damage) applyDamage(u2, r2.damage);
     }
+  } else if (sp.battle && sp.battle.type === "control") {
+    const ctl = resolveControl(caster, target, sp, state.rng);
+    if (ctl) log(ctl.text, ctl.stunned ? "hit" : "info");
   } else if (res.healing) {
     const before = target.currentHp;
     if (!healUnit(target, res.healing)) {
@@ -614,6 +614,11 @@ function onHexClick(h) {
     const res = strike(u, target, { distance: hexDistance(u.position, target.position), coverAC: coverACAt(state.terrainIx, target.position), terrainIx: state.terrainIx, rng: state.rng });
     log(`${u.name} strikes ${target.name}: ${res.breakdown}`, res.hit ? "hit" : "miss");
     if (res.hit) applyDamage(target, res.damage);
+    // on-hit rider — SHARED rule, same rng point as the resolver replay
+    if (res.hit && isAlive(target)) {
+      const rider = tryApplyOnHit(u, target, state.rng);
+      if (rider) log(rider.text, rider.applied ? "hit" : "info");
+    }
     u.hasActed = true;
     state.phase = "idle"; clearHighlights(); render();
     return;
@@ -885,6 +890,18 @@ function startTurn() {
     e.remainingRounds -= 1;
     return e.remainingRounds > 0;
   });
+  // SHARED condition tick (poison save/dot, burn dot, stun skip) — same point + rng order
+  // as the resolver replay. Damage lands through applyDamage (downed/mortality bookkeeping).
+  {
+    const tick = tickConditions(u, state.rng);
+    for (const ev of tick.events) {
+      log(ev.text, ev.damage ? "down" : "info");
+      if (ev.damage) applyDamage(u, ev.damage);
+    }
+    if (state.phase === "over") { render(); return; }
+    if (!isConscious(u)) { if (state.phase !== "over") endTurn(); else render(); return; }
+    if (tick.skip) { u.hasMoved = true; u.hasActed = true; }
+  }
   state.phase = "idle";
   clearHighlights();
   // P6 TELEGRAPH: paint THIS enemy's planned move + strike BEFORE it acts (no ghost on a player turn).
@@ -964,6 +981,11 @@ function aiAct(u, target) {
     const res = strike(u, target, { distance: dist, coverAC: coverACAt(state.terrainIx, target.position), terrainIx: state.terrainIx, rng: state.rng });   // TERRAIN: cover → +AC; P8: LOS gate
     log(`${u.name} strikes ${target.name}: ${res.breakdown}`, res.hit ? "hit" : "miss");
     if (res.hit) applyDamage(target, res.damage);
+    // on-hit rider (spider venom & kin) — SHARED rule, same rng point as the resolver replay
+    if (res.hit && isAlive(target)) {
+      const rider = tryApplyOnHit(u, target, state.rng);
+      if (rider) log(rider.text, rider.applied ? "hit" : "info");
+    }
     u.hasActed = true; return true;
   }
   return false;

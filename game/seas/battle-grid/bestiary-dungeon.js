@@ -143,6 +143,9 @@ export function makeMonster(def, opts = {}) {
     baseMovementHexes: move, baseCastingMod: intMod,
     equipped: { weapon: null, offhand: null, armor: null, helm: null, boots: null, ring: null, trinket: null },
 
+    // on-hit condition rider (spider venom & kin) — consumed by effects.js tryApplyOnHit
+    applies: def.applies ?? null,
+
     // bestiary metadata (display / future hooks; not used by core combat)
     cr, art: def.art ?? null, special: def.special ?? null,
     boss: !!(opts.boss ?? def.boss), naturalArmor: def.naturalArmor ?? 0, scaled: !!def.scaled,
@@ -239,6 +242,7 @@ export const DUNGEON_BESTIARY = {
     name: "Tiny Spider", emoji: "\u{1F577}️", cr: 0.25, role: "melee", hp: 2, ac: 15, dmg: "1d3", hit: 5, range: 1, speed: 20,
     str: 1, dex: 7, con: 1, int: 1, wis: 1, cha: 1, subtypes: ["vermin"],
     special: "Poison (Dex); climb; tremorsense.", art: "spider-tiny",
+    applies: { id: "poison", name: "spider venom", save: "con", dc: 10, rounds: 2, dmg: "1d2" }, // MECHANICAL (effects.js on-hit rider)
   },
   dire_rat: { // SRD Dire Rat: bite +4 (1d4 + filth fever). Reskin: "Giant Sewer Rat".
     name: "Dire Rat", emoji: "\u{1F400}", cr: 0.33, role: "melee", hp: 5, ac: 15, dmg: "1d4", hit: 4, range: 1, speed: 40,
@@ -284,6 +288,7 @@ export const DUNGEON_BESTIARY = {
     name: "Small Spider", emoji: "\u{1F577}️", cr: 0.5, role: "melee", hp: 4, ac: 14, dmg: "1d4-2", hit: 4, range: 1, speed: 30,
     str: 1, dex: 7, con: 1, int: 1, wis: 1, cha: 1, subtypes: ["vermin"],
     special: "Poison (Str); climb.", art: "spider",
+    applies: { id: "poison", name: "spider venom", save: "con", dc: 11, rounds: 2, dmg: "1d3" }, // MECHANICAL (effects.js on-hit rider)
   },
   badger: { // SRD Badger: claw +4 (1d2-1), rages when wounded.
     name: "Badger", emoji: "\u{1F9A1}", cr: 0.5, role: "melee", hp: 6, ac: 15, dmg: "1d2-1", hit: 4, range: 1, speed: 30,
@@ -304,6 +309,7 @@ export const DUNGEON_BESTIARY = {
     name: "Giant Spider", emoji: "\u{1F578}️", cr: 1, role: "melee", hp: 11, ac: 14, dmg: "1d6", hit: 4, range: 1, speed: 30,
     str: 1, dex: 7, con: 2, int: 1, wis: 1, cha: 1, subtypes: ["vermin"],
     special: "Poison (Str); web; climb. (= bestiary 'Medium Spider'.)", art: "spider",
+    applies: { id: "poison", name: "spider venom", save: "con", dc: 12, rounds: 3, dmg: "1d3" }, // MECHANICAL (effects.js on-hit rider)
   },
   krenshar: { // SRD Krenshar: bite +2 (1d6), scare (Will DC 13).
     name: "Krenshar", emoji: "\u{1F631}", cr: 1, role: "melee", hp: 11, ac: 15, dmg: "1d6", hit: 2, range: 1, speed: 40,

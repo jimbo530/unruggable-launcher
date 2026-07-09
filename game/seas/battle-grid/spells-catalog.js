@@ -90,7 +90,8 @@ export const SPELL_CATALOG = {
   },
   burning_hands: {
     // SRD Lvl 1 Evocation [Fire]. 15ft cone, 1d4/level (max 5d6 in SRD), Ref half.
-    // (VERBATIM from engine; hexArea splash pending — see AoE wiring.)
+    // (VERBATIM from engine — SPELLS_BASE is spread LAST so THIS entry never wins; the
+    // engine's hexArea radius stands. Radius AoE is LIVE via effects.js splash.)
     id: "burning_hands", name: "Burning Hands", level: 1,
     battle: { type: "damage", hexRange: 2, hexArea: 1, damage: "1d4/level", damageType: "fire", save: "ref" },
   },
@@ -147,15 +148,16 @@ export const SPELL_CATALOG = {
   // ══ LEVEL 3 ════════════════════════════════════════════════════════════════
   fireball: {
     // SRD Lvl 3 Evocation [Fire]. 20ft-radius burst, 1d6/level (max 10d6), Ref half.
-    // hexArea radius ≈ 2 hexes; AoE splash pending (engine resolves one target now).
+    // RADIUS AoE LIVE — effects.js aoeSecondaryTargets splashes foes within hexArea.
     id: "fireball", name: "Fireball", level: 3,
     battle: { type: "damage", hexRange: 6, hexArea: 2, damage: "1d6/level", damageType: "fire", save: "ref" },
   },
   lightning_bolt: {
     // SRD Lvl 3 Evocation [Electricity]. 120ft LINE, 1d6/level (max 10d6), Ref half.
-    // Engine has no line shape — approximated as small radius; line AoE pending.
+    // LINE LIVE (effects.js): a corridor from the caster through the struck hex out to
+    // hexLength — every foe metric-colinear with the aim gets its own save.
     id: "lightning_bolt", name: "Lightning Bolt", level: 3,
-    battle: { type: "damage", hexRange: 6, hexArea: 1, damage: "1d6/level", damageType: "electricity", save: "ref" }, // SRD line; shape pending
+    battle: { type: "damage", hexRange: 6, hexShape: "line", hexLength: 6, damage: "1d6/level", damageType: "electricity", save: "ref" },
   },
   haste: {
     // SRD Lvl 3 Transmutation. +30ft speed, +1 attack, +1 dodge AC, +1 Reflex.
@@ -193,9 +195,10 @@ export const SPELL_CATALOG = {
   // ══ LEVEL 5 ════════════════════════════════════════════════════════════════
   cone_of_cold: {
     // SRD Lvl 5 Evocation [Cold]. 60ft CONE, 1d6/level (SRD max 15d6; engine caps
-    // /level at 10d6), Ref half. Cone approximated as a short-range radius burst.
+    // /level at 10d6), Ref half. CONE LIVE (effects.js): a widening wedge from the
+    // caster through the struck hex out to hexLength — every foe caught saves.
     id: "cone_of_cold", name: "Cone of Cold", level: 5,
-    battle: { type: "damage", hexRange: 2, hexArea: 2, damage: "1d6/level", damageType: "cold", save: "ref" }, // SRD cone; shape pending
+    battle: { type: "damage", hexRange: 2, hexShape: "cone", hexLength: 3, damage: "1d6/level", damageType: "cold", save: "ref" },
   },
   flame_strike: {
     // SRD Lvl 5 Evocation [Fire]. 10ft-radius column, 1d6/level (SRD max 15d6;

@@ -34,6 +34,8 @@ import {
 import { strike, castWrapped, planIntent, chooseTarget, resolveOverboard } from "./combat-helpers.js";
 import { coverACAt, blockedKeys, tileEntryEffect } from "./terrain-effects.js";
 import { losClear } from "./los.js";
+// SHARED effects (AoE shapes + conditions): identical rules/rng-order on client + server.
+import { aoeSecondaryTargets, tickConditions, tryApplyOnHit, resolveControl } from "./effects.js";
 // GRID-CONFIG SHADOW (grid-config.js): the squad board is 16×9, but tot-engine's hexesInRange/
 // hexNeighbors are FROZEN at the verbatim 9×7. game.js runs multi-pawn fights by importing the
 // grid-reading fns from grid-config (a byte-for-byte copy that reads a MUTABLE GRID) + calling
@@ -492,19 +494,19 @@ function castAtR(units, caster, spell, target, rng, terrainIx, log) {
   if (res.damage) {
     entry.damage = res.damage; applyDamage(target, res.damage);
     log.push(entry);
-    const area = spell.battle && spell.battle.hexArea;
-    if (area && area > 0) {
-      for (const u2 of units) {
-        if (evaluateOutcome(units).over) break;
-        if (!isAlive(u2) || u2 === target || u2.isPlayer === caster.isPlayer) continue;
-        if (hexDistance(target.position, u2.position) <= area) {
-          const r2 = castWrapped(caster, u2, spell, false, rng);
-          log.push({ type: "spell-splash", unit: caster.id, target: u2.id, spell: spell.id, damage: r2.damage || 0,
-            breakdown: r2.breakdown, text: `  ↳ ${spell.name} splash hits ${u2.name}: ${r2.breakdown}` });
-          if (r2.damage) applyDamage(u2, r2.damage);
-        }
-      }
+    // SHARED AoE (radius/cone/line): membership + victim ORDER come from effects.js so the
+    // client's splash rolls and the server's replay consume rng identically.
+    for (const u2 of aoeSecondaryTargets(spell, caster, target, units, isAlive)) {
+      if (evaluateOutcome(units).over) break;
+      const r2 = castWrapped(caster, u2, spell, false, rng);
+      log.push({ type: "spell-splash", unit: caster.id, target: u2.id, spell: spell.id, damage: r2.damage || 0,
+        breakdown: r2.breakdown, text: `  ↳ ${spell.name} splash hits ${u2.name}: ${r2.breakdown}` });
+      if (r2.damage) applyDamage(u2, r2.damage);
     }
+  } else if (spell.battle && spell.battle.type === "control") {
+    const ctl = resolveControl(caster, target, spell, rng);
+    log.push({ type: "spell-control", unit: caster.id, target: target.id, spell: spell.id,
+      stunned: !!(ctl && ctl.stunned), text: ctl ? ctl.text : entry.text });
   } else if (res.healing) {
     entry.healing = applyHealing(target, res.healing).healed; log.push(entry);
   } else if (res.effect) {
@@ -547,6 +549,11 @@ function runEnemyTurn(units, u, rng, terrainIx, spellbook, log) {
     log.push({ type: "attack", unit: u.id, target: target.id, hit: !!res.hit, damage: res.hit ? res.damage : 0,
       natural: res.nat, crit: !!res.crit, downed, breakdown: res.breakdown,
       text: `${u.name} strikes ${target.name}: ${res.breakdown}` });
+    // on-hit rider (spider venom & kin) — SHARED rule, same rng point as game.js
+    if (res.hit && isAlive(target)) {
+      const rider = tryApplyOnHit(u, target, rng);
+      if (rider) log.push({ type: "on-hit", unit: u.id, target: target.id, applied: rider.applied, text: rider.text });
+    }
     u.hasActed = true;
   }
 }
@@ -579,6 +586,11 @@ function applyPlayerAction(units, u, act, idx, rng, terrainIx, spellbook, log) {
     log.push({ type: "attack", unit: u.id, target: t.id, hit: !!res.hit, damage: res.hit ? res.damage : 0,
       natural: res.nat, crit: !!res.crit, downed, breakdown: res.breakdown,
       text: `${u.name} strikes ${t.name}: ${res.breakdown}` });
+    // on-hit rider (player pawns normally carry none; uniform rule, same rng point)
+    if (res.hit && isAlive(t)) {
+      const rider = tryApplyOnHit(u, t, rng);
+      if (rider) log.push({ type: "on-hit", unit: u.id, target: t.id, applied: rider.applied, text: rider.text });
+    }
     u.hasActed = true;
     return;
   }
@@ -663,6 +675,19 @@ export function resolveEncounter(input) {
         if (e.remainingRounds === -1) return true;
         e.remainingRounds -= 1; return e.remainingRounds > 0;
       });
+      // SHARED condition tick (poison save/dot, burn dot, stun skip) — same point + same
+      // rng order as game.js startTurn. Damage lands through resolver applyDamage.
+      {
+        const tick = tickConditions(u, rng);
+        for (const ev of tick.events) {
+          if (ev.damage) applyDamage(u, ev.damage);
+          log.push({ type: ev.kind, unit: u.id, damage: ev.damage || 0, text: ev.text });
+        }
+        if (tick.skip) { u.hasMoved = true; u.hasActed = true; }
+        outcome = evaluateOutcome(units);
+        if (outcome.over) break;
+      }
+      if (!isConscious(u)) { turnIdx = (turnIdx + 1) % units.length; if (turnIdx === 0) { round++; if (round > maxRounds) break; } continue; }
       if (u.isPlayer) {
         // consume this unit's submitted actions until (and including) its 'end' / a fatal result.
         let ranDry = true;

@@ -12,6 +12,7 @@
 import { getJob, getSettlement, bunkCap, statRate } from "./settlements.js";
 import { feed, FOOD_MORALE } from "./upkeep.js";
 import { record as journalRecord } from "./journal.js";
+import { skillForJob, addSkillXp } from "./skills.js";
 
 // ── storage (localStorage in browser; in-memory shim under Node) ─────────────────────────
 const store = (() => {
@@ -94,6 +95,10 @@ export function collectShift(pawnId, now = Date.now()) {
   const stat = job.stat, gain = XP_PER_SHIFT * statRate(a.settlementId);
   const xp = readJSON(K_XP, {}); xp[pawnId] = xp[pawnId] || {};
   xp[pawnId][stat] = (xp[pawnId][stat] || 0) + gain; writeJSON(K_XP, xp);
+  // SKILL XP — if the job declares a CRAFT (skills.js JOB_SKILL map), ALSO accrue that skill's water at
+  // the same rate as the stat XP. Unskilled/copper labor returns null here → stat-only (founder doctrine).
+  const skill = skillForJob(job);
+  if (skill) addSkillXp(pawnId, skill, gain);
   // COIN wage
   const w = WAGE[job.kind] || WAGE.dock;
   const wages = readJSON(K_WAGES, {}); wages[pawnId] = wages[pawnId] || {};
@@ -114,7 +119,7 @@ export function collectShift(pawnId, now = Date.now()) {
   // start the next shift
   a.startedAt = now; a.shiftUntil = now + SHIFT_MS;
   const all = allAssign(); all[pawnId] = a; writeJSON(K_ASSIGN, all);
-  return { ok: true, stat, xp: gain, coin: w.coin, wage: w.amt, produce, fed };
+  return { ok: true, stat, xp: gain, coin: w.coin, wage: w.amt, produce, fed, skill: skill || null, skillXp: skill ? gain : 0 };
 }
 
 /** Quit the current job, freeing the bunk for someone else. */
