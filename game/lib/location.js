@@ -648,5 +648,17 @@ export function tryArrive(shipId, extraCrewIds = []) {
   const journeys = allJourneys();
   delete journeys[shipId];
   writeJourneys(journeys);
+
+  // journal: the landing writes a line in every traveler's memoir (the ship keeps a log
+  // too). Fiction: one hex = 8h; a short hop still counts as day 1.
+  import("./journal.js").then(({ record }) => {
+    const days = Math.max(1, Math.round((j.hours ?? (j.distance || 1) * 8) / 24));
+    const ev = {
+      from: j.fromPort || "open water", to: j.toPort || "open water",
+      days, by: j.medium === "land" ? "foot" : "ship",
+    };
+    record(shipId, "journey", ev);
+    for (const cid of crew) record(cid, "journey", ev);
+  }).catch((e) => console.warn("[location] journal record failed:", e.message)); // visible, not silent
   return true;
 }

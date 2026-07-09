@@ -1122,6 +1122,14 @@ function recordWalkaboutResult(s, win) {
       hero: s.walkabout.hero || "guest", node: s.walkabout.node, win: !!win, at: Date.now(),
     }));
   } catch (e) { console.warn("walkabout result persist failed:", e); }   // visible, not silent
+  // journal: every verified walkabout fight is a memoir line; a loss is a death (sent
+  // home stripped). Dynamic import keeps the battle page working even if lib/ is absent.
+  import("../../lib/journal.js").then(({ record }) => {
+    const hero = s.walkabout.hero || "guest";
+    const place = "the goblin cave"; // walkabout site; node kept as data for the historians
+    record(hero, "fight", { foe: "the cave's defenders", place, won: !!win, node: s.walkabout.node });
+    if (!win) record(hero, "death", { place, home: "Port Royal", node: s.walkabout.node });
+  }).catch((e) => console.warn("journal record failed:", e.message)); // visible, not silent
 }
 
 /** Per-fight settlement wiring: which localStorage claims key + which deployed LootPool the keeper pays

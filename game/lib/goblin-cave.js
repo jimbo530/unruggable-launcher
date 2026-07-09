@@ -377,6 +377,11 @@ export function completeCave(pawnId, opts = {}) {
   const claims = allClaims();
   claims.push(claim);
   writeJSON(K_CLAIMS, claims);
+  // journal: a verified cave win is a chapter-worthy day
+  import("./journal.js").then(({ record }) => {
+    record(pawnId, "fight", { foe: "the goblins of the cave", place: "the goblin cave", won: true }, now);
+    if (itemLoot && itemLoot.symbol) record(pawnId, "loot", { what: itemLoot.symbol, place: "the goblin cave" }, now);
+  }).catch((e) => console.warn("[goblin-cave] journal record failed:", e.message)); // visible, not silent
   return claim;
 }
 
