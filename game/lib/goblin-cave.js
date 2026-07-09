@@ -125,10 +125,38 @@ export function goblinRng(seed) { return mulberry32(hashSeed(seed)); }
  * @param {number|string} seed  the fight seed (server-issued for a real fight; any value in tests)
  * @returns {object} a PVE encounter { type:"pve", group:[…], objective:"wipe", map:"cave", … }
  */
-export function rollCaveEncounter(seed) {
-  const enc = rollEncounter(AREA_ID, DANGER, goblinRng(seed));
+export function rollCaveEncounter(seed, depth = 1) {
+  const rng = goblinRng(seed);
+  const enc = rollEncounter(AREA_ID, DANGER, rng);
   if (!enc || enc.type !== "pve" || !Array.isArray(enc.group) || !enc.group.length)
     throw new Error("[goblin-cave] cave roll did not produce a goblin group (check area-encounters 'goblin-cave').");
+
+  // ── DEPTH SCALING (founder 2026-07-08: "goblins increase in number and strength as
+  // you descend") — DETERMINISTIC from the same seeded rng (the extras are drawn AFTER
+  // the base roll, so both client and server reproduce the identical squad from
+  // (seed, depth)). Back-compat: depth defaults to 1 = the original starter pack.
+  //   number:   +1 goblin per depth past 1 (capped so the current cave deck still fits)
+  //   strength: +2 hpBonus per depth past 1 on every goblin
+  //   the deeps: at depth 4+ one goblin becomes a CLASSED LEAD (founder: "enemies with
+  //              one class level will be in the depth") — flagged lead + extra hp; the
+  //              class-engine hookup deepens this later, the flag is the seam.
+  const d = Math.max(1, Math.min(9, Math.floor(Number(depth) || 1)));
+  if (d > 1) {
+    const extras = Math.min(d - 1, 5);
+    for (let i = 0; i < extras; i++) {
+      const pick = enc.group[Math.floor(rng() * enc.group.length) % enc.group.length];
+      enc.group.push({ ...pick, id: (pick.id || pick.monsterId) + "-d" + d + "x" + i });
+    }
+    for (const u of enc.group) u.hpBonus = (u.hpBonus || 0) + (d - 1) * 2;
+    if (d >= 4) {
+      const lead = enc.group[Math.floor(rng() * enc.group.length) % enc.group.length];
+      lead.lead = true;
+      lead.classLevel = 1;                      // the classed-goblin seam (class-engine later)
+      lead.hpBonus = (lead.hpBonus || 0) + 6;
+      lead.name = (lead.name || "Goblin") + " Warleader";
+    }
+  }
+  enc.depth = d;
   enc.routeId = CAVE.id;       // tag so the map can recognise a cave win on return
   return enc;
 }
@@ -143,8 +171,8 @@ export function rollCaveEncounter(seed) {
  * @param {{q:number,r:number}[]} [takenHexes]  player/occupied hexes to avoid (default: none)
  * @returns {object[]} engine-ready enemy BattleUnits (deterministic ids + positions)
  */
-export function buildGoblinEnemies(seed, takenHexes = []) {
-  const enc = rollCaveEncounter(seed);
+export function buildGoblinEnemies(seed, takenHexes = [], depth = 1) {
+  const enc = rollCaveEncounter(seed, depth);
   const taken = new Set(takenHexes.filter(Boolean).map((h) => `${h.q},${h.r}`));
   return spawnMonsterGroup(enc.group, taken, SQUAD_GRID);
 }

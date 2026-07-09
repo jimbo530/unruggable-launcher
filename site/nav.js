@@ -11,6 +11,7 @@ const NAV_CATEGORIES = {
     { href: '/fund/', label: 'Charity Funds' },
     { href: 'adopt.html', label: 'Adopt a Token' },
     { href: 'card-shop.html', label: 'Card Shop' },
+    { href: 'songsmith.html', label: '🎤 Songsmith Booth' },
   ],
   'Unrugable Tokens': [
     { href: 'unrugable.html', label: 'Launch a Token' },
@@ -22,6 +23,8 @@ const NAV_CATEGORIES = {
     { href: 'tree-leaderboard.html', label: 'Trees Funded' },
     { href: 'burns.html', label: 'Burns' },
     { href: 'carbon.html', label: 'Carbon' },
+    { href: 'retire-leaderboard.html', label: 'Carbon Retirement' },
+    { href: 'ccc.html', label: 'CCC Work Log' },
   ],
   'Games': [
     { href: 'games/index.html', label: 'MfT Arcade' },
