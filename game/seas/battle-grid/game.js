@@ -1101,12 +1101,27 @@ async function verifyAndSettle() {
     if (body.winner === "player" && body.payoutEligible) {
       log("✅ Verified WIN — your cut is logged. Loot is queued for payout.", "win");
       recordStakesClaim(s, body);
+      recordWalkaboutResult(s, true);
     } else {
       log(`Server verdict: ${body.winner} (payout ${body.payoutEligible ? "eligible" : "not eligible"}).`, "info");
+      // a conclusive enemy win = a walkabout LOSS (sent home stripped — the walkabout resets)
+      if (body.winner === "enemy") recordWalkaboutResult(s, false);
     }
   } catch (e) {
     log(`Could not reach the verify service: ${e.message}`, "down");   // visible, not silent
   }
+}
+
+/** WALKABOUT RESULT (founder 2026-07-08): the cave path consumes this on return —
+ *  a WIN clears the node (recharge clock starts); a LOSS wipes cave progress (sent home
+ *  without gear or loot — the strip itself lands with the server-side death settle). */
+function recordWalkaboutResult(s, win) {
+  if (typeof localStorage === "undefined" || !s.walkabout || !s.walkabout.node) return;
+  try {
+    localStorage.setItem("walkabout:result", JSON.stringify({
+      hero: s.walkabout.hero || "guest", node: s.walkabout.node, win: !!win, at: Date.now(),
+    }));
+  } catch (e) { console.warn("walkabout result persist failed:", e); }   // visible, not silent
 }
 
 /** Per-fight settlement wiring: which localStorage claims key + which deployed LootPool the keeper pays
