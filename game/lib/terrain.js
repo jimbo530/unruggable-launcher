@@ -28,9 +28,13 @@
 //
 // LAYERS (top wins)
 //   1) PAINT — the founder's brush. opts.paint maps "col,row" -> partial hex override
-//      ({biome:"forest", river:true, deposit:{...}, name:"..."}). The hand-drawn BASE MAP
-//      will land here as painted hexes; procgen fills every direction beyond it.
-//   2) PROCGEN — elevation + moisture + temperature fBm -> biome; ridged channel -> rivers;
+//      ({biome:"forest", river:true, deposit:{...}, name:"..."}). Regional maps (Manlan,
+//      Isles of 1,000 Kingdoms…) import here at sheet scale (tools/import-map-paint.cjs).
+//   2) MACRO — the founder's PLANET painting (opts.macro = planet-macro.json, from
+//      tools/import-planet-macro.cjs): says WHERE continents/ridges/ice are across the
+//      10x10-sheet planet; sampled with domain warp so his smooth strokes grow fractal
+//      hex-scale coastlines. Off the painting: endless ocean.
+//   3) PROCGEN — elevation + moisture + temperature fBm -> biome; ridged channel -> rivers;
 //      blob channel -> lakes. Temperature = latitude gradient + noise, so sheets nearer
 //      the poles run tundra and the equator runs jungle (Earth-like across ~100 sheets).
 //
@@ -103,6 +107,27 @@ function fbm(seed, x, y, baseWavelength = 170) {
 const ELEV_SALT = 0x0e1e7a71, MOIST_SALT = 0x00151172, RIVER_SALT = 0x0417e57a;
 const TEMP_SALT = 0x7e307e30, LAKE_SALT = 0x1a3e1a3e;
 const VOLC_SALT = 0x501ca10c, REEF_SALT = 0x0eef0eef, PILLAR_SALT = 0x9111a125;
+const WARP_A = 0x3a3a7a11, WARP_B = 0x7b1b5b31;
+
+// ── the MACRO layer: the founder's PLANET PAINTING as ground truth ───────────────────
+// planet-macro.json (tools/import-planet-macro.cjs) = 512x512 classes ocean/land/ridge/ice
+// over the 10x10-sheet planet. hexAt samples it with DOMAIN WARP (fractal coastlines from
+// smooth strokes) and blends: macro says WHERE land is, noise says what it feels like.
+// Outside the painting: endless deep ocean (rare procgen seamounts).
+export function decodeMacroRLE(json) {
+  if (!json || !json.rle || !json.W) throw new Error("[terrain] bad macro json");
+  const data = new Uint8Array(json.W * json.H);
+  for (let y = 0; y < json.H; y++) {
+    let x = 0;
+    for (const run of json.rle[y].split(",")) {
+      const [cls, n] = run.split(":").map(Number);
+      data.fill(cls, y * json.W + x, y * json.W + x + n);
+      x += n;
+    }
+    if (x !== json.W) throw new Error("[terrain] macro row " + y + " length " + x);
+  }
+  return data;
+}
 
 // hex centers: flat-top odd-q offset (matches location.js) — odd columns sit half a hex south.
 function hexCenter(col, row) { return { x: col, y: row + (col & 1) * 0.5 }; }
@@ -161,26 +186,62 @@ function pickWeighted(table, r01) {
 
 // ── the world ────────────────────────────────────────────────────────────────────────
 /**
- * Build a world view. { seed, resourceSalt?, paint? }
+ * Build a world view. { seed, resourceSalt?, paint?, macro? }
  *  seed         — the public terrain seed (int). Same seed = same world, forever.
  *  resourceSalt — SERVER-ONLY salt for prospect(); omit on clients (prospect throws).
  *  paint        — founder overrides: { "col,row": { biome?, river?, deposit?, name? } }
+ *  macro        — planet-macro.json content: the founder's planet painting as landmass
+ *                 truth (omit = pure procgen world).
  */
 export function makeWorld(opts = {}) {
   const seed = Number(opts.seed);
   if (!Number.isFinite(seed)) throw new Error("[terrain] makeWorld needs a numeric seed");
   const resourceSalt = opts.resourceSalt == null ? null : Number(opts.resourceSalt);
   const paint = opts.paint || {};
+  const macro = opts.macro ? {
+    W: opts.macro.W, H: opts.macro.H, cols: opts.macro.cols, rows: opts.macro.rows,
+    colOff: opts.macro.colOff, rowOff: opts.macro.rowOff, data: decodeMacroRLE(opts.macro),
+  } : null;
+
+  // bilinear landness/ridgeness/iceness from the macro classes at a (possibly warped) hex pos
+  function macroSample(x, y) {
+    const mx = (x - macro.colOff) / macro.cols * macro.W - 0.5;
+    const my = (y - macro.rowOff) / macro.rows * macro.H - 0.5;
+    let L = 0, R = 0, I = 0;
+    const x0 = Math.floor(mx), y0 = Math.floor(my);
+    for (let dy = 0; dy <= 1; dy++) for (let dx = 0; dx <= 1; dx++) {
+      const xx = x0 + dx, yy = y0 + dy;
+      const w = (1 - Math.abs(mx - xx)) * (1 - Math.abs(my - yy));
+      if (w <= 0 || xx < 0 || yy < 0 || xx >= macro.W || yy >= macro.H) continue; // off-map = ocean
+      const cls = macro.data[yy * macro.W + xx];
+      if (cls === 1 || cls === 2 || cls === 3) L += w;
+      if (cls === 2) R += w;
+      if (cls === 3) I += w;
+    }
+    return { L, R, I };
+  }
 
   function hexAt(col, row) {
     col = Math.floor(Number(col)); row = Math.floor(Number(row));
     if (!Number.isFinite(col) || !Number.isFinite(row)) throw new Error("[terrain] bad coords");
     const { x, y } = hexCenter(col, row);
-    const e = fbm(seed ^ ELEV_SALT, x, y);
+    let e, iceBoost = 0;
+    if (macro) {
+      // domain warp: fractal coastlines out of smooth painted strokes
+      const wx = x + (fbm(seed ^ WARP_A, x, y, 60) - 0.5) * 22;
+      const wy = y + (fbm(seed ^ WARP_B, x, y, 60) - 0.5) * 22;
+      const s = macroSample(wx, wy);
+      e = 0.335 + s.L * 0.23 + s.R * 0.13 + (fbm(seed ^ ELEV_SALT, x, y) - 0.5) * 0.24;
+      iceBoost = s.I;
+    } else {
+      e = fbm(seed ^ ELEV_SALT, x, y);
+    }
     const m = fbm(seed ^ MOIST_SALT, x, y);
-    // temperature: latitude gradient (equator row 0 hot -> poles cold) + noise weather
+    // temperature: latitude gradient (equator row 0 hot -> poles cold) + noise weather;
+    // painted ice (the Icey Waste) forces deep cold whatever the latitude says
     const lat = Math.min(1, Math.abs(row) / POLE_ROWS);
-    const t = Math.max(0, Math.min(1, (1 - lat) * 0.8 + (fbm(seed ^ TEMP_SALT, x, y, 240) - 0.5) * 0.5));
+    let t = Math.max(0, Math.min(1, (1 - lat) * 0.8 + (fbm(seed ^ TEMP_SALT, x, y, 240) - 0.5) * 0.5));
+    t = Math.max(0, t - iceBoost * 0.8);
     let biome = deriveBiome(e, m, t);
     // stone pillars (founder): natural rock formations — sea stacks on the coast,
     // hoodoo/butte country in the deserts. Rare small blobs; dramatic landmark ground.
