@@ -15,6 +15,22 @@ export function pawnCapacity(str = 1) {
   return PAWN_BASE_LB + Math.max(0, (Number(str) || 1) - 1) * STR_LB_PER_POINT;
 }
 
+// ── MOUNTS (founder 2026-07-08: 'buying mounts and mules, also loose those if you die') ──
+// A mount adds carry capacity to the PARTY while alive-and-held. Lost on death like all
+// carried things — the goblins eat your mule. Tokens live on Base (mounts-deployed.json):
+//   MULE  0x449bf1572Cfd6A8e7Ac22de301e4eaED001E8A2B — the hauler (D&D price 8g)
+//   HORSE 0x3d98a43986C0E3b82aD48c30B05723DD22F36004 — the runner (D&D price 75g; speed later)
+export const MOUNTS = {
+  mule:  { carryLb: 200, goldPrice: 8,  token: '0x449bf1572Cfd6A8e7Ac22de301e4eaED001E8A2B' },
+  horse: { carryLb: 150, goldPrice: 75, token: '0x3d98a43986C0E3b82aD48c30B05723DD22F36004' },
+};
+// party capacity = every pawn's own back + every led mount's saddlebags
+export function partyCapacity(pawnStrs = [], mounts = []) {
+  const pawns = (pawnStrs || []).reduce((s2, str) => s2 + pawnCapacity(str), 0);
+  const packs = (mounts || []).reduce((s2, m) => s2 + ((MOUNTS[m] && MOUNTS[m].carryLb) || 0), 0);
+  return pawns + packs;
+}
+
 // ── COIN WEIGHT (gives gold/silver/copper its pressure) ─────────────────────────
 // 100 coins = 1 lb, any metal (user 2026-06-25). So value held as COPPER weighs 100× the same
 // value in GOLD (100 copper = 1 gold of value = 1 lb vs 1 gold coin = 0.01 lb). That's the
