@@ -230,8 +230,11 @@ async function main() {
     }
     if (!ownerHeld) throw new Error(`pawn #${tokenId} is held by ${owner}, not this wallet (${player}) — WorkClock is owner-only; refusing to clock out a pawn you don't hold`);
     if (!work.employed) throw new Error(`pawn ${pawnArg} is not rowing — nothing to clock out`);
-    const hash = await chain.clockOut(collection, tokenId);
-    out({ ok: true, tool: 'row', action: 'stop', mode: 'LIVE', pawn: pawnArg, ship: ship.name, tx: hash, backend: backendBlock });
+    const rc = await chain.clockOut(collection, tokenId);
+    if (!rc.landed) throw new Error(`stop-rowing tx REVERTED on-chain (status ${rc.status}) tx ${rc.hash} — pawn NOT shipped from the oars. Not reporting a false success.`);
+    out({ ok: true, tool: 'row', action: 'stop', mode: 'LIVE', pawn: pawnArg, ship: ship.name,
+      tx: rc.hash, landed: true, block: rc.blockNumber,
+      receipt: `shipped the oars — tx ${rc.hash} landed in block ${rc.blockNumber}`, backend: backendBlock });
     return;
   }
 
@@ -260,11 +263,17 @@ async function main() {
 
   // LIVE — chain.setWork enforces CITIZEN_ALLOW_LIVE + on-chain ownership; throws loudly otherwise.
   if (!ownerHeld) throw new Error(`pawn #${tokenId} held by ${owner}, not this wallet (${player}) — WorkClock is owner-only; refusing to put a pawn you don't hold to the oars`);
-  const hash = await chain.setWork(collection, tokenId, ship.rowVault, ships.TT_JOB, mode);
+  const rc = await chain.setWork(collection, tokenId, ship.rowVault, ships.TT_JOB, mode);
+  if (!rc.landed) throw new Error(`row clock-in tx REVERTED on-chain (status ${rc.status}) tx ${rc.hash} — pawn NOT put to the oars. Not reporting a false success.`);
   const after = await chain.readWork(collection, tokenId);
+  const onOars = after.employed && after.target.toLowerCase() === ship.rowVault.toLowerCase();
   out({
-    ok: true, tool: 'row', action: 'clock-in', mode: 'LIVE', pawn: pawnArg, ship: ship.name, tx: hash,
-    verified: { rowing: after.employed, onOars: after.target.toLowerCase() === ship.rowVault.toLowerCase(), timeAtOars: fmtDur(after.currentRunSecs) },
+    ok: true, tool: 'row', action: 'clock-in', mode: 'LIVE', pawn: pawnArg, ship: ship.name,
+    tx: rc.hash, landed: true, block: rc.blockNumber,
+    verified: { rowing: after.employed, onOars, timeAtOars: fmtDur(after.currentRunSecs) },
+    receipt: onOars
+      ? `AT THE OARS — tx ${rc.hash} landed in block ${rc.blockNumber}; WorkClock confirms pawn rows ${ship.name}.`
+      : `tx ${rc.hash} landed in block ${rc.blockNumber} but WorkClock does NOT show the pawn at ${ship.name}'s oars — investigate.`,
     note: FLOW_GAP_NOTE, backend: backendBlock,
   });
 }

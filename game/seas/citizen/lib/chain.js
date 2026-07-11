@@ -208,7 +208,9 @@ async function setWork(collection, tokenId, target, ttype, mode) {
   const wc = new ethers.Contract(WORKCLOCK, WORKCLOCK_ABI, w);
   const tx = await wc.setWork(collection, tokenId, target, ttype, mode, { ...fees, nonce, gasLimit: 120000 });
   const rc = await tx.wait();
-  return rc.hash;
+  // Return the FULL receipt truth — a reverted tx (status 0) still has a hash; the caller must be able
+  // to tell landed from reverted (no silent "it has a hash so it worked").
+  return { hash: rc.hash, status: rc.status, blockNumber: rc.blockNumber, landed: rc.status === 1 };
 }
 
 /** Clock a pawn OUT via WorkClock V2.clockOut. LIVE owner tx; same guards as setWork. */
@@ -223,7 +225,7 @@ async function clockOut(collection, tokenId) {
   const wc = new ethers.Contract(WORKCLOCK, WORKCLOCK_ABI, w);
   const tx = await wc.clockOut(collection, tokenId, { ...fees, nonce, gasLimit: 100000 });
   const rc = await tx.wait();
-  return rc.hash;
+  return { hash: rc.hash, status: rc.status, blockNumber: rc.blockNumber, landed: rc.status === 1 };
 }
 
 // ── LocationPool (gated custom AMM, e.g. the ocean fish wall) ──────────────────────────────────

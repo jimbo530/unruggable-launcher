@@ -149,8 +149,12 @@ function catalog() {
       return;
     }
     if (!before.employed) throw new Error(`pawn ${pawnArg} is not employed — nothing to clock out`);
-    const hash = await chain.clockOut(collection, tokenId);
-    out({ ok: true, tool: 'work', action: 'clock-out', mode: 'LIVE', pawn: pawnArg, tx: hash });
+    const rc = await chain.clockOut(collection, tokenId);
+    if (!rc.landed) throw new Error(`clock-out tx REVERTED on-chain (status ${rc.status}) tx ${rc.hash} — pawn NOT clocked out. Not reporting a false success.`);
+    const afterOut = await chain.readWork(collection, tokenId);
+    out({ ok: true, tool: 'work', action: 'clock-out', mode: 'LIVE', pawn: pawnArg,
+      tx: rc.hash, landed: true, block: rc.blockNumber,
+      receipt: `clocked OUT — tx ${rc.hash} landed in block ${rc.blockNumber}; pawn now employed=${afterOut.employed}` });
     return;
   }
 
@@ -228,11 +232,19 @@ function catalog() {
   }
 
   // LIVE — chain.setWork enforces CITIZEN_ALLOW_LIVE + on-chain ownership; throws loudly otherwise.
-  const hash = await chain.setWork(collection, tokenId, job.target, job.ttype, mode);
+  const rc = await chain.setWork(collection, tokenId, job.target, job.ttype, mode);
+  // RECEIPT (fix: clock-in must PROVE it landed). A reverted tx still has a hash — refuse to report a
+  // false success. Then re-read WorkClock so the receipt shows the pawn ACTUALLY on the job.
+  if (!rc.landed) throw new Error(`clock-in tx REVERTED on-chain (status ${rc.status}) tx ${rc.hash} — pawn NOT clocked into "${job.id}". Not reporting a false success.`);
   const after = await chain.readWork(collection, tokenId);
+  const onTarget = after.employed && after.target.toLowerCase() === job.target.toLowerCase();
   out({
     ok: true, tool: 'work', action: 'clock-in', mode: 'LIVE', job: job.id, jobName: job.name,
-    pawn: pawnArg, target: job.target, payoutMode: mode, tx: hash,
-    verified: { employed: after.employed, onTarget: after.target.toLowerCase() === job.target.toLowerCase(), currentRun: fmtDur(after.currentRunSecs) },
+    pawn: pawnArg, target: job.target, payoutMode: mode,
+    tx: rc.hash, landed: true, block: rc.blockNumber,
+    verified: { employed: after.employed, onTarget, currentRun: fmtDur(after.currentRunSecs), accumulated: fmtDur(after.accumulatedSecs) },
+    receipt: onTarget
+      ? `CLOCKED IN — tx ${rc.hash} landed in block ${rc.blockNumber}; WorkClock confirms pawn is now on "${job.id}" (run ${fmtDur(after.currentRunSecs)}).`
+      : `tx ${rc.hash} landed in block ${rc.blockNumber} but WorkClock does NOT show the pawn on "${job.id}" (employed=${after.employed}, target=${after.target}) — investigate before trusting the clock-in.`,
   });
 })().catch((e) => { out({ ok: false, tool: 'work', error: e.message || String(e), hint: 'run `node citizen/tools/work.js` (no args) to see the job catalog + your pawns; clock in needs --pawn <distributor:tokenId> from pawns.js myCrewIds.' }); process.exit(1); });

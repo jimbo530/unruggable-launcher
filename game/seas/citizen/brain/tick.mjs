@@ -102,11 +102,22 @@ const MENU_BY_TOOL = Object.fromEntries(MENU.map((m) => [m.tool, m]));
 // ── run a toolbelt command as a child (profile wallet env injected) → parsed JSON or raw text ────
 function runTool(argv, env, timeoutMs = 120000) {
   const r = spawnSync('node', argv, { cwd: SEAS_DIR, env, encoding: 'utf8', timeout: timeoutMs, maxBuffer: 32 * 1024 * 1024 });
-  if (r.error) throw new Error(`tool spawn failed: ${r.error.message}`);
+  if (r.error) throw new Error(`tool spawn failed (${argv.join(' ')}): ${r.error.message}`);
   const stdout = r.stdout || '';
+  const stderr = r.stderr || '';
   let json = null;
   try { json = JSON.parse(stdout); } catch { /* not JSON — keep raw */ }
-  return { status: r.status, json, stdout: stdout.slice(0, 4000), stderr: (r.stderr || '').slice(0, 1500) };
+  // A tool killed by the timeout (SIGTERM) exits with a null status + a signal — that is a REAL failure
+  // and must never look like a clean run. Synthesize a loud error result so the outcome line surfaces it.
+  if (r.status === null && r.signal) {
+    return { status: 124, json: { error: `tool KILLED by signal ${r.signal} after ${timeoutMs}ms (timeout) — ${argv.join(' ')}`, stderr: stderr.slice(0, 1500) }, stdout: stdout.slice(0, 4000), stderr: stderr.slice(0, 1500) };
+  }
+  // Nonzero exit with NO parseable stdout: fold stderr into a synthetic error JSON so the failure is
+  // never reduced to a bare status. (Tools that print their own {error} JSON are already covered.)
+  if (r.status !== 0 && !json) {
+    return { status: r.status, json: { error: (stderr.trim() || stdout.trim() || `exited ${r.status} with no output`).slice(0, 1200) }, stdout: stdout.slice(0, 4000), stderr: stderr.slice(0, 1500) };
+  }
+  return { status: r.status, json, stdout: stdout.slice(0, 4000), stderr: stderr.slice(0, 1500) };
 }
 
 // ── extract the model's reply: {steps:[...]} (v2) or legacy {tool,...} (v1) ─────────────────────
@@ -175,8 +186,14 @@ function appendJournal(profileId, entry) {
 
 function notesPath(profileId) { return path.join(NOTES_DIR, `${profileId}.md`); }
 function readNotes(profileId) {
+  // Shared DESIGN TRUTH (income rails) is prepended for EVERY profile — the canonical model of how
+  // rung-0 income works (FIGHT from zero; harvest needs flow; wages are slow-drip). This stops the
+  // bots re-filing misfilings (crab-dispenser) and grinding blocked rails.
+  const sharedPath = path.join(NOTES_DIR, 'DESIGN-TRUTH-income-rails.md');
+  const shared = fs.existsSync(sharedPath) ? fs.readFileSync(sharedPath, 'utf8') : '';
   const p = notesPath(profileId);
-  return fs.existsSync(p) ? fs.readFileSync(p, 'utf8') : '';
+  const own = fs.existsSync(p) ? fs.readFileSync(p, 'utf8') : '';
+  return [shared, own].filter(Boolean).join('\n\n');
 }
 function addNote(profileId, note) {
   if (!note) return false;
@@ -233,19 +250,25 @@ function detectRut(profileId) {
   return null;
 }
 
-// ── cached claimable-achievements read (6h TTL — rungs move on day+ timescales) ──────────────────
-function readClaimableCached(profileId, childEnv) {
+// ── claimable-achievements read. Cached (6h TTL) for the tick's LIVE STATE (rungs move on day+
+//    timescales, so a cache is honest for PLANNING). But a CLAIM must source its ids from CHAIN TRUTH
+//    at the moment of claiming — pass fresh:true to bypass the cache (see the claim step below). A
+//    stale window (drained pool, advanced start id) is exactly why claims were bouncing "nothing
+//    claimable": the READ lied, the claim path re-read chain and rejected the ghost ids. ──────────────
+function readClaimableCached(profileId, childEnv, opts = {}) {
   fs.mkdirSync(CACHE_DIR, { recursive: true });
   const cachePath = path.join(CACHE_DIR, `claimable-${profileId}.json`);
-  if (fs.existsSync(cachePath) && Date.now() - fs.statSync(cachePath).mtimeMs < CLAIMABLE_TTL_MS) {
+  if (!opts.fresh && fs.existsSync(cachePath) && Date.now() - fs.statSync(cachePath).mtimeMs < CLAIMABLE_TTL_MS) {
     try { return { ...readJSON(cachePath), cached: true }; } catch { /* fall through to fresh read */ }
   }
   const r = runTool(['citizen/tools/claim-achievement.js'], childEnv, 180000);
-  const condensed = r.json
-    ? JSON.parse(JSON.stringify(r.json, (k, v) => (Array.isArray(v) && v.length > 12 ? v.slice(0, 12).concat([`…and ${v.length - 12} more`]) : v)))
-    : { error: 'claimable read failed', stderr: r.stderr };
+  if (r.status !== 0 || !r.json) {
+    // FAIL LOUDLY: a failed claimable read is real information, never a silent empty.
+    return { error: `claimable read failed (exit ${r.status})`, detail: (r.json && r.json.error) || r.stderr || r.stdout, cached: false };
+  }
+  const condensed = JSON.parse(JSON.stringify(r.json, (k, v) => (Array.isArray(v) && v.length > 12 ? v.slice(0, 12).concat([`…and ${v.length - 12} more`]) : v)));
   try { fs.writeFileSync(cachePath, JSON.stringify(condensed)); } catch { /* cache write is best-effort */ }
-  return condensed;
+  return { ...condensed, cached: false };
 }
 
 // ── build the tick prompt ───────────────────────────────────────────────────────────────────────
@@ -337,6 +360,16 @@ export async function runTick(profileId, opts = {}) {
   state.portReport = gaps.json ? { coinUsd: gaps.json.coinUsd, actionable: gaps.json.actionable, top: (gaps.json.gaps || []).slice(0, 5).map((g) => ({ id: g.id, actionable: g.actionable })) } : { error: 'scan-gaps failed', stderr: gaps.stderr };
   const inv = runTool(['citizen/tools/inventory.js'], childEnv, 150000);
   state.hold = inv.json ? { held: inv.json.held, cached: !!inv.json.cached } : { error: 'inventory read failed', stderr: inv.stderr };
+  // MY PAWNS' JOB STATE — the work catalog read already resolves each owned pawn's clock-in id
+  // (distributor:tokenId), current job, and accrued time. Fold it into LIVE STATE so the brain can
+  // (a) construct the --pawn arg clock-in requires, and (b) VERIFY a clock-in landed — without
+  // spending a whole tick on a duplicate read. This is the "my pawns" section the FLAWS asked for.
+  const wk = runTool(['citizen/tools/work.js', 'read'], childEnv, 150000);
+  state.myPawnJobs = wk.json && wk.json.myPawns
+    ? { count: wk.json.myPawns.count, error: wk.json.myPawns.error,
+        pawns: (wk.json.myPawns.jobs || []).map((j) => ({ pawn: j.pawn, employed: j.employed, job: j.job, currentRun: j.currentRun, accumulated: j.accumulated })),
+        note: 'clock any pawn in with work { jobId, pawn: "<pawn from here>" }; employed/job/accumulated show whether a clock-in already landed.' }
+    : { error: `work read failed (exit ${wk.status})`, detail: (wk.json && wk.json.error) || wk.stderr };
   try { state.claimable = readClaimableCached(profileId, childEnv); }
   catch (e) { state.claimable = { error: `claimable read failed: ${e.message}` }; }
 
@@ -362,6 +395,25 @@ export async function runTick(profileId, opts = {}) {
     let argv = null, exec = null;
     try { argv = menuItem.build(step.args, { selfAddr, allowExecute }); }
     catch (e) { exec = { tool: step.tool, error: `bad args: ${e.message}` }; }
+    // FRESH-CLAIM GUARD (fix: caches lie about claim windows). A claim EXECUTE must source its ids from
+    // CHAIN TRUTH at the instant of claiming — not from the tick's 6h-cached LIVE STATE. Before firing,
+    // re-READ claimable FRESH (bypass cache) and narrow the brain's --pawns to only the ids that are
+    // still genuinely claimable right now. If none survive, we DON'T send a doomed tx — we report the
+    // fresh window loudly so the next tick claims the real ids.
+    if (!exec && argv && step.tool === 'claim-achievement' && step.args && step.args.execute && allowExecute) {
+      const fresh = readClaimableCached(profileId, childEnv, { fresh: true });
+      const freshIds = new Set((fresh.claimableNow || []).map((c) => Number(c.tokenId)).filter((n) => Number.isInteger(n)));
+      const wanted = String(step.args.pawns).split(',').map((s) => Number(s.trim())).filter((n) => Number.isInteger(n));
+      const confirmed = wanted.filter((id) => freshIds.has(id));
+      if (!confirmed.length) {
+        exec = { tool: step.tool, ran: false, note: 'claim skipped — FRESH read shows none of the requested pawns are claimable now',
+          result: { error: `stale claim: requested pawns [${wanted.join(',')}] are NOT in the FRESH claimable set [${[...freshIds].join(',') || 'empty'}] — the cached window had drifted (pool drained / start id advanced). Not sending a doomed claim.`,
+            freshClaimableNow: (fresh.claimableNow || []).slice(0, 12), blockedOnHouseAttest: (fresh.blockedOnHouseAttest || []).slice(0, 6), cached: false } };
+      } else {
+        // rewrite --pawns to the freshly-confirmed subset (rebuild argv so the value is honest)
+        argv = menuItem.build({ ...step.args, pawns: confirmed.join(',') }, { selfAddr, allowExecute });
+      }
+    }
     if (!exec) {
       if (argv === null) exec = { tool: step.tool, ran: false, note: 'no-op (wait)' };
       else { const r = runTool(argv, childEnv, 180000); exec = { tool: step.tool, ran: true, argv, status: r.status, result: r.json || { raw: r.stdout, stderr: r.stderr } }; }
@@ -381,9 +433,27 @@ export async function runTick(profileId, opts = {}) {
   const w = state.wallet.balances || {};
   const stepLine = reply.steps.map((s) => s.tool).join(' → ');
   const outcomeLines = stepResults.map((ex, i) => {
+    const failed = !!ex.error || (ex.ran && ex.status !== 0);
     const ok = ex.error ? 'ERROR' : (ex.ran === false ? 'waited' : (ex.status === 0 ? 'ok' : `exit ${ex.status}`));
-    const short = ex.error ? ex.error : (ex.ran === false ? 'no action' : (ex.result && (ex.result.decision || ex.result.note || ex.result.tool)) || `status ${ex.status}`);
-    return `  ${i + 1}. ${ex.tool} (${ok}): ${typeof short === 'string' ? short.slice(0, 300) : JSON.stringify(short).slice(0, 300)}`;
+    // FAIL LOUDLY: a failed step's summary must carry the tool's OWN error message (never just its
+    // name). Tools print rich {error,hint,reason} JSON even when they exit 1 — surface it. If the tool
+    // emitted non-JSON, fall back to its raw stdout+stderr so a crash is never reduced to "status 1".
+    let short;
+    if (ex.error) {
+      short = ex.error; // harness-side failure (bad args / unknown tool)
+    } else if (ex.ran === false) {
+      short = 'no action';
+    } else if (failed) {
+      const r = ex.result || {};
+      const err = r.error || r.reason || r.would || r.raw || (r.stderr && `stderr: ${r.stderr}`);
+      short = err
+        ? (r.hint ? `${err} — hint: ${r.hint}` : err)
+        : `exit ${ex.status} with no error body (raw: ${JSON.stringify(r).slice(0, 200)})`;
+    } else {
+      const r = ex.result || {};
+      short = r.decision || r.note || r.would || r.tool || `status ${ex.status}`;
+    }
+    return `  ${i + 1}. ${ex.tool} (${ok}): ${typeof short === 'string' ? short.slice(0, 400) : JSON.stringify(short).slice(0, 400)}`;
   });
   const holdShort = (state.hold.held || []).slice(0, 6).map((h) => `${h.symbol}:${h.balance}`).join(' ') || 'empty';
   const entry = [
