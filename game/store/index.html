@@ -16,6 +16,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>General Store — gear up</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/ethers/6.13.2/ethers.umd.min.js"></script>
   <style>
     :root{ --ink:#f3ead7; --muted:#b6a584; --gold:#e6b422; --rope:#caa45a; --green:#2ecc71; }
     *{box-sizing:border-box}
@@ -52,7 +53,9 @@
     .price{ color:var(--gold); font-weight:700; font-size:15px; }
     .btn{ background:#2a5a2f; border:1px solid var(--green); color:#eafff0; border-radius:8px; font-size:12px; padding:7px 13px; cursor:pointer; }
     .btn:hover{ background:#357039; }
-    .item.owned .btn{ background:#2a2417; border-color:#4a3a22; color:var(--muted); cursor:default; }
+    .item.stocked{ border-color:#3a5a3f; } /* you hold ≥1 (spares still buyable) */
+    .chainbadge{ font-size:10px; color:#7fd1a8; border:1px solid #2f5a44; border-radius:5px; padding:1px 4px; margin-left:6px; vertical-align:middle; }
+    .toast{ position:fixed; left:50%; bottom:18px; transform:translateX(-50%); background:#15110a; border:1px solid var(--gold); color:#ffe9b0; padding:10px 16px; border-radius:10px; font-size:13.5px; max-width:90%; box-shadow:0 6px 22px rgba(0,0,0,.5); z-index:50; }
     /* ── LOAD PREVIEW (encumbrance) ───────────────────────────────────────── */
     .load{ max-width:980px; margin:0 auto 16px; background:rgba(0,0,0,.28); border:1px solid #2a2114; border-radius:10px; padding:11px 14px; }
     .load .lhead{ display:flex; align-items:baseline; justify-content:space-between; gap:8px; flex-wrap:wrap; font-size:12.5px; }
@@ -96,6 +99,7 @@
   </div>
   <div class="load" id="load" hidden></div>
   <div id="shop"></div>
+  <div id="toast" class="toast" hidden></div>
 
   <div class="cosmetics">
     <h3>✨ Cosmetics — soon</h3>
@@ -106,11 +110,16 @@
 
   <script type="module">
     // Import from the SEAS armory (authentic D&D 3.5 data — each item carries a `.weight` in lb).
-    import { ITEMS, SLOTS, itemImg, formatCoins } from "../seas/battle-grid/items.js";
+    import { ITEMS, SLOTS, itemImg, formatCoins, gearCount, addGear, inventory } from "../seas/battle-grid/items.js";
     import { buildUnit, pawnRole } from "../seas/battle-grid/units.js";
     import { pawnCapacity, gearWeight, loadState, LOAD } from "../lib/weight.js";
+    import { GEAR_TOKENS, isTokenized } from "../shared/gear-tokens.js";
+    import { buyGear } from "../shared/gold.js";
 
-    const owned = new Set(JSON.parse(localStorage.getItem("sts_gear") || "[]"));
+    // Shelf price = market (book) price + 0.05% — a thin buffer that covers the 0.01%
+    // Uniswap pool fee so your gold reliably clears the on-chain buy. NOT a scrap source.
+    const MARKUP = 1.0005;
+    const markedCp = (cp) => Math.ceil(cp * MARKUP);
     const shopEl = document.getElementById("shop");
     const tabsEl = document.getElementById("tabs");
     const chipsEl = document.getElementById("chips");
@@ -153,7 +162,7 @@
       const lo = (p && loadouts && loadouts[p.id]) || null;
       let carriedItems;
       if (lo) carriedItems = Object.values(lo).filter(Boolean).map(id => ITEMS[id]).filter(Boolean);
-      else carriedItems = [...owned].map(id => ITEMS[id]).filter(Boolean);
+      else carriedItems = Object.keys(inventory()).map(id => ITEMS[id]).filter(Boolean);
       const capacity = pawnCapacity(str);
       const carried = gearWeight(carriedItems);
       return { name, str, capacity, carried, hasCrew: !!(p && p.endowment) };
@@ -206,11 +215,36 @@
     const baseType = (it) => it.id.replace(/-(wooden|iron|bronze|steel|leather)$/, "");
     const power = (it) => Object.values(it.mods || {}).reduce((s, v) => s + Math.abs(v), 0);
 
-    function buy(it) {
-      if (owned.has(it.id)) return;
-      owned.add(it.id);
-      localStorage.setItem("sts_gear", JSON.stringify([...owned]));
-      render();
+    // Buy: tokenized gear swaps GOLD→gear on its Port Royal wall (real, on-chain). The
+    // +0.05% markup covers the 0.01% pool fee. Non-tokenized armory items fall back to a
+    // beta off-chain "add to kit". Either way the game inventory count goes up (spares).
+    let busy = false;
+    async function buy(it) {
+      if (busy) return;
+      const tok = GEAR_TOKENS[it.id];
+      if (isTokenized(it.id)) {
+        busy = true;
+        const goldCost = +(tok.gold * MARKUP).toFixed(6);
+        try {
+          toast(`Confirm in your wallet — ${formatCoins(markedCp(it.priceCp))} 🪙…`);
+          await buyGear(tok.address, goldCost);
+          addGear(it.id, 1); render();
+          toast(`Bought ${it.name} ✓ (spent ~${goldCost} gold)`);
+        } catch (e) {
+          toast("⚠ " + (e?.shortMessage || e?.message || "buy failed"));
+        } finally { busy = false; }
+      } else {
+        addGear(it.id, 1); render();
+        toast(`${it.name} added to your kit (beta — off-chain)`);
+      }
+    }
+
+    // tiny transient toast
+    let toastT = null;
+    function toast(msg) {
+      const el = document.getElementById("toast");
+      el.textContent = msg; el.hidden = false;
+      clearTimeout(toastT); toastT = setTimeout(() => { el.hidden = true; }, 4200);
     }
 
     function buildTabs() {
@@ -252,15 +286,15 @@
       const grid = document.createElement("div");
       grid.className = "grid";
       for (const it of list) {
-        const has = owned.has(it.id);
+        const have = gearCount(it.id);
         const wt = Number(it.weight) || 0;
         const card = document.createElement("div");
-        card.className = "item" + (has ? " owned" : "");
+        card.className = "item" + (have ? " stocked" : "");
         card.innerHTML = `
           <div class="head"><div class="ico"><img src="${itemImg(it.id)}" alt="" loading="lazy" onerror="this.outerHTML='${it.emoji}'"></div>
             <div><div class="nm">${it.name}</div><div class="eff">${it.desc}</div></div></div>
-          <div class="buy"><span class="price">🪙 ${formatCoins(it.priceCp)}</span>
-            <button class="btn">${has ? "✓ Owned" : "Buy"}</button></div>
+          <div class="buy"><span class="price">🪙 ${formatCoins(markedCp(it.priceCp))}${isTokenized(it.id) ? '<span class="chainbadge" title="Real on-chain buy on the Port Royal wall">⛓ on-chain</span>' : ''}</span>
+            <button class="btn">${have ? `Buy +1 · have ${have}` : "Buy"}</button></div>
           <div class="wt">⚖️ ${wt} lb<span class="delta"> · hover to preview load</span></div>`;
         card.querySelector(".btn").addEventListener("click", () => buy(it));
         // Hover an item → ghost-preview what adding its weight does to the load bar.

@@ -1,0 +1,150 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Town — Seize the Seas</title>
+<!--
+  town/index.html — ONE data-driven TOWN UI for every settlement (founder 2026-06-26: "same UI,
+  different options per town, more limited than Port Royal"). Reads ?s=<settlementId> (default
+  port_royal) from game/lib/settlements.js → renders that town's SERVICES (goods/services tiles)
+  + JOBS (the labor market: apply → shift → collect coin + stat XP, via game/lib/jobs-loop.js).
+  Capital shows the full set; smaller player-built towns render only what's been built there.
+-->
+<style>
+  :root{ --bg:#0e1a24; --card:#16222e; --line:#26333f; --muted:#9fb0c0; --gold:#e6b422; --green:#2ecc71; --ink:#f3ead7; }
+  *{ box-sizing:border-box; }
+  body{ margin:0; padding:60px 14px 50px; color:var(--ink); background:linear-gradient(rgba(8,12,18,.7),rgba(8,12,18,.85)), url(../art/world-map.jpg) center/cover fixed, #0e1a24; font:14px/1.5 -apple-system,Segoe UI,Roboto,sans-serif; }
+  .wrap{ max-width:960px; margin:0 auto; }
+  h1{ font-size:24px; margin:4px 0 2px; color:var(--gold); letter-spacing:1px; }
+  .sub{ color:var(--muted); margin:0 0 4px; font-size:13px; }
+  .pawn{ background:rgba(0,0,0,.3); border:1px solid var(--line); border-radius:10px; padding:9px 13px; margin:12px 0 18px; font-size:13px; }
+  .pawn b{ color:var(--gold); }
+  h2{ font-size:14px; color:var(--gold); letter-spacing:.5px; border-bottom:1px solid var(--line); padding-bottom:5px; margin:20px 0 11px; text-transform:uppercase; }
+  .grid{ display:grid; grid-template-columns:repeat(auto-fill,minmax(190px,1fr)); gap:10px; }
+  .tile{ background:var(--card); border:1px solid var(--line); border-radius:10px; padding:12px; text-decoration:none; color:var(--ink); display:block; }
+  .tile:hover{ border-color:var(--gold); }
+  .tile .ico{ font-size:22px; }
+  .tile .nm{ font-weight:700; margin-top:3px; }
+  .tile .d{ color:var(--muted); font-size:11.5px; margin-top:2px; }
+  .job{ background:var(--card); border:1px solid var(--line); border-radius:10px; padding:11px 13px; display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
+  .job .nm{ font-weight:700; } .job .meta{ color:var(--muted); font-size:11.5px; }
+  .job .spacer{ margin-left:auto; }
+  .stat{ display:inline-block; background:#23323f; border:1px solid var(--line); border-radius:5px; padding:1px 6px; font-size:11px; color:var(--green); }
+  .btn{ background:#2a5a2f; border:1px solid var(--green); color:#eafff0; border-radius:8px; font-size:12px; padding:6px 12px; cursor:pointer; }
+  .btn:hover{ background:#357039; } .btn.alt{ background:#3a3320; border-color:var(--gold); color:#ffe9b0; } .btn:disabled{ opacity:.5; cursor:default; }
+  .full{ color:var(--muted); font-size:12px; }
+  .xp{ font-size:12px; color:var(--muted); }
+  .toast{ position:fixed; left:50%; bottom:18px; transform:translateX(-50%); background:#15110a; border:1px solid var(--gold); color:#ffe9b0; padding:9px 15px; border-radius:10px; font-size:13px; z-index:50; }
+  .foot{ color:var(--muted); text-align:center; margin-top:22px; font-size:12px; }
+  a.home{ color:var(--muted); font-size:12px; text-decoration:none; } a.home:hover{ color:var(--gold); }
+  /* persistent tab bar — World Map is a standing tab in every location UI (founder 2026-06-26) */
+  .tabs{ display:flex; gap:6px; margin:6px 0 10px; }
+  .tabs .tab{ background:var(--card); border:1px solid var(--line); border-radius:9px 9px 0 0; padding:8px 15px; font-size:13px; font-weight:700; text-decoration:none; color:var(--muted); }
+  .tabs .tab.on{ color:var(--gold); border-bottom-color:var(--gold); background:#1d2c39; }
+  .tabs .tab:hover{ color:var(--gold); }
+</style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="tabs">
+      <span class="tab on" id="tabHere">📍 Town</span>
+      <a class="tab" id="tabMap" href="../map/">🗺️ World Map</a>
+    </div>
+    <h1 id="townName">Town</h1>
+    <p class="sub" id="townSub"></p>
+    <div class="pawn" id="pawnBar">—</div>
+    <div id="services"></div>
+    <h2>⚓ Work — the labor market</h2>
+    <div id="jobs" class="grid" style="grid-template-columns:1fr;"></div>
+    <div class="foot">Bunks are finite — if a job's full, sail to another town. Town work trains pawns faster than the wild. 🏴‍☠️</div>
+  </div>
+  <div id="toast" class="toast" hidden></div>
+
+  <script type="module">
+    import { getSettlement, settlementServices, settlementJobs, statRate } from "../lib/settlements.js";
+    import { applyForWork, collectShift, leaveWork, openBunks, assignmentOf, shiftLeftSecs, trainedStats, wages } from "../lib/jobs-loop.js";
+
+    const sid = new URLSearchParams(location.search).get("s") || "port_royal";
+    const town = getSettlement(sid);
+    const $ = (id) => document.getElementById(id);
+    let toastT; const toast = (m) => { const e = $("toast"); e.textContent = m; e.hidden = false; clearTimeout(toastT); toastT = setTimeout(() => e.hidden = true, 3800); };
+
+    if (!town) { $("townName").textContent = "Unknown town"; $("townSub").textContent = `No settlement "${sid}" — it may not be built yet.`; }
+    else {
+      // active pawn (same keys the crew/battle use)
+      const readJSON = (k, d) => { try { return JSON.parse(localStorage.getItem(k) || d); } catch { return JSON.parse(d); } };
+      const crew = readJSON("sts_crew", "[]");
+      const activeId = localStorage.getItem("sts_active");
+      const pawn = (Array.isArray(crew) && (crew.find(p => p && p.id === activeId) || crew[0])) || null;
+      const pawnId = pawn ? pawn.id : null;
+      const pawnName = pawn ? (pawn.name || "your pawn") : null;
+
+      $("townName").textContent = town.name;
+      $("tabHere").textContent = `📍 ${town.name}`;
+      $("tabMap").href = `../map/?from=${sid}`;   // map knows where you're sailing from
+      $("townSub").textContent = `${town.tier.toUpperCase()} · trains stats ${statRate(sid)}× · ${settlementJobs(sid).length} jobs`;
+
+      // SERVICES (data-driven tiles)
+      const svc = settlementServices(sid);
+      if (svc.length) {
+        const sec = document.createElement("div");
+        sec.innerHTML = `<h2>🏪 Goods & Services</h2><div class="grid" id="svcGrid"></div>`;
+        $("services").appendChild(sec);
+        const g = sec.querySelector("#svcGrid");
+        for (const s of svc) {
+          const a = document.createElement("a"); a.className = "tile"; a.href = s.href;
+          a.innerHTML = `<div class="ico">${s.icon}</div><div class="nm">${s.label}</div><div class="d">${s.desc}</div>`;
+          g.appendChild(a);
+        }
+      }
+
+      function pawnBar() {
+        if (!pawnId) { $("pawnBar").innerHTML = `No crew yet — <a class="home" href="../tavern/">sign one on at the Tavern →</a>`; return; }
+        const a = assignmentOf(pawnId);
+        const t = trainedStats(pawnId), w = wages(pawnId);
+        const tStr = Object.keys(t).length ? Object.entries(t).map(([k, v]) => `${k} +${v}`).join(" · ") : "no training yet";
+        const wStr = Object.keys(w).length ? Object.entries(w).map(([k, v]) => `${v} ${k}`).join(" · ") : "0";
+        const where = a ? `working <b>${(settlementJobs(a.settlementId).find(j => j.job.id === a.jobId)?.job.name) || a.jobId}</b>` : "idle";
+        $("pawnBar").innerHTML = `<b>${pawnName}</b> — ${where} · trained: ${tStr} · earned: ${wStr}`;
+      }
+
+      function renderJobs() {
+        const host = $("jobs"); host.innerHTML = "";
+        for (const { job, unlimited } of settlementJobs(sid)) {
+          const open = openBunks(sid, job.id);
+          const a = pawnId ? assignmentOf(pawnId) : null;
+          const onThis = a && a.settlementId === sid && a.jobId === job.id;
+          const row = document.createElement("div"); row.className = "job";
+          let action;
+          if (!pawnId) action = `<span class="full">recruit a crew first</span>`;
+          else if (onThis) {
+            const left = shiftLeftSecs(pawnId);
+            action = left > 0
+              ? `<button class="btn" disabled>shift ${left}s</button> <button class="btn alt" data-leave="1">Leave</button>`
+              : `<button class="btn" data-collect="1">Collect ✓</button> <button class="btn alt" data-leave="1">Leave</button>`;
+          } else if (a) action = `<span class="full">${pawnName} is busy</span>`;
+          else if (open > 0) action = `<button class="btn" data-apply="${job.id}">Put ${pawnName} to work</button>`;
+          else action = `<span class="full">no open bunks</span>`;
+          row.innerHTML = `<div><div class="nm">${job.name} <span class="stat">trains ${job.stat}</span></div>
+            <div class="meta">${job.kind}${unlimited ? " · unlimited" : ` · ${open === Infinity ? "∞" : open} open`}</div></div>
+            <div class="spacer"></div><div>${action}</div>`;
+          host.appendChild(row);
+        }
+        // wire buttons
+        host.querySelectorAll("[data-apply]").forEach(b => b.onclick = () => {
+          const r = applyForWork(pawnId, sid, b.dataset.apply); toast(r.ok ? `${pawnName} starts the shift.` : "⚠ " + r.reason); refresh();
+        });
+        host.querySelectorAll("[data-collect]").forEach(b => b.onclick = () => {
+          const r = collectShift(pawnId); if (r.ok) toast(`+${r.xp} ${r.stat} · +${r.wage} ${r.coin}`); refresh();
+        });
+        host.querySelectorAll("[data-leave]").forEach(b => b.onclick = () => { leaveWork(pawnId); toast(`${pawnName} clocks out.`); refresh(); });
+      }
+
+      function refresh() { pawnBar(); renderJobs(); }
+      refresh();
+      setInterval(refresh, 1000); // tick the shift timers / ready state
+    }
+  </script>
+</body>
+</html>

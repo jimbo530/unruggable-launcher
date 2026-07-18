@@ -20,12 +20,24 @@ export const FEE = 100;          // 0.01% gold/Money pool
 export const BASE_CHAIN = 8453n;
 const SLIP_BPS = 200n;           // 2% default slippage guard
 
+// The three in-game coins (all 18 dec) — used by the Port Royal trade-good market.
+export const COINS = {
+  copper: '0x0197896c617f20d61E73E06eC8b2A95eef176bee',
+  silver: '0x36cF0ceDEee07b14C496f77C61d010268c31E0e9',
+  gold:   '0x2065d87b3a1FACc9A4fE037D7a58bC069F597004',
+};
+
 const ERC20 = [
   'function balanceOf(address) view returns (uint256)',
   'function allowance(address,address) view returns (uint256)',
   'function approve(address,uint256) returns (bool)',
+  'function transfer(address,uint256) returns (bool)',
   'function decimals() view returns (uint8)',
 ];
+
+// The ship/build gold SINK = treasury (per the doctrine, sunk gold isn't burned — it's recycled
+// to build the world). Spending gold on a ship/build transfers it here.
+export const GOLD_SINK = '0xE2a4A8b9d77080c57799A94BA8eDeb2Dd6e0aC10';
 const MONEY_ABI = [
   'function deposit(uint256 amount)',          // USDC in -> Money 1:1 to caller
   'function redeem(uint256 amount)',           // Money in -> USDC 1:1 to caller
@@ -119,6 +131,98 @@ export async function buyGold(usdcHuman) {
     amountIn: moneyWei, amountOutMinimum: minOut, sqrtPriceLimitX96: 0n,
   })).wait();
   return { goldOut: fmt(quoted, 18), tx: rc.hash };
+}
+
+/**
+ * Spend gold on a ship/build — transfers `goldHuman` GOLD to the sink (treasury), which recycles
+ * it into building the world (no burn). Returns the tx. The thing bought (ship/fleet) is granted
+ * game-side by the caller after this resolves.
+ * @returns {Promise<{spent:number, tx:string}>}
+ */
+export async function spendGold(goldHuman, toAddr = GOLD_SINK) {
+  if (!account) await connect();
+  const wei = window.ethers.parseUnits(String(goldHuman), 18);
+  if (wei <= 0n) throw new Error('Bad gold amount.');
+  const bal = await erc(ADDR.gold, true).balanceOf(account);
+  if (bal < wei) throw new Error(`Not enough gold — need ${goldHuman}.`);
+  const rc = await (await erc(ADDR.gold, false).transfer(toAddr, wei)).wait();
+  return { spent: Number(goldHuman), tx: rc.hash };
+}
+
+/** Coin balances (copper/silver/gold), human. */
+export async function coinBalances() {
+  if (!account) return { copper: 0, silver: 0, gold: 0 };
+  const [c, s, g] = await Promise.all([
+    erc(COINS.copper, true).balanceOf(account),
+    erc(COINS.silver, true).balanceOf(account),
+    erc(COINS.gold,   true).balanceOf(account),
+  ]);
+  return { copper: fmt(c, 18), silver: fmt(s, 18), gold: fmt(g, 18) };
+}
+
+/**
+ * Buy a trade good (food/gem) at Port Royal: spend `coinHuman` of `coinKey`
+ * (copper|silver|gold) → good, swapping on its fee-100 wall. Slippage-guarded, exact approval.
+ * @returns {Promise<{goodOut:number, coinSpent:number, tx:string}>}
+ */
+export async function buyGood(goodAddr, coinKey, coinHuman) {
+  if (!account) await connect();
+  const coinAddr = COINS[coinKey];
+  if (!coinAddr) throw new Error('Unknown coin: ' + coinKey);
+  const coinWei = window.ethers.parseUnits(String(coinHuman), 18);
+  if (coinWei <= 0n) throw new Error('Bad coin amount.');
+  const bal = await erc(coinAddr, true).balanceOf(account);
+  if (bal < coinWei) throw new Error(`Not enough ${coinKey} — you need ${coinHuman}.`);
+
+  const q = new window.ethers.Contract(ADDR.quoter, QUOTER_ABI, provider);
+  const quoted = (await q.quoteExactInputSingle.staticCall({
+    tokenIn: coinAddr, tokenOut: goodAddr, amountIn: coinWei, fee: FEE, sqrtPriceLimitX96: 0n,
+  }))[0];
+  const minOut = (quoted * (10000n - SLIP_BPS)) / 10000n;
+  await ensureAllowance(coinAddr, ADDR.router, coinWei);
+  const router = new window.ethers.Contract(ADDR.router, ROUTER_ABI, signer);
+  const rc = await (await router.exactInputSingle({
+    tokenIn: coinAddr, tokenOut: goodAddr, fee: FEE, recipient: account,
+    amountIn: coinWei, amountOutMinimum: minOut, sqrtPriceLimitX96: 0n,
+  })).wait();
+  return { goodOut: fmt(quoted, 18), coinSpent: fmt(coinWei, 18), tx: rc.hash };
+}
+
+/** Live quote: how much GEAR a given GOLD amount buys on its Port Royal wall (human, 18dec). */
+export async function quoteGearForGold(gearAddr, goldHuman) {
+  const amtIn = window.ethers.parseUnits(String(goldHuman), 18);
+  const q = new window.ethers.Contract(ADDR.quoter, QUOTER_ABI, provider);
+  const out = await q.quoteExactInputSingle.staticCall({
+    tokenIn: ADDR.gold, tokenOut: gearAddr, amountIn: amtIn, fee: FEE, sqrtPriceLimitX96: 0n,
+  });
+  return fmt(out[0], 18);
+}
+
+/**
+ * Buy a gear token at the Port Royal market: spend `goldHuman` GOLD → gear (swap on the
+ * fee-100 wall). Caller passes the marked-up gold cost (book price × 1.0005) so the swap
+ * clears the 0.01% fee and the player nets ~the item count expected. Slippage-guarded.
+ * @returns {Promise<{gearOut:number, goldSpent:number, tx:string}>}
+ */
+export async function buyGear(gearAddr, goldHuman) {
+  if (!account) await connect();
+  const goldWei = window.ethers.parseUnits(String(goldHuman), 18);
+  if (goldWei <= 0n) throw new Error('Bad gold amount.');
+  const bal = await erc(ADDR.gold, true).balanceOf(account);
+  if (bal < goldWei) throw new Error('Not enough gold — buy gold first.');
+
+  const q = new window.ethers.Contract(ADDR.quoter, QUOTER_ABI, provider);
+  const quoted = (await q.quoteExactInputSingle.staticCall({
+    tokenIn: ADDR.gold, tokenOut: gearAddr, amountIn: goldWei, fee: FEE, sqrtPriceLimitX96: 0n,
+  }))[0];
+  const minOut = (quoted * (10000n - SLIP_BPS)) / 10000n;
+  await ensureAllowance(ADDR.gold, ADDR.router, goldWei);
+  const router = new window.ethers.Contract(ADDR.router, ROUTER_ABI, signer);
+  const rc = await (await router.exactInputSingle({
+    tokenIn: ADDR.gold, tokenOut: gearAddr, fee: FEE, recipient: account,
+    amountIn: goldWei, amountOutMinimum: minOut, sqrtPriceLimitX96: 0n,
+  })).wait();
+  return { gearOut: fmt(quoted, 18), goldSpent: fmt(goldWei, 18), tx: rc.hash };
 }
 
 /**
