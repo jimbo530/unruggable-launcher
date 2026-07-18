@@ -597,3 +597,207 @@ _The continuous memory of this bot. Each tick appends one entry._
 - **goal → now**: Diagnose the quote rail: find any working route among SALT→COPPER, RATIONS→COPPER, SALT→GOLD (10-unit lots). If a quote lands, next tick find/confirm the SELL rail before acting on it — no sell tool is currently in the menu. Haul clock-in is parked (attempted twice, no readable receipt); do not re-clock unless a read can confirm status.
 - **flaw filed**: quote rail exits 1 with no error text: quote {tokenIn:'SALT', tokenOut:'COPPER', amount:10} failed exit 1 on two consecutive ticks at Port Royal with no diagnostic output, so a player cannot price held goods or tell a broken route from a bad symbol — and the menu exposes no goods-sell tool to act on a quote anyway.
 - **lesson**: When one tool fails exit-1 twice on identical args, stop retrying verbatim — vary exactly one argument per attempt (tokenIn, then tokenOut) to isolate which leg of the route is unsupported instead of which retry got lucky.
+
+## 2026-07-08T13:02:38.072Z — worker
+- **state**: eth=0.00059761056048186 usdc=0 gold=0 silver=0 copper=97 | hold: SALT:48 RATIONS:29 APPLE:19 HONEY:14 COD:11 ALE:9 | pawns=1 | top gap=lumber
+- **steps**: quote → fish — After three exit-1 failures on goods routes, a coin-to-coin control quote (GOLD→COPPER) isolates whether the quote tool itself is dead or just goods symbols are unsupported — one variation, per my rule. The free fish loop read re-checks the only other income rail from Port Royal (sell value, skill, crab status) so I'm not idle-grinding a blocked market.
+- **outcomes**:
+  1. quote (ok): quote
+  2. fish (ok): Read-only — ocean buy + PR sell quotes are LIVE on-chain. Catching = a GOLD→FISH swap at the ocean LP (presence-gated), skill-scaled. No HarvestGround/dispenser is involved (that model is superseded).
+- **goal → now**: Quote control test: if GOLD→COPPER quotes, goods symbols are the broken leg (file that flaw, stop quoting goods); if it also exits 1, the quote tool is fully down — park quoting entirely. Either way, next income focus is whatever the fish loop read shows: fish sell economics or a crab/ground status change. Haul clock-in stays parked pending any readable status.
+- **lesson**: When every goods route fails identically, run a control test on the tool's simplest supported pair (coin→coin) before concluding the whole rail is broken — a passing control turns 'tool broken' into 'these symbols unsupported', which is a different flaw and a different workaround.
+
+## 2026-07-08T13:26:26.897Z — worker
+- **state**: eth=0.00059761056048186 usdc=0 gold=0 silver=0 copper=97 | hold: SALT:48 RATIONS:29 APPLE:19 HONEY:14 COD:11 ALE:9 | pawns=1 | top gap=lumber
+- **steps**: quote → quote — The GOLD→COPPER control passed, so the quote tool works and goods symbols are the broken leg (flaw filed, goods quotes stop). Fishing is my only live income rail but it's a GOLD-funded swap — these two zero-cost coin-ladder quotes tell me whether my 97 copper can actually be converted up into enough gold to fund a minimum catch before I spend anything sailing to 8004.
+- **outcomes**:
+  1. quote (ok): quote
+  2. quote (exit 1): quote
+- **noted**: At Port Report coinUsd rates my 97 copper ≈ $0.0097, while wallet caps show minUsdPerTrade $0.10 (~10 gold ≈ 1000 copper). If the fish-catch swap honors the same floor, my entire copper stack is ~10x short of one minimum trade — verify against the COPPER→GOLD and GOLD→FISH quotes before ever sailing to loc 8004.
+- **goal → now**: Goods quoting confirmed broken (GOLD→COPPER control passed; flaw filed) — no more goods quotes. Now price the coin ladder: if COPPER→GOLD and GOLD→FISH both quote, compute whether 97 copper funds a minimum fish catch. If it can't, fishing parks too and my ask to the founder becomes a goods-sell rail or a readable work-clock receipt — every other income rung is gated. Haul clock-in stays parked.
+- **flaw filed**: quote rejects all goods symbols silently: SALT→COPPER, RATIONS→COPPER, and SALT→GOLD each exit 1 with no error text at Port Royal, while the GOLD→COPPER control quote succeeds — so goods symbols are unsupported in the quote rail, and with no goods-sell tool in the menu either, a player's entire starting hold (141 units of food goods) is unpriceable and illiquid.
+- **lesson**: After a control test passes, the next move is to price the path I'd actually take (COPPER→GOLD→FISH), not celebrate the tool working — a working quote rail is only useful if it prices the specific ladder my capital must climb.
+
+## 2026-07-09T13:02:36.419Z — worker
+- **state**: eth=0.00059761056048186 usdc=0 gold=0 silver=0 copper=97 | hold: SALT:48 RATIONS:29 APPLE:19 HONEY:14 COD:11 ALE:9 | pawns=1 | top gap=lumber
+- **steps**: work → work — Breaking the quote rut: quoting banks nothing and goods routes are confirmed dead, so I return to my actual charter rung — honest labor. I now hold my pawn's distributor:tokenId and live execution is ENABLED, so I read the job catalog for the best live wage then clock my Redrum Raiders into haul for real (mode:1) instead of the earlier DRY attempts that gave no receipt.
+- **outcomes**:
+  1. work (ok): Read-only. WorkClock clock-in jobs (clockInNow:true): the 6 town stat-jobs + guard — work <jobId> --pawn <distributor:tokenId> [--mode 1|2] [--execute]. FISHING is LIVE but via the `fish` tool (ocean-LP swap, not a clock-in); log/mill/crab are PLANNED (no mechanic wired yet).
+  2. work (ok): work
+- **noted**: Live-enabled ticks are the only window to convert a DRY-parked work clock-in into a real wage; when liveTrading:ENABLED appears, prioritize the actual labor rung over read-only quotes.
+- **goal → now**: Stop pricing the dead coin ladder. Worker's rung is labor: with pawn id 0x4ECe491951B759363bCBAF75389a202Fe0584080:0 confirmed and live enabled, clock into the best-wage live job (haul default) and read the clock-in receipt. If the live clock-in returns a real accrual/receipt, wages are my income rail — repeat next tick. If it fails live with an error, THAT error is the flaw to file to the founder; fishing/goods-sell asks stay secondary.
+- **lesson**: A move parked as 'no readable receipt' under DRY is not proven blocked — once live execution is ENABLED, re-attempt the real clock-in once before re-parking; DRY silence and a live failure are different flaws.
+
+## 2026-07-09T13:26:38.829Z — worker
+- **state**: eth=0.000596743589611492 usdc=0 gold=0 silver=0 copper=97 | hold: SALT:48 RATIONS:29 APPLE:19 HONEY:14 COD:11 ALE:9 | pawns=1 | top gap=lumber
+- **steps**: work — Live execution is ENABLED and I hold my pawn's distributor:tokenId, so this is the window to convert the DRY-parked haul clock-in into a real wage — my charter's actual labor rung, not another read-only quote. The clock-in's own receipt is the only proof of accrual, so one clean live attempt tells me if wages are my income rail.
+- **outcomes**:
+  1. work (ok): work
+- **lesson**: (none)
+
+## 2026-07-09T13:49:13.009Z — worker
+- **state**: eth=0.00059587745196118 usdc=0 gold=0 silver=0 copper=97 | hold: SALT:48 RATIONS:29 APPLE:19 HONEY:14 COD:11 ALE:9 | pawns=1 | top gap=lumber
+- **steps**: work — Live is ENABLED and I hold my pawn's id, so this is the window to actually clock my Redrum Raiders into haul (the default best-wage live job) and read the real accrual receipt — labor is my charter rung, and only the clock-in's own receipt proves a wage rail.
+- **outcomes**:
+  1. work (ok): work
+- **goal → now**: With pawn 0x4ECe491951B759363bCBAF75389a202Fe0584080:0 and live enabled, my one repeatable income move is a live haul clock-in. Each tick: run work {jobId:haul, pawn:<id>, mode:1} and read the receipt. If it accrues, repeat and let wages stack; if it errors live, file THAT error as the flaw. Fishing/goods-sell stay secondary until a wage receipt proves out or a sell rail appears.
+- **lesson**: (none)
+
+## 2026-07-09T14:10:18.597Z — worker
+- **state**: eth=0.000595011276624713 usdc=0 gold=0 silver=0 copper=97 | hold: SALT:48 RATIONS:29 APPLE:19 HONEY:14 COD:11 ALE:9 | pawns=1 | top gap=lumber
+- **steps**: work — Live is ENABLED and I hold my pawn's id, so this is the window to convert the parked haul clock-in into a real wage — labor is my charter rung, and the clock-in's own receipt is the only proof of accrual.
+- **outcomes**:
+  1. work (ok): work
+- **lesson**: Prior ticks logged work as 'ok: work' with no accrual detail — if this live clock-in again returns no readable receipt, the flaw is the work tool never surfacing accrued wage/time, and I must ask the founder for a readable clock-in receipt rather than re-attempting blindly.
+
+## 2026-07-09T14:31:25.257Z — worker
+- **state**: eth=0.000594144589507242 usdc=0 gold=0 silver=0 copper=97 | hold: SALT:48 RATIONS:29 APPLE:19 HONEY:14 COD:11 ALE:9 | pawns=1 | top gap=lumber
+- **steps**: work — Live is ENABLED and I hold my pawn's id — this is the window to actually clock my Redrum Raiders into haul (the default best-wage live job) and read the real accrual receipt, my charter's labor rung. Only the clock-in's own receipt proves a wage rail.
+- **outcomes**:
+  1. work (ok): work
+- **lesson**: (none)
+
+## 2026-07-10T13:02:53.222Z — worker
+- **state**: eth=0.00059327831472895 usdc=0 gold=0 silver=0 copper=97 | hold: SALT:48 RATIONS:29 APPLE:19 HONEY:14 COD:11 ALE:9 | pawns=1 | top gap=lumber
+- **steps**: work — Four consecutive live haul clock-ins (2026-07-09) logged only 'ok: work' — no receipt, no error, copper flat at 97 — so re-running the same blind clock-in violates my no-grinding-blocked-rungs rule. The menu says a no-jobId work read shows my pawns' current jobs + accrued time, so one read verifies whether those clock-ins actually registered and are silently accruing before I either collect or park the labor rung.
+- **outcomes**:
+  1. work (ok): Read-only. WorkClock clock-in jobs (clockInNow:true): the 6 town stat-jobs + guard — work <jobId> --pawn <distributor:tokenId> [--mode 1|2] [--execute]. FISHING is LIVE but via the `fish` tool (ocean-LP swap, not a clock-in); log/mill/crab are PLANNED (no mechanic wired yet).
+- **noted**: 2026-07-09: ran work {jobId:haul, pawn:0x4ECe491951B759363bCBAF75389a202Fe0584080:0, mode:1} LIVE on 4 consecutive ticks; every outcome was the bare string 'work' — no tx hash, no accrual, no error — and copper never moved from 97. The haul clock-in is unproven; only a work read showing my pawn's current job/accrued time (or a founder-confirmed receipt) can prove the wage rail.
+- **goal → now**: Verify, don't re-clock: run work {} and check whether my Redrum Raiders (0x4ECe491951B759363bCBAF75389a202Fe0584080:0) shows a current job + accrued time from the 2026-07-09 clock-ins. If it shows accrual, labor is live — plan wage collection next tick. If it still returns only the catalog, the wage rail is receipt-less/blocked: flaw is filed, so hold my 97 copper + goods as savings and wait for a founder fix or a sell rail instead of burning gas on blind clock-ins.
+- **flaw filed**: work clock-in gives no receipt: live work {jobId:haul, pawn:0x4ECe491951B759363bCBAF75389a202Fe0584080:0, mode:1} at Port Royal ran on 4 consecutive ticks (2026-07-09) and returned only the bare string 'work' — no tx hash, no accrued-time/wage figure, no error — while copper stayed at 97, so a solo worker cannot tell if the clock-in landed, and the honest-labor rung is unverifiable.
+- **lesson**: A receipt-less 'ok' with an unchanged balance across 4 ticks is evidence of a broken rail, not slow income — after two identical silent 'successes', switch from re-attempting to verifying state via a read.
+
+## 2026-07-10T13:27:50.225Z — worker
+- **state**: eth=0.00059327831472895 usdc=0 gold=0 silver=0 copper=97 | hold: SALT:48 RATIONS:29 APPLE:19 HONEY:14 COD:11 ALE:9 | pawns=1 | top gap=lumber
+- **steps**: fish — My goal's verify step already resolved earlier today: the work {} read returned only the catalog (no pawn job/accrued time), so the wage rail stays receipt-less and I must not burn gas on blind clock-ins. The one free read left that could open income is the crab dispenser status — crab is my only zero-capital harvest rail, and this read from Port Royal is the cheapest signal that rung 0 opened; if it shows live, next tick I sail to loc 2006.
+- **outcomes**:
+  1. fish (ok): DRY — no tx. CRAB = a FREE server-authoritative CATCH (HarvestGround.dispense), NOT a gold buy. Zero-resource income (founder). The crab beach ground is LIVE. Re-run with --execute (CITIZEN_ALLOW_LIVE=1, AT the crab beach — loc 2006, hex (2,6) [`sail.js 2 6`]) to dispense.
+- **noted**: 2026-07-10: work {} read confirmed the catalog-only behavior — it never shows a pawn's current job or accrued time, so the WorkClock wage rail is unverifiable end-to-end until the founder fixes the read or the clock-in returns a receipt. Labor rung parked; savings: 97 copper + food hold intact.
+- **goal → now**: Wage rail parked (flaw filed 2026-07-10: work read shows no pawn job/accrual, clock-ins receipt-less). Each tick: one free crab-dispenser check (fish {action:'crab'} from Port Royal) — if it goes live, sail to loc 2006 (crab beach) for the zero-capital harvest. Otherwise hold 97 copper + food goods as savings and wait for a founder fix on the work receipt or a goods-sell rail. No gas on blind clock-ins.
+- **flaw filed**: work read omits pawn state: work {} at Port Royal returns only the job catalog — it never lists my pawn's current job or accrued time, so 4 live haul clock-ins (2026-07-09) remain unverifiable and the honest-labor rung is dead-ended for a solo worker until the read or the clock-in receipt is fixed.
+- **lesson**: When a goal's verify condition already resolved earlier the same day, don't re-run the verification — act on the branch it selected (here: hold savings, poll only the cheapest alternative rail).
+
+## 2026-07-10T13:52:21.866Z — worker
+- **state**: eth=0.00059327831472895 usdc=0 gold=0 silver=0 copper=97 | hold: SALT:48 RATIONS:29 APPLE:19 HONEY:14 COD:11 ALE:9 | pawns=1 | top gap=lumber
+- **steps**: sail — Last tick's dry run confirmed the crab beach HarvestGround is LIVE and dispense would be a FREE catch — but it is location-gated at loc 2006 and I'm at Port Royal (8,3). Sailing there is the single committed step that opens my only zero-capital income rail; one small Base tx is well within my gas cushion and risks no pawn, no coin, no goods.
+- **outcomes**:
+  1. sail (ok): voyage requested through the rules server (server-clocked; arrival takes real time).
+- **noted**: 2026-07-10: crab beach ground (loc 2006, hex (2,6)) confirmed LIVE via dry run — voyage begun from Port Royal (8,3). On arrival run fish {action:'crab'} with execute (needs CITIZEN_ALLOW_LIVE=1) for the free HarvestGround.dispense; sell/convert plans come only after the first catch actually lands.
+- **goal → now**: En route to crab beach (loc 2006, hex (2,6)) — voyage is server-clocked, so each tick: check arrival; if not arrived, wait (no gas burns). On arrival, run fish {action:'crab'} LIVE for the free dispense — my first zero-capital income. Wage rail stays parked (receipt-less clock-ins, flaws filed); 97 copper + food hold stay banked as savings.
+- **lesson**: When a dry run confirms a gated rail is live, stop polling and pay the movement cost immediately — the poll was the decision point, and re-checking from the wrong location is idle gas.
+
+## 2026-07-10T14:15:49.530Z — worker
+- **state**: eth=0.00059327831472895 usdc=0 gold=0 silver=0 copper=97 | hold: SALT:48 RATIONS:29 APPLE:19 HONEY:14 COD:11 ALE:9 | pawns=1 | top gap=lumber
+- **steps**: fish → inventory — I have ARRIVED at crab beach (Bonewater Atoll, loc 2006) and live execution is enabled — this is exactly the moment my goal built toward: run the free HarvestGround.dispense for my first zero-capital income, then force-refresh the hold to verify the catch actually landed (a receipt-less 'ok' means nothing without a state read, per my haul lesson).
+- **outcomes**:
+  1. fish (ok): DRY — no tx. CRAB = a FREE server-authoritative CATCH (HarvestGround.dispense), NOT a gold buy. Zero-resource income (founder). The crab beach ground is LIVE. Re-run with --execute (CITIZEN_ALLOW_LIVE=1, AT the crab beach — loc 2006, hex (2,6) [`sail.js 2 6`]) to dispense.
+  2. inventory (ok): these goods are real tradeable wealth — sell dear at the right port, or keep what feeds/equips the crew.
+- **noted**: 2026-07-10: arrived at Bonewater Atoll (2,6) [2006] — crab beach. First live fish {action:'crab'} dispense attempted this tick; whatever the hold read shows afterward is the ground truth on whether the zero-capital crab rail actually pays.
+- **goal → now**: AT crab beach (loc 2006). This tick: run fish {action:'crab'} LIVE + verify via fresh inventory. If the catch landed: repeat the dispense each tick it stays free, and scout the sell path (fish sell is at Port Royal — plan the return voyage only once the hold holds enough catch to be worth the sail). If dispense fails or pays nothing: file the flaw, hold savings (97 copper + food goods), and fall back to waiting on the work-receipt fix.
+- **lesson**: Always pair a live dispense/claim with an immediate fresh state read in the same tick — arrival windows are the payoff of paid movement, and verification is what turns an 'ok' into real income.
+
+## 2026-07-10T14:39:21.882Z — worker
+- **state**: eth=0.00059327831472895 usdc=0 gold=0 silver=0 copper=97 | hold: SALT:48 RATIONS:29 APPLE:19 HONEY:14 COD:11 ALE:9 | pawns=1 | top gap=lumber
+- **steps**: fish → inventory — I'm at crab beach with live enabled; last tick's dispense came back DRY despite live mode, so this is the one paced retry of my only zero-capital income rail, immediately verified with a forced-fresh hold read — the fresh inventory is the only proof a catch landed.
+- **outcomes**:
+  1. fish (ok): DRY — no tx. CRAB = a FREE server-authoritative CATCH (HarvestGround.dispense), NOT a gold buy. Zero-resource income (founder). The crab beach ground is LIVE. Re-run with --execute (CITIZEN_ALLOW_LIVE=1, AT the crab beach — loc 2006, hex (2,6) [`sail.js 2 6`]) to dispense.
+  2. inventory (ok): these goods are real tradeable wealth — sell dear at the right port, or keep what feeds/equips the crew.
+- **noted**: 2026-07-10: first crab dispense at loc 2006 returned DRY even though the tick was live-enabled and I was on-site — the action menu exposes no execute arg for fish, so live pass-through is the harness's job. Fresh hold this tick still shows only the seed food goods (no crab), confirming nothing landed.
+- **goal → now**: AT crab beach (loc 2006), live enabled. This tick: one retry of fish {action:'crab'} + fresh inventory to verify. If crab appears in the hold: the zero-capital rail is proven — repeat each free tick and plan the Port Royal sell voyage once the catch stacks. If it returns DRY again: the flaw is filed, stop retrying — hold savings (97 copper + food hold) and wait on the work-receipt or crab-execute fix.
+- **flaw filed**: crab dispense ignores live mode: fish {action:'crab'} at loc 2006 (on-site, live trading ENABLED) returned 'DRY — no tx, re-run with --execute (CITIZEN_ALLOW_LIVE=1)', but the action menu exposes no execute arg on fish — the bot has no way to trigger the live HarvestGround.dispense, dead-ending the only zero-capital income rail at the moment of payoff.
+- **lesson**: A DRY response saying 're-run with --execute' while live trading is already ENABLED means the execute flag isn't reaching the tool — that's a harness/rail wiring problem, not a location or timing problem, so one retry then file the flaw instead of grinding it.
+
+## 2026-07-11T13:02:57.914Z — worker
+- **state**: eth=0.00059327831472895 usdc=0 gold=0 silver=0 copper=97 | hold: SALT:48 RATIONS:29 APPLE:19 HONEY:14 COD:11 ALE:9 | pawns=1 | top gap=lumber
+- **steps**: work → sail — Breakthrough in this tick's state: myPawnJobs finally shows my pawn EMPLOYED at haul with 10d 22h accrued — the wage rail is real and my four 'bare string' clock-ins did land. Crab at loc 2006 is closed by design (harvest needs flow, my pawn has none — per the design-truth note, stop retrying), so I read the job catalog for haul's wage rate / payout mechanics, then sail home to Port Royal where the wage and sell rails live.
+- **outcomes**:
+  1. work (ok): Read-only. WorkClock clock-in jobs (clockInNow:true): the 6 town stat-jobs + guard — work <jobId> --pawn <distributor:tokenId> [--mode 1|2] [--execute]. FISHING is LIVE but via the `fish` tool (ocean-LP swap, not a clock-in); log/mill/crab are PLANNED (no mechanic wired yet).
+  2. sail (ok): voyage requested through the rules server (server-clocked; arrival takes real time).
+- **noted**: 2026-07-11: wage rail PROVEN — my pawn 0x4ECe491951B759363bCBAF75389a202Fe0584080:0 is employed:true at job=haul, accumulated 10d 22h 15m (accrual continued even while I sailed to Bonewater). Copper still 97, so accrued time has NOT paid out yet; the conversion mechanism (mode:2? clock-out? auto-drip?) is unknown — do NOT blind-fire mode:2 live, learn its semantics first.
+- **goal → now**: Crab rail is closed by design (needs flow; my pawn has none) — stop retrying. Wage rail PROVEN: haul accrued 10d 22h. Now: sail back to Port Royal (8,3); en route, learn how accrued haul time converts to copper (catalog read / founder / receipts) before ever firing mode:2 live. On arrival: check wallet for wage drip, and scout a sell rail for the food hold. Savings intact: 97 copper + food goods.
+- **lesson**: The harness now surfaces myPawnJobs (employed/job/accrued) in live state — a clock-in that returned a bare 'work' string with no receipt can still have landed; a later state read, not the call's own output, is the real proof.
+
+## 2026-07-11T13:27:34.896Z — worker
+- **state**: eth=0.00059327831472895 usdc=0 gold=0 silver=0 copper=97 | hold: SALT:48 RATIONS:29 APPLE:19 HONEY:14 COD:11 ALE:9 | pawns=1 | top gap=lumber
+- **steps**: work → quote — I'm back at Port Royal with 10d 22h accrued on haul but copper unchanged at 97 — so the wage doesn't auto-drip and I must learn the conversion before firing mode:2 live. A jobId-only work read (no pawn = cannot clock in) should surface haul's wage rate and mode semantics, and a SALT→COPPER quote scouts the sell value of my largest good, both zero-cost reads straight from my stated goal.
+- **outcomes**:
+  1. work (ERROR): bad args: work clock-in needs a pawn (distributor:tokenId)
+- **goal → now**: Back at Port Royal (8,3), wage NOT auto-dripping (97 copper vs 10d 22h accrued). Learn haul's payout semantics via jobId-only work read before ever firing mode:2 live; in parallel, scout the food-hold sell rail starting with SALT→COPPER quotes. Savings intact: 97 copper + food goods.
+- **lesson**: Copper sitting at 97 while accrued haul time passed 10d with me present at Port Royal rules out an auto-drip wage — conversion must be an explicit call (likely mode:2 or clock-out), so its semantics are the gate, not my location.
+
+## 2026-07-12T13:01:50.464Z — worker
+- **state**: eth=0.00059327831472895 usdc=0 gold=0 silver=0 copper=97 | hold: SALT:48 RATIONS:29 APPLE:19 HONEY:14 COD:11 ALE:9 | pawns=1 | top gap=lumber
+- **steps**: quote → fish — Wage conversion is blocked (no safe way to learn mode:2, jobId-only read hard-errors), so this tick scouts the OTHER income gate: a read-only SALT→COPPER quote prices my largest good (48 SALT), and a fish loop read at Port Royal checks projected sell values and whether my held COD counts as sellable fish — both zero-cost steps toward making the food hold liquid.
+- **outcomes**:
+  1. quote (ok): quote
+  2. fish (ok): Read-only — ocean buy + PR sell quotes are LIVE on-chain. Catching = a GOLD→FISH swap at the ocean LP (presence-gated), skill-scaled. No HarvestGround/dispenser is involved (that model is superseded).
+- **noted**: work {jobId} WITHOUT a pawn hard-errors ('bad args: work clock-in needs a pawn') — there is NO per-job detail read; the no-arg catalog and the action-menu arg doc are the only in-game documentation of mode 1|2, and neither explains payout. Accrued haul time (10d 22h+) keeps growing while unconverted, so waiting on founder semantics costs nothing.
+- **goal → now**: At Port Royal (8,3), wage conversion BLOCKED pending founder semantics on mode:2/clock-out (flaw filed — do not fire mode:2 live). Meanwhile prove a sell rail for the food hold: SALT→COPPER quote + fish loop (does held COD sell?). Savings intact: 97 copper + food goods; accrual keeps growing at haul.
+- **flaw filed**: wage payout semantics unexposed: pawn 0x4ECe...4080:0 employed at haul with 10d 22h accrued at Port Royal, copper frozen at 97 — no auto-drip; work's mode 1|2 arg is undocumented, work {jobId} without pawn errors, and work {} shows only the catalog, so there is no safe in-game way to convert accrued wage time to copper without blind-firing mode:2 live and risking the accrual.
+- **lesson**: When a rail's only unknown is an undocumented mode flag guarding accrued value, the founder is the read — experimenting live risks forfeiting 10d 22h of accrual to save one question; file the flaw and grind a different rung meanwhile.
+
+## 2026-07-12T13:25:23.484Z — worker
+- **state**: eth=0.00059327831472895 usdc=0 gold=0 silver=0 copper=97 | hold: SALT:48 RATIONS:29 APPLE:19 HONEY:14 COD:11 ALE:9 | pawns=1 | top gap=lumber
+- **steps**: fish → wallet → inventory — Live trading is ENABLED and fish sell is the only live-capable sell rail at Port Royal — a $0.10 sell (the exact cap floor) tests my goal's open question: do my 11 held COD convert to coin? The wallet and fresh hold reads afterward are the ground truth on whether anything actually landed.
+- **outcomes**:
+  1. fish (exit 1): not enough FISH to sell: have 0, need 10.00 — CATCH first (buy at the ocean LP) — hint: run `node citizen/tools/fish.js loop` to see flow-supply + your WIS skill + the catch/sell plan; catch/sell take --pawn <distributor:tokenId> and are location-gated (must be at the ocean / Port Royal).
+- **noted**: fish {action:'sell'} at Port Royal is the ONLY live-capable conversion of goods→coin exposed in the menu; whether it accepts seed COD (vs only freshly-caught fish) is the gate on the entire food hold's liquidity — result of the 2026-07-12 $0.10 test is the answer.
+- **goal → now**: At Port Royal (8,3). Wage conversion still BLOCKED on founder semantics (flaw filed — never blind-fire mode:2). This tick: live-test fish sell ($0.10) to learn if held COD converts to coin — if it lands, the food hold is liquid and SALT/RATIONS become my savings ladder; if it refuses, file the sell-rail gap and keep accruing haul time. Savings: 97 copper + food hold.
+- **flaw filed**: quote tool returns no data: SALT→COPPER quote at Port Royal (2026-07-12) returned only the bare string 'quote' — no price, no amountOut, no error — making it impossible to price held goods before selling; the read-only pricing rail is effectively blind.
+- **lesson**: A quote call with valid args can still return the bare string 'quote' with no price data — the quote tool's output is currently uninformative, so the only way to price a good is to attempt the smallest live sell on a rail that executes.
+
+## 2026-07-13T13:02:02.563Z — worker
+- **state**: eth=0.00059327831472895 usdc=0 gold=0 silver=0 copper=97 | hold: SALT:48 RATIONS:29 APPLE:19 HONEY:14 COD:11 ALE:9 | pawns=1 | top gap=lumber
+- **steps**: build — Yesterday's $0.10 test proved held COD is NOT sellable FISH (need 10 caught FISH, have 0), so both conversion rails (wage payout, goods→coin) are now confirmed blocked and haul accrual grows free while I wait. The one new zero-cost move is reading the build catalog — pricing a mill/farm gives my savings a concrete target for the builder rung.
+- **outcomes**:
+  1. build (ok): Read-only. Use `build plan <mill|farm>` to design + price a specific build (still DRY — no factory deployed).
+- **noted**: SELL-RAIL TRUTH (proven 2026-07-12): the seed food hold has NO path to coin at Port Royal — fish sell rejects held COD (wants >=10 caught FISH), quote returns no data, trade is buy-only. Treat all 8 seed goods as illiquid savings until a goods-sell rail ships; stop testing sells against them.
+- **goal → now**: At Port Royal (8,3). Both conversion rails BLOCKED and flaw-filed: wage payout (mode:2 semantics unknown — never blind-fire) and goods→coin (held COD isn't FISH; no goods-sell rail). Haul accrual (10d 22h+) grows free while parked. Now: price the builder rung via the build catalog so savings have a target; otherwise wait for founder rails. Savings: 97 copper + illiquid food hold.
+- **flaw filed**: goods sell rail missing: at Port Royal the only live sell (fish sell) rejects held seed COD — 'not enough FISH: have 0, need 10.00' — it only accepts freshly-caught FISH tokens; with quote returning bare 'quote' (no price data) and trade being buy-only, the entire seed food hold (141 units across SALT/RATIONS/APPLE/HONEY/COD/ALE/JERKY/CINNAMON) has no path to coin anywhere in the action menu.
+- **lesson**: Seed COD and caught FISH are different tokens: fish sell only accepts the caught-FISH ERC20 with a 10-unit floor, so a food-good in the hold is not liquid just because a same-named fish sell rail exists.
+
+## 2026-07-13T13:25:41.594Z — worker
+- **state**: eth=0.00059327831472895 usdc=0 gold=0 silver=0 copper=97 | hold: SALT:48 RATIONS:29 APPLE:19 HONEY:14 COD:11 ALE:9 | pawns=1 | top gap=lumber
+- **steps**: build → build — Both conversion rails stay blocked (flaws filed) and haul accrual grows free, so the one zero-cost move left is finishing what last tick started: the build catalog said to run plan per kind. Pricing BOTH mill and farm gives my savings a concrete gold target for the builder rung — read-only, DRY, no risk to my 97 copper or gas.
+- **outcomes**:
+  1. build (ok): DRY by definition until the founder approves + deploys the StructureFactory. This tool never deploys a contract and never fabricates a structure.
+  2. build (ok): DRY by definition until the founder approves + deploys the StructureFactory. This tool never deploys a contract and never fabricates a structure.
+- **noted**: Builder-rung pricing (from build plan mill/farm at Port Royal, 2026-07-13) is the savings target that decides whether 97 copper + future wage payouts are weeks or months from a first structure — record both gold costs verbatim when the plans return.
+- **goal → now**: At Port Royal (8,3). Both conversion rails BLOCKED and flaw-filed: wage payout (mode:2 semantics unknown — never blind-fire) and goods→coin (no sell rail; hold is illiquid savings). Haul accrual (10d 22h+, run 7d+) grows free while parked. This tick: price mill AND farm via build plan so the builder rung has a concrete gold target. Then: wait on founder rails, keep accruing. Savings: 97 copper + food hold.
+- **lesson**: build with no kind only LISTS buildable kinds; the actual price/design comes only from a per-kind plan call — always follow a catalog read with the specific plan read before treating a rung as priced.
+
+## 2026-07-13T13:47:02.554Z — worker
+- **state**: eth=0.00059327831472895 usdc=0 gold=0 silver=0 copper=97 | hold: SALT:48 RATIONS:29 APPLE:19 HONEY:14 COD:11 ALE:9 | pawns=1 | top gap=lumber
+- **steps**: wait — Every forward rung is now confirmed blocked: wage payout semantics unknown, goods→coin has no sell rail, and last tick's build plan calls for mill AND farm returned only the 'DRY until founder deploys StructureFactory' notice with no gold price — so the builder rung can't even be targeted yet. Haul accrual (10d 22h+, run 7d+) grows free while parked; the disciplined move is to wait, spend nothing, and not re-grind blocked rails.
+- **outcomes**:
+  1. wait (waited): no action
+- **noted**: As of 2026-07-13 the builder rung is pre-deployment: build plan mill/farm both return no price. Re-check pricing only after the founder announces StructureFactory is deployed — until then the savings target for a first structure is unknowable.
+- **goal → now**: At Port Royal (8,3). ALL forward rungs blocked & flaw-filed: wage payout (mode:2 semantics unknown — never blind-fire), goods→coin (no sell rail; hold is illiquid savings), builder pricing (build plan returns no gold cost — StructureFactory undeployed). Haul accrual (10d 22h+, run 7d+) grows free while parked. Holding pattern: wait ticks, watch each tick's live state for a founder rail (payout semantics, sell rail, or factory deploy) and act the tick one appears. Savings: 97 copper + food hold.
+- **flaw filed**: build plan returns no price: build plan mill and build plan farm at Port Royal (2026-07-13) each returned only the 'DRY by definition until the founder approves + deploys the StructureFactory' notice — no gold cost, no design, no site info — so the builder rung cannot be priced or saved toward; the plan/read half of the build tool is blocked on the factory deploy, not just the execute half.
+- **lesson**: build plan <kind> currently returns only the factory-not-deployed disclaimer with NO gold cost or design — the builder rung is unpriceable (not just unexecutable) until the StructureFactory deploys, so stop re-running plan calls.
+
+## 2026-07-14T13:02:07.978Z — worker
+- **state**: eth=0.00059327831472895 usdc=0 gold=0 silver=0 copper=97 | hold: SALT:48 RATIONS:29 APPLE:19 HONEY:14 COD:11 ALE:9 | pawns=1 | top gap=lumber
+- **steps**: wait — Nothing changed this tick: no sell rail, no StructureFactory deploy, no attested rungs, no wage-payout semantics, and I hold 0 USDC so the lone lumber gap (buy-only) is unreachable. Haul time keeps accruing free while parked, so the zero-cost move is patience — spend nothing, re-check next tick's live state for a founder rail.
+- **outcomes**:
+  1. wait (waited): no action
+- **noted**: Wage accrual telemetry: accumulated=10d22h15m has been static since 2026-07-11 while currentRun ticks up (7d23h58m on 2026-07-14) — when payout semantics finally arrive, expect the payable amount to derive from currentRun (or accumulated+currentRun at clock-out), not from the static accumulated figure alone.
+- **goal → now**: At Port Royal (8,3). ALL forward rungs blocked & flaw-filed: wage payout (mode:2 semantics unknown — never blind-fire), goods→coin (no sell rail), builder pricing (StructureFactory undeployed). Haul currentRun grows free (~8d); accumulated frozen at 10d 22h 15m since 07-11. Holding pattern: wait ticks, act the tick a founder rail appears (payout semantics, sell rail, or factory deploy). Savings: 97 copper + food hold.
+- **lesson**: The work read's 'accumulated' field is frozen at 10d 22h 15m — the exact value from 2026-07-11 — while currentRun has grown to 7d 23h 58m, so 'accumulated' likely only updates on a clock-out/payout event and currentRun is the live counter of banked-but-unposted time.
+
+## 2026-07-16T13:02:14.098Z — worker
+- **state**: eth=0.00059327831472895 usdc=0 gold=0 silver=0 copper=97 | hold: SALT:48 RATIONS:29 APPLE:19 HONEY:14 COD:11 ALE:9 | pawns=1 | top gap=lumber
+- **steps**: wait — Nothing changed since 07-14: no sell rail, no StructureFactory deploy, no attested rungs, no wage-payout semantics, 0 USDC so the lone lumber gap (buy-only) stays unreachable. Haul currentRun keeps growing free (9d 23h 58m) while parked, so the zero-cost move remains patience — every blocked rail is already flaw-filed and re-probing them wastes the tick.
+- **outcomes**:
+  1. wait (waited): no action
+- **goal → now**: At Port Royal (8,3). ALL forward rungs blocked & flaw-filed: wage payout (mode:2 semantics unknown — never blind-fire), goods→coin (no sell rail), builder pricing (StructureFactory undeployed). Haul currentRun grows free (9d 23h 58m on 07-16); accumulated frozen at 10d 22h 15m since 07-11. Holding pattern: wait ticks, act the tick a founder rail appears (payout semantics, sell rail, or factory deploy). Savings: 97 copper + food hold.
+- **lesson**: Two consecutive wait ticks (07-14 → 07-16) changed nothing in live state except currentRun ticking up — the tick's own live-state snapshot (wallet, claimable, portReport, myPawnJobs) is sufficient to detect any rail unlock without spending probe calls, so the holding pattern is truly zero-cost.
+
+## 2026-07-17T13:01:55.968Z — worker
+- **state**: eth=0.00059327831472895 usdc=0 gold=0 silver=0 copper=97 | hold: SALT:48 RATIONS:29 APPLE:19 HONEY:14 COD:11 ALE:9 | pawns=1 | top gap=lumber
+- **steps**: water-pawn — Rut-breaker: the one instrument I have never probed is water-pawn's free READ on target:flow. Per the design-truth notes a wage that drips zero because the job token has no flow is a real finding — if this read shows my pawn's wage-flow is zero (and prices what $1 of flow would buy), it explains why 10d+ of haul accrual has never converted to copper and turns the blocked wage rung into a concrete funding target instead of an unknown.
+- **outcomes**:
+  1. water-pawn (exit 1): --pawn must be a non-negative integer tokenId — hint: players should feed at the tavern (GOLD): `node citizen/tools/tavern.js --pawn <distributor:tokenId> --rounds N`. This tool is the USDC-side plumbing; needs --pawn <tokenId> + USDC on hand.
+- **noted**: water-pawn READ (no execute) on my pawn with target:flow is zero-cost and shows current flow level + $ cost — record its output verbatim; if flow=0, the haul wage paying nothing is the flow-gate working as designed and the fix is funding flow, not payout semantics.
+- **goal → now**: At Port Royal (8,3). Wage rung reframed: haul accrual (run 10d 23h+) may pay nothing because my pawn's job-FLOW is zero — this tick's water-pawn flow READ is the test. If flow=0, new savings target = $1 USDC to water flow (needs founder funding; I hold 0 USDC). Other rungs still blocked & filed: goods sell rail, StructureFactory pricing, mode:2 semantics. Savings: 97 copper + food hold.
+- **lesson**: When every forward rung is blocked and waits stop teaching, inventory the UNUSED read modes of the action menu — water-pawn's no-execute read (level/flow + cost) was sitting unprobed the whole holding pattern and is the only tool that can reveal whether zero job-flow is what starves the haul wage.

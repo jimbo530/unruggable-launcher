@@ -553,3 +553,186 @@ _The continuous memory of this bot. Each tick appends one entry._
 - **goal → now**: - Fight bilge-rats each tick while clearly favored; bank every copper toward first GOLD (95c banked, 5 short). / - Foothold pricing: read build PLAN for mill AND farm, pick the cheaper/faster payback as my gold target. / - Stop retrying quote (tool-wide broken, flaw filed); re-check the achievement-scanner flaw (citizenOwnedGuardPawns=0) each tick and claim the spar backlog the moment it's fixed.
 - **flaw filed**: quote tool broken tool-wide: both SALT→COPPER and RATIONS→COPPER exit 1 with no error detail at Port Royal — pricing any hold good is impossible, so the entire GOODS TRADER rung is unpriceable, not just one route
 - **lesson**: Varying the good proved the quote failure is tool-wide, not route-specific — so stop spending steps on it entirely and get my price targets from a different rail (build plan) until the flaw is fixed.
+
+## 2026-07-08T13:04:07.815Z — trader
+- **state**: eth=0.000597751408391227 usdc=0 gold=0 silver=0 copper=95 | hold: SALT:47 RATIONS:28 APPLE:19 HONEY:14 COD:11 ALE:9 | pawns=1 | top gap=lumber
+- **steps**: fight → work → fish — Fight is my only proven income and I'm 5 copper from first GOLD, so it leads while the pool is fat. Then two cheap reads: the bare work READ confirms Black Tide is still clocked into barter and accruing (verify with reads, never re-fire writes), and fish loop scouts whether the Port Royal fish rail is a second live earner now that both pricing rails (quote and build plan) are down.
+- **outcomes**:
+  1. fight (ok): WIN (server-verified)
+  2. work (ok): Read-only. WorkClock clock-in jobs (clockInNow:true): the 6 town stat-jobs + guard — work <jobId> --pawn <distributor:tokenId> [--mode 1|2] [--execute]. FISHING is LIVE but via the `fish` tool (ocean-LP swap, not a clock-in); log/mill/crab are PLANNED (no mechanic wired yet).
+  3. fish (ok): Read-only — ocean buy + PR sell quotes are LIVE on-chain. Catching = a GOLD→FISH swap at the ocean LP (presence-gated), skill-scaled. No HarvestGround/dispenser is involved (that model is superseded).
+- **noted**: Foothold pricing is fully blocked at Port Royal: quote is broken tool-wide AND build plan returns no numbers (DRY until founder deploys StructureFactory) — don't spend steps on either until a flaw is marked fixed.
+- **goal → now**: - Fight bilge-rats each tick while clearly favored; bank every copper toward first GOLD (95c banked, 5 short). / - Verify barter accrual via bare work READ; scout fish loop as a possible second earner at Port Royal. / - Foothold pricing blocked (quote broken tool-wide, build plan returns no price) — check both flaws + the achievement-scanner flaw (citizenOwnedGuardPawns=0) each tick; claim the spar backlog the moment the scanner is fixed.
+- **flaw filed**: build plan returns no plan or price: 'build plan mill' and 'build plan farm' at Port Royal return only the DRY/no-StructureFactory disclaimer with zero cost/output numbers — a PLAN mode should still price the design even when deployment is gated, otherwise the BUILDER rung is unpriceable on top of the broken quote tool
+- **lesson**: Build PLAN doesn't price anything either — it returns only the DRY/no-factory notice with no costs, so BOTH pricing rails (quote and build plan) are dead; stop planning around them and scout alternate income reads (work accrual, fish loop) instead.
+
+## 2026-07-08T13:27:31.599Z — trader
+- **state**: eth=0.000597751408391227 usdc=0 gold=0 silver=0 copper=95 | hold: SALT:47 RATIONS:28 APPLE:19 HONEY:14 COD:11 ALE:9 | pawns=1 | top gap=lumber
+- **steps**: fish → wallet — The rut notice is right: three server-verified fight WINs left my purse frozen at 95 copper, so fight is not banking anything right now. The fish loop read confirmed Port Royal sell quotes are LIVE on-chain and I hold 11 COD — a minimum-size sell (0.10) is my one live-capable rail to actually bank coin, and the wallet read right after proves whether proceeds land.
+- **outcomes**:
+  1. fish (exit 1): fish
+- **noted**: Fight payouts are not landing: bilge-rat WINs verify but copper stays frozen (would-claim only, payout keeper apparently off) — do not lead with fight again until the purse actually moves from a win.
+- **goal → now**: - Lead with fish sell (COD from hold, 0.10-0.25 per tick) — the only live-capable income rail; verify each sale with a wallet read. / - Fight is PAUSED: wins verify but bank nothing (flaw filed) — resume only when a win moves the purse. / - Each tick check the three open flaws (quote tool-wide, build plan no-price, achievement scanner citizenOwnedGuardPawns=0); claim the spar backlog the instant the scanner is fixed.
+- **flaw filed**: fight wins pay nothing: 3+ consecutive server-verified bilge-rat WINs at Port Royal left the purse unchanged at 95 copper — the would-claim payout never lands (payout keeper off or claim rail unwired), so the PEASANT fight rung earns zero despite winning
+- **lesson**: A 'server-verified WIN' is not income until the purse moves — the fight rail's would-claim never paid (95 copper unchanged across 3+ wins), so always check the wallet delta before counting a rail as proven.
+
+## 2026-07-09T13:04:46.026Z — trader
+- **state**: eth=0.000597751408391227 usdc=0 gold=0 silver=0 copper=95 | hold: SALT:47 RATIONS:28 APPLE:19 HONEY:14 COD:11 ALE:9 | pawns=1 | top gap=lumber
+- **steps**: fish → fish → wallet — Fish is my only live-capable rail (fight banks nothing, quote+build broken); last tick's sell exited 1 with no detail, so read the loop first to see supply/skill/sell-value, then attempt a minimum 0.10 COD sell and verify the copper delta with a wallet read.
+- **outcomes**:
+  1. fish (ok): Read-only — ocean buy + PR sell quotes are LIVE on-chain. Catching = a GOLD→FISH swap at the ocean LP (presence-gated), skill-scaled. No HarvestGround/dispenser is involved (that model is superseded).
+  2. fish (exit 1): fish
+- **lesson**: (none)
+
+## 2026-07-09T13:28:01.262Z — trader
+- **state**: eth=0.000597751408391227 usdc=0 gold=0 silver=0 copper=95 | hold: SALT:47 RATIONS:28 APPLE:19 HONEY:14 COD:11 ALE:9 | pawns=1 | top gap=lumber
+- **steps**: fish → wallet — Every other rail is confirmed dead (fight banks nothing, quote+build broken); fish sell is the only live-capable earner, and prior 'exit 1' logs show the default loop action fired — so this tick I pass action:sell with an explicit 0.10 usd and read the wallet immediately to confirm whether copper actually moves.
+- **outcomes**:
+  1. fish (exit 1): fish
+- **goal → now**: - Attempt fish sell with EXPLICIT action:sell+usd each tick (COD from hold, 0.10) and verify copper delta via wallet — the sole live-capable rail. / - If fish sell exits 1 again with explicit args, pivot to a work barter clock-in test (LIVE per catalog) as the alternate earner rather than re-grinding a dead sell. / - Fight PAUSED (wins bank nothing); quote+build PAUSED (broken). Check all flaws each tick; claim spar backlog the instant the scanner flaw is fixed.
+- **flaw filed**: fish sell errors bare: fish action:sell usd:0.10 at Port Royal exits 1 with no detail across multiple ticks — if this fails again with explicit args, the only live COD-sell rail is unusable and the PEASANT-to-trader rung has zero working income at Port Royal
+- **lesson**: Prior fish failures logged as 'fish (exit 1)' were the bare default (loop) call — a real sell needs action:sell + usd passed explicitly, so verify the args before counting the rail as tested.
+
+## 2026-07-10T13:04:50.053Z — trader
+- **state**: eth=0.000597751408391227 usdc=0 gold=0 silver=0 copper=95 | hold: SALT:47 RATIONS:28 APPLE:19 HONEY:14 COD:11 ALE:9 | pawns=1 | top gap=lumber
+- **steps**: work → work — Fish sell exited 1 again last tick even with explicit action:sell+usd, so per my own pivot condition I stop grinding that dead rail and clock Black Tide into the barter job — the one catalog-LIVE wage rail I haven't tested — then read the catalog back to confirm the clock-in registered and see accrual state.
+- **outcomes**:
+  1. work (ok): work
+  2. work (ok): Read-only. WorkClock clock-in jobs (clockInNow:true): the 6 town stat-jobs + guard — work <jobId> --pawn <distributor:tokenId> [--mode 1|2] [--execute]. FISHING is LIVE but via the `fish` tool (ocean-LP swap, not a clock-in); log/mill/crab are PLANNED (no mechanic wired yet).
+- **goal → now**: - Black Tide clocked into barter (if the clock-in took): each tick read work accrual and learn how/when the wage pays out; verify any payout with a wallet read. / - Fish sell PAUSED (exits 1 with explicit args, flaw filed); fight PAUSED (wins bank nothing); quote+build PAUSED (broken). / - Check all open flaws each tick; claim the spar backlog the instant the achievement scanner flaw is fixed.
+- **lesson**: When a rail fails with fully-explicit args, the pivot condition I wrote must actually fire next tick — a pre-committed fallback (work barter) is what keeps a rut from becoming three more wasted ticks.
+
+## 2026-07-10T13:28:36.191Z — trader
+- **state**: eth=0.000596882529621624 usdc=0 gold=0 silver=0 copper=95 | hold: SALT:47 RATIONS:28 APPLE:19 HONEY:14 COD:11 ALE:9 | pawns=1 | top gap=lumber
+- **steps**: work — Last tick's barter clock-in returned an ambiguous 'ok', so before anything else I read the work catalog back to confirm Black Tide (0x2E2AB7ae48876f1b4497A04d864C025f7DF58e1f:53) is actually on the barter job and to see accrued time and how the wage pays. Every other rail is paused (fight banks nothing, fish sell exits 1, quote+build broken, achievement scanner still shows citizenOwnedGuardPawns=0 in this tick's claim scan), so the wage rail is the one live thread worth a careful step.
+- **outcomes**:
+  1. work (ok): Read-only. WorkClock clock-in jobs (clockInNow:true): the 6 town stat-jobs + guard — work <jobId> --pawn <distributor:tokenId> [--mode 1|2] [--execute]. FISHING is LIVE but via the `fish` tool (ocean-LP swap, not a clock-in); log/mill/crab are PLANNED (no mechanic wired yet).
+- **lesson**: (none)
+
+## 2026-07-10T13:52:57.898Z — trader
+- **state**: eth=0.000596882529621624 usdc=0 gold=0 silver=0 copper=95 | hold: SALT:47 RATIONS:28 APPLE:19 HONEY:14 COD:11 ALE:9 | pawns=1 | top gap=lumber
+- **steps**: work → work → wallet — Two no-arg work reads returned only static catalog text — no pawn job or accrual — so I can't confirm last tick's ambiguous barter clock-in actually took. Live is enabled this tick, so I re-run the clock-in with fully explicit jobId+pawn, read back once, and snapshot the wallet as the baseline for detecting any wage payout by copper delta.
+- **outcomes**:
+  1. work (ok): work
+  2. work (ok): Read-only. WorkClock clock-in jobs (clockInNow:true): the 6 town stat-jobs + guard — work <jobId> --pawn <distributor:tokenId> [--mode 1|2] [--execute]. FISHING is LIVE but via the `fish` tool (ocean-LP swap, not a clock-in); log/mill/crab are PLANNED (no mechanic wired yet).
+  3. wallet (ok): FUND this address with a little ETH (gas) + USDC, then the founder flips it live.
+- **noted**: The no-arg work read returns only the static job catalog (no 'my pawns' current jobs' or accrued time despite the menu text) — clock-ins cannot be verified by reading work; verify via wallet copper delta across ticks instead.
+- **goal → now**: - Re-ran barter clock-in explicitly (live); no-arg work read shows only catalog, so verify the wage via wallet copper delta across the next few ticks (baseline: 95 copper). / - Fish sell PAUSED (exits 1 with explicit args); fight PAUSED (wins bank nothing); quote+build PAUSED (broken). / - Check all open flaws each tick; claim the spar backlog the instant the achievement scanner flaw is fixed.
+- **flaw filed**: work read omits pawn job status: the no-arg work read at Port Royal returns only the static job catalog — it never shows my pawns' current jobs or accrued time as documented, so a barter clock-in for 0x2E2AB7ae48876f1b4497A04d864C025f7DF58e1f:53 cannot be verified and the wage rail is unauditable
+- **lesson**: An 'ok' result with no state echo is not confirmation — re-issue the action explicitly while live is enabled and establish a wallet baseline, because a clock-in that silently didn't take can eat days of imaginary accrual.
+
+## 2026-07-10T14:16:26.678Z — trader
+- **state**: eth=0.000596014624803331 usdc=0 gold=0 silver=0 copper=95 | hold: SALT:47 RATIONS:28 APPLE:19 HONEY:14 COD:11 ALE:9 | pawns=1 | top gap=lumber
+- **steps**: wait — This tick's wallet read already shows copper unchanged at 95 only ~24 minutes after the explicit barter clock-in — far too soon to judge the wage. Every other rail is still paused or blocked (fight banks nothing, fish sell exits 1, quote/build broken, scanner still shows citizenOwnedGuardPawns=0, and the lumber gap needs USDC I don't have), so the single correct move is patience while the wage window accrues.
+- **outcomes**:
+  1. wait (waited): no action
+- **goal → now**: - Barter wage watch: baseline 95 copper (set 2026-07-10 ~13:53); still 95 at 14:16 — keep checking the wallet delta each tick, and give the wage at least a day before declaring the clock-in dead. / - Fish sell PAUSED (exits 1 with explicit args); fight PAUSED (wins bank nothing); quote+build PAUSED (broken); trade blocked by 0 USDC until income lands. / - Check all open flaws each tick; claim the spar backlog the instant the achievement scanner flaw is fixed.
+- **lesson**: With 0 USDC the trade rail is unusable even on an actionable gap — lumber can stay top of the Port Report all week and I still can't close it, which makes the barter wage the true critical path to my first trade, not the gap list.
+
+## 2026-07-11T13:04:48.073Z — trader
+- **state**: eth=0.000596014624803331 usdc=0 gold=0 silver=0 copper=95 | hold: SALT:47 RATIONS:28 APPLE:19 HONEY:14 COD:11 ALE:9 | pawns=1 | top gap=lumber
+- **steps**: water-pawn — The new myPawnJobs read finally verifies Black Tide IS employed on barter (currentRun ~5d) — but accumulated is 0d 0h 0m and copper is still 95 at the ~23h mark of my wage watch. Per the design-truth notes, wages pay through a pawn's fee-flow, so before declaring the clock-in dead I take one read-only step: check the pawn's current flow/level via the water-pawn READ to test whether the zero wage is a flow gate (working as designed, needs USDC watering) or a genuinely dead rail worth a precise flaw.
+- **outcomes**:
+  1. water-pawn (exit 1): --pawn must be a non-negative integer tokenId — hint: players should feed at the tavern (GOLD): `node citizen/tools/tavern.js --pawn <distributor:tokenId> --rounds N`. This tool is the USDC-side plumbing; needs --pawn <tokenId> + USDC on hand.
+- **noted**: Live state now includes a working myPawnJobs read (the old 'work read omits pawn job status' gap is closed): Black Tide confirmed employed on barter, currentRun counts up but accumulated stays 0d 0h 0m — check accumulated + copper delta each tick; if flow=0 on the water-pawn read, the barter wage is flow-gated and needs USDC watering to ever pay.
+- **goal → now**: - Barter wage watch: baseline 95 copper (2026-07-10 ~13:53); still 95 at 24h and accumulated 0d 0h 0m despite employed=true — this tick I read pawn flow (water-pawn READ); if flow=0 the wage is flow-gated and blocked on 0 USDC, if flow>0 file a wage-accrual flaw. / - Fish sell PAUSED (exits 1); fight PAUSED (wins bank nothing); quote+build PAUSED (broken); trade blocked by 0 USDC. / - Check open flaws each tick; claim the spar backlog the instant the achievement scanner counts my pawn (still citizenOwnedGuardPawns=0 this tick).
+- **lesson**: Employment and earning are separate rails: the live-state myPawnJobs now proves the barter clock-in landed (employed=true, currentRun ticking), yet accumulated stays 0d 0h 0m and the purse is flat — so 'clocked in' is not evidence of accrual, and the next diagnostic is the pawn's wage-flow, not another clock-in.
+
+## 2026-07-12T13:03:52.971Z — trader
+- **state**: eth=0.000596014624803331 usdc=0 gold=0 silver=0 copper=95 | hold: SALT:47 RATIONS:28 APPLE:19 HONEY:14 COD:11 ALE:9 | pawns=1 | top gap=lumber
+- **steps**: water-pawn — The barter wage watch is now ~48h with copper flat at 95 and accumulated still 0d 0h 0m despite employed=true, so the flow diagnostic is still the critical path. Last tick's water-pawn READ failed only on arg format (it wants the bare integer tokenId, not distributor:tokenId), so I re-issue it with pawn=53 to learn whether the zero wage is a flow gate (working as designed, blocked on 0 USDC) or a dead rail worth a precise flaw.
+- **outcomes**:
+  1. water-pawn (ok): READ-ONLY — no transaction sent. Live needs --execute AND CITIZEN_ALLOW_LIVE=1, an owner-held pawn, and enough USDC.
+- **noted**: water-pawn takes the BARE integer tokenId (53 for Black Tide), not the distributor:tokenId form that work uses — my earlier note saying both need distributor:tokenId is wrong for water-pawn.
+- **goal → now**: - Barter wage watch: baseline 95 copper (2026-07-10 ~13:53); still 95 at ~48h, accumulated 0d 0h 0m despite employed=true — this tick re-ran the water-pawn READ with the correct bare tokenId (53): if flow=0 the wage is flow-gated on 0 USDC (working as designed), if flow>0 file a precise wage-accrual flaw next tick. / - Fish sell PAUSED (exits 1); fight PAUSED (wins bank nothing); quote+build PAUSED (broken); trade blocked by 0 USDC. / - Check open flaws each tick; claim the spar backlog the instant the achievement scanner counts my pawn (still citizenOwnedGuardPawns=0 this tick).
+- **lesson**: Tools on the same pawn disagree on id format: work clock-in wants distributor:tokenId while water-pawn wants the bare integer tokenId — an exit-1 arg error is a formatting problem, not a blocked rail, so re-read the hint and retry before pausing a diagnostic.
+
+## 2026-07-12T13:26:57.463Z — trader
+- **state**: eth=0.000596014624803331 usdc=0 gold=0 silver=0 copper=95 | hold: SALT:47 RATIONS:28 APPLE:19 HONEY:14 COD:11 ALE:9 | pawns=1 | top gap=lumber
+- **steps**: water-pawn — The wage watch is the critical path and last tick's water-pawn READ came back ok but reported NO level/flow numbers, so the flow-gate question is still open. I re-issue the read with an explicit target:'flow' to force the flow value out; every other rail (fight/fish/quote/trade/claim) is confirmed paused or blocked this tick, so this single diagnostic is the only step that advances the climb.
+- **outcomes**:
+  1. water-pawn (ok): READ-ONLY — no transaction sent. Live needs --execute AND CITIZEN_ALLOW_LIVE=1, an owner-held pawn, and enough USDC.
+- **goal → now**: - Barter wage watch: baseline 95 copper (2026-07-10 ~13:53); still 95 at ~72h, employed=true, currentRun 6d+, accumulated 0d 0h 0m. Last water-pawn READ was ok but returned NO flow number — this tick re-read with target:'flow'. If flow=0: wage is flow-gated on 0 USDC (working as designed), stop the watch and just monitor copper weekly. If flow>0: file a precise wage-accrual flaw. If still no data: the flow flaw filed this tick covers it. / - Fish sell PAUSED (exits 1); fight PAUSED (wins bank nothing); quote+build PAUSED (broken); trade blocked by 0 USDC. / - Check open flaws each tick; claim the spar backlog the instant the achievement scanner counts my pawn (still citizenOwnedGuardPawns=0 this tick).
+- **flaw filed**: water-pawn READ omits level/flow data: the no-execute READ on pawn 53 at Port Royal returns ok with only the live-gating note ('READ-ONLY — no transaction sent...') and no level, flow, or cost numbers, despite the menu promising 'No execute = READ level + cost' — this blocks diagnosing whether the barter wage (employed 6d, accumulated 0d 0h 0m, copper flat at 95 for ~72h) is flow-gated or a dead accrual rail.
+- **lesson**: An 'ok' exit is not the same as an answer: last tick's water-pawn READ succeeded but omitted the level/flow data its menu promises, so I must judge reads by the fields returned, not the exit code — and retry with explicit args (target:'flow') before declaring a diagnostic done.
+
+## 2026-07-12T13:48:46.037Z — trader
+- **state**: eth=0.000596014624803331 usdc=0 gold=0 silver=0 copper=95 | hold: SALT:47 RATIONS:28 APPLE:19 HONEY:14 COD:11 ALE:9 | pawns=1 | top gap=lumber
+- **steps**: fish — The wage-watch is closed per my own rule: the target:'flow' re-read still returned no flow data, so the filed flaw covers it and re-polling water-pawn is the rut. Instead I rotate to auditing a paused rail — a read-only fish loop at Port Royal tells me current supply, my skill, and the projected sell value of my COD:11, i.e. whether the sell rail (paused on exits-1) has recovered and what my hold is actually worth here.
+- **outcomes**:
+  1. fish (ok): Read-only — ocean buy + PR sell quotes are LIVE on-chain. Catching = a GOLD→FISH swap at the ocean LP (presence-gated), skill-scaled. No HarvestGround/dispenser is involved (that model is superseded).
+- **goal → now**: - Wage watch CLOSED: water-pawn READ returns no flow data even with target:'flow' (flaw filed 2026-07-12 covers it); barter stays clocked in, just check copper vs 95 baseline weekly — next check ~2026-07-19. / - Rotate one cheap READ per tick across paused rails to catch recovery: fish loop (this tick) → quote SALT→COPPER → fight only if loot keeper confirmed on. Trade/build still blocked (0 USDC / no StructureFactory). / - Claim the spar backlog the instant claim-achievement counts my pawn (still citizenOwnedGuardPawns=0 this tick).
+- **lesson**: When a diagnostic has both failed twice and been covered by a filed flaw, the watch is DONE — the productive move is rotating a cheap read across the PAUSED rails (fish/fight/quote) to catch the first one that recovers, not re-polling the dead one.
+
+## 2026-07-12T14:10:43.358Z — trader
+- **state**: eth=0.000596014624803331 usdc=0 gold=0 silver=0 copper=95 | hold: SALT:47 RATIONS:28 APPLE:19 HONEY:14 COD:11 ALE:9 | pawns=1 | top gap=lumber
+- **steps**: quote → fish — Rotation read this tick is quote SALT→COPPER to catch the quote tool recovering. Then I act on last tick's fish-loop signal that Port Royal sell quotes are LIVE on-chain: a smallest-cap ($0.10) live sell of my COD is the first real income attempt in days, tiny, paced, and within every hard limit.
+- **outcomes**:
+  1. quote (ok): quote
+  2. fish (exit 1): not enough FISH to sell: have 0, need 10.00 — CATCH first (buy at the ocean LP) — hint: run `node citizen/tools/fish.js loop` to see flow-supply + your WIS skill + the catch/sell plan; catch/sell take --pawn <distributor:tokenId> and are location-gated (must be at the ocean / Port Royal).
+- **goal → now**: - Rotation continues: quote SALT→COPPER read this tick; fish SELL tested live at $0.10 (loop read said PR sell quotes are LIVE). If the sell banks copper, fish-sell becomes my income rail — repeat small sells and stack copper toward the first foothold. If it exits 1 again, re-pause and file the gap between loop-says-live and sell-fails. / - Fight stays paused until loot keeper confirmed on; trade/build blocked (0 USDC / no StructureFactory); barter copper check vs 95 baseline ~2026-07-19. / - Claim the spar backlog the instant claim-achievement counts my pawn (still citizenOwnedGuardPawns=0 this tick).
+- **lesson**: A recovery signal from a rotation read should be converted into the smallest capped live action the very next tick — the rotation exists to find the first rail that pays, not just to log that it might.
+
+## 2026-07-13T13:03:48.456Z — trader
+- **state**: eth=0.000596014624803331 usdc=0 gold=0 silver=0 copper=95 | hold: SALT:47 RATIONS:28 APPLE:19 HONEY:14 COD:11 ALE:9 | pawns=1 | top gap=lumber
+- **steps**: quote → quote — Fish-sell re-pauses: the exit-1 was a gate, not a flaw — the sell rail takes only FISH tokens (I have 0; my COD:11 doesn't count) and catching needs GOLD + ocean presence I don't have. So I rotate to probing the quote rail with my two biggest holds (COD, SALT): last tick's quote returned 'ok' but with no numbers, so a real payload here both confirms quote recovery and prices my first live goods-sale toward copper.
+- **outcomes**:
+  1. quote (ok): quote
+  2. quote (ok): quote
+- **noted**: Fish income path is fully gated for me right now: sell needs ≥10 FISH tokens (COD/loot foods don't count), catch = GOLD→FISH swap at the ocean LP requiring gold I don't have (0g) + sailing to the ocean hex — revisit only after I hold ~1+ gold; my hold's sell path is quote/trade at Port Royal.
+- **goal → now**: - Quote rail probe: last quote returned ok-but-EMPTY (no numbers) — this tick quotes COD:11 and SALT:20 →COPPER; if real numbers land, do the smallest live sell next tick to finally bank copper. If empty again, file 'quote returns ok with no payload' and keep rotating. / - Fish-sell RE-PAUSED (needs ≥10 FISH; catch needs gold + ocean sail — not viable at 0g). Fight paused until loot keeper confirmed; trade/build blocked (0 USDC / no StructureFactory); barter copper check vs 95 baseline ~2026-07-19. / - Claim the spar backlog the instant claim-achievement counts my pawn (still citizenOwnedGuardPawns=0 this tick).
+- **lesson**: COD is not FISH: the fish sell rail only accepts FISH caught at the ocean LP (GOLD→FISH swap, presence-gated) — loot food goods like COD must be sold through the quote/trade rail instead, so the sell exit-1 was a working gate, not the loop-says-live gap I feared.
+
+## 2026-07-14T13:03:42.108Z — trader
+- **state**: eth=0.000596014624803331 usdc=0 gold=0 silver=0 copper=95 | hold: SALT:47 RATIONS:28 APPLE:19 HONEY:14 COD:11 ALE:9 | pawns=1 | top gap=lumber
+- **steps**: fight → wallet — Quote returned ok-but-empty a second consecutive tick, so per my own plan I file that flaw and rotate the probe to the next paused rail: a bilge-rats fight (auto-declines if not clearly favored, so my last pawn is safe) followed by a same-tick wallet read — if copper moves off the 95 baseline, the loot keeper is back ON and fighting becomes my live income rail.
+- **outcomes**:
+  1. fight (ok): WIN (server-verified)
+  2. wallet (ok): FUND this address with a little ETH (gas) + USDC, then the founder flips it live.
+- **noted**: Quote rail confirmed broken in a new way 2026-07-14: returns exit 0 'ok' with an EMPTY payload (no numbers) on both COD→COPPER and SALT→COPPER at Port Royal — flaw filed; do not re-probe quote until it's marked fixed.
+- **goal → now**: - Fight probe live this tick (bilge-rats; auto-decline protects the pawn): if the same-tick wallet read shows copper >95, the loot keeper is ON — fight becomes my income rail, repeat small wins while the pool is fat. If copper is frozen at 95 again, re-pause fight and rotate a cheap scan-gaps/build read next tick. / - Quote FLAW-FILED (ok-but-empty, 2 ticks) — paused until marked fixed. Fish paused (needs ~1+ gold + ocean sail). Trade/build blocked (0 USDC / no StructureFactory). Barter copper check vs 95 baseline ~2026-07-19. / - Claim the spar backlog the instant claim-achievement counts my pawn (still citizenOwnedGuardPawns=0 this tick).
+- **flaw filed**: quote returns ok with no payload: quote at Port Royal exits 0 with 'ok' but zero price data on two consecutive ticks (SALT:20→COPPER, COD:11→COPPER, 2026-07-13 and 2026-07-14) — goods cannot be priced for sale, blocking the entire goods-trader rung for a hold-rich/coin-poor player.
+- **lesson**: Pair a rail probe with a same-tick wallet read instead of waiting a full tick for the delta — fight then wallet answers 'is the loot keeper on?' immediately, turning a two-tick diagnostic into one.
+
+## 2026-07-16T13:03:39.381Z — trader
+- **state**: eth=0.000596014624803331 usdc=0 gold=0 silver=0 copper=95 | hold: SALT:47 RATIONS:28 APPLE:19 HONEY:14 COD:11 ALE:9 | pawns=1 | top gap=lumber
+- **steps**: water-pawn — Copper is frozen at 95 despite last tick's server-verified fight WIN, so per my own plan I re-pause fight and file the loot-keeper flaw. The one cheap unknown left is whether my barter job can EVER pay: accumulated is still 0d0h0m after ~10 days of currentRun, so I read Black Tide's flow (bare tokenId 53) — flow=0 confirms the wage is flow-gated and needs USDC watering, which decides whether to keep him clocked in or rotate him when a rail reopens.
+- **outcomes**:
+  1. water-pawn (ok): READ-ONLY — no transaction sent. Live needs --execute AND CITIZEN_ALLOW_LIVE=1, an owner-held pawn, and enough USDC.
+- **goal → now**: - Loot keeper confirmed OFF (verified WIN, copper still 95) — fight PAUSED + flaw filed; resume only when a win moves the purse. / - This tick: water-pawn READ (pawn 53, target flow) — if flow=0, barter wage is confirmed flow-gated (needs USDC I don't have); leave Black Tide clocked in (costs nothing) but stop expecting the ~2026-07-19 copper delta. / - All other rails paused pending fixes: quote (ok-but-empty, flaw filed), fish (needs ~1+ gold + ocean sail), trade/build (0 USDC / no StructureFactory), spar backlog (citizenOwnedGuardPawns=0). Cheap rotation reads only until a keeper flips.
+- **lesson**: A running clock is not an earning clock: currentRun near 10 days with accumulated still 0d 0h 0m means the job accrues presence, not wage — verify the flow gate before trusting any time-on-job number as income.
+
+## 2026-07-16T13:25:21.264Z — trader
+- **state**: eth=0.000596014624803331 usdc=0 gold=0 silver=0 copper=95 | hold: SALT:47 RATIONS:28 APPLE:19 HONEY:14 COD:11 ALE:9 | pawns=1 | top gap=lumber
+- **steps**: build — Every income rail is paused on filed flaws, so per my rotation plan I spend this tick on the one cheap probe not checked recently: a build LIST at Port Royal to see if the founder has deployed StructureFactory — the moment it lists real buildables with prices, my trader-builder foothold rung reopens and my 95 copper + fat goods hold finally have a target.
+- **outcomes**:
+  1. build (ok): Read-only. Use `build plan <mill|farm>` to design + price a specific build (still DRY — no factory deployed).
+- **goal → now**: - Rotation-probe one paused rail per tick, cheapest first: this tick build LIST (is StructureFactory live?); next candidates fish loop, then a fresh claim-achievement read. Act only if a probe shows a keeper flipped. / - Confirmed dead-ends this cycle: loot keeper OFF (win banked nothing), quote ok-but-empty, water-pawn READ returns no flow data (flaw filed) — barter stays clocked in for free but expect zero wage until USDC exists. / - Spar backlog claims the instant citizenOwnedGuardPawns counts my pawn.
+- **flaw filed**: water-pawn read omits promised data: READ mode (pawn 53, target flow) exits ok but returns only the execute-gating note — no level, no flow, no cost — so the documented 'No execute = READ level + cost' contract is unmet and a flow-gated wage can never be diagnosed without spending USDC blind.
+- **lesson**: A water-pawn READ (target flow) returns only the live-gating boilerplate, not the flow number it promises — so a pawn's job-wage flow cannot actually be verified by reading; treat the barter wage as unpayable until I hold USDC to water with, full stop.
+
+## 2026-07-16T13:46:12.358Z — trader
+- **state**: eth=0.000596014624803331 usdc=0 gold=0 silver=0 copper=95 | hold: SALT:47 RATIONS:28 APPLE:19 HONEY:14 COD:11 ALE:9 | pawns=1 | top gap=lumber
+- **steps**: fish — Every income rail is paused on filed flaws, so per my rotation plan the next cheapest unchecked probe is the fish loop READ — it reports supply, skill, projected catch and sell value in one shot, telling me whether the fish rail's wiring or economics changed (my hold's 11 COD can't sell as FISH, but the loop also reveals if a sell path or dispenser flipped). Claim-achievement is already answered in this tick's live state (cached, citizenOwnedGuardPawns=0) so re-reading it would waste the tick.
+- **outcomes**:
+  1. fish (ok): Read-only — ocean buy + PR sell quotes are LIVE on-chain. Catching = a GOLD→FISH swap at the ocean LP (presence-gated), skill-scaled. No HarvestGround/dispenser is involved (that model is superseded).
+- **goal → now**: - Rotation-probe one paused rail per tick, cheapest first: this tick fish loop (any change in catch/sell wiring?); next a FRESH claim-achievement read (live state showed only a cached zero), then a single fight to re-test the loot keeper. Act only if a probe shows a keeper flipped. / - Confirmed dead-ends: loot keeper OFF, quote ok-but-empty, build DRY (no StructureFactory), water-pawn READ returns no flow data — barter stays clocked in free but wage is unpayable without USDC. / - Spar backlog claims the instant citizenOwnedGuardPawns counts my pawn.
+- **lesson**: When the live-state snapshot already contains a cached read (claimable this tick), the rotation should skip past it to the next unprobed rail rather than burning the tick to refresh a cache — treat cached:true live-state data as this tick's answer unless acting on it requires freshness (like claim ids at claim time).
+
+## 2026-07-16T14:07:04.345Z — trader
+- **state**: eth=0.000596014624803331 usdc=0 gold=0 silver=0 copper=95 | hold: SALT:47 RATIONS:28 APPLE:19 HONEY:14 COD:11 ALE:9 | pawns=1 | top gap=lumber
+- **steps**: fight → wallet — Fish loop and build were probed the last two ticks and claimable is already answered in this tick's cached live state (citizenOwnedGuardPawns=0), so the rotation's next unprobed rail is the loot keeper: one bilge-rat fight (auto-declines if unfavored, so my lone pawn isn't risked) followed by an immediate wallet read to see if copper moves off 95 — the only probe that also pays if it passes.
+- **outcomes**:
+  1. fight (ok): WIN (server-verified)
+  2. wallet (ok): FUND this address with a little ETH (gas) + USDC, then the founder flips it live.
+- **goal → now**: - Rotation-probe one paused rail per tick, cheapest first: this tick a single fight + same-tick wallet read (did the loot keeper flip? copper must move off 95); next candidates: quote re-probe, then build LIST again. Act only if a probe shows a keeper flipped. / - Confirmed dead-ends: quote ok-but-empty, build DRY (no StructureFactory), water-pawn READ returns no flow data, fish needs ~1+ gold — barter stays clocked in free but wage is unpayable without USDC. / - Spar backlog claims the instant citizenOwnedGuardPawns counts my pawn.
+- **lesson**: When re-probing a paused payout rail, pair the action with a wallet read in the SAME tick: the pre-action balance is already in live state, so the in-tick delta is the cleanest keeper-on/off verdict, no cross-tick cache ambiguity.
+
+## 2026-07-17T13:03:55.460Z — trader
+- **state**: eth=0.000596014624803331 usdc=0 gold=0 silver=0 copper=95 | hold: SALT:47 RATIONS:28 APPLE:19 HONEY:14 COD:11 ALE:9 | pawns=1 | top gap=lumber
+- **steps**: quote → quote — Last tick's fight probe verdict is now conclusive — a verified WIN banked nothing (copper frozen at 95 in this tick's snapshot), so the loot keeper stays off and the rotation moves to its next cheapest unprobed rail: the quote tool. Two read-only quotes on my two biggest holdings give a tool-wide verdict in one tick; if either returns real numbers, my 139 units of SALT+RATIONS finally have a priced sell path.
+- **outcomes**:
+  1. quote (ok): quote
+  2. quote (ok): quote
+- **goal → now**: - Rotation-probe one paused rail per tick, cheapest first: this tick quote re-probe (SALT→COPPER + RATIONS→COPPER — any real numbers yet?); next build LIST, then a fresh claim-achievement read, then fight again. Act (sell small) only if a quote returns actual numbers. / - Confirmed dead-ends: loot keeper OFF (7/16 verified WIN banked zero, copper frozen at 95), build DRY (no StructureFactory), water-pawn READ returns no flow data, fish needs ~1+ gold — barter stays clocked in free but wage is unpayable without USDC. / - Spar backlog claims the instant citizenOwnedGuardPawns counts my pawn.
+- **lesson**: A same-tick wallet read after a fight can return only the funding boilerplate instead of balances — the reliable keeper verdict is the NEXT tick's live-state copper (still 95 after the 7/16 win), so judge payout probes across ticks, not within them.

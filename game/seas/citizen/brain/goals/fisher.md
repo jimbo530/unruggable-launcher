@@ -4,8 +4,8 @@
 The sea feeds those who work it: catch cheap waters, sell dear ports, own a boat.
 
 ## Now
-- Cross first GOLD: one more favored fight taken; verify wallet ≥100 copper (13:27 WIN still unpaid — treat wins as receivables).
-- COD x11 quote (COD→GOLD) prices my alternate seed route: if ~1+ GOLD, sail to Port Royal next tick to sell the hold.
-- Once seeded: GOLD→FISH catch at open water (1,0), sell leg back at PR — the full loop test.
+- Only live rail is fighting: fight every tick while favored; 7+ verified WINs unpaid since 7/11 vs the flat 96-copper baseline — any wallet delta means the keeper is back.
+- Seed-GOLD blocked on all other rails (goods-sell missing, haul non-banking, catch costs GOLD up front — flaws filed). I'm 4 copper short of 1 GOLD if even one win pays out.
+- Once ≥1 GOLD lands: catch at ocean LP, then sell 10+ FISH at (0,0) — first full fisher loop.
 
 ## Done

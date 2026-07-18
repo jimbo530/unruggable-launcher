@@ -4,8 +4,8 @@
 Buy low, carry, sell dear — then build the store the route deserves.
 
 ## Now
-- Fight bilge-rats each tick while clearly favored; bank every copper toward first GOLD (95c banked, 5 short).
-- Foothold pricing: read build PLAN for mill AND farm, pick the cheaper/faster payback as my gold target.
-- Stop retrying quote (tool-wide broken, flaw filed); re-check the achievement-scanner flaw (citizenOwnedGuardPawns=0) each tick and claim the spar backlog the moment it's fixed.
+- Rotation-probe one paused rail per tick, cheapest first: this tick quote re-probe (SALT→COPPER + RATIONS→COPPER — any real numbers yet?); next build LIST, then a fresh claim-achievement read, then fight again. Act (sell small) only if a quote returns actual numbers.
+- Confirmed dead-ends: loot keeper OFF (7/16 verified WIN banked zero, copper frozen at 95), build DRY (no StructureFactory), water-pawn READ returns no flow data, fish needs ~1+ gold — barter stays clocked in free but wage is unpayable without USDC.
+- Spar backlog claims the instant citizenOwnedGuardPawns counts my pawn.
 
 ## Done

@@ -555,3 +555,151 @@ _The continuous memory of this bot. Each tick appends one entry._
 - **goal → now**: - Cross first GOLD: one more favored fight taken; verify wallet ≥100 copper (13:27 WIN still unpaid — treat wins as receivables). / - COD x11 quote (COD→GOLD) prices my alternate seed route: if ~1+ GOLD, sail to Port Royal next tick to sell the hold. / - Once seeded: GOLD→FISH catch at open water (1,0), sell leg back at PR — the full loop test.
 - **flaw filed**: fight payout lag: server-verified WIN at 13:27 paid 0 copper (wallet 96 before and after, ~25 min later) — payout keeper appears off or batching, so the advertised 'loot pays' rung silently accrues instead of landing
 - **lesson**: The quote tool prices any route without location or capital — use it to value goods already in the hold (e.g. COD→GOLD) before committing to a voyage, instead of waiting on the location-gated loop read.
+
+## 2026-07-08T13:03:25.366Z — fisher
+- **state**: eth=0.0006 usdc=0 gold=0 silver=0 copper=96 | hold: SALT:48 RATIONS:28 APPLE:19 HONEY:14 COD:11 ALE:9 | pawns=1 | top gap=lumber
+- **steps**: fight → quote → fish — Still 96 copper with two WINs owed, so I take one more clearly-favored fight while the pool pays, then price both seed routes in one tick: retry the COD x11 → GOLD quote with explicit args (last attempt errored), and run the fish loop read — my pawn is confirmed at open water (1,0), so the presence-gated loop finally answers whether GOLD→FISH→GOLD clears after skill scaling.
+- **outcomes**:
+  1. fight (ok): WIN (server-verified)
+  2. quote (exit 1): quote
+- **goal → now**: - Price both seed routes this tick: COD x11 → GOLD quote (sell-hold route) vs fish-loop read at open water (1,0) (catch economics). / - If COD quote ≥ ~1 GOLD: sail to Port Royal next tick and sell the hold for seed. / - Keep banking one favored fight per tick as receivables; recheck wallet each tick for the retroactive payout that crosses 100 copper.
+- **lesson**: Two consecutive verified WINs with zero wallet delta means the payout keeper is off, not merely slow — cap fighting at one per tick to keep banking receivables cheaply, and spend the rest of the tick on reads (quote, loop) whose value doesn't depend on the keeper.
+
+## 2026-07-09T13:03:50.617Z — fisher
+- **state**: eth=0.0006 usdc=0 gold=0 silver=0 copper=96 | hold: SALT:48 RATIONS:28 APPLE:19 HONEY:14 COD:11 ALE:9 | pawns=1 | top gap=lumber
+- **steps**: fish → quote — Breaking the fight rut (payout keeper is off, so wins bank nothing): my pawn's presence at open water (1,0) is finally registered, so the fish loop read is a live test of my whole charter thesis, and a clean COD→GOLD quote prices my alternate seed route to decide next tick's sail-and-sell to Port Royal.
+- **outcomes**:
+  1. fish (ok): Read-only — ocean buy + PR sell quotes are LIVE on-chain. Catching = a GOLD→FISH swap at the ocean LP (presence-gated), skill-scaled. No HarvestGround/dispenser is involved (that model is superseded).
+  2. quote (exit 1): quote
+- **goal → now**: - Decide the seed route from this tick's two reads: fish-loop economics at (1,0) vs COD x11 → GOLD quote. / - If COD quote ≥ ~1 GOLD: sail to Port Royal next tick and sell the hold for seed copper/gold (crosses the 100 threshold without the broken keeper). / - Stop leading with fight until the payout keeper is confirmed back on.
+- **flaw filed**: quote tool errors: quote COD→GOLD (amount 11) has exited 1 on three separate ticks with explicit args, blocking my ability to price held goods before a voyage.
+- **lesson**: When the payout keeper is off, another verified WIN adds a receivable I can't spend — so on a rut tick the higher-value move is a live read (loop/quote) that actually changes my next decision, not a fourth banked receivable.
+
+## 2026-07-09T13:27:11.829Z — fisher
+- **state**: eth=0.0006 usdc=0 gold=0 silver=0 copper=96 | hold: SALT:48 RATIONS:28 APPLE:19 HONEY:14 COD:11 ALE:9 | pawns=1 | top gap=lumber
+- **steps**: quote — (no reasoning given)
+- **outcomes**:
+  1. quote (ok): quote
+- **lesson**: (none)
+
+## 2026-07-10T13:03:52.692Z — fisher
+- **state**: eth=0.0006 usdc=0 gold=0 silver=0 copper=96 | hold: SALT:48 RATIONS:28 APPLE:19 HONEY:14 COD:11 ALE:9 | pawns=1 | top gap=lumber
+- **steps**: fish → sail — The COD→GOLD quote has failed 4 straight ticks (flaw filed), so I stop grinding it and probe the sell leg directly: a minimal live sell attempt either lands seed coin or returns the location gate telling me exactly where Port Royal is. Then I sail from open water (1,0) toward (0,0) — my best guess for Port Royal — so the sell leg is live when I dock; a 1-hex sail is cheap and reversible if the guess is wrong.
+- **outcomes**:
+  1. fish (exit 1): fish
+- **noted**: Port Royal's hex coordinates are not exposed by any read tool; as of 2026-07-10 I'm testing (0,0) as its location — confirm or correct on arrival.
+- **goal → now**: - Confirm arrival at (0,0): is it Port Royal? If yes, sell COD x11 via fish sell for seed copper/gold. If no, use this tick's sell-refusal message to get PR's real hex and re-sail. / - Quote COD→GOLD is abandoned (4 exit-1 failures, flaw filed) — price the hold via live capped sell attempts instead. / - Keep fight parked until the payout keeper is confirmed back on; wins are receivables, not cash.
+- **lesson**: When a read-only pricing tool is broken for multiple ticks, a minimal capped live attempt at the action itself is the better probe — its honest refusal carries the routing info (the location gate names the port I need), which a dead quote never will.
+
+## 2026-07-11T13:04:03.671Z — fisher
+- **state**: eth=0.0006 usdc=0 gold=0 silver=0 copper=96 | hold: SALT:48 RATIONS:28 APPLE:19 HONEY:14 COD:11 ALE:9 | pawns=1 | top gap=lumber
+- **steps**: sail → pawns — Last tick's sail to (0,0) left no outcome and my pawn is still at open water (1,0), so the voyage never started — I re-issue the sail toward my best guess for Port Royal, then read pawns to confirm the voyage actually registered this time instead of assuming it did.
+- **outcomes**:
+  1. sail (ok): voyage requested through the rules server (server-clocked; arrival takes real time).
+  2. pawns (ok): READ-ONLY command picture. Pawns are NOT moved — any transfer is a founder-gated on-chain decision.
+- **goal → now**: - Re-issued sail (1,0)→(0,0); confirm via pawns read this tick that the voyage clocked in, and next tick check arrival. / - On arrival: if it's Port Royal, sell COD x11 via fish sell (usd-capped) for seed coin; if not, use the sell refusal to learn PR's real hex. / - Fight stays parked until a wallet delta proves the payout keeper is back on.
+- **flaw filed**: fish sell fails silent: at open water (1,0), fish action=sell exits 1 with no refusal message, so it neither sells nor names the required port hex — the location-gate error text is the only in-game way to discover Port Royal's coordinates and it's blank.
+- **lesson**: A mutating step that leaves no logged outcome never happened — treat 'no outcome' as 'not done' and confirm each state change with a read in the same tick, or I burn a whole tick believing a sail that was never issued.
+
+## 2026-07-11T13:28:15.705Z — fisher
+- **state**: eth=0.0006 usdc=0 gold=0 silver=0 copper=96 | hold: SALT:48 RATIONS:28 APPLE:19 HONEY:14 COD:11 ALE:9 | pawns=1 | top gap=lumber
+- **steps**: fish → wallet → inventory — The re-issued sail landed — my pawn now reads (0,0), though it still says 'open water', so the minimal usd-capped COD sell is the live probe: it either banks my first seed coin at Port Royal or its refusal names the real port hex. Wallet + fresh inventory in the same tick confirm any coin/COD delta instead of assuming the sell happened.
+- **outcomes**:
+  1. fish (exit 1): not enough FISH to sell: have 0, need 10.00 — CATCH first (buy at the ocean LP) — hint: run `node citizen/tools/fish.js loop` to see flow-supply + your WIS skill + the catch/sell plan; catch/sell take --pawn <distributor:tokenId> and are location-gated (must be at the ocean / Port Royal).
+- **noted**: Arrival mechanics confirmed working end-to-end: sail (1,0)→(0,0) issued 2026-07-11 13:04 registered and completed within ~24 min — voyages are real-time but short at 1 hex.
+- **goal → now**: - At (0,0) but label says 'open water' — this tick's capped COD sell (0.10 usd) decides: coin lands = it's Port Royal; refusal text = learn PR's real hex and re-sail. / - Confirm outcome via wallet + fresh inventory deltas in the same tick, never by assumption. / - Fight stays parked until a wallet delta proves the payout keeper is back on.
+- **lesson**: The location label carries routing info before any action does: 'open water (0,0)' (not a port name) already hints this hex may not be Port Royal — read the label, then let the capped sell attempt settle it.
+
+## 2026-07-12T13:02:56.001Z — fisher
+- **state**: eth=0.0006 usdc=0 gold=0 silver=0 copper=96 | hold: SALT:48 RATIONS:28 APPLE:19 HONEY:14 COD:11 ALE:9 | pawns=1 | top gap=lumber
+- **steps**: fish → fight → wallet — Last tick's sell refusal revealed the real gate isn't location — it's that selling needs 10+ FISH tokens and my COD:11 doesn't count, so the fisher loop needs seed GOLD for a catch. Fish loop reads the catch/sell economics (cost, flow-supply, my WIS scaling) to see what a catch actually costs vs my 96 copper; one no-stakes fight (auto-declines if unfavorable) is my only from-zero income rail and doubles as the payout-keeper probe, with the wallet read catching any copper delta in the same tick.
+- **outcomes**:
+  1. fish (ok): Read-only — ocean buy + PR sell quotes are LIVE on-chain. Catching = a GOLD→FISH swap at the ocean LP (presence-gated), skill-scaled. No HarvestGround/dispenser is involved (that model is superseded).
+  2. fight (ok): WIN (server-verified)
+  3. wallet (ok): FUND this address with a little ETH (gas) + USDC, then the founder flips it live.
+- **noted**: fish sell at (0,0) refused on 'have 0 FISH, need 10.00' — NOT on location — so (0,0) appears to pass the sell location gate (likely Port Royal or an accepted ocean hex); the binding constraint is seed GOLD for a catch, not position.
+- **goal → now**: - (0,0) passes the sell gate — the blocker is seed GOLD: fish loop this tick prices a catch vs my 96 copper. / - Fight is un-parked as the keeper probe: one clearly-favored fight, wallet delta same tick tells me if loot pays live again. / - If a catch needs ≥1 GOLD, next rung is grinding copper past 100 via fights and finding the copper→gold hop.
+- **lesson**: FISH is its own token distinct from COD and other food goods — the sell leg needs 10+ FISH minimum, so loot-won fish goods do NOT shortcut the fishing economy; the loop is strictly catch(GOLD→FISH) then sell(FISH→GOLD).
+
+## 2026-07-12T13:26:12.025Z — fisher
+- **state**: eth=0.0006 usdc=0 gold=0 silver=0 copper=96 | hold: SALT:48 RATIONS:28 APPLE:19 HONEY:14 COD:11 ALE:9 | pawns=1 | top gap=lumber
+- **steps**: quote → fight → wallet — Port Report pricing says 96 copper ≈ 0.96 GOLD — one small win from the ~1 GOLD a 10-FISH catch likely needs, so the quote proves whether the copper→gold hop exists and its real rate. One clearly-favored fight is my only from-zero income and doubles as the payout-keeper probe; the same-tick wallet read catches any copper delta (yesterday's 13:02 WIN still shows unpaid at 96).
+- **outcomes**:
+  1. quote (ok): quote
+  2. fight (ok): WIN (server-verified)
+  3. wallet (ok): FUND this address with a little ETH (gas) + USDC, then the founder flips it live.
+- **noted**: Two consecutive verified fight WINs (2026-07-11 13:27, 2026-07-12 13:02) have paid 0 copper — the payout keeper has been off ~24h+; wins are accruing as receivables against the 96-copper baseline.
+- **goal → now**: - Copper→gold hop: quoted 96 COPPER→GOLD this tick — if rate ≈ 100:1, one more paid fight-win puts a 10-FISH catch in reach. / - Fight each tick while clearly favored; wallet delta same tick is the keeper probe (2 WINs unpaid so far, receivables logged). / - Once holding ≥1 GOLD: catch at ocean LP, sail/sell 10+ FISH at (0,0) — first full fisher loop.
+- **lesson**: Coin-tier USD prices in the Port Report (copper $0.0001, gold $0.01) imply a clean 100:1 copper→gold parity on-chain — so my 96 copper is ~0.96 GOLD of catch capital, not spare change; the seed-gold gap is one fight-win wide, not a distant rung.
+
+## 2026-07-13T13:02:57.093Z — fisher
+- **state**: eth=0.0006 usdc=0 gold=0 silver=0 copper=96 | hold: SALT:48 RATIONS:28 APPLE:19 HONEY:14 COD:11 ALE:9 | pawns=1 | top gap=lumber
+- **steps**: fight → wallet — Fighting is my only from-zero income and each verified WIN is a receivable even while the payout keeper is off; the same-tick wallet read is the keeper probe — any delta above the 96-copper baseline means the 3 banked wins (plus today's) are landing and my ~1-GOLD catch seed is suddenly close.
+- **outcomes**:
+  1. fight (ok): WIN (server-verified)
+  2. wallet (ok): FUND this address with a little ETH (gas) + USDC, then the founder flips it live.
+- **goal → now**: - Fight every tick while clearly favored; wallet delta same tick probes the payout keeper (3 verified WINs now unpaid — 7/11 13:27, 7/12 13:02, 7/12 13:26 — receivables against the 96-copper baseline). / - When payouts land: check if copper stack clears the $0.10 min-trade cap before attempting the copper→gold hop; may need ~1000 copper, not ~100. / - Once holding ≥1 GOLD: catch at ocean LP, sell 10+ FISH at (0,0) — first full fisher loop.
+- **flaw filed**: loot payout keeper off 48h+: three consecutive server-verified bilge-rats WINs (2026-07-11 13:27, 2026-07-12 13:02, 2026-07-12 13:26) have paid 0 copper against a flat 96-copper baseline — the from-zero fight rail verifies wins but banks nothing, stalling every zero-capital climber at rung 0.
+- **lesson**: My entire 96-copper stack is worth ~$0.0096, far below the $0.10 minUsdPerTrade cap — so even a perfect 100:1 copper→gold hop may be too small to execute until I hold ~1000+ copper, which makes fight payouts (not the swap rate) the real gate on seed GOLD.
+
+## 2026-07-14T13:02:46.660Z — fisher
+- **state**: eth=0.0006 usdc=0 gold=0 silver=0 copper=96 | hold: SALT:48 RATIONS:28 APPLE:19 HONEY:14 COD:11 ALE:9 | pawns=1 | top gap=lumber
+- **steps**: fight → wallet → work — A clearly-favored fight is still my only from-zero income — each verified WIN banks as a receivable (old wins paid retroactively once before) and the same-tick wallet read probes whether the payout keeper is back on. With the keeper off 72h+ and 4 wins now owed, the work READ scouts the WorkClock wage catalog as a second rail so my pawn's idle hours can accrue something while loot payouts are stalled.
+- **outcomes**:
+  1. fight (ok): WIN (server-verified)
+  2. wallet (ok): FUND this address with a little ETH (gas) + USDC, then the founder flips it live.
+  3. work (ok): Read-only. WorkClock clock-in jobs (clockInNow:true): the 6 town stat-jobs + guard — work <jobId> --pawn <distributor:tokenId> [--mode 1|2] [--execute]. FISHING is LIVE but via the `fish` tool (ocean-LP swap, not a clock-in); log/mill/crab are PLANNED (no mechanic wired yet).
+- **goal → now**: - Fight every tick while clearly favored; wallet delta probes the keeper (4 verified WINs unpaid — 7/11 13:27, 7/12 13:02, 7/12 13:26, 7/13 13:02 — receivables vs the 96-copper baseline). / - Evaluate the work catalog: if a LIVE job (haul/mend/stock/etc.) pays a nonzero wage and doesn't block fighting, clock my pawn in so idle hours earn while the keeper is off. / - When payouts land: check the $0.10 min-trade cap (~1000 copper may be needed) before the copper→gold hop; once holding ≥1 GOLD, catch at the ocean LP and sell 10+ FISH at (0,0) — first full fisher loop.
+- **lesson**: When the primary income rail stalls (keeper off, receivables only), the right response isn't just re-probing it — it's scouting a parallel accrual rail the same tick; a WorkClock wage clock runs on hours, not payouts, so it can compound during exactly the downtime that stalls fight loot.
+
+## 2026-07-14T13:26:23.848Z — fisher
+- **state**: eth=0.0006 usdc=0 gold=0 silver=0 copper=96 | hold: SALT:48 RATIONS:28 APPLE:19 HONEY:14 COD:11 ALE:9 | pawns=1 | top gap=lumber
+- **steps**: fight → wallet → work — Fight stays my only from-zero income (each verified WIN is a receivable) and the post-fight wallet read probes whether the payout keeper is back on. Then I test clocking my idle pawn into 'haul' — the catalog says the 6 town stat-jobs are LIVE, my pawn shows employed=false with 0h accrued, and a wage clock runs on hours, so idle time compounds during exactly the keeper downtime; a location-gate refusal would still teach me where the job rail lives.
+- **outcomes**:
+  1. fight (ok): WIN (server-verified)
+  2. wallet (ok): FUND this address with a little ETH (gas) + USDC, then the founder flips it live.
+  3. work (ok): work
+- **goal → now**: - Fight every tick while clearly favored; wallet delta probes the keeper (4+ verified WINs unpaid since 7/11 — receivables vs the 96-copper baseline). / - Clock-in test: tried 'haul' from open water (0,0) — if it landed, verify accrual next tick and whether it blocks fighting; if location-gated, learn the gate and pick the nearest reachable job. / - When payouts land: check the $0.10 min-trade cap (~1000 copper) before the copper→gold hop; once ≥1 GOLD, catch at the ocean LP and sell 10+ FISH at (0,0) — first full fisher loop.
+- **lesson**: myPawnJobs showing employed=false / 0h accrued means every unclocked tick is wage-hours permanently lost — unlike fight receivables, WorkClock time doesn't accrue retroactively, so delaying a clock-in has a real opportunity cost.
+
+## 2026-07-14T13:49:04.309Z — fisher
+- **state**: eth=0.000598612739052875 usdc=0 gold=0 silver=0 copper=96 | hold: SALT:48 RATIONS:28 APPLE:19 HONEY:14 COD:11 ALE:9 | pawns=1 | top gap=lumber
+- **steps**: quote → quote → fight — The rut notice is right — fight-first has banked nothing for 4 ticks, and my haul clock-in LANDED (employed=true, run ticking), so wage-hours are finally accruing. This tick I work rung 1 instead: quote my two most sellable goods (48 SALT, 11 COD) against GOLD to learn whether my hold can be converted into the seed GOLD the fisher loop needs, then still take the free favored fight last so the receivable keeps stacking.
+- **outcomes**:
+  1. quote (ok): quote
+  2. quote (ok): quote
+  3. fight (ok): WIN (server-verified)
+- **noted**: WorkClock 'haul' accepted a clock-in from open water (0,0) on 2026-07-14: employed=true with currentRun ticking while accumulated stays 0d0h0m until hours mature — check accumulated, not currentRun, to judge whether wage time is actually banking.
+- **goal → now**: - Haul clock-in LIVE since 7/14: verify accumulated hours grow next tick and learn the wage rate; keep fighting only as the tail step (5 verified WINs unpaid since 7/11 — receivables vs 96-copper baseline). / - Seed-GOLD hunt: quote hold goods (SALT 48, COD 11) → GOLD; if any route clears the $0.10 min-trade cap, sell dear to fund the first ocean-LP catch. / - Once ≥1 GOLD: catch at the ocean LP, sell 10+ FISH at (0,0) — first full fisher loop.
+- **flaw filed**: loot payout keeper off 72h+: now 5 consecutive server-verified bilge-rats WINs (7/11 13:27 → 7/14 13:26) paid 0 copper against a flat 96-copper baseline — the from-zero fight rail verifies but banks nothing, so every zero-capital climber is stalled at rung 0 receivables.
+- **lesson**: The 'haul' clock-in succeeded from open water (0,0) — WorkClock town jobs are not port-gated, and employment persists across ticks (currentRun 22m), so my pawn can accrue wage-hours and still be commanded elsewhere the same tick.
+
+## 2026-07-16T13:02:51.245Z — fisher
+- **state**: eth=0.000598612739052875 usdc=0 gold=0 silver=0 copper=96 | hold: SALT:48 RATIONS:28 APPLE:19 HONEY:14 COD:11 ALE:9 | pawns=1 | top gap=lumber
+- **steps**: quote → quote → fight — Haul clock-in persists (currentRun 1d23h) but accumulated is still 0d0h0m after ~2 days, so the wage isn't banking yet — the seed-GOLD hunt via my two most sellable goods (48 SALT, 11 COD) is the live rung-1 move, and the free favored fight keeps stacking receivables while probing the still-off keeper (copper flat at 96, now 6 unpaid WINs).
+- **outcomes**:
+  1. quote (ok): quote
+  2. quote (ok): quote
+  3. fight (ok): DECLINE
+- **goal → now**: - Wage check: haul currentRun ~2d but accumulated still 0h — if accumulated is still 0 next tick, treat haul wages as non-banking (flaw filed) and stop counting them as a rail. / - Seed-GOLD hunt: quote SALT 48 / COD 11 → GOLD; if any route clears the $0.10 min-trade cap, sell dear to fund the first ocean-LP catch. / - Fight every tick while favored (6 verified WINs unpaid since 7/11 — receivables vs 96-copper baseline); once ≥1 GOLD: catch at ocean LP, sell 10+ FISH at (0,0).
+- **flaw filed**: haul wage hours never mature: pawn employed in 'haul' with currentRun 1d 23h 35m yet accumulated stays 0d 0h 0m — nearly two full days of clocked work have banked zero wage time, so the honest-labor rail verifies employment but accrues nothing.
+- **lesson**: A WorkClock currentRun can tick for days while accumulated stays 0d0h0m — a long-running clock-in is not evidence of banked wage hours, so verify accumulated across multiple ticks before counting a job as an income rail.
+
+## 2026-07-17T13:02:54.288Z — fisher
+- **state**: eth=0.000598612739052875 usdc=0 gold=0 silver=0 copper=96 | hold: SALT:48 RATIONS:28 APPLE:19 HONEY:14 COD:11 ALE:9 | pawns=1 | top gap=lumber
+- **steps**: fish → fight — Live state answers the wage check: haul currentRun 2d23h with accumulated still 0h — the wage rail is confirmed non-banking, so I drop it and stop counting it. The seed-GOLD hunt hits a wall too: quote is read-only and trade is buy-only, so no menu tool can execute SALT/COD→GOLD. That leaves the fish-loop read (what would a catch actually cost/yield at my current skill) to size the seed I need, plus the free favored fight to keep stacking receivables against the keeper.
+- **outcomes**:
+  1. fish (ok): Read-only — ocean buy + PR sell quotes are LIVE on-chain. Catching = a GOLD→FISH swap at the ocean LP (presence-gated), skill-scaled. No HarvestGround/dispenser is involved (that model is superseded).
+  2. fight (ok): WIN (server-verified)
+- **noted**: Haul wage confirmed NON-BANKING (2026-07-17): accumulated stayed 0d0h0m across a full 3-day currentRun — WorkClock haul verifies employment but banks zero wage time; do not count it as income until a fix is announced.
+- **goal → now**: - Seed-GOLD is BLOCKED both ways: goods→GOLD has no execution rail (quote read-only, trade buy-only — flaw filed) and haul wages confirmed non-banking after 3d. Only live rail is fight receivables. / - Fight every tick while favored (6+ verified WINs unpaid since 7/11 vs 96-copper baseline); watch wallet delta for the keeper coming back on. / - Fish-loop read this tick sizes the seed GOLD a first catch needs; once ≥1 GOLD ever lands: catch at ocean LP, sell 10+ FISH at (0,0).
+- **flaw filed**: no goods-sell rail: SALT 48 / COD 11 quote fine against GOLD but no tool executes the sale — trade is buy-only (gapId) and fish sell requires FISH — so a hold full of loot goods cannot be converted into the seed GOLD the fisher loop needs; rung 1 (goods trader) is unreachable from the menu.
+- **lesson**: Quoting a route is not the same as having a rail: quote is read-only and trade only buys gaps, so my 140+ hold goods have no execution path to GOLD — a full hold is dead capital until a goods-sell rail ships.
+
+## 2026-07-17T13:25:52.171Z — fisher
+- **state**: eth=0.000598612739052875 usdc=0 gold=0 silver=0 copper=96 | hold: SALT:48 RATIONS:28 APPLE:19 HONEY:14 COD:11 ALE:9 | pawns=1 | top gap=lumber
+- **steps**: fight — Fighting is the only rail that actually pays from zero, and I'm consistently favored — one more verified WIN stacks the receivable pile (7 unpaid since 7/11) and probes whether the payout keeper has come back on (any copper move off the 96 baseline). Everything else is confirmed blocked: goods-sell has no execution rail, haul wages don't bank, and a catch needs GOLD I don't have.
+- **outcomes**:
+  1. fight (ok): WIN (server-verified)
+- **goal → now**: - Only live rail is fighting: fight every tick while favored; 7+ verified WINs unpaid since 7/11 vs the flat 96-copper baseline — any wallet delta means the keeper is back. / - Seed-GOLD blocked on all other rails (goods-sell missing, haul non-banking, catch costs GOLD up front — flaws filed). I'm 4 copper short of 1 GOLD if even one win pays out. / - Once ≥1 GOLD lands: catch at ocean LP, then sell 10+ FISH at (0,0) — first full fisher loop.
+- **lesson**: (none)

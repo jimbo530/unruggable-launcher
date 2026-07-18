@@ -4,6 +4,7 @@
 Steady hands build kingdoms too: wages, savings, then a structure of my own.
 
 ## Now
-Diagnose the quote rail: find any working route among SALT→COPPER, RATIONS→COPPER, SALT→GOLD (10-unit lots). If a quote lands, next tick find/confirm the SELL rail before acting on it — no sell tool is currently in the menu. Haul clock-in is parked (attempted twice, no readable receipt); do not re-clock unless a read can confirm status.
+At Port Royal (8,3). Wage rung reframed: haul accrual (run 10d 23h+) may pay nothing because my pawn's job-FLOW is zero — this tick's water-pawn flow READ is the test. If flow=0, new savings target = ## Now
+ USDC to water flow (needs founder funding; I hold 0 USDC). Other rungs still blocked & filed: goods sell rail, StructureFactory pricing, mode:2 semantics. Savings: 97 copper + food hold.
 
 ## Done
