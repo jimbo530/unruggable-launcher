@@ -119,7 +119,7 @@ let state = null;
 function setStoreFile(p) { storeFile = p; state = null; }
 
 function loadState() {
-  if (!fs.existsSync(storeFile)) return { players: {}, cooldowns: {}, orbs: {}, rations: {}, bestiary: { pawns: {} }, aboard: {}, ships: {} };
+  if (!fs.existsSync(storeFile)) return { players: {}, cooldowns: {}, orbs: {}, rations: {}, bestiary: { pawns: {} }, aboard: {}, ships: {}, claims: {} };
   const raw = fs.readFileSync(storeFile, 'utf8');
   // No silent catch: a corrupt authority file must STOP the operator, never silently reset.
   try {
@@ -143,6 +143,10 @@ function loadState() {
     // Additive schema migration, same rule as above — an older state file upgrades in place, never resets.
     if (!parsed.aboard || typeof parsed.aboard !== 'object') parsed.aboard = {};
     if (!parsed.ships || typeof parsed.ships !== 'object') parsed.ships = {};
+    // loot claims (payout feed): { [nonce]: { runId, poolAddress, collection, tokenId,
+    //   serverVerified:true, prizeLabel, wonAt, paidTx:null } }. Append-only; nonce is single-use so
+    //   a claim can never be recorded twice. paidTx is stamped by the keeper's ack.
+    if (!parsed.claims || typeof parsed.claims !== 'object') parsed.claims = {};
     return parsed;
   } catch (e) {
     throw new Error(`[seas] CORRUPT state file ${storeFile} — refusing to start: ${e.message}`);
@@ -906,6 +910,9 @@ function issueSeed(playerRaw, fightRaw, opts = {}) {
 
   const now = _now();
   gcFights(now);
+  // DEPTH (founder 2026-07-08: goblins scale by depth) — pinned at issue so client and
+  // server rebuild the IDENTICAL deepened squad; clamped like the lib clamps it.
+  const depth = Math.max(1, Math.min(9, Math.floor(Number(opts && opts.depth) || 1)));
   const seed = 'seas-' + fight + '-' + crypto.randomBytes(16).toString('hex'); // unguessable RNG anchor
   const nonce = crypto.randomBytes(12).toString('hex');
   // UNIVERSAL EATING: catch the pawn up from its server stores (once-per-day, batched, cheapest-first)
@@ -914,8 +921,8 @@ function issueSeed(playerRaw, fightRaw, opts = {}) {
   // fights (cooldown kinds carry a pawn) are tracked; a pawn-less fight pins starve 0.
   let starve = 0;
   if (pawn) { serverAutoEat(pawn, now); starve = serverStarvePenalty(pawn, now); }
-  _fights.set(nonce, { player: addrKey(player), fight, seed, used: false, issuedAt: now, pawn, starve });
-  return { status: 200, body: { ok: true, seed, nonce, fight, pawn } };
+  _fights.set(nonce, { player: addrKey(player), fight, seed, used: false, issuedAt: now, pawn, starve, depth });
+  return { status: 200, body: { ok: true, seed, nonce, fight, pawn, depth } };
 }
 
 /**
@@ -952,7 +959,7 @@ function verifyFight({ player: playerRaw, nonce, playerTeam, playerActions }) {
 
   // Reconstruct the foes from the seed alone (the SAME builder the client used → matching ids/hexes).
   const playerHexes = playerTeam.map((u) => u && u.position).filter(Boolean);
-  const enemyTeam = mod[kind.buildEnemies](seed, playerHexes);
+  const enemyTeam = mod[kind.buildEnemies](seed, playerHexes, rec.depth || 1);
   // UNIVERSAL EATING: the server is the referee — CLAMP the client-submitted player team by the
   // pinned starvation penalty (rec.starve, set at issue from the SERVER's ration store) so a starving
   // pawn genuinely fights weaker here and a fat-stat client submission is overridden. pen 0 = no-op.
@@ -991,6 +998,28 @@ function verifyFight({ player: playerRaw, nonce, playerTeam, playerActions }) {
     rec.roll = roll; // pinned to this (consumed) nonce — the keeper fires what THIS says, nothing else
     const fire = roll && Array.isArray(roll.fires) && roll.fires[0] ? roll.fires[0] : null;
     if (fire) prize = { poolId: fire.poolId, poolAddress: fire.pool.address, label: fire.pool.label, deployed: fire.deployed };
+
+    // ── PERSIST the win as a PAYABLE CLAIM (payout feed — root-cause fix 2026-07-11: verify-fight
+    //    used to return the prize then FORGET it; the keeper starved). Keyed by the single-use nonce
+    //    → the same fight can never yield two claims. Only recorded on a genuine, conclusive,
+    //    pawn-bearing win that named a deployed pool. Keeper reads GET /seas/claims, fires payout().
+    if (prize && prize.deployed && rec.pawn && prize.poolAddress) {
+      const st = ensureState();
+      if (!st.claims || typeof st.claims !== 'object') st.claims = {};
+      if (!st.claims[nonce]) {                         // idempotent on nonce
+        st.claims[nonce] = {
+          runId: `win-${rec.fight}-${nonce}`,
+          poolAddress: prize.poolAddress,
+          collection: rec.pawn.split(':')[0],
+          tokenId: rec.pawn.split(':')[1],
+          serverVerified: true,
+          prizeLabel: prize.label,
+          wonAt: new Date(_now()).toISOString(),
+          paidTx: null,
+        };
+        saveState();
+      }
+    }
   }
 
   // ── KILL-TRACKER / PERSONAL BESTIARY (founder 2026-07-01): count slain foes from the SERVER'S OWN
@@ -1256,6 +1285,8 @@ const ROUTES = [
   'POST /seas/verify-fight { player, nonce, playerTeam, playerActions }   — REPLAY the engine → authoritative { winner }; starts the server cooldown on a conclusive cooldown-kind run',
   'POST /seas/use-chrono-orb { player, collection, tokenId, action }      — DEBIT 1 server-attributed Chrono Orb → clear a server cooldown (skip the WAIT only; must still RUN+WIN). 402 no orb, 403 not owner, 409 not cooling',
   'GET  /seas/cooldown?collection=0x..&tokenId=..&action=goblin-cave      — server-clock secsLeft for a pawn+action (display truth)',
+  'GET  /seas/claims[?all=1]                                              — payout feed: unpaid server-verified wins (keeper reads this)',
+  'POST /seas/claims/ack { runId, txHash, secret }                        — mark a claim paid (keeper ack; SEAS_CLAIM_ACK_SECRET-gated)',
   'GET  /seas/bestiary?pawn=<collection>:<tokenId>                        — READ-ONLY personal bestiary (kill counts, earned titles, progress)',
   'GET  /seas/lore?pawn=<collection>:<tokenId>&monster=<monsterId>        — READ-ONLY monster strengths/weaknesses (gated behind the earned achievement)',
 ];
@@ -1363,7 +1394,7 @@ async function handle(req, res) {
 
   if (route === 'POST /seas/issue-seed') {
     const body = await readBody(req);
-    const out = issueSeed(body.player, body.fight, { collection: body.collection, tokenId: body.tokenId });
+    const out = issueSeed(body.player, body.fight, { collection: body.collection, tokenId: body.tokenId, depth: body.depth });
     return sendJSON(res, out.status, out.body);
   }
 
@@ -1371,6 +1402,33 @@ async function handle(req, res) {
     const body = await readBody(req);
     const result = await useChronoOrb(body);
     return sendJSON(res, result.status, result.body);
+  }
+
+  if (route === 'GET /seas/claims') {
+    // Payout feed: unpaid server-verified wins for the keeper. ?all=1 to include paid ones.
+    const st = ensureState();
+    const all = u.searchParams.get('all') === '1';
+    const list = Object.values(st.claims || {})
+      .filter((c) => all || !c.paidTx)
+      .map(({ runId, poolAddress, collection, tokenId, serverVerified, prizeLabel, wonAt, paidTx }) =>
+        ({ runId, poolAddress, collection, tokenId, serverVerified, prizeLabel, wonAt, paidTx }));
+    return sendJSON(res, 200, { ok: true, count: list.length, claims: list });
+  }
+
+  if (route === 'POST /seas/claims/ack') {
+    // The keeper POSTs { runId, txHash, secret } after an on-chain-confirmed payout so the claim
+    // stops showing as unpaid. Gated by a shared secret (env SEAS_CLAIM_ACK_SECRET) — ack only
+    // stamps a record, it moves NO funds, but we still don't want open writes.
+    const body = await readBody(req);
+    if (!process.env.SEAS_CLAIM_ACK_SECRET || body.secret !== process.env.SEAS_CLAIM_ACK_SECRET) {
+      return sendJSON(res, 403, { ok: false, reason: 'bad or missing ack secret' });
+    }
+    const st = ensureState();
+    const hit = Object.values(st.claims || {}).find((c) => c.runId === body.runId);
+    if (!hit) return sendJSON(res, 404, { ok: false, reason: `no claim ${body.runId}` });
+    hit.paidTx = body.txHash || 'acked';
+    saveState();
+    return sendJSON(res, 200, { ok: true, runId: body.runId, paidTx: hit.paidTx });
   }
 
   if (route === 'GET /seas/cooldown') {
