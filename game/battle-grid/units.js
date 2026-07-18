@@ -291,6 +291,7 @@ export function makeStarterUnits() {
       endowment: p.endowment, role: r.isCaster ? "caster" : "melee",
       position: { q: 1, r: 5 }, spells: r.spells, crewId: p.crewId || null,
     });
+    player.pawnId = p.id;        // link to the persistent pawn (loadout/inventory updates on a fall)
     // Pre-equip the gear loadout saved in the Crew View.
     const lo = readLoadout(p.id);
     if (lo) for (const slot of ["weapon", "armor", "trinket"]) if (lo[slot]) equipItem(player, lo[slot]);

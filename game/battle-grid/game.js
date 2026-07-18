@@ -16,7 +16,7 @@
  */
 
 import { makeStarterUnits, SPELLS } from "./units.js";
-import { ITEMS, SLOTS, equipItem, equippedList, ownedGear } from "./items.js";
+import { ITEMS, SLOTS, equipItem, equippedList, ownedGear, applyEquipment, resolveFallenWeapon } from "./items.js";
 import {
   HEX_SIZE, GRID_COLS, GRID_ROWS, allHexes, hexToPixel, hexPolygonPoints,
   gridPixelDimensions, hexDistance, hexNeighbors, hexesInRange, isAdjacent,
@@ -378,10 +378,46 @@ function onHexClick(h) {
 // ── Damage / death / win (ToT death thresholds: 0 down, -10 dead) ────────────────
 function applyDamage(target, dmg) {
   target.currentHp -= dmg;
-  if (!isConscious(target)) {
+  if (!isConscious(target) && !target._fell) {
+    target._fell = true;                       // resolve the weapon loss exactly once
     log(`${target.name} falls! (${target.currentHp} HP)`, "down");
+    resolveFall(target);
   }
   checkWin();
+}
+
+// FOUNDER RULE: a fallen pawn loses ONLY the weapon it was carrying — 50/50 the victor
+// loots it vs the house takes it (a sink). The player's pawn auto-equips a spare so it
+// isn't left bare (stock a few at the market → skip an immediate store run).
+function resolveFall(unit) {
+  const weaponId = unit.equipped?.weapon || null;
+  if (!weaponId) return;
+  const winnerGetsIt = Math.random() < 0.5;
+  const r = resolveFallenWeapon({ weaponId, fallenIsPlayer: unit.isPlayer, winnerGetsIt });
+
+  if (unit.isPlayer) {
+    unit.equipped.weapon = r.reEquipId || null; // weapon's gone; grab a spare if any
+    applyEquipment(unit);
+    if (unit.pawnId) persistLoadoutWeapon(unit.pawnId, r.reEquipId || null);
+    const lost = ITEMS[r.lostId]?.name || "its weapon";
+    log(r.reEquipId
+      ? `${unit.name} loses ${lost} — grabs a spare ${ITEMS[r.reEquipId]?.name || ""}.`
+      : `${unit.name} loses ${lost} — no spare left! (restock at the market)`, "down");
+  } else if (r.lootedId) {
+    log(`Spoils! You loot ${ITEMS[r.lootedId]?.name || "a weapon"} from ${unit.name}.`, "win");
+  } else if (r.toHouse) {
+    log(`${unit.name}'s weapon is lost to the deep.`, "info");
+  }
+}
+
+// Persist the pawn's weapon slot so the auto-equipped spare carries into the next battle.
+function persistLoadoutWeapon(pawnId, weaponId) {
+  if (typeof localStorage === "undefined") return;
+  try {
+    const all = JSON.parse(localStorage.getItem("sts_loadout") || "{}");
+    all[pawnId] = { ...(all[pawnId] || {}), weapon: weaponId };
+    localStorage.setItem("sts_loadout", JSON.stringify(all));
+  } catch (e) { console.warn("loadout persist failed:", e); }
 }
 
 function checkWin() {

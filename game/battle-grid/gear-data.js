@@ -14,13 +14,36 @@
  */
 
 // material tiers. bonus = STAT bump (to attack/ac). priceMul = cost vs the iron baseline.
+// weightMul = how heavy vs the base D&D weight — WOOD IS LIGHTER than metal (founder 2026-06-25):
+// a wooden longsword (4lb×0.5 = 2lb) weighs half an iron one — lighter to carry, and it's the
+// ~2lb of milled lumber it's made from. So wood = cheap + light + weak (the starter tier).
 export const MATERIALS = {
-  wooden: { label: 'Wooden', bonus: 0, priceMul: 0.5, locked: false },
-  iron:   { label: 'Iron',   bonus: 1, priceMul: 1.0, locked: false },
-  bronze: { label: 'Bronze', bonus: 2, priceMul: 2.0, locked: false },
-  steel:  { label: 'Steel',  bonus: 3, priceMul: 4.0, locked: true },  // unlocks later
-  leather:{ label: 'Leather',bonus: 0, priceMul: 1.0, locked: false }, // helmet-leather / soft gear
+  wooden: { label: 'Wooden', bonus: 0, priceMul: 0.5, weightMul: 0.5, locked: false },
+  iron:   { label: 'Iron',   bonus: 1, priceMul: 1.0, weightMul: 1.0, locked: false },
+  bronze: { label: 'Bronze', bonus: 2, priceMul: 2.0, weightMul: 1.1, locked: false },
+  steel:  { label: 'Steel',  bonus: 3, priceMul: 4.0, weightMul: 1.0, locked: true },  // unlocks later
+  leather:{ label: 'Leather',bonus: 0, priceMul: 1.0, weightMul: 0.4, locked: false }, // helmet-leather / soft gear
 };
+
+// base item weights (lb, authentic D&D 3.5) keyed by item TYPE — multiplied by the material's
+// weightMul above to get the final per-item weight. Used by weight.js (encumbrance).
+export const WEIGHTS = {
+  dagger:1, club:3, sickle:2, kama:2, sai:1, nunchaku:2, 'light-hammer':2, handaxe:3,
+  mace:8, morningstar:6, warhammer:5, hammer:5, shortsword:2, scimitar:4, rapier:2, kukri:2,
+  longsword:4, sword:4, battleaxe:6, flail:5, 'bastard-sword':6,
+  quarterstaff:4, greatsword:8, greataxe:12, greatclub:8, maul:10, 'dwarven-waraxe':8,
+  'dwarven-urgrosh':12, 'gnome-hooked-hammer':6, 'orc-double-axe':15,
+  spear:6, glaive:10, halberd:12, pike:12, lance:10, mancatcher:8,
+  shortbow:2, longbow:3, crossbow:4, 'hand-crossbow':2, 'heavy-crossbow':8, 'repeating-crossbow':6,
+  dart:0.5, javelin:2, shuriken:0.5, sling:0, blowgun:1, bolas:2, net:6,
+  armor:15, 'armor-studded':20, 'armor-hide':25, 'armor-chain-shirt':25, 'armor-scalemail':30,
+  'armor-chainmail':40, 'armor-ring-mail':30, 'armor-breastplate':30, 'armor-splint':45,
+  'armor-half-plate':50, 'armor-plate':50, shield:15, helmet:3,
+  spyglass:1, lantern:2, 'healers-kit':1, relic:1,
+};
+/** Final item weight (lb) = base type weight × material weight multiplier, 1-dp. */
+export const matWeight = (typeKey, mid) =>
+  Math.round(((WEIGHTS[typeKey] ?? 1) * ((MATERIALS[mid] && MATERIALS[mid].weightMul) ?? 1)) * 10) / 10;
 
 // base weapon table: dmg=base flat attack, fin=finesse(+to-hit), reach=+1 range,
 // rng=ranged range bonus, two=two-handed(+1 dmg). gp = D&D 3.5 list price (gold pieces).
@@ -158,11 +181,11 @@ export function buildArmory() {
         if (mid === 'leather') continue;
         const id = `${key}-${mid}`;
         add(id, w, `${mat.label} ${w.name}`, weaponMods(w, mat.bonus, false, 0), priceCp(w.gp, mat.priceMul),
-          { material: mid, locked: mat.locked, masterwork: false, enchantable: false, enchant: 0 });
+          { material: mid, locked: mat.locked, masterwork: false, enchantable: false, enchant: 0, weight: matWeight(key, mid) });
       }
     } else {
       add(key, w, w.name, weaponMods(w, 1, false, 0), priceCp(w.gp, 1),
-        { material: 'iron', locked: false, masterwork: false, enchantable: false, enchant: 0 });
+        { material: 'iron', locked: false, masterwork: false, enchantable: false, enchant: 0, weight: matWeight(key, 'iron') });
     }
   }
   // armors
@@ -173,17 +196,17 @@ export function buildArmory() {
         const id = `${key}-${mid}`;
         const mat = MATERIALS[mid];
         add(id, a, `${mat.label} ${a.name}`, armorMods(a, key === 'helmet' ? Math.floor(mat.bonus / 2) : mat.bonus, false, 0),
-          priceCp(a.gp, mat.priceMul), { material: mid, locked: mat.locked, masterwork: false, enchantable: false, enchant: 0 });
+          priceCp(a.gp, mat.priceMul), { material: mid, locked: mat.locked, masterwork: false, enchantable: false, enchant: 0, weight: matWeight(key, mid) });
       }
     } else {
       add(key, a, a.name, armorMods(a, 0, false, 0), priceCp(a.gp, 1),
-        { material: 'cloth', locked: false, masterwork: false, enchantable: false, enchant: 0 });
+        { material: 'cloth', locked: false, masterwork: false, enchantable: false, enchant: 0, weight: (WEIGHTS[key] ?? 1) });
     }
   }
   // trinkets
   for (const [id, t] of Object.entries(TRINKETS)) {
     items[id] = { id, slot: 'trinket', sprite: `../art/gear/${id}.png`, priceCp: priceCp(t.gp, 1), gold: Math.max(1, Math.round(t.gp)),
-      masterwork: false, enchantable: false, enchant: 0, material: null, locked: false, ...t };
+      masterwork: false, enchantable: false, enchant: 0, material: null, locked: false, weight: (WEIGHTS[id] ?? 1), ...t };
   }
   return items;
 }

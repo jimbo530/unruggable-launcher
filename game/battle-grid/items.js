@@ -40,16 +40,53 @@ if (typeof localStorage !== "undefined") {
 /** Path to an item's cut-out art (works from any depth-1 page: store/crew/battle-grid). */
 export const itemImg = (id) => `../art/gear/${id}.png`; // clean keyed cut-outs (art/items were over-erased to shadows)
 
-/** Gear the player owns (bought at the General Store), from localStorage. Guarded for
- *  Node. The battle equip panel only offers owned gear; the store writes this set. */
+// ── INVENTORY (counts) ───────────────────────────────────────────────────────
+// localStorage "sts_gear" holds an id->count map so the player can stock SPARES
+// (buy 3 iron swords → hold 3). A fallen pawn loses ONE of its equipped weapon
+// (see loseWeaponOnFall); a spare auto-equips so you're not left bare. Legacy
+// format was an array of ids (a yes/no Set) — migrated transparently to {id:1...}.
+const GEAR_KEY = "sts_gear";
+
+/** Raw inventory as an id->count map. Migrates the legacy array (Set) format. */
+export function inventory() {
+  if (typeof localStorage === "undefined") {                 // node/tests: one of each
+    const all = {}; for (const id of Object.keys(ITEMS)) all[id] = 1; return all;
+  }
+  let raw;
+  try { raw = JSON.parse(localStorage.getItem(GEAR_KEY) || "{}"); }
+  catch (e) { console.warn("inventory parse failed:", e); return {}; }
+  if (Array.isArray(raw)) {                                   // legacy [id,id] → {id:count}
+    const m = {}; for (const id of raw) m[id] = (m[id] || 0) + 1; return m;
+  }
+  return raw && typeof raw === "object" ? raw : {};
+}
+
+function saveInventory(m) {
+  if (typeof localStorage === "undefined") return;
+  const clean = {}; for (const id in m) if (m[id] > 0) clean[id] = m[id]; // prune zeros
+  localStorage.setItem(GEAR_KEY, JSON.stringify(clean));
+}
+
+/** How many of an item the player holds. */
+export function gearCount(id) { return inventory()[id] || 0; }
+
+/** Add n of an item to inventory; returns the new count. */
+export function addGear(id, n = 1) {
+  const m = inventory(); m[id] = (m[id] || 0) + n; saveInventory(m); return m[id];
+}
+
+/** Remove up to n of an item; returns how many were actually removed. */
+export function removeGear(id, n = 1) {
+  const m = inventory(); const have = m[id] || 0; const take = Math.min(have, n);
+  if (take > 0) { m[id] = have - take; saveInventory(m); }
+  return take;
+}
+
+/** Set of ids the player owns at least one of (back-compat for the equip panels). */
 export function ownedGear() {
   if (typeof localStorage === "undefined") return new Set(Object.keys(ITEMS)); // tests: all owned
-  try {
-    return new Set(JSON.parse(localStorage.getItem("sts_gear") || "[]"));
-  } catch (e) {
-    console.warn("owned-gear parse failed:", e);
-    return new Set();
-  }
+  const m = inventory();
+  return new Set(Object.keys(m).filter((id) => m[id] > 0));
 }
 
 /** Recompute a unit's live combat fields = base values + equipped item mods. */
@@ -98,4 +135,48 @@ export function equipItem(u, itemId) {
 /** The items a unit currently has equipped, in slot order. */
 export function equippedList(u) {
   return SLOTS.map((slot) => u.equipped[slot]).filter(Boolean).map((id) => ITEMS[id]);
+}
+
+// ── DEATH = LOSE THE CARRIED WEAPON (founder rule) ────────────────────────────
+// When a pawn falls it loses ONLY the one weapon it was carrying. A spare of any
+// weapon auto-equips so the pawn isn't left bare (stock a few → skip the store run).
+// The fallen weapon: 50/50 the VICTOR loots it vs the HOUSE takes it (a sink so
+// PVE-generated enemy gear doesn't inflate the economy).
+
+/** Best spare WEAPON the player owns (highest attack power), or null if none. */
+export function bestSpareWeapon() {
+  const inv = inventory();
+  let best = null, bestScore = -Infinity;
+  for (const id in inv) {
+    if (inv[id] <= 0) continue;
+    const it = ITEMS[id];
+    if (!it || it.slot !== "weapon") continue;
+    const score = (it.mods?.attack || 0) + (it.mods?.atkBonus || 0);
+    if (score > bestScore) { bestScore = score; best = id; }
+  }
+  return best;
+}
+
+/**
+ * Resolve a fallen pawn's carried weapon against the PERSISTENT player inventory.
+ * @param {{weaponId: string|null, fallenIsPlayer: boolean, winnerGetsIt: boolean}} o
+ *   winnerGetsIt = the 50/50 coin flip (true: victor keeps it, false: house sink).
+ * @returns {{lostId:?string, lootedId:?string, toHouse:boolean, reEquipId:?string}}
+ *   - player's pawn fell → its weapon leaves the player's inventory (gone); a spare is
+ *     chosen to auto-equip (reEquipId, may be the same type if a duplicate remains).
+ *   - enemy pawn fell → player is victor: winnerGetsIt adds the weapon, else house sink.
+ */
+export function resolveFallenWeapon({ weaponId, fallenIsPlayer, winnerGetsIt }) {
+  const res = { lostId: null, lootedId: null, toHouse: false, reEquipId: null };
+  if (!weaponId) return res;
+  if (fallenIsPlayer) {
+    removeGear(weaponId, 1);                 // the carried weapon is destroyed/taken — gone either way
+    res.lostId = weaponId;
+    res.toHouse = !winnerGetsIt;             // bookkeeping: enemy kept it vs house sink
+    res.reEquipId = bestSpareWeapon();       // auto-equip a spare so the pawn isn't bare
+  } else {
+    if (winnerGetsIt) { addGear(weaponId, 1); res.lootedId = weaponId; } // player loots it
+    else { res.toHouse = true; }              // house sink (keeps PVE gear from inflating)
+  }
+  return res;
 }
