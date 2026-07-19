@@ -30,6 +30,18 @@ const FEES = { maxFeePerGas: ethers.parseUnits('0.15', 'gwei'), maxPriorityFeePe
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 function flag(name) { const i = process.argv.indexOf(name); return i >= 0 ? (process.argv[i + 1] ?? null) : null; }
 
+// public-RPC reads rate-limit mid-run — retry with backoff, loudly.
+async function retryRead(fn, label, tries = 10) {
+  for (let i = 0; i < tries; i++) {
+    try { return await fn(); }
+    catch (e) {
+      if (i === tries - 1) throw new Error(`${label}: ${e.shortMessage || e.message}`);
+      console.log(`  (read retry ${i + 1}/${tries} ${label})`);
+      await sleep(3000 * (i + 1));
+    }
+  }
+}
+
 const POOL_ABI = [
   'function placed() view returns (bool)',
   'function location() view returns (uint256)',
@@ -61,17 +73,17 @@ async function main() {
   for (const [g, p] of Object.entries(kit.pools)) {
     if (!p.pool || !p.seeded) { console.error(`  ${g}: pool missing/unseeded — finish deploy-town-kit.js first`); process.exit(1); }
     const pool = new ethers.Contract(p.pool, POOL_ABI, wallet);
-    const isPlaced = await pool.placed();
+    const isPlaced = await retryRead(() => pool.placed(), `placed ${g}`);
     if (isPlaced) {
-      const loc = await pool.location();
+      const loc = await retryRead(() => pool.location(), `location ${g}`);
       if (loc !== BigInt(hex)) { console.error(`  ${g}: ALREADY placed at ${loc} (expected ${hex}) — investigate before proceeding`); process.exit(1); }
       already++;
       continue;
     }
     if (!EXECUTE) { console.log(`  would place ${g} (${p.pool}) at ${hex}`); continue; }
-    const tx = await pool.placeAt(hex, { nonce: nonce++, ...FEES });
+    const tx = await pool.placeAt(hex, { nonce: nonce++, gasLimit: 80000, ...FEES });
     await tx.wait();
-    const loc = await pool.location();
+    const loc = await retryRead(() => pool.location(), `post-place location ${g}`);
     if (loc !== BigInt(hex)) { console.error(`  ${g}: post-place location=${loc} != ${hex} — STOP`); process.exit(1); }
     p.placeTx = tx.hash;
     placedNow++;
