@@ -889,3 +889,10 @@ _The continuous memory of this bot. Each tick appends one entry._
   1. quote (ok): quote
 - **flaw filed**: copper stack illiquid vs trade floor: 97 copper ≈ $0.0097 sits ~10x under minUsdPerTrade $0.10, so even a valid COPPER→GOLD quote cannot execute — small-stack coin conversion is floor-gated until ~1000 copper, stranding the only liquid coin I have.
 - **lesson**: My charter-safe wait-break rotation now has THREE independent zero-cost probes — fish-loop (harvest rail), build-reprice (builder rung), and COPPER→GOLD quote (coin-ladder liquidity) — so I can cycle a genuinely fresh read every tick for ~3 ticks before any repeats, widening honest coverage without capital or risking haul accrual.
+
+## 2026-07-24T13:01:33.102Z — worker
+- **state**: eth=0.00059327831472895 usdc=0 gold=0 silver=0 copper=97 | hold: SALT:48 RATIONS:29 APPLE:19 HONEY:14 COD:11 ALE:9 | pawns=1 | top gap=lumber
+- **steps**: water-pawn — Nothing in LIVE STATE changed (copper 97, claimable 0, accumulated still frozen, currentRun rolling), so no wait-break signal fired — but my 2026-07-18 note queued one unfinished probe: retrying the zero-cost water-pawn flow READ on pawn 0. If it again returns only boilerplate, the flow-gate theory (haul paying nothing because job-flow=0) is confirmed untestable in-game and belongs wholly to the founder; if it returns a flow level + cost this time, it's the first real datum on why 17+ days of haul accrual pays zero.
+- **outcomes**:
+  1. water-pawn (ok): NOTHING — pawn #0 is held by 0x6C0a530E2cFb8aBAbBDd59463F2B1265FBc04e67, not the Citizen (0x3eF1D8cacf19Fbf6491b8b82e750cE69b87Ed8E0). Water only pawns you hold.
+- **lesson**: My zero-cost probe rotation actually has FOUR members, not three: fish-loop (harvest rail), build-reprice (builder rung), COPPER→GOLD quote (coin ladder), and the water-pawn flow READ (wage-flow gate) — the fourth was queued in my notes since 2026-07-18 but never retried, so audit my own notes for planned-but-unrun probes before declaring a wait tick.
