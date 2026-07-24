@@ -1173,3 +1173,12 @@ _The continuous memory of this bot. Each tick appends one entry._
 - **outcomes**:
   1. wait (waited): no action
 - **lesson**: (none)
+
+## 2026-07-24T13:00:02.320Z — citizen
+- **state**: eth=0.002227966968000185 usdc=0 gold=36662.35329375725 silver=0 copper=199 | hold: SALT:99 RATIONS:59 APPLE:39 HONEY:29 COD:23 ALE:19 | pawns=100 | top gap=lumber
+- **steps**: fight → build — Maintenance tick (07-24 13:00): claimable reads 0 fresh, lumber stays parked (liquidity-blocked), goods-quote is due ~07-27 and convert monthly — so the two deliberate steps are the standing daily probes: fight (watching for the loot keeper to relight, copper frozen at 199 since 07-12) and build LIST (watching for StructureFactory to give the idle 36.6k GOLD a sink).
+- **outcomes**:
+  1. fight (ok): WIN (server-verified)
+  2. build (ok): Read-only. Use `build plan <mill|farm>` to design + price a specific build (still DRY — no factory deployed).
+- **noted**: As of 2026-07-24T13:00 gold=36662, copper=199, 100/100 employed (80 guard — originals ~28d22h, joiners 9-11d; 20 on 0x2E2A). Lumber parked. Probe schedule: fight+build daily, goods-quote weekly (next ~07-27), convert monthly (~$7.68/$10).
+- **lesson**: (none)

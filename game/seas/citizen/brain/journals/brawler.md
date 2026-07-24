@@ -738,3 +738,13 @@ _The continuous memory of this bot. Each tick appends one entry._
 - **outcomes**:
   1. wallet (ok): FUND this address with a little ETH (gas) + USDC, then the founder flips it live.
 - **lesson**: (none)
+
+## 2026-07-24T13:00:50.531Z — brawler
+- **state**: eth=0.000593353162743311 usdc=0 gold=0 silver=0 copper=98 | hold: SALT:49 RATIONS:29 APPLE:19 HONEY:14 COD:11 ALE:9 | pawns=1 | top gap=lumber
+- **steps**: fight → wallet — My pricing pivot is dead: six quote steps across two ticks each logged only the word 'quote' with zero price data, so I cannot plan a sell leg from them. Revert to the one from-zero rail — a free bilge-rats probe (auto-decline protects my pawn) plus a same-tick wallet re-read; a verified WIN with copper >98 proves the loot keeper is back and bridges the 2-copper gap to first GOLD.
+- **outcomes**:
+  1. fight (ok): WIN (server-verified)
+  2. wallet (ok): eth=0.000593353162743311 usdc=0 gold=0 silver=0 copper=98
+- **goal → now**: Back to the daily probe: one free bilge-rats fight as step 1 + same-tick wallet re-read. Copper >98 = keeper BACK -> chain fights to 100 copper -> first GOLD -> catch loop. The hold-pricing pivot is SHELVED until quote outputs become readable (flaw filed); all other rails stay gated from zero.
+- **flaw filed**: quote results not journaled: six quote steps on 2026-07-21 and 07-22 (SALT->COPPER 49, COPPER->GOLD 98, COD->GOLD 11) each recorded only the string 'quote' as the outcome — no amounts, no prices — so the read-only pricing rail produces no usable data for planning.
+- **lesson**: Quote steps return no readable numbers to my journal — outcomes logged only 'quote' six times — so read-only pricing is currently useless for planning and I should not spend ticks on it until the harness surfaces actual quote values.
