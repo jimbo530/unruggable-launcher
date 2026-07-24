@@ -1037,3 +1037,139 @@ _The continuous memory of this bot. Each tick appends one entry._
   1. wait (waited): no action
 - **noted**: As of 2026-07-17T13:24 gold=31898, copper=199, 100/100 pawns employed (80 guard — originals ~21d22h, joiners 2-5d; 20 on 0x2E2A). Both 07-17 daily probes done at 13:00 (fight WIN no loot — keeper dark since 07-12; build LIST still DRY). Next scheduled action: convert-winnings probe ~07-20 (threshold ~07-21).
 - **lesson**: (none)
+
+## 2026-07-18T13:00:02.838Z — citizen
+- **state**: eth=0.002227966968000185 usdc=0 gold=36662.35329375725 silver=0 copper=199 | hold: SALT:99 RATIONS:59 APPLE:39 HONEY:29 COD:23 ALE:19 | pawns=100 | top gap=lumber
+- **steps**: fight → build → convert-winnings — First tick of 07-18: run the two daily maintenance probes (fight = only live earner + keeper watch; build LIST = watching for the GOLD sink to open). Third step is an off-schedule convert-winnings READ because gold jumped 31898→36662 (+4764) since yesterday with zero claims available — the cbBTC batch may have fired early, and I should verify the source of any balance move rather than assume.
+- **outcomes**:
+  1. fight (ok): WIN (server-verified)
+  2. build (ok): Read-only. Use `build plan <mill|farm>` to design + price a specific build (still DRY — no factory deployed).
+  3. convert-winnings (exit 1): below $10 threshold ($7.68) — hold winnings, do not convert dust — hint: run DRY (no --execute) to see the cbBTC→GOLD quote; needs cbBTC winnings in the wallet and a filling route. Live needs --execute AND CITIZEN_ALLOW_LIVE=1.
+- **noted**: As of 2026-07-18T13:00 gold=36662 (+4764 since 07-17 with no claims — suspect the cbBTC convert batch fired early; probing convert-winnings this tick to confirm), copper=199, eth dipped to 0.002228 (gas burn), 100/100 pawns employed (80 guard — originals ~22d22h, joiners 4-6d; 20 on 0x2E2A).
+- **goal → now**: Watch COMPLETE + VERIFIED (100/100 employed). Maintenance cadence: daily fight probe until copper moves (keeper off since 07-12), daily build LIST probe for the GOLD sink (~36.6k idle). Gold jumped +4764 on 07-18 with no claims — verifying via convert-winnings probe whether the cbBTC batch fired early; if so, conversion becomes the second live earner. Surface any spend ≥$50 to the founder first.
+- **lesson**: When a balance moves with no action of mine to explain it (gold +4764 overnight with claimable=0), probe the likeliest rail immediately instead of waiting for its scheduled check — unexplained income is as worth verifying as unexplained loss.
+
+## 2026-07-18T13:24:52.300Z — citizen
+- **state**: eth=0.002227966968000185 usdc=0 gold=36662.35329375725 silver=0 copper=199 | hold: SALT:99 RATIONS:59 APPLE:39 HONEY:29 COD:23 ALE:19 | pawns=100 | top gap=lumber
+- **steps**: work — The 13:00 convert probe DISPROVED my batch hypothesis (accrual sits at $7.68, below the $10 threshold — no conversion fired), so the +4764 GOLD since 07-17 is still unattributed. The one unprobed rail that could pay GOLD is a job wage — a work READ shows the catalog, wage flows, and accrued time for all 100 pawns (especially the 20 on the unnamed 0x2E2A job), which either explains the credit or confirms it came from outside the action menu.
+- **outcomes**:
+  1. work (ok): Read-only. WorkClock clock-in jobs (clockInNow:true): the 6 town stat-jobs + guard — work <jobId> --pawn <distributor:tokenId> [--mode 1|2] [--execute]. FISHING is LIVE but via the `fish` tool (ocean-LP swap, not a clock-in); log/mill/crab are PLANNED (no mechanic wired yet).
+- **noted**: As of 2026-07-18T13:24 gold=36662, copper=199, 100/100 employed. The +4764 GOLD (07-17→07-18) is NOT the cbBTC batch — convert probe shows $7.68 < $10, unfired. Accrual re-measured at ~$0.015/day ($7.65 on 07-16 → $7.68 on 07-18), so threshold crossing is months out — drop the ~07-20 convert probe from the schedule; probe monthly. Gold source hunt: work READ this tick to check whether a wage rail (esp. the unnamed 0x2E2A job, 20 pawns at 22d) pays GOLD.
+- **goal → now**: Watch COMPLETE + VERIFIED (100/100 employed). Priority: attribute the unexplained +4764 GOLD (07-18) — cbBTC batch RULED OUT ($7.68<$10, accrual ~$0.015/day so conversion is months away); probing wage rails (work READ), then filing as unattributed if no rail explains it. Maintenance: daily fight probe until copper moves (keeper off since 07-12), daily build LIST probe for the GOLD sink (~36.6k idle). Surface any spend ≥$50 to the founder first.
+- **flaw filed**: unattributed GOLD credit: wallet gold rose 31898→36662 (+4764, ~$47) between 07-17 and 07-18 with claimable=0, no claims fired by me, and the cbBTC convert batch confirmed UNFIRED ($7.68 < $10 threshold) — no rail in the action menu accounts for the credit; balances should be attributable to a named rail
+- **lesson**: A hypothesis probe that comes back negative still narrows the search: convert-winnings at $7.68 rules OUT the cbBTC batch, and comparing accruals across probes ($7.65 on 07-16 → $7.68 on 07-18, ~$0.015/day) re-measures the real accrual rate at ~30x slower than the ~$0.45/day I'd been projecting — the $10 threshold is months away, not 07-21.
+
+## 2026-07-18T13:48:14.358Z — citizen
+- **state**: eth=0.002227966968000185 usdc=0 gold=36662.35329375725 silver=0 copper=199 | hold: SALT:99 RATIONS:59 APPLE:39 HONEY:29 COD:23 ALE:19 | pawns=100 | top gap=lumber
+- **steps**: claim-achievement — The +4764 GOLD hunt has one unprobed rail left: the live-state claimable READ is cached — a fresh claim-achievement READ rules out (or reveals) a newly attested pool/line that could have auto-credited GOLD. If it shows nothing, the flaw stands as filed and I return to maintenance cadence; both 07-18 daily probes (fight WIN no loot, build DRY) are already done.
+- **outcomes**:
+  1. claim-achievement (ok): READ-ONLY — no transaction sent. The claim is gated by --execute AND CITIZEN_ALLOW_LIVE=1, and requires an explicit --pawns list.
+- **noted**: As of 2026-07-18T13:48 gold=36662 — flat since 13:00, so the +4764 (07-17→07-18) was a ONE-TIME credit, not a continuous drip. Convert batch ruled out ($7.68<$10); work catalog shows no GOLD wage rail named for the 0x2E2A job. Flaw filed as unattributed.
+- **goal → now**: Watch COMPLETE + VERIFIED (100/100 employed). The +4764 GOLD (07-18) is a one-time credit (flat 13:00→13:48): convert ruled OUT, work catalog shows no GOLD wage rail — final probe is a FRESH claimable READ; if clean, it stays filed as unattributed and I watch for recurrence (any repeat = escalate to founder). Maintenance: daily fight probe until copper moves (keeper off since 07-12), daily build LIST probe for the GOLD sink (~36.6k idle). Surface any spend ≥$50 to the founder first.
+- **lesson**: A cached READ can mask a newly opened income rail — when attributing an unexplained credit, force a fresh read of every rail before declaring it unattributed; 'cached:true showing zero' is not evidence of zero.
+
+## 2026-07-18T14:10:51.675Z — citizen
+- **state**: eth=0.002227966968000185 usdc=0 gold=36662.35329375725 silver=0 copper=199 | hold: SALT:99 RATIONS:59 APPLE:39 HONEY:29 COD:23 ALE:19 | pawns=100 | top gap=lumber
+- **steps**: trade — The +4764 hunt is closed (gold flat 13:00→14:10 confirms one-time; filed unattributed, watching for recurrence) and both 07-18 daily probes are done. The spare capacity this tick goes to the Port Report's work: lumber has been the top ACTIONABLE gap for days, and with ~36.6k GOLD on the wallet this is the first real test of whether the trade rail can put idle gold to work — one $0.25 gap-closing buy, well inside the cap, on the proper route.
+- **outcomes**:
+  1. trade (exit 1): this route is not executable yet (custom pool / no fill) — staying safe — hint: run `node citizen/tools/scan-gaps.js --actionable` for a valid gapId, then `trade.js <gapId>` DRY; live needs --execute AND CITIZEN_ALLOW_LIVE=1.
+- **noted**: As of 2026-07-18T14:10 gold=36662 flat since 13:00 — the +4764 (07-17→07-18) is confirmed a ONE-TIME unattributed credit (convert unfired, no GOLD wage rail, claimable 0); flaw stands, escalate only on recurrence. First live trade probe fired at the lumber gap (top actionable for days) to test whether idle GOLD can close Port Report gaps.
+- **goal → now**: Watch COMPLETE + VERIFIED (100/100 employed). The +4764 GOLD credit is CLOSED as unattributed (one-time, all rails ruled out) — escalate to founder only if it recurs. New thread: test the trade rail on the persistent lumber gap ($0.25 probe fired 07-18) to see if ~36.6k idle GOLD can start closing Port Report gaps. Maintenance: daily fight probe until copper moves (keeper off since 07-12), daily build LIST probe. Surface any spend ≥$50 to the founder first.
+- **lesson**: When every maintenance probe is done and an investigation closes, the next-best move is not 'wait' but probing the longest-standing actionable signal in the Port Report — a persistent actionable gap is the world telling you where work exists.
+
+## 2026-07-19T13:00:02.851Z — citizen
+- **state**: eth=0.002227966968000185 usdc=0 gold=36662.35329375725 silver=0 copper=199 | hold: SALT:99 RATIONS:59 APPLE:39 HONEY:29 COD:23 ALE:19 | pawns=100 | top gap=lumber
+- **steps**: fight → scan-gaps → build — Daily maintenance probes first (fight for the loot keeper, build LIST for the GOLD sink). The 07-18 trade probe failed asking for 'a valid gapId from scan-gaps' — the Port Report's summary id 'lumber' evidently isn't the executable gapId format — so a full scan-gaps read this tick sources the real gapId, and next tick I fire the $0.25 lumber trade with it.
+- **outcomes**:
+  1. fight (ok): WIN (server-verified)
+  2. scan-gaps (ok): scan-gaps
+  3. build (ok): Read-only. Use `build plan <mill|farm>` to design + price a specific build (still DRY — no factory deployed).
+- **noted**: As of 2026-07-19T13:00 gold=36662 flat since 07-18 14:10 — the +4764 credit did NOT recur (stays closed as one-time). 100/100 employed (80 guard originals ~23d22h, joiners 5-7d; 20 on 0x2E2A). Claimable fresh-read 0. 07-19 probes: fight + build fired this tick; trade retry waits on a valid gapId from scan-gaps.
+- **goal → now**: Watch COMPLETE + VERIFIED (100/100 employed); +4764 credit closed (no recurrence as of 07-19). Active thread: get a valid gapId from the full scan-gaps read and fire the $0.25 lumber gap trade — first test of ~36.6k idle GOLD closing Port Report gaps. Maintenance: daily fight probe until copper moves (keeper dark since 07-12), daily build LIST probe. Surface any spend ≥$50 to the founder first.
+- **lesson**: The Port Report summary's gap id (e.g. 'lumber') is not necessarily the executable gapId the trade tool wants — an 'actionable' flag in a summary read doesn't guarantee route executability; always source the gapId from the full scan-gaps read before firing a trade.
+
+## 2026-07-19T13:25:16.704Z — citizen
+- **state**: eth=0.002227966968000185 usdc=0 gold=36662.35329375725 silver=0 copper=199 | hold: SALT:99 RATIONS:59 APPLE:39 HONEY:29 COD:23 ALE:19 | pawns=100 | top gap=lumber
+- **steps**: scan-gaps → trade — Both 07-19 daily probes (fight, build) are already done this tick per the journal, so the spare action goes to the active thread: a fresh full scan-gaps read (top 10, for the executable gap detail the last tick's journal failed to capture), then one bounded $0.25 retry at the lumber gap — the 07-18 error read 'route not executable (no fill)', so the id may be fine and a refreshed scan may show the route filled; the retry costs nothing if it still can't fill.
+- **outcomes**:
+  1. scan-gaps (ok): scan-gaps
+  2. trade (exit 1): this route is not executable yet (custom pool / no fill) — staying safe — hint: run `node citizen/tools/scan-gaps.js --actionable` for a valid gapId, then `trade.js <gapId>` DRY; live needs --execute AND CITIZEN_ALLOW_LIVE=1.
+- **noted**: As of 2026-07-19T13:25 gold=36662, copper=199, 100/100 employed (80 guard originals ~23d22h; 20 on 0x2E2A). Lumber is still the ONLY actionable Port Report gap; the 07-18 trade failure text ('custom pool / no fill') indicates the lumber route resolves but lacks fill — if this tick's post-scan retry fails the same way, stop retrying until the Port Report changes and treat lumber as liquidity-blocked, not id-blocked.
+- **goal → now**: Watch COMPLETE + VERIFIED (100/100 employed); +4764 credit closed. Active thread: lumber gap trade — fresh scan-gaps + one $0.25 retry fired 07-19; if it fails 'no fill' again, park the trade rail as liquidity-blocked and watch for the Port Report to change. Maintenance: daily fight probe until copper moves (keeper dark since 07-12), daily build LIST probe. Surface any spend ≥$50 to the founder first.
+- **lesson**: Distinguish error classes before re-diagnosing: 'route not executable / no fill' means the gapId RESOLVED and the blocker is pool liquidity, while an invalid-id error would say so — don't burn ticks hunting a new id format when the id already resolved.
+
+## 2026-07-20T13:00:03.183Z — citizen
+- **state**: eth=0.002227966968000185 usdc=0 gold=36662.35329375725 silver=0 copper=199 | hold: SALT:99 RATIONS:59 APPLE:39 HONEY:29 COD:23 ALE:19 | pawns=100 | top gap=lumber
+- **steps**: fight → build — The 07-19 lumber retry failed 'no fill' again, so per my own plan the trade rail is now PARKED as liquidity-blocked until the Port Report changes — no more retries. That leaves today's two daily maintenance probes: fight (watching for the loot keeper to come back — copper stuck at 199 since 07-12) and build LIST (watching for the StructureFactory so ~36.6k idle GOLD finally gets a sink).
+- **outcomes**:
+  1. fight (ok): WIN (server-verified)
+  2. build (ok): Read-only. Use `build plan <mill|farm>` to design + price a specific build (still DRY — no factory deployed).
+- **noted**: As of 2026-07-20T13:00 gold=36662, copper=199, 100/100 employed (80 guard — originals ~24d22h, joiners 6-8d; 20 on 0x2E2A). Lumber gap trade PARKED as liquidity-blocked (two consecutive 'no fill' failures 07-18/07-19); no retries until the Port Report's actionable set changes. Daily probes: fight (keeper dark since 07-12), build LIST (still DRY). Convert probe monthly (~$7.68/$10, ~$0.015/day).
+- **goal → now**: Watch COMPLETE + VERIFIED (100/100 employed). Lumber trade PARKED (liquidity-blocked, two 'no fill' fails) — resume only if the Port Report's actionable set changes or a new gap appears. Maintenance mode: daily fight probe (loot keeper dark since 07-12), daily build LIST probe (GOLD sink waits on StructureFactory), convert-winnings probe monthly. Surface any spend ≥$50 to the founder first.
+- **flaw filed**: lumber gap not executable: the ONLY actionable Port Report gap ('lumber') has failed two consecutive $0.25 trade attempts with 'route not executable (custom pool / no fill)' — the report flags it actionable but the route has no fill, so the one advertised trade opportunity is a dead end; either the actionable flag should require executable liquidity or the lumber pool needs seeding.
+- **lesson**: When a probe's stop-condition triggers (second 'no fill'), actually stop — the discipline of parking a rail is only real if the next tick honors it instead of finding a reason for one more retry.
+
+## 2026-07-20T13:25:05.543Z — citizen
+- **state**: eth=0.002227966968000185 usdc=0 gold=36662.35329375725 silver=0 copper=199 | hold: SALT:99 RATIONS:59 APPLE:39 HONEY:29 COD:23 ALE:19 | pawns=100 | top gap=lumber
+- **steps**: quote — Both 07-20 daily probes (fight WIN/no loot, build still DRY) landed at 13:00, lumber is parked, and claimable is 0 — so this tick's one deliberate step is a zero-cost re-probe of the goods-quote layer (COD→USDC), last verified broken 07-08. If the makers fixed goods route resolution, the fish-sell → USDC → water-pawn chain (rung 3) reopens for my 23 COD and idle 36.6k GOLD.
+- **outcomes**:
+  1. quote (ok): quote
+- **noted**: Goods-quote layer (all goods inputs: COD, SALT) last verified broken 2026-07-08; weekly re-probe cadence starts 2026-07-20 — if COD→USDC ever quotes clean, immediately test fish sell (usd 0.10-0.25) since that reopens the USDC self-fund path for watering.
+- **lesson**: A parked-broken rail needs a re-probe cadence, not just a park: record the last-tested date and recheck weekly, because maker-side fixes land silently and a permanently-parked rail can quietly become the best available move.
+
+## 2026-07-21T13:00:01.775Z — citizen
+- **state**: eth=0.002227966968000185 usdc=0 gold=36662.35329375725 silver=0 copper=199 | hold: SALT:99 RATIONS:59 APPLE:39 HONEY:29 COD:23 ALE:19 | pawns=100 | top gap=lumber
+- **steps**: fight → build — Maintenance mode holds: lumber stays parked (Port Report actionable set unchanged — still only lumber), claimable is 0 fresh, convert is monthly, goods-quote re-probe is weekly (next ~07-27). So today's two deliberate steps are the daily probes: fight (watching for the loot keeper to relight — copper frozen at 199 since 07-12) and build LIST (watching for StructureFactory so the idle 36.6k GOLD finally gets its sink).
+- **outcomes**:
+  1. fight (ok): WIN (server-verified)
+  2. build (ok): Read-only. Use `build plan <mill|farm>` to design + price a specific build (still DRY — no factory deployed).
+- **noted**: As of 2026-07-21T13:00 gold=36662, copper=199, 100/100 employed (80 guard — originals ~25d22h, joiners 7-9d; 20 on 0x2E2A). Lumber still the only actionable gap (parked). Probe schedule: fight+build daily, goods-quote weekly (next ~07-27), convert monthly (~$7.68/$10).
+- **lesson**: A no-change maintenance tick still earns its keep as a baseline reading: confirming gold/copper flat and the watch intact is what makes any future one-time credit or keeper relight detectable — drift detection requires boring, repeated measurements.
+
+## 2026-07-21T13:23:30.931Z — citizen
+- **state**: eth=0.002227966968000185 usdc=0 gold=36662.35329375725 silver=0 copper=199 | hold: SALT:99 RATIONS:59 APPLE:39 HONEY:29 COD:23 ALE:19 | pawns=100 | top gap=lumber
+- **steps**: wait — Both 07-21 daily probes (fight WIN/no loot, build LIST still DRY) landed at 13:00, claimable reads 0, lumber stays the only gap and stays parked, goods-quote re-probe is due ~07-27 and convert ~monthly. With every scheduled probe done and no rail state changed since the 13:00 baseline, the highest-value move this tick is to wait rather than burn gas re-running probes whose answers are already in hand.
+- **outcomes**:
+  1. wait (waited): no action
+- **noted**: As of 2026-07-21T13:23 gold=36662, copper=199, 100/100 employed (80 guard — originals ~25d22h, joiners ~7-9d; 20 on 0x2E2A). All 07-21 probes complete at 13:00; waited this tick. Next scheduled: daily fight+build 07-22, goods-quote ~07-27, convert monthly (~$7.68/$10).
+- **lesson**: On multi-tick days, the second tick's job is only to act if the 13:00 baseline changed — re-running a same-day probe that already answered is idle motion dressed as work, and repeat fights while the loot keeper is dark bank nothing.
+
+## 2026-07-22T13:00:01.593Z — citizen
+- **state**: eth=0.002227966968000185 usdc=0 gold=36662.35329375725 silver=0 copper=199 | hold: SALT:99 RATIONS:59 APPLE:39 HONEY:29 COD:23 ALE:19 | pawns=100 | top gap=lumber
+- **steps**: fight → build — Maintenance day (07-22 13:00): lumber parked, claimable 0 fresh, convert monthly, goods-quote due ~07-27 — so the two deliberate steps are the daily probes, fight (watching for the loot keeper to relight, copper frozen at 199 since 07-12) and build LIST (watching for StructureFactory to give the idle 36.6k GOLD a sink).
+- **outcomes**:
+  1. fight (ok): WIN (server-verified)
+  2. build (ok): Read-only. Use `build plan <mill|farm>` to design + price a specific build (still DRY — no factory deployed).
+- **noted**: As of 2026-07-22T13:00 gold=36662, copper=199, 100/100 employed (80 guard — originals ~26d22h, joiners 8-10d; 20 on 0x2E2A). Lumber parked. Probe schedule: fight+build daily, goods-quote weekly (next ~07-27), convert monthly (~$7.68/$10).
+- **lesson**: (none)
+
+## 2026-07-22T13:23:20.077Z — citizen
+- **state**: eth=0.002227966968000185 usdc=0 gold=36662.35329375725 silver=0 copper=199 | hold: SALT:99 RATIONS:59 APPLE:39 HONEY:29 COD:23 ALE:19 | pawns=100 | top gap=lumber
+- **steps**: wait — Both 07-22 daily probes (fight WIN/no loot, build LIST still DRY) already landed at 13:00; claimable reads 0 fresh, lumber stays parked, goods-quote is due ~07-27 and convert monthly — nothing in the baseline changed since 13:00, so re-running answered probes would be idle gas-burn. The highest-value move is to wait.
+- **outcomes**:
+  1. wait (waited): no action
+- **lesson**: (none)
+
+## 2026-07-23T13:00:01.705Z — citizen
+- **state**: eth=0.002227966968000185 usdc=0 gold=36662.35329375725 silver=0 copper=199 | hold: SALT:99 RATIONS:59 APPLE:39 HONEY:29 COD:23 ALE:19 | pawns=100 | top gap=lumber
+- **steps**: fight → build — Maintenance tick (07-23 13:00): lumber parked, claimable 0 fresh, convert monthly, goods-quote due ~07-27 — so the two deliberate steps are the daily probes: fight (watch for the loot keeper to relight, copper frozen at 199 since 07-12) and build LIST (watch for StructureFactory to give the idle 36.6k GOLD a sink).
+- **outcomes**:
+  1. fight (ok): WIN (server-verified)
+  2. build (ok): Read-only. Use `build plan <mill|farm>` to design + price a specific build (still DRY — no factory deployed).
+- **noted**: As of 2026-07-23T13:00 gold=36662, copper=199, 100/100 employed (80 guard — originals ~27d22h, joiners 8-11d; 20 on 0x2E2A). Lumber parked. Probe schedule: fight+build daily, goods-quote weekly (next ~07-27), convert monthly (~$7.68/$10).
+- **lesson**: (none)
+
+## 2026-07-23T13:24:30.004Z — citizen
+- **state**: eth=0.002227966968000185 usdc=0 gold=36662.35329375725 silver=0 copper=199 | hold: SALT:99 RATIONS:59 APPLE:39 HONEY:29 COD:23 ALE:19 | pawns=100 | top gap=lumber
+- **steps**: fight → build — Maintenance tick second-half check: 13:00 already ran fight+build, but this is the standing daily probe pair — fight watches for the loot keeper to relight (copper frozen at 199 since 07-12), build LIST watches for StructureFactory to give the idle 36.6k GOLD a sink. Claimable is 0 fresh, lumber is parked (liquidity-blocked), convert/goods-quote are not due. No rail state has changed to justify anything larger.
+- **outcomes**:
+  1. fight (ok): WIN (server-verified)
+  2. build (ok): Read-only. Use `build plan <mill|farm>` to design + price a specific build (still DRY — no factory deployed).
+- **lesson**: (none)
+
+## 2026-07-23T13:45:33.399Z — citizen
+- **state**: eth=0.002227966968000185 usdc=0 gold=36662.35329375725 silver=0 copper=199 | hold: SALT:99 RATIONS:59 APPLE:39 HONEY:29 COD:23 ALE:19 | pawns=100 | top gap=lumber
+- **steps**: wait — Both 07-23 daily probes (fight WIN/no loot, build LIST still DRY) already landed at 13:00 and again at 13:24; claimable reads 0 fresh, lumber stays parked, goods-quote is due ~07-27 and convert monthly — no rail state changed since baseline, so re-running answered probes would be idle gas-burn.
+- **outcomes**:
+  1. wait (waited): no action
+- **lesson**: (none)

@@ -797,3 +797,38 @@ return {
 };
 
 })();
+
+// ============================================================
+// GAMEPAD ADAPTER (added 2026-06-14) — makes every game controller-playable.
+// Polls a connected controller (Xbox via Bluetooth, etc.) and dispatches synthetic
+// keydown/keyup so the engine's key handlers (and any game that listens for keys)
+// work with a pad. Also mirrors directions + A/B into TAS.input.touch. Keyboard untouched.
+// Map: D-pad / left-stick -> Arrows; A -> Space/W/Z (jump/primary); B -> X/K/D; X -> A/J; Y -> S; Start -> Enter.
+// ============================================================
+(function () {
+  var AX = 0.45, prev = {};
+  function first() { var g = navigator.getGamepads ? navigator.getGamepads() : []; for (var i = 0; i < g.length; i++) if (g[i]) return g[i]; return null; }
+  function fire(type, m) { try { document.dispatchEvent(new KeyboardEvent(type, { code: m.code, key: m.key, bubbles: true })); } catch (e) {} }
+  function edge(id, down, maps) { if (down === prev[id]) return; prev[id] = down; for (var i = 0; i < maps.length; i++) fire(down ? 'keydown' : 'keyup', maps[i]); }
+  function poll() {
+    var gp = first();
+    if (gp) {
+      var P = function (i) { return !!(gp.buttons[i] && gp.buttons[i].pressed); };
+      var ax = gp.axes[0] || 0, ay = gp.axes[1] || 0;
+      var L = P(14) || ax < -AX, R = P(15) || ax > AX, U = P(12) || ay < -AX, D = P(13) || ay > AX;
+      var A = P(0), B = P(1), X = P(2), Y = P(3), St = P(9);
+      edge('L', L, [{ code: 'ArrowLeft', key: 'ArrowLeft' }]);
+      edge('R', R, [{ code: 'ArrowRight', key: 'ArrowRight' }]);
+      edge('U', U, [{ code: 'ArrowUp', key: 'ArrowUp' }]);
+      edge('D', D, [{ code: 'ArrowDown', key: 'ArrowDown' }]);
+      edge('A', A, [{ code: 'Space', key: ' ' }, { code: 'KeyW', key: 'w' }, { code: 'KeyZ', key: 'z' }]);
+      edge('B', B, [{ code: 'KeyX', key: 'x' }, { code: 'KeyK', key: 'k' }, { code: 'KeyD', key: 'd' }]);
+      edge('X', X, [{ code: 'KeyA', key: 'a' }, { code: 'KeyJ', key: 'j' }]);
+      edge('Y', Y, [{ code: 'KeyS', key: 's' }]);
+      edge('St', St, [{ code: 'Enter', key: 'Enter' }]);
+      if (window.TAS && TAS.input && TAS.input.touch) { var t = TAS.input.touch; t.left = L; t.right = R; t.up = U; t.down = D; t.a = A; t.b = B; }
+    }
+    requestAnimationFrame(poll);
+  }
+  requestAnimationFrame(poll);
+})();

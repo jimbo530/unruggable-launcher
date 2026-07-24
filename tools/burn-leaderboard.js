@@ -48,8 +48,8 @@ const STATIC_TOKENS = [
   { symbol: 'AZUSD', token: '0x3595ca37596D5895B70EFAB592ac315D5B9809B2', decimals: 18 },
   { symbol: 'BB', token: '0xf967bf3dccF8b6826F82de1781C98E61Bda3b106', decimals: 18 },
   { symbol: 'EB', token: '0x17a176Ab2379b86F1E65D79b03bD8c75981244D8', decimals: 18 },
-  { symbol: 'BURGERS', token: '0xBb4F55E2ef8F832B3b1Fa7985CC850631e498d1C', decimals: 18 },
-  { symbol: 'TGN', token: '0x3F1fce2288df498b45e4B0e55074fbc6c6c46122', decimals: 18 },
+  { symbol: 'BURGERS', token: '0x06A05043eb2C1691b19c2C13219dB9212269dDc5', decimals: 18 },
+  { symbol: 'TGN', token: '0xD75dfa972C6136f1c594Fec1945302f885E1ab29', decimals: 18 },
   { symbol: 'EGP', token: '0x2D9a906DEea5e2EAD43E78A80bF45dCE49498193', decimals: 18 },
   { symbol: 'POOP', token: '0x108bD96080870BF50B1b0e3b310E5219C5AEf43D', decimals: 18 },
 ];

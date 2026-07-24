@@ -120,6 +120,53 @@ function runTool(argv, env, timeoutMs = 120000) {
   return { status: r.status, json, stdout: stdout.slice(0, 4000), stderr: stderr.slice(0, 1500) };
 }
 
+// ── SUCCESS SUMMARY: a data-BEARING one-liner for the journal, so the tool's ANSWER (price, balances,
+//    pawn ids, hold) reaches the brain's memory next tick — not just the tool's name. The prior code
+//    fell through to `r.tool`, which is why a SUCCESSFUL `quote` journaled as the bare word "quote":
+//    the price was computed and returned, but only this summary is kept, so the number never reached
+//    the bot. Every read whose JSON lacked decision/note/would lost its answer the same way. ──────────
+export function summarizeSuccess(ex) {
+  const r = (ex && ex.result) || {};
+  if (typeof r.receipt === 'string') return r.receipt;   // a landed tx proves itself, first
+  if (typeof r.decision === 'string') return r.decision;
+
+  // tool-specific data lines — the actual answer the read produced
+  if (ex.tool === 'quote' && r.ok) {
+    if (r.route === 'v3' && r.amountOut != null)
+      return `${r.amountIn} ${r.tokenIn} → ${r.amountOut} ${r.tokenOut} (fee ${r.fee}${r.pricePerOut != null ? `, ${r.pricePerOut} in/out` : ''})`;
+    if (r.bookPrice) {
+      const coin = r.bookPrice.coin || r.tokenOut;
+      const live = r.live && r.live.amountOut != null ? `, live ${r.live.amountOut}` : (r.live && r.live.note ? ` (${r.live.note})` : '');
+      return `${r.direction || `${r.tokenIn}→${r.tokenOut}`}: book ${r.bookPrice.perUnit} ${coin}/unit × ${r.amountIn} = ${r.bookPrice.totalCoin} ${coin}${live}`;
+    }
+  }
+  if (ex.tool === 'wallet' && r.balances) {
+    const b = r.balances;
+    return `eth=${b.eth} usdc=${b.usdc} gold=${b.gold} silver=${b.silver} copper=${b.copper}`;
+  }
+  if (ex.tool === 'work' && r.myPawns) {
+    const js = (r.myPawns.jobs || []).slice(0, 4).map((j) => `${j.pawn} ${j.employed ? `${j.job} ${j.currentRun || ''}`.trim() : 'idle'}`);
+    return `${r.myPawns.count} pawn(s)${js.length ? ': ' + js.join('; ') : ''}`;
+  }
+  if (ex.tool === 'fish' && r.mode === 'LOOP' && r.buyAtOcean) {
+    const sell = r.sellAtPortRoyal ? r.sellAtPortRoyal.projectedGold : '?';
+    return `loop: ${r.buyAtOcean.spendGold}g → ${r.buyAtOcean.fishCaught} fish, sell ~${sell}g (×${r.grossMultiple})`;
+  }
+  if (ex.tool === 'inventory' && Array.isArray(r.held)) {
+    return r.held.length ? r.held.slice(0, 8).map((h) => `${h.symbol}:${h.balance}`).join(' ') : 'hold empty';
+  }
+
+  if (typeof r.would === 'string') return r.would;
+  if (typeof r.note === 'string') return r.note;
+
+  // generic fallback: compact the scalar fields so SOMETHING data-bearing lands (never the bare name)
+  const skip = new Set(['ok', 'tool', 'route', 'mode', 'tokenInAddr', 'tokenOutAddr', 'hint', 'wallet', 'fisher', 'crabber']);
+  const bits = Object.entries(r)
+    .filter(([k, v]) => !skip.has(k) && (typeof v === 'number' || typeof v === 'string' || typeof v === 'boolean'))
+    .slice(0, 8).map(([k, v]) => `${k}=${v}`);
+  return bits.length ? bits.join(' ') : (r.tool || `status ${ex.status}`);
+}
+
 // ── extract the model's reply: {steps:[...]} (v2) or legacy {tool,...} (v1) ─────────────────────
 function extractReply(text) {
   if (typeof text !== 'string' || !text.trim()) throw new Error('empty model reply');
@@ -450,8 +497,7 @@ export async function runTick(profileId, opts = {}) {
         ? (r.hint ? `${err} — hint: ${r.hint}` : err)
         : `exit ${ex.status} with no error body (raw: ${JSON.stringify(r).slice(0, 200)})`;
     } else {
-      const r = ex.result || {};
-      short = r.decision || r.note || r.would || r.tool || `status ${ex.status}`;
+      short = summarizeSuccess(ex); // data-bearing summary — never the bare tool name (the "quote"→"quote" bug)
     }
     return `  ${i + 1}. ${ex.tool} (${ok}): ${typeof short === 'string' ? short.slice(0, 400) : JSON.stringify(short).slice(0, 400)}`;
   });

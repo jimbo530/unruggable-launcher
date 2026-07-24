@@ -1,0 +1,3173 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Sea-Floor Salvage</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body { width: 100%; height: 100%; overflow: hidden; background: #1a1c2c; touch-action: none; }
+canvas { display: block; margin: 0 auto; }
+#back-link {
+  position: fixed; bottom: 8px; left: 50%; transform: translateX(-50%);
+  color: #666; font-family: monospace; font-size: 12px; text-decoration: none; z-index: 10;
+}
+#back-link:hover { color: #aaa; }
+</style>
+<script src="tasern-art.js"></script>
+</head>
+<body>
+<canvas id="gc"></canvas>
+<a id="back-link" href="/games">Back to Arcade</a>
+<script src="nft-loader.js"></script>
+<script src="baseling-sprites.js"></script>
+<script src="baseling-player.js"></script>
+<script src="tasern-theme.js"></script>
+<script>if(window.NftLoader)NftLoader.gate();</script>
+<script>
+(function() {
+"use strict";
+
+// ============================================================
+// BASELING STAT BLOCK (NftLoader integration)
+// ============================================================
+// Stats come from BaselingPlayer.getMults() (see ARCADE-STATS.md), the single source of
+// stat math, clamped to the single-player band (0.8–1.6). Tunnel Bug's many getX()
+// helpers below read D&D-style fields on statB; rather than rewrite all 15 of them, we
+// keep statB's shape and synthesize its fields from the five bounded multipliers:
+//   speed <- moveSpeed,  damage <- damage,  luck <- luck,  and synthetic str/dex/con/
+//   int/wis/cha each = 10 + (mult-1)*20 (so mult 1.0 -> neutral 10, 0.8 -> 6, 1.6 -> 22).
+// This routes every effect through the clamp without inventing new math. Not a wager
+// game -> default band. recomputeStats() re-runs after a title-screen character pick.
+var statB = {
+  damage: 1, speed: 1, lives: 0, hpMult: 1, scoreMult: 1, cooldown: 1, luck: 1,
+  str: 10, dex: 10, con: 10, int: 10, wis: 10, cha: 10,
+  level: 0, color: '#44dd88', name: 'Baseling', icon: 'B'
+};
+function recomputeStats() {
+  // Tunnel Bug runs its own engine (no TAS), so it talks to BaselingPlayer directly.
+  var m = (window.BaselingPlayer && BaselingPlayer.getMults) ? BaselingPlayer.getMults() : { moveSpeed: 1, health: 1, damage: 1, luck: 1, swim: 1 };
+  function dnd(x) { return Math.round(10 + (x - 1) * 20); }
+  statB.speed = m.moveSpeed;    // SPD -> dig/move speed
+  statB.damage = m.damage;      // PWR -> melee/dig damage
+  statB.hpMult = m.health;      // STA -> resistance/HP
+  statB.luck = m.luck;          // LCK -> drops/combo
+  statB.cooldown = 1;           // no dedicated stat
+  statB.scoreMult = 1;          // score is not a stat in the new system
+  statB.lives = m.health > 1.3 ? 1 : 0; // STA buys a cushion life
+  statB.str = dnd(m.damage);    // STR helpers -> dig speed, rock push, melee
+  statB.dex = dnd(m.moveSpeed); // DEX helpers -> move speed, dodge
+  statB.con = dnd(m.health);    // CON helpers -> lives, resist, HP
+  statB.int = dnd(m.luck);      // INT helpers -> score/reveal (map to luck flavor)
+  statB.wis = dnd(m.luck);      // WIS helpers -> powerup duration / detect (luck flavor)
+  statB.cha = dnd(m.luck);      // CHA helpers -> combo / stun / luck
+}
+try {
+  if (window.NftLoader && NftLoader.getStatBonuses) {
+    var _b = NftLoader.getStatBonuses();
+    if (_b) { statB.color = _b.color || statB.color; statB.name = _b.name || statB.name; statB.icon = _b.icon || statB.icon; }
+  }
+} catch (e) { console.warn('[sea-floor-salvage] NftLoader display info failed:', e && e.message); }
+recomputeStats();
+
+var picking = false; // baseling character-select overlay open
+var frame = 0;       // global animation clock (incremented each game-loop tick)
+if (window.BaselingPlayer && BaselingPlayer.init) {
+  BaselingPlayer.init().then(function () { recomputeStats(); }).catch(function (e) { console.warn('[sea-floor-salvage] player init failed:', e && e.message); });
+}
+
+// Local sprite-draw helper (tunnel-bug has no TAS engine). Draws the selected baseling
+// at (x,y) center, size px; returns true if a real sprite drew, false to use fallback.
+function drawSelectedBaseling(c, x, y, size, opts) {
+  if (!window.BaselingPlayer || !window.BaselingSprites) return false;
+  var sel = BaselingPlayer.getSelected();
+  if (!sel || !sel.charId) return false;
+  if (!BaselingSprites.isLoaded(sel.charId)) {
+    if (!BaselingSprites.hasFailed(sel.charId)) BaselingSprites.load(sel.charId, sel.colorVariant);
+    return false;
+  }
+  return BaselingSprites.draw(c, sel.charId, sel.colorVariant, sel.sparkle, x, y, size, opts || {});
+}
+
+// ============================================================
+// STAT DERIVED VALUES (15+ references throughout game)
+// ============================================================
+// STR: dig speed multiplier, rock push chance, melee damage
+function getDigSpeed() { return 1 + (statB.str - 10) * 0.04; }
+function getRockPushChance() { return Math.min(0.6, Math.max(0, (statB.str - 12) * 0.05)); }
+function getMeleeDamage() { return statB.damage * (1 + (statB.str - 10) * 0.05); }
+
+// DEX: movement speed, dodge chance, animation speed
+function getMoveSpeed() { return statB.speed * (1 + (statB.dex - 10) * 0.03); }
+function getDodgeChance() { return Math.min(0.3, Math.max(0, (statB.dex - 12) * 0.02)); }
+
+// CON: extra lives, damage resistance, max HP
+function getBonusLives() { return statB.lives + Math.floor(Math.max(0, statB.con - 10) / 4); }
+function getDamageResist() { return Math.min(0.4, Math.max(0, (statB.con - 10) * 0.02)); }
+
+// INT: score multiplier, pathfind reveal, puzzle bonus
+function getScoreMult() { return statB.scoreMult * (1 + (statB.int - 10) * 0.03); }
+function getRevealRadius() { return 2 + Math.floor(Math.max(0, statB.int - 10) / 3); }
+
+// WIS: powerup duration, item detect range, trap awareness
+function getPowerupDuration() { return 1 + (statB.wis - 10) * 0.06; }
+function getItemDetectRange() { return 1 + Math.floor(Math.max(0, statB.wis - 10) / 4); }
+function getTrapAwareness() { return Math.min(0.5, Math.max(0, (statB.wis - 12) * 0.03)); }
+
+// CHA: combo multiplier, bug stun chance, shop prices
+function getComboMult() { return 1 + (statB.cha - 10) * 0.04; }
+function getStunChance() { return Math.min(0.4, Math.max(0, (statB.cha - 12) * 0.03)); }
+function getLuckBonus() { return statB.luck * (1 + (statB.cha - 10) * 0.02); }
+
+// ============================================================
+// CONSTANTS
+// ============================================================
+var COLS = 20, ROWS = 15, BASE_TILE = 32;
+var DIRT = 0, TUNNEL = 1, ROCK = 2, LAVA = 3, POISON_GAS = 4;
+var DIR = { NONE: -1, UP: 0, RIGHT: 1, DOWN: 2, LEFT: 3 };
+var DX = [0, 1, 0, -1], DY = [-1, 0, 1, 0];
+
+// Zone definitions (depth-based theming)
+var ZONES = [
+  { name: 'Sandy Shallows', dirt: ['#C2A878','#B3996A'], spec: ['#D8C290','#CBB47E'], bg: '#0e1a22', tunnelTint: 'rgba(5,15,25,0.3)',  border: '#8A7A4A' },
+  { name: 'Kelp Beds',      dirt: ['#5A6B3A','#4A5A30'], spec: ['#7A8A4A','#6A7A40'], bg: '#0a140e', tunnelTint: 'rgba(5,20,12,0.32)', border: '#3A4A28' },
+  { name: 'Coral Reef',     dirt: ['#3A5A6C','#2E4E60'], spec: ['#60A0B0','#5090A0'], bg: '#0a0e15', tunnelTint: 'rgba(8,18,25,0.3)',  border: '#225566' },
+  { name: 'Hadal Trench',   dirt: ['#1F2438','#171B2C'], spec: ['#2A3358','#3A4368'], bg: '#05060f', tunnelTint: 'rgba(2,4,15,0.42)', border: '#1A2244' }
+];
+
+// Colors
+var C_BG = '#1a1c2c';
+var C_ROCK = '#778';
+var C_ROCK_DARK = '#556';
+var C_ROCK_LIGHT = '#99a';
+var C_LAVA = '#FF4400';
+var C_LAVA_GLOW = '#FF8800';
+var C_POISON = '#a855f7';
+
+// === SEA RESKIN ART (Sea-Floor Salvage) — preloaded images, procedural fallback ===
+var SEA_ART = {};
+['rock','enemy-snake','scarab-walk1','scarab-walk2','treasure-chest','gold-coins','pearl','seafloor'].forEach(function(n){
+  var im = new Image(); im.src = 'art/sea/' + n + '.png'; SEA_ART[n] = im;
+});
+function seaImg(n){ var im = SEA_ART[n]; return (im && im.complete && im.naturalWidth > 0) ? im : null; }
+
+// ============================================================
+// CANVAS SETUP
+// ============================================================
+var canvas = document.getElementById('gc');
+var ctx = canvas.getContext('2d');
+var W, H, TILE, SCALE, OFFSET_X, OFFSET_Y;
+
+function resize() {
+  var dpr = window.devicePixelRatio || 1;
+  var sw = window.innerWidth;
+  var sh = window.innerHeight - 20;
+  SCALE = Math.min(sw / (COLS * BASE_TILE), sh / ((ROWS + 2) * BASE_TILE));
+  TILE = Math.floor(BASE_TILE * SCALE);
+  W = COLS * TILE;
+  H = (ROWS + 2) * TILE;
+  OFFSET_X = Math.floor((sw - W) / 2);
+  OFFSET_Y = Math.floor((sh - H) / 2);
+  canvas.width = W * dpr;
+  canvas.height = H * dpr;
+  canvas.style.width = W + 'px';
+  canvas.style.height = H + 'px';
+  canvas.style.marginTop = Math.max(0, OFFSET_Y) + 'px';
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+}
+window.addEventListener('resize', resize);
+resize();
+
+// ============================================================
+// AUDIO ENGINE
+// ============================================================
+var audioCtx = null;
+function ensureAudio() {
+  if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  if (audioCtx.state === 'suspended') audioCtx.resume();
+}
+
+function playTone(freq, dur, type, vol, slide) {
+  if (!audioCtx) return;
+  var osc = audioCtx.createOscillator();
+  var gain = audioCtx.createGain();
+  osc.type = type || 'square';
+  osc.frequency.setValueAtTime(freq, audioCtx.currentTime);
+  if (slide) osc.frequency.linearRampToValueAtTime(slide, audioCtx.currentTime + dur);
+  gain.gain.setValueAtTime(vol || 0.1, audioCtx.currentTime);
+  gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + dur);
+  osc.connect(gain);
+  gain.connect(audioCtx.destination);
+  osc.start();
+  osc.stop(audioCtx.currentTime + dur);
+}
+
+function playNoise(dur, vol) {
+  if (!audioCtx) return;
+  var bufSize = audioCtx.sampleRate * dur;
+  var buf = audioCtx.createBuffer(1, bufSize, audioCtx.sampleRate);
+  var data = buf.getChannelData(0);
+  for (var i = 0; i < bufSize; i++) data[i] = Math.random() * 2 - 1;
+  var src = audioCtx.createBufferSource();
+  src.buffer = buf;
+  var gain = audioCtx.createGain();
+  gain.gain.setValueAtTime(vol || 0.05, audioCtx.currentTime);
+  gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + dur);
+  var filt = audioCtx.createBiquadFilter();
+  filt.type = 'bandpass';
+  filt.frequency.value = 800;
+  filt.Q.value = 2;
+  src.connect(filt);
+  filt.connect(gain);
+  gain.connect(audioCtx.destination);
+  src.start();
+  src.stop(audioCtx.currentTime + dur);
+}
+
+var SFX = {
+  dig: function() { playNoise(0.06, 0.08); playTone(200, 0.05, 'triangle', 0.04, 120); },
+  squash: function() { playTone(300, 0.15, 'square', 0.12, 80); playNoise(0.12, 0.1); },
+  pump: function() { playTone(220, 0.08, 'square', 0.06, 440); },
+  pop: function() { playTone(600, 0.2, 'sawtooth', 0.1, 100); playNoise(0.15, 0.12); },
+  die: function() { playTone(400, 0.4, 'sawtooth', 0.12, 60); setTimeout(function() { playTone(200, 0.3, 'square', 0.08, 40); }, 200); },
+  powerup: function() { playTone(440, 0.08, 'square', 0.08); setTimeout(function() { playTone(660, 0.08, 'square', 0.08); }, 80); setTimeout(function() { playTone(880, 0.12, 'square', 0.1); }, 160); },
+  levelComplete: function() {
+    var notes = [523, 659, 784, 1047];
+    notes.forEach(function(n, i) { setTimeout(function() { playTone(n, 0.15, 'square', 0.08); }, i * 120); });
+  },
+  rockFall: function() { playTone(80, 0.3, 'triangle', 0.1, 40); playNoise(0.2, 0.08); },
+  gameOver: function() {
+    var notes = [440, 349, 293, 220];
+    notes.forEach(function(n, i) { setTimeout(function() { playTone(n, 0.25, 'sawtooth', 0.1); }, i * 200); });
+  },
+  bossRoar: function() { playTone(60, 0.5, 'sawtooth', 0.15, 30); playNoise(0.3, 0.12); setTimeout(function() { playTone(50, 0.4, 'triangle', 0.1, 25); }, 200); },
+  poison: function() { playTone(150, 0.15, 'sine', 0.06, 80); },
+  lava: function() { playNoise(0.1, 0.04); playTone(100, 0.12, 'triangle', 0.05, 60); },
+  crystal: function() { playTone(1200, 0.15, 'sine', 0.08, 1800); setTimeout(function() { playTone(1600, 0.1, 'sine', 0.06); }, 80); },
+  mushroom: function() { playTone(300, 0.1, 'triangle', 0.07, 500); },
+  bossHit: function() { playTone(100, 0.2, 'square', 0.12, 50); playNoise(0.15, 0.1); },
+  stun: function() { playTone(500, 0.1, 'square', 0.06, 200); }
+};
+
+// ============================================================
+// DIRT TEXTURE (pre-rendered per zone)
+// ============================================================
+var dirtCanvas = document.createElement('canvas');
+var dirtCtx = dirtCanvas.getContext('2d');
+function genDirtTextures() {
+  dirtCanvas.width = TILE * 4;
+  dirtCanvas.height = TILE;
+  for (var layer = 0; layer < 4; layer++) {
+    var zone = ZONES[layer];
+    var baseColor = zone.dirt[0];
+    dirtCtx.fillStyle = baseColor;
+    dirtCtx.fillRect(layer * TILE, 0, TILE, TILE);
+    for (var i = 0; i < 20; i++) {
+      dirtCtx.fillStyle = zone.spec[0];
+      dirtCtx.globalAlpha = 0.3 + Math.random() * 0.4;
+      var sx = layer * TILE + Math.random() * (TILE - 2);
+      var sy = Math.random() * (TILE - 2);
+      dirtCtx.fillRect(sx, sy, 1 + Math.random() * 2, 1 + Math.random() * 2);
+    }
+    // Zone-specific decorations
+    if (layer === 2) {
+      // Crystal sparkles in cavern layer
+      for (var c = 0; c < 5; c++) {
+        dirtCtx.fillStyle = '#88CCFF';
+        dirtCtx.globalAlpha = 0.2 + Math.random() * 0.3;
+        dirtCtx.fillRect(layer * TILE + Math.random() * TILE, Math.random() * TILE, 1, 1);
+      }
+    }
+    if (layer === 3) {
+      // Ember glow in magma layer
+      for (var e = 0; e < 3; e++) {
+        dirtCtx.fillStyle = '#FF4400';
+        dirtCtx.globalAlpha = 0.1 + Math.random() * 0.15;
+        dirtCtx.fillRect(layer * TILE + Math.random() * TILE, Math.random() * TILE, 2, 1);
+      }
+    }
+    dirtCtx.globalAlpha = 1;
+  }
+}
+
+// ============================================================
+// PARTICLES
+// ============================================================
+var particles = [];
+function spawnParticles(x, y, color, count, speed) {
+  for (var i = 0; i < count; i++) {
+    var angle = Math.random() * Math.PI * 2;
+    var spd = (speed || 2) * (0.5 + Math.random());
+    particles.push({
+      x: x, y: y,
+      vx: Math.cos(angle) * spd, vy: Math.sin(angle) * spd,
+      life: 1, color: color,
+      size: 2 + Math.random() * 3,
+      glow: false, trail: false
+    });
+  }
+}
+function spawnGlowParticles(x, y, color, count, speed) {
+  for (var i = 0; i < count; i++) {
+    var angle = Math.random() * Math.PI * 2;
+    var spd = (speed || 1.5) * (0.3 + Math.random());
+    particles.push({
+      x: x, y: y,
+      vx: Math.cos(angle) * spd, vy: Math.sin(angle) * spd,
+      life: 1, color: color,
+      size: 3 + Math.random() * 4,
+      glow: true, trail: false
+    });
+  }
+}
+function spawnTrailParticle(x, y, color) {
+  particles.push({
+    x: x, y: y, vx: (Math.random() - 0.5) * 0.5, vy: -0.5 - Math.random(),
+    life: 0.6, color: color, size: 2 + Math.random() * 2, glow: false, trail: true
+  });
+}
+function updateParticles(dt) {
+  for (var i = particles.length - 1; i >= 0; i--) {
+    var p = particles[i];
+    p.x += p.vx * dt * 60;
+    p.y += p.vy * dt * 60;
+    if (!p.trail) p.vy += 0.05 * dt * 60;
+    p.life -= dt * 2.5;
+    if (p.life <= 0) particles.splice(i, 1);
+  }
+}
+function drawParticles() {
+  for (var i = 0; i < particles.length; i++) {
+    var p = particles[i];
+    ctx.globalAlpha = p.life;
+    if (p.glow) {
+      ctx.shadowColor = p.color;
+      ctx.shadowBlur = 8;
+    }
+    ctx.fillStyle = p.color;
+    ctx.fillRect(p.x - p.size / 2, p.y - p.size / 2, p.size, p.size);
+    if (p.glow) {
+      ctx.shadowColor = 'transparent';
+      ctx.shadowBlur = 0;
+    }
+  }
+  ctx.globalAlpha = 1;
+}
+
+// ============================================================
+// SCREEN SHAKE
+// ============================================================
+var shakeX = 0, shakeY = 0, shakeIntensity = 0, shakeDuration = 0;
+function triggerShake(intensity, duration) {
+  shakeIntensity = intensity;
+  shakeDuration = duration;
+}
+function updateShake(dt) {
+  if (shakeDuration > 0) {
+    shakeDuration -= dt;
+    var t = shakeIntensity * (shakeDuration > 0 ? 1 : 0);
+    shakeX = (Math.random() - 0.5) * t * 2;
+    shakeY = (Math.random() - 0.5) * t * 2;
+  } else {
+    shakeX = 0;
+    shakeY = 0;
+    shakeIntensity = 0;
+  }
+}
+
+// ============================================================
+// SCREEN FLASH
+// ============================================================
+var flashAlpha = 0, flashColor = '#fff';
+function flash(color) { flashColor = color || '#fff'; flashAlpha = 0.4; }
+function updateFlash(dt) { flashAlpha = Math.max(0, flashAlpha - dt * 3); }
+function drawFlash() {
+  if (flashAlpha > 0) {
+    ctx.globalAlpha = flashAlpha;
+    ctx.fillStyle = flashColor;
+    ctx.fillRect(0, 0, W, H);
+    ctx.globalAlpha = 1;
+  }
+}
+
+// ============================================================
+// FLOATING SCORE POPUPS
+// ============================================================
+var scorePopups = [];
+function spawnScorePopup(x, y, text, color) {
+  scorePopups.push({ x: x, y: y, text: text, color: color || '#FFD700', life: 1.2, vy: -1.5 });
+}
+function updateScorePopups(dt) {
+  for (var i = scorePopups.length - 1; i >= 0; i--) {
+    var p = scorePopups[i];
+    p.y += p.vy * dt * 60;
+    p.life -= dt;
+    if (p.life <= 0) scorePopups.splice(i, 1);
+  }
+}
+function drawScorePopups() {
+  for (var i = 0; i < scorePopups.length; i++) {
+    var p = scorePopups[i];
+    ctx.globalAlpha = Math.min(1, p.life * 2);
+    ctx.fillStyle = p.color;
+    ctx.font = 'bold ' + Math.floor(TILE * 0.45) + 'px monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText(p.text, p.x, p.y);
+  }
+  ctx.globalAlpha = 1;
+}
+
+// ============================================================
+// GAME STATE
+// ============================================================
+var state = 'title'; // title, tutorial, playing, levelComplete, dying, gameOver, bossIntro
+var grid = [];
+var player = {};
+var bugs = [];
+var rocks = [];
+var powerups = [];
+var hazards = [];
+var score = 0, highScore = 0, lives = 3, level = 1, combo = 0;
+var stateTimer = 0;
+var inputDir = DIR.NONE, inputPump = false;
+var shieldTimer = 0, speedTimer = 0;
+var digAnimations = [];
+var keys = {};
+var tutorialShown = false;
+var bossActive = false;
+var currentZone = 0;
+var zoneTransitionAlpha = 0;
+
+// Load high score
+try { highScore = parseInt(localStorage.getItem('seafloor_hi') || '0', 10); } catch(e) { highScore = 0; }
+
+// ============================================================
+// TASERN ENEMY TYPES
+// ============================================================
+var ENEMY_TYPES = {
+  myconid: {
+    name: 'Reef Eel',
+    color: '#38d973', legColor: '#227744', eyeColor: '#f4b41b',
+    hp: 1, speed: 1.2, canFly: false, canDig: false,
+    scoreBase: 100, zones: [0, 1, 2, 3],
+    draw: 'myconid'
+  },
+  burrower: {
+    name: 'Bore Worm',
+    color: '#7a444a', legColor: '#553030', eyeColor: '#e6482e',
+    hp: 1, speed: 1.6, canFly: false, canDig: true,
+    scoreBase: 200, zones: [1, 2, 3],
+    draw: 'burrower'
+  },
+  crystalBeetle: {
+    name: 'Rock Crab',
+    color: '#3cacd7', legColor: '#2a7a9a', eyeColor: '#a855f7',
+    hp: 2, speed: 0.9, canFly: false, canDig: false,
+    scoreBase: 300, zones: [2, 3],
+    draw: 'crystalBeetle'
+  },
+  sporeFlyer: {
+    name: 'Jellyfish',
+    color: '#a855f7', legColor: '#7733bb', eyeColor: '#f4b41b',
+    hp: 1, speed: 1.8, canFly: true, canDig: false,
+    scoreBase: 250, zones: [0, 1, 2],
+    draw: 'sporeFlyer'
+  },
+  lavaCrawler: {
+    name: 'Vent Crab',
+    color: '#e6482e', legColor: '#aa3318', eyeColor: '#f4b41b',
+    hp: 2, speed: 1.0, canFly: false, canDig: false,
+    scoreBase: 350, zones: [3],
+    draw: 'lavaCrawler'
+  }
+};
+
+var BOSS_TYPES = {
+  myconidKing: {
+    name: 'Reef Tyrant',
+    color: '#38d973', legColor: '#1a7a3a', eyeColor: '#e6482e',
+    hp: 8, speed: 0.6, canFly: false, canDig: true,
+    scoreBase: 2000, draw: 'boss_myconid'
+  },
+  crystalWyrm: {
+    name: 'Deep Serpent',
+    color: '#3cacd7', legColor: '#2266aa', eyeColor: '#a855f7',
+    hp: 12, speed: 0.5, canFly: true, canDig: true,
+    scoreBase: 3000, draw: 'boss_wyrm'
+  },
+  magmaLord: {
+    name: 'Vent Lord',
+    color: '#e6482e', legColor: '#991100', eyeColor: '#f4b41b',
+    hp: 16, speed: 0.4, canFly: false, canDig: true,
+    scoreBase: 5000, draw: 'boss_magma'
+  }
+};
+
+// ============================================================
+// TASERN ITEM TYPES
+// ============================================================
+var ITEM_TYPES = {
+  mushroomCap:  { name: 'Gold Coin',   color: '#f4b41b', effect: 'heal',   desc: '+1 Life',        symbol: 'C' },
+  crystalShard: { name: 'Pearl',       color: '#3cacd7', effect: 'shield', desc: 'Diver Shield',   symbol: 'O' },
+  ancientRune:  { name: 'Powder Keg',  color: '#f4b41b', effect: 'bomb',   desc: 'Keg Blast',      symbol: 'K' },
+  healingMoss:  { name: 'Sea Current', color: '#a855f7', effect: 'speed',  desc: 'Swift Current',  symbol: '~' },
+  sporePod:     { name: 'Ink Pod',     color: '#6a6acc', effect: 'stun',   desc: 'Ink Burst',      symbol: 'X' },
+  emberStone:   { name: 'Hot Vent',    color: '#e6482e', effect: 'fire',   desc: 'Vent Blaze',     symbol: 'V' }
+};
+var itemTypeKeys = Object.keys(ITEM_TYPES);
+
+// ============================================================
+// LEVEL GENERATION
+// ============================================================
+function getZoneForLevel(lvl) {
+  if (lvl <= 3) return 0;
+  if (lvl <= 7) return 1;
+  if (lvl <= 12) return 2;
+  return 3;
+}
+
+function isBossLevel(lvl) { return lvl > 0 && lvl % 5 === 0; }
+
+function initLevel() {
+  grid = [];
+  bugs = [];
+  rocks = [];
+  powerups = [];
+  hazards = [];
+  particles = [];
+  digAnimations = [];
+  scorePopups = [];
+  combo = 0;
+  shieldTimer = 0;
+  speedTimer = 0;
+  bossActive = false;
+
+  var prevZone = currentZone;
+  currentZone = getZoneForLevel(level);
+  if (currentZone !== prevZone) {
+    zoneTransitionAlpha = 1.0;
+  }
+
+  var y, x;
+  for (y = 0; y < ROWS; y++) {
+    grid[y] = [];
+    for (x = 0; x < COLS; x++) {
+      grid[y][x] = DIRT;
+    }
+  }
+
+  // Top 2 rows always tunnel (sky/surface)
+  for (x = 0; x < COLS; x++) {
+    grid[0][x] = TUNNEL;
+    grid[1][x] = TUNNEL;
+  }
+
+  // Starting tunnel for player
+  for (x = 0; x < 5; x++) {
+    grid[2][x] = TUNNEL;
+  }
+
+  // Place rocks
+  var rockCount = 3 + Math.min(level, 10);
+  var placed = 0;
+  var attempts = 0;
+  while (placed < rockCount && attempts < 200) {
+    attempts++;
+    var rx = Math.floor(Math.random() * COLS);
+    var ry = 3 + Math.floor(Math.random() * (ROWS - 4));
+    if (grid[ry][rx] === DIRT && grid[ry - 1] && grid[ry - 1][rx] === DIRT) {
+      grid[ry][rx] = ROCK;
+      rocks.push({ x: rx, y: ry, falling: false, fallY: 0, settled: true, fallSpeed: 0, crushed: false });
+      placed++;
+    }
+  }
+
+  // Place hazards based on zone
+  if (currentZone >= 1) {
+    // Poison gas pockets
+    var poisonCount = Math.floor(level / 3);
+    for (var pi = 0; pi < poisonCount; pi++) {
+      attempts = 0;
+      var px, py;
+      do {
+        px = Math.floor(Math.random() * COLS);
+        py = 4 + Math.floor(Math.random() * (ROWS - 5));
+        attempts++;
+      } while (grid[py][px] !== DIRT && attempts < 50);
+      if (grid[py][px] === DIRT) {
+        hazards.push({ x: px, y: py, type: 'poison', timer: 0, active: false, life: 3 + Math.random() * 2 });
+      }
+    }
+  }
+  if (currentZone >= 3) {
+    // Lava veins
+    var lavaCount = 1 + Math.floor(level / 6);
+    for (var li = 0; li < lavaCount; li++) {
+      var lx = Math.floor(Math.random() * (COLS - 2)) + 1;
+      var ly = 8 + Math.floor(Math.random() * (ROWS - 9));
+      if (ly < ROWS && grid[ly][lx] === DIRT) {
+        hazards.push({ x: lx, y: ly, type: 'lava', timer: 0, active: true, life: 999 });
+        grid[ly][lx] = LAVA;
+      }
+    }
+  }
+
+  // Place items hidden in dirt (WIS affects reveal range)
+  var puCount = 2 + Math.floor(level / 2);
+  for (var ii = 0; ii < puCount; ii++) {
+    var ix, iy;
+    attempts = 0;
+    do {
+      ix = Math.floor(Math.random() * COLS);
+      iy = 3 + Math.floor(Math.random() * (ROWS - 4));
+      attempts++;
+    } while (grid[iy][ix] !== DIRT && attempts < 100);
+    if (grid[iy][ix] === DIRT) {
+      var itemKey = itemTypeKeys[Math.floor(Math.random() * itemTypeKeys.length)];
+      // Bias certain items to certain zones
+      if (currentZone >= 2 && Math.random() < 0.3) itemKey = 'crystalShard';
+      if (currentZone >= 3 && Math.random() < 0.2) itemKey = 'emberStone';
+      powerups.push({
+        x: ix, y: iy,
+        type: itemKey,
+        collected: false,
+        visible: false,
+        bobPhase: Math.random() * Math.PI * 2
+      });
+    }
+  }
+
+  // Pre-dig some tunnels for bugs to start in
+  var tunnelSeeds = 2 + Math.min(level, 5);
+  for (var t = 0; t < tunnelSeeds; t++) {
+    var tx = 5 + Math.floor(Math.random() * (COLS - 7));
+    var ty = 4 + Math.floor(Math.random() * (ROWS - 6));
+    var len = 3 + Math.floor(Math.random() * 4);
+    var horiz = Math.random() > 0.5;
+    for (var si = 0; si < len; si++) {
+      var cx = horiz ? tx + si : tx;
+      var cy = horiz ? ty : ty + si;
+      if (cx >= 0 && cx < COLS && cy >= 0 && cy < ROWS && grid[cy][cx] === DIRT) {
+        grid[cy][cx] = TUNNEL;
+      }
+    }
+  }
+
+  // Place enemies (Tasern themed)
+  if (isBossLevel(level)) {
+    // Boss level: fewer minions + 1 boss
+    placeBoss();
+    var minionCount = 2 + Math.floor(level / 5);
+    placeEnemies(Math.min(minionCount, 6));
+  } else {
+    var bugCount = 2 + level;
+    placeEnemies(Math.min(bugCount, 14));
+  }
+
+  // Player
+  player = {
+    x: 1, y: 2, px: 1 * TILE, py: 4 * TILE,
+    dir: DIR.RIGHT, moving: false, moveTimer: 0,
+    animFrame: 0, animTimer: 0, pumping: false, pumpTarget: null,
+    speed: 5 * getMoveSpeed(), dead: false, invincible: 0,
+    digCooldown: 0
+  };
+}
+
+function placeEnemies(count) {
+  var zone = currentZone;
+  var availableTypes = [];
+  for (var key in ENEMY_TYPES) {
+    if (ENEMY_TYPES[key].zones.indexOf(zone) !== -1) {
+      availableTypes.push(key);
+    }
+  }
+  if (availableTypes.length === 0) availableTypes = ['myconid'];
+
+  for (var i = 0; i < count; i++) {
+    var bx, by;
+    var attempts = 0;
+    do {
+      bx = 5 + Math.floor(Math.random() * (COLS - 6));
+      by = 4 + Math.floor(Math.random() * (ROWS - 5));
+      attempts++;
+    } while (grid[by][bx] !== TUNNEL && attempts < 100);
+    grid[by][bx] = TUNNEL;
+
+    var typeKey = availableTypes[Math.floor(Math.random() * availableTypes.length)];
+    // Higher level = more chance of tougher enemies
+    if (level >= 6 && Math.random() < 0.2 && availableTypes.indexOf('crystalBeetle') !== -1) {
+      typeKey = 'crystalBeetle';
+    }
+    var et = ENEMY_TYPES[typeKey];
+
+    bugs.push({
+      x: bx, y: by, px: bx * TILE, py: (by + 2) * TILE,
+      type: typeKey, enemyDef: et,
+      dir: DIR.RIGHT, hp: et.hp, maxHp: et.hp,
+      moveTimer: 0, speed: et.speed,
+      inflate: 0, inflateDir: 0, dead: false,
+      animFrame: 0, animTimer: 0, stunTimer: 0,
+      isBoss: false, digTimer: 0,
+      sporeTimer: 0 // for spore flyer attacks
+    });
+  }
+}
+
+function placeBoss() {
+  bossActive = true;
+  var bossKey;
+  if (level <= 5) bossKey = 'myconidKing';
+  else if (level <= 10) bossKey = 'crystalWyrm';
+  else bossKey = 'magmaLord';
+
+  var bt = BOSS_TYPES[bossKey];
+  // Scale boss HP with level
+  var bossHp = bt.hp + Math.floor(level / 5) * 2;
+
+  var bx, by;
+  var attempts = 0;
+  do {
+    bx = 8 + Math.floor(Math.random() * (COLS - 10));
+    by = 6 + Math.floor(Math.random() * (ROWS - 8));
+    attempts++;
+  } while (attempts < 100);
+
+  // Clear a 3x3 area for the boss
+  for (var dy = -1; dy <= 1; dy++) {
+    for (var dx = -1; dx <= 1; dx++) {
+      var nx = bx + dx, ny = by + dy;
+      if (nx >= 0 && nx < COLS && ny >= 0 && ny < ROWS) {
+        grid[ny][nx] = TUNNEL;
+      }
+    }
+  }
+
+  bugs.push({
+    x: bx, y: by, px: bx * TILE, py: (by + 2) * TILE,
+    type: bossKey, enemyDef: bt,
+    dir: DIR.LEFT, hp: bossHp, maxHp: bossHp,
+    moveTimer: 0, speed: bt.speed,
+    inflate: 0, inflateDir: 0, dead: false,
+    animFrame: 0, animTimer: 0, stunTimer: 0,
+    isBoss: true, digTimer: 0,
+    attackTimer: 3, // boss attack cooldown
+    phase: 0, // boss phase (changes at half HP)
+    sporeTimer: 0
+  });
+
+  // Show boss intro
+  state = 'bossIntro';
+  stateTimer = 2.0;
+}
+
+// ============================================================
+// GRID HELPERS
+// ============================================================
+function inBounds(x, y) { return x >= 0 && x < COLS && y >= 0 && y < ROWS; }
+function getLayer(y) { return Math.min(3, Math.floor(y / (ROWS / 4))); }
+
+function digTile(x, y) {
+  if (!inBounds(x, y) || grid[y][x] !== DIRT) return false;
+
+  // Check for rock
+  for (var ri = 0; ri < rocks.length; ri++) {
+    var r = rocks[ri];
+    if (r.x === x && r.y === y && !r.crushed) {
+      // STR check: can push rocks?
+      if (Math.random() < getRockPushChance()) {
+        var pushDir = player.dir;
+        var pushX = x + DX[pushDir], pushY = y + DY[pushDir];
+        if (inBounds(pushX, pushY) && grid[pushY][pushX] === TUNNEL) {
+          grid[y][x] = TUNNEL;
+          r.x = pushX;
+          r.y = pushY;
+          SFX.rockFall();
+          spawnScorePopup(x * TILE + TILE / 2, (y + 2) * TILE, 'PUSH!', '#AAB');
+          triggerShake(3, 0.15);
+          return true;
+        }
+      }
+      return false;
+    }
+  }
+
+  grid[y][x] = TUNNEL;
+  SFX.dig();
+
+  // Dig animation
+  digAnimations.push({ x: x * TILE, y: (y + 2) * TILE, life: 1 });
+  var zone = ZONES[getLayer(y)];
+  spawnParticles(x * TILE + TILE / 2, (y + 2) * TILE + TILE / 2, zone.dirt[0], 6, 1.5);
+
+  // Reveal power-ups (WIS affects range)
+  var revealRange = getItemDetectRange();
+  for (var pi = 0; pi < powerups.length; pi++) {
+    var pu = powerups[pi];
+    if (!pu.collected && !pu.visible) {
+      var dist = Math.abs(pu.x - x) + Math.abs(pu.y - y);
+      if (dist <= revealRange) {
+        pu.visible = true;
+        if (dist === 0) {
+          // Direct dig on item
+        } else {
+          // Nearby detection glow
+          spawnGlowParticles(pu.x * TILE + TILE / 2, (pu.y + 2) * TILE + TILE / 2, '#FFD700', 4, 1);
+        }
+      }
+    }
+  }
+
+  // Activate poison gas if dug near
+  for (var hi = 0; hi < hazards.length; hi++) {
+    var h = hazards[hi];
+    if (h.type === 'poison' && !h.active && Math.abs(h.x - x) + Math.abs(h.y - y) <= 1) {
+      h.active = true;
+      grid[h.y][h.x] = TUNNEL;
+      // WIS: trap awareness can prevent damage
+      if (Math.random() < getTrapAwareness()) {
+        spawnScorePopup(x * TILE + TILE / 2, (y + 2) * TILE, 'AVOIDED!', '#66DD88');
+      } else {
+        SFX.poison();
+        flash('#a855f7');
+        spawnParticles(h.x * TILE + TILE / 2, (h.y + 2) * TILE + TILE / 2, C_POISON, 15, 2);
+      }
+    }
+  }
+
+  // Check rocks above
+  checkRockFall();
+  return true;
+}
+
+function checkRockFall() {
+  for (var ri = 0; ri < rocks.length; ri++) {
+    var rock = rocks[ri];
+    if (rock.crushed || rock.falling) continue;
+    var below = rock.y + 1;
+    if (below < ROWS && grid[below][rock.x] === TUNNEL) {
+      rock.falling = true;
+      rock.settled = false;
+      rock.fallY = 0;
+      rock.fallSpeed = 0;
+      SFX.rockFall();
+    }
+  }
+}
+
+// ============================================================
+// PLAYER MOVEMENT
+// ============================================================
+function movePlayer(dt) {
+  if (player.dead) return;
+  player.invincible = Math.max(0, player.invincible - dt);
+  player.animTimer += dt;
+  if (player.animTimer > 0.15) { player.animTimer = 0; player.animFrame = (player.animFrame + 1) % 4; }
+  if (player.digCooldown > 0) player.digCooldown -= dt * getDigSpeed();
+
+  var spd = speedTimer > 0 ? player.speed * 1.6 : player.speed;
+
+  // Trail particles when speeding
+  if (speedTimer > 0 && player.moving && Math.random() < 0.3) {
+    spawnTrailParticle(player.px + TILE / 2, player.py + TILE, '#FFD700');
+  }
+
+  if (player.pumping) {
+    if (player.pumpTarget && !player.pumpTarget.dead) {
+      player.pumpTarget.inflate += dt * 2.5 * getMeleeDamage();
+      player.pumpTarget.stunTimer = 0.5;
+      if (player.pumpTarget.inflate >= 1) {
+        killBug(player.pumpTarget, false);
+        player.pumping = false;
+        player.pumpTarget = null;
+      }
+    } else {
+      player.pumping = false;
+      player.pumpTarget = null;
+    }
+    if (!inputPump) {
+      player.pumping = false;
+      if (player.pumpTarget) {
+        player.pumpTarget.inflateDir = -1;
+      }
+      player.pumpTarget = null;
+    }
+    return;
+  }
+
+  if (inputDir === DIR.NONE) {
+    player.moving = false;
+    return;
+  }
+
+  player.dir = inputDir;
+  var targetX = player.x + DX[inputDir];
+  var targetY = player.y + DY[inputDir];
+
+  if (!inBounds(targetX, targetY)) return;
+
+  // Check rock blocking
+  for (var ri = 0; ri < rocks.length; ri++) {
+    var r = rocks[ri];
+    if (r.x === targetX && r.y === targetY && !r.crushed && !r.falling) {
+      // STR push attempt
+      if (Math.random() < getRockPushChance()) {
+        var pushX = targetX + DX[inputDir], pushY = targetY + DY[inputDir];
+        if (inBounds(pushX, pushY) && grid[pushY][pushX] === TUNNEL) {
+          grid[targetY][targetX] = TUNNEL;
+          r.x = pushX;
+          r.y = pushY;
+          triggerShake(3, 0.15);
+          SFX.rockFall();
+          spawnScorePopup(targetX * TILE + TILE / 2, (targetY + 2) * TILE, 'PUSH!', '#AAB');
+          checkRockFall();
+          break;
+        }
+      }
+      return;
+    }
+  }
+
+  // Check lava
+  if (grid[targetY][targetX] === LAVA) {
+    if (shieldTimer <= 0) {
+      SFX.lava();
+      flash('#FF4400');
+      if (player.invincible <= 0 && Math.random() >= getDamageResist()) {
+        playerDie();
+      }
+      return;
+    }
+  }
+
+  // Dig if dirt
+  if (grid[targetY][targetX] === DIRT) {
+    digTile(targetX, targetY);
+  }
+
+  // Move with smooth interpolation
+  player.moving = true;
+  player.moveTimer += dt * spd;
+  if (player.moveTimer >= 1) {
+    player.moveTimer = 0;
+    player.x = targetX;
+    player.y = targetY;
+
+    // Collect power-ups
+    for (var pi = 0; pi < powerups.length; pi++) {
+      var pu = powerups[pi];
+      if (pu.x === player.x && pu.y === player.y && !pu.collected && pu.visible) {
+        collectItem(pu);
+      }
+    }
+
+    // Poison gas damage
+    for (var hi = 0; hi < hazards.length; hi++) {
+      var h = hazards[hi];
+      if (h.type === 'poison' && h.active && h.x === player.x && h.y === player.y) {
+        if (Math.random() >= getTrapAwareness() && player.invincible <= 0 && Math.random() >= getDamageResist()) {
+          flash('#a855f7');
+          playerDie();
+        }
+      }
+    }
+  }
+
+  // Smooth pixel position
+  var tx = player.x * TILE;
+  var ty = (player.y + 2) * TILE;
+  var lerpSpeed = spd * dt * TILE * 1.5;
+  player.px += (tx - player.px) * Math.min(1, lerpSpeed / Math.max(1, Math.abs(tx - player.px)));
+  player.py += (ty - player.py) * Math.min(1, lerpSpeed / Math.max(1, Math.abs(ty - player.py)));
+  if (Math.abs(player.px - tx) < 0.5) player.px = tx;
+  if (Math.abs(player.py - ty) < 0.5) player.py = ty;
+}
+
+function collectItem(pu) {
+  pu.collected = true;
+  var itemDef = ITEM_TYPES[pu.type];
+  SFX.powerup();
+  var baseItemScore = 50;
+  var earnedItem = Math.floor(baseItemScore * getScoreMult());
+  score += earnedItem;
+  spawnScorePopup(pu.x * TILE + TILE / 2, (pu.y + 2) * TILE, '+' + earnedItem + ' ' + itemDef.name, itemDef.color);
+  spawnGlowParticles(pu.x * TILE + TILE / 2, (pu.y + 2) * TILE + TILE / 2, itemDef.color, 10, 2);
+
+  var puDur = getPowerupDuration();
+  switch (itemDef.effect) {
+    case 'speed':
+      speedTimer = 5 * puDur;
+      break;
+    case 'shield':
+      shieldTimer = 5 * puDur;
+      SFX.crystal();
+      break;
+    case 'bomb':
+      doBomb(player.x, player.y);
+      break;
+    case 'heal':
+      lives++;
+      SFX.mushroom();
+      flash('#66DD88');
+      spawnScorePopup(pu.x * TILE + TILE / 2, (pu.y + 2) * TILE - TILE, '+1 LIFE', '#66DD88');
+      break;
+    case 'stun':
+      doStunBurst(player.x, player.y);
+      break;
+    case 'fire':
+      doFireWave(player.x, player.y);
+      break;
+  }
+  flash(itemDef.color);
+}
+
+function doBomb(cx, cy) {
+  triggerShake(8, 0.3);
+  for (var dy = -2; dy <= 2; dy++) {
+    for (var dx = -2; dx <= 2; dx++) {
+      if (Math.abs(dx) + Math.abs(dy) > 3) continue;
+      var nx = cx + dx, ny = cy + dy;
+      if (inBounds(nx, ny) && grid[ny][nx] === DIRT) {
+        grid[ny][nx] = TUNNEL;
+        spawnParticles(nx * TILE + TILE / 2, (ny + 2) * TILE + TILE / 2, '#FA0', 3, 3);
+      }
+    }
+  }
+  for (var bi = 0; bi < bugs.length; bi++) {
+    var bug = bugs[bi];
+    if (!bug.dead && Math.abs(bug.x - cx) + Math.abs(bug.y - cy) <= 2) {
+      if (bug.isBoss) {
+        damageBoss(bug, 2);
+      } else {
+        killBug(bug, false);
+      }
+    }
+  }
+  flash('#f80');
+  checkRockFall();
+}
+
+function doStunBurst(cx, cy) {
+  SFX.stun();
+  triggerShake(4, 0.2);
+  spawnGlowParticles(cx * TILE + TILE / 2, (cy + 2) * TILE + TILE / 2, '#AA66CC', 20, 3);
+  for (var bi = 0; bi < bugs.length; bi++) {
+    var bug = bugs[bi];
+    if (!bug.dead && Math.abs(bug.x - cx) + Math.abs(bug.y - cy) <= 3) {
+      bug.stunTimer = 3 * getPowerupDuration();
+      spawnScorePopup(bug.px + TILE / 2, bug.py, 'STUNNED!', '#AA66CC');
+    }
+  }
+}
+
+function doFireWave(cx, cy) {
+  triggerShake(6, 0.25);
+  for (var d = 0; d < 4; d++) {
+    for (var dist = 1; dist <= 3; dist++) {
+      var fx = cx + DX[d] * dist, fy = cy + DY[d] * dist;
+      if (!inBounds(fx, fy)) break;
+      if (grid[fy][fx] === DIRT) grid[fy][fx] = TUNNEL;
+      spawnParticles(fx * TILE + TILE / 2, (fy + 2) * TILE + TILE / 2, '#FF4400', 4, 2);
+      for (var bi = 0; bi < bugs.length; bi++) {
+        var bug = bugs[bi];
+        if (!bug.dead && bug.x === fx && bug.y === fy) {
+          if (bug.isBoss) damageBoss(bug, 1);
+          else killBug(bug, false);
+        }
+      }
+    }
+  }
+  flash('#FF4400');
+  checkRockFall();
+}
+
+// ============================================================
+// PUMP MECHANIC
+// ============================================================
+function tryPump() {
+  if (player.dead || player.pumping) return;
+  var dx = DX[player.dir], dy = DY[player.dir];
+  for (var dist = 1; dist <= 4; dist++) {
+    var tx = player.x + dx * dist;
+    var ty = player.y + dy * dist;
+    if (!inBounds(tx, ty)) break;
+    if (grid[ty][tx] !== TUNNEL) break;
+    for (var bi = 0; bi < bugs.length; bi++) {
+      var bug = bugs[bi];
+      if (!bug.dead && bug.x === tx && bug.y === ty) {
+        player.pumping = true;
+        player.pumpTarget = bug;
+        bug.inflateDir = 1;
+        SFX.pump();
+        return;
+      }
+    }
+  }
+}
+
+// ============================================================
+// BUG AI
+// ============================================================
+function updateBugs(dt) {
+  for (var bi = 0; bi < bugs.length; bi++) {
+    var bug = bugs[bi];
+    if (bug.dead) continue;
+
+    bug.animTimer += dt;
+    if (bug.animTimer > 0.12) { bug.animTimer = 0; bug.animFrame = (bug.animFrame + 1) % 4; }
+
+    // Deflate when not being pumped
+    if (bug.inflateDir === -1) {
+      bug.inflate = Math.max(0, bug.inflate - dt * 1.5);
+      if (bug.inflate <= 0) bug.inflateDir = 0;
+    }
+
+    if (bug.stunTimer > 0) {
+      bug.stunTimer -= dt;
+      continue;
+    }
+
+    // Boss special attack logic
+    if (bug.isBoss) {
+      updateBossAI(bug, dt);
+    }
+
+    // Speed increases with level
+    var actualSpeed = bug.speed * (1 + (level - 1) * 0.06);
+    bug.moveTimer += dt * actualSpeed;
+
+    if (bug.moveTimer >= 1) {
+      bug.moveTimer = 0;
+
+      var canFly = bug.enemyDef ? bug.enemyDef.canFly : false;
+      var canDig = bug.enemyDef ? bug.enemyDef.canDig : false;
+
+      // Burrowers can dig through dirt
+      if (canDig && bug.digTimer <= 0) {
+        var digDir = getDirectionToward(bug.x, bug.y, player.x, player.y);
+        if (digDir !== -1) {
+          var digX = bug.x + DX[digDir], digY = bug.y + DY[digDir];
+          if (inBounds(digX, digY) && grid[digY][digX] === DIRT) {
+            grid[digY][digX] = TUNNEL;
+            spawnParticles(digX * TILE + TILE / 2, (digY + 2) * TILE + TILE / 2, ZONES[getLayer(digY)].dirt[0], 4, 1);
+            bug.digTimer = 2;
+          }
+        }
+      }
+      if (bug.digTimer > 0) bug.digTimer -= 1;
+
+      // Pathfind toward player
+      var path = findPath(bug.x, bug.y, player.x, player.y, canFly);
+      if (path && path.length > 1) {
+        var next = path[1];
+        if (canFly || grid[next.y][next.x] === TUNNEL) {
+          // CHA: stun chance on approach
+          if (Math.random() < getStunChance() && !bug.isBoss) {
+            bug.stunTimer = 0.5;
+            spawnScorePopup(bug.px + TILE / 2, bug.py, 'DAZED!', '#FFD700');
+          } else {
+            if (next.x > bug.x) bug.dir = DIR.RIGHT;
+            else if (next.x < bug.x) bug.dir = DIR.LEFT;
+            else if (next.y > bug.y) bug.dir = DIR.DOWN;
+            else bug.dir = DIR.UP;
+            bug.x = next.x;
+            bug.y = next.y;
+          }
+        }
+      } else {
+        // Random wander
+        var dirs = [];
+        for (var d = 0; d < 4; d++) {
+          var nx = bug.x + DX[d], ny = bug.y + DY[d];
+          if (!inBounds(nx, ny)) continue;
+          if (canFly || grid[ny][nx] === TUNNEL) dirs.push(d);
+        }
+        if (dirs.length > 0) {
+          var rd = dirs[Math.floor(Math.random() * dirs.length)];
+          bug.x += DX[rd];
+          bug.y += DY[rd];
+          bug.dir = rd;
+        }
+      }
+    }
+
+    // Smooth pixel position
+    var tgtX = bug.x * TILE;
+    var tgtY = (bug.y + 2) * TILE;
+    bug.px += (tgtX - bug.px) * 0.2;
+    bug.py += (tgtY - bug.py) * 0.2;
+
+    // Check collision with player
+    if (!player.dead && !player.pumping && bug.x === player.x && bug.y === player.y) {
+      // DEX: dodge chance
+      if (Math.random() < getDodgeChance()) {
+        spawnScorePopup(player.px + TILE / 2, player.py, 'DODGE!', '#88CCFF');
+        bug.stunTimer = 0.3;
+        continue;
+      }
+      if (shieldTimer > 0) {
+        if (bug.isBoss) {
+          damageBoss(bug, 1);
+        } else {
+          killBug(bug, false);
+        }
+        shieldTimer = 0;
+        flash('#0ff');
+      } else if (player.invincible <= 0) {
+        // CON: damage resistance
+        if (Math.random() < getDamageResist()) {
+          spawnScorePopup(player.px + TILE / 2, player.py, 'RESIST!', '#FF8844');
+          player.invincible = 1;
+        } else {
+          playerDie();
+        }
+      }
+    }
+  }
+}
+
+function getDirectionToward(fx, fy, tx, ty) {
+  var dx = tx - fx, dy = ty - fy;
+  if (Math.abs(dx) > Math.abs(dy)) {
+    return dx > 0 ? DIR.RIGHT : DIR.LEFT;
+  } else if (dy !== 0) {
+    return dy > 0 ? DIR.DOWN : DIR.UP;
+  }
+  return -1;
+}
+
+function updateBossAI(boss, dt) {
+  // Phase change at half HP
+  if (boss.hp <= boss.maxHp / 2 && boss.phase === 0) {
+    boss.phase = 1;
+    boss.speed *= 1.3;
+    SFX.bossRoar();
+    triggerShake(10, 0.5);
+    flash('#FF0000');
+    spawnScorePopup(boss.px + TILE / 2, boss.py, 'ENRAGED!', '#FF0000');
+  }
+
+  boss.attackTimer -= dt;
+  if (boss.attackTimer <= 0) {
+    boss.attackTimer = boss.phase === 1 ? 2 : 3;
+    // Boss attack: spawn hazard or summon minion
+    if (Math.random() < 0.5) {
+      // Spawn poison cloud around boss
+      spawnParticles(boss.px + TILE / 2, boss.py + TILE / 2, '#44CC44', 15, 3);
+      SFX.poison();
+      var gx = boss.x + Math.floor(Math.random() * 3) - 1;
+      var gy = boss.y + Math.floor(Math.random() * 3) - 1;
+      if (inBounds(gx, gy) && grid[gy][gx] === TUNNEL) {
+        hazards.push({ x: gx, y: gy, type: 'poison', timer: 0, active: true, life: 4 });
+      }
+    } else {
+      // Summon a minion
+      var spawnX = boss.x + Math.floor(Math.random() * 5) - 2;
+      var spawnY = boss.y + Math.floor(Math.random() * 5) - 2;
+      if (inBounds(spawnX, spawnY) && grid[spawnY][spawnX] === TUNNEL) {
+        var mt = currentZone >= 2 ? 'crystalBeetle' : 'myconid';
+        var mdef = ENEMY_TYPES[mt];
+        bugs.push({
+          x: spawnX, y: spawnY, px: spawnX * TILE, py: (spawnY + 2) * TILE,
+          type: mt, enemyDef: mdef,
+          dir: DIR.RIGHT, hp: mdef.hp, maxHp: mdef.hp,
+          moveTimer: 0, speed: mdef.speed,
+          inflate: 0, inflateDir: 0, dead: false,
+          animFrame: 0, animTimer: 0, stunTimer: 0,
+          isBoss: false, digTimer: 0, sporeTimer: 0
+        });
+        spawnGlowParticles(spawnX * TILE + TILE / 2, (spawnY + 2) * TILE + TILE / 2, '#FF4444', 8, 2);
+        SFX.bossHit();
+      }
+    }
+  }
+}
+
+function damageBoss(boss, amount) {
+  boss.hp -= amount;
+  SFX.bossHit();
+  triggerShake(5, 0.2);
+  spawnScorePopup(boss.px + TILE / 2, boss.py, '-' + amount + ' HP', '#FF4444');
+  spawnParticles(boss.px + TILE / 2, boss.py + TILE / 2, boss.enemyDef.color, 10, 3);
+  if (boss.hp <= 0) {
+    killBug(boss, false);
+  }
+}
+
+// Simple BFS pathfinding
+function findPath(sx, sy, tx, ty, canFly) {
+  if (sx === tx && sy === ty) return [{ x: sx, y: sy }];
+  var visited = {};
+  var queue = [{ x: sx, y: sy, path: [{ x: sx, y: sy }] }];
+  visited[sy * COLS + sx] = true;
+  var maxSteps = 200;
+  var steps = 0;
+
+  while (queue.length > 0 && steps < maxSteps) {
+    steps++;
+    var cur = queue.shift();
+    for (var d = 0; d < 4; d++) {
+      var nx = cur.x + DX[d], ny = cur.y + DY[d];
+      if (!inBounds(nx, ny)) continue;
+      var key = ny * COLS + nx;
+      if (visited[key]) continue;
+      if (!canFly && grid[ny][nx] !== TUNNEL) continue;
+      // Rocks block even fliers
+      var blocked = false;
+      for (var ri = 0; ri < rocks.length; ri++) {
+        if (rocks[ri].x === nx && rocks[ri].y === ny && !rocks[ri].crushed) { blocked = true; break; }
+      }
+      if (blocked) continue;
+      visited[key] = true;
+      var newPath = cur.path.concat({ x: nx, y: ny });
+      if (nx === tx && ny === ty) return newPath;
+      queue.push({ x: nx, y: ny, path: newPath });
+    }
+  }
+  return null;
+}
+
+// ============================================================
+// ROCKS
+// ============================================================
+function updateRocks(dt) {
+  for (var ri = 0; ri < rocks.length; ri++) {
+    var rock = rocks[ri];
+    if (rock.crushed) continue;
+    if (!rock.falling) continue;
+
+    rock.fallSpeed += dt * 12;
+    rock.fallY += rock.fallSpeed * dt * TILE;
+
+    if (rock.fallY >= TILE) {
+      rock.fallY -= TILE;
+      rock.y += 1;
+
+      // Kill bugs at current position
+      var hitCount = 0;
+      for (var bi = 0; bi < bugs.length; bi++) {
+        var bug = bugs[bi];
+        if (!bug.dead && bug.x === rock.x && bug.y === rock.y) {
+          if (bug.isBoss) {
+            damageBoss(bug, 3); // rocks do extra boss damage
+          } else {
+            killBug(bug, true);
+          }
+          hitCount++;
+        }
+      }
+
+      // Kill player
+      if (!player.dead && player.x === rock.x && player.y === rock.y) {
+        if (shieldTimer > 0) {
+          shieldTimer = 0;
+          flash('#0ff');
+        } else if (player.invincible <= 0) {
+          if (Math.random() >= getDamageResist()) {
+            playerDie();
+          } else {
+            spawnScorePopup(player.px + TILE / 2, player.py, 'RESIST!', '#FF8844');
+            player.invincible = 1;
+          }
+        }
+      }
+
+      if (hitCount > 0) {
+        combo += hitCount;
+        triggerShake(6, 0.2);
+      }
+
+      // Check if should keep falling
+      var below = rock.y + 1;
+      if (below >= ROWS || grid[below][rock.x] !== TUNNEL) {
+        rock.falling = false;
+        rock.settled = true;
+        rock.fallY = 0;
+        rock.fallSpeed = 0;
+        rock.crushed = true;
+        grid[rock.y][rock.x] = TUNNEL;
+        spawnParticles(rock.x * TILE + TILE / 2, (rock.y + 2) * TILE + TILE / 2, C_ROCK, 12, 2);
+        SFX.rockFall();
+        triggerShake(4, 0.15);
+        if (combo > 0) {
+          var comboScore = combo * 50 * Math.floor(getComboMult());
+          spawnScorePopup(rock.x * TILE + TILE / 2, (rock.y + 2) * TILE, combo + 'x COMBO! +' + comboScore, '#FF4444');
+          score += comboScore;
+          flash('#ff0');
+        }
+        combo = 0;
+      } else {
+        // Check for other rocks blocking
+        var rockBelow = false;
+        for (var r2i = 0; r2i < rocks.length; r2i++) {
+          var r2 = rocks[r2i];
+          if (r2 !== rock && r2.x === rock.x && r2.y === below && !r2.crushed) {
+            rockBelow = true; break;
+          }
+        }
+        if (rockBelow) {
+          rock.falling = false;
+          rock.settled = true;
+          rock.fallY = 0;
+          rock.fallSpeed = 0;
+          rock.crushed = true;
+          grid[rock.y][rock.x] = TUNNEL;
+          spawnParticles(rock.x * TILE + TILE / 2, (rock.y + 2) * TILE + TILE / 2, C_ROCK, 10, 2);
+          combo = 0;
+        }
+      }
+    }
+  }
+}
+
+// ============================================================
+// HAZARDS
+// ============================================================
+function updateHazards(dt) {
+  for (var hi = hazards.length - 1; hi >= 0; hi--) {
+    var h = hazards[hi];
+    if (h.type === 'poison' && h.active) {
+      h.life -= dt;
+      h.timer += dt;
+      // Emit poison particles
+      if (h.timer > 0.3) {
+        h.timer = 0;
+        if (grid[h.y][h.x] === TUNNEL) {
+          spawnParticles(h.x * TILE + TILE / 2, (h.y + 2) * TILE + TILE / 2, C_POISON, 2, 0.5);
+        }
+      }
+      if (h.life <= 0) {
+        hazards.splice(hi, 1);
+      }
+    }
+    if (h.type === 'lava') {
+      h.timer += dt;
+      // Lava glow particles
+      if (h.timer > 0.5) {
+        h.timer = 0;
+        spawnParticles(h.x * TILE + TILE / 2, (h.y + 2) * TILE + TILE / 4, C_LAVA_GLOW, 1, 0.3);
+      }
+    }
+  }
+}
+
+// ============================================================
+// KILLS & SCORING
+// ============================================================
+function killBug(bug, byRock) {
+  bug.dead = true;
+  var baseScore = bug.enemyDef ? bug.enemyDef.scoreBase : 100;
+  if (bug.isBoss) baseScore = bug.enemyDef.scoreBase;
+  var comboMult = byRock ? Math.max(1, combo) * getComboMult() : getComboMult();
+  var levelMult = 1 + (level - 1) * 0.1;
+  var earned = Math.floor(baseScore * comboMult * levelMult * getScoreMult());
+  score += earned;
+
+  var bugName = bug.enemyDef ? bug.enemyDef.name : bug.type;
+  var bugColor = bug.enemyDef ? bug.enemyDef.color : '#44AA66';
+
+  spawnScorePopup(bug.px + TILE / 2, bug.py, '+' + earned, '#FFD700');
+
+  if (byRock) {
+    SFX.squash();
+    flash('#f44');
+    triggerShake(5, 0.2);
+    spawnParticles(bug.px + TILE / 2, bug.py + TILE / 2, bugColor, 18, 3);
+  } else {
+    SFX.pop();
+    flash('#ff0');
+    spawnParticles(bug.px + TILE / 2, bug.py + TILE / 2, bugColor, 22, 4);
+  }
+
+  if (bug.isBoss) {
+    SFX.bossRoar();
+    triggerShake(12, 0.5);
+    flash('#FFD700');
+    spawnGlowParticles(bug.px + TILE / 2, bug.py + TILE / 2, '#FFD700', 30, 5);
+    spawnScorePopup(bug.px + TILE / 2, bug.py - TILE, 'BOSS DEFEATED!', '#FFD700');
+    bossActive = false;
+  }
+
+  // Check level complete
+  var alive = bugs.filter(function(b) { return !b.dead; });
+  if (alive.length === 0) {
+    state = 'levelComplete';
+    stateTimer = 2.5;
+    SFX.levelComplete();
+    var lvlBonus = Math.floor(level * 100 * getScoreMult());
+    score += lvlBonus;
+    spawnScorePopup(W / 2, H / 2, 'GARDEN BONUS +' + lvlBonus, '#3cacd7');
+  }
+}
+
+function playerDie() {
+  if (player.dead) return;
+  player.dead = true;
+  SFX.die();
+  flash('#f00');
+  triggerShake(10, 0.4);
+  spawnParticles(player.px + TILE / 2, player.py + TILE / 2, statB.color, 25, 3);
+  lives--;
+  state = 'dying';
+  stateTimer = 2;
+}
+
+// ============================================================
+// TIMERS
+// ============================================================
+function updateTimers(dt) {
+  if (shieldTimer > 0) shieldTimer -= dt;
+  if (speedTimer > 0) speedTimer -= dt;
+}
+
+// ============================================================
+// DRAWING - GRID & ZONES
+// ============================================================
+function drawGrid() {
+  // Background per zone
+  ctx.fillStyle = ZONES[currentZone].bg;
+  ctx.fillRect(0, 2 * TILE, W, ROWS * TILE);
+
+  // Sky
+  var skyGrad = ctx.createLinearGradient(0, 0, 0, 2 * TILE);
+  skyGrad.addColorStop(0, '#1a1c2c');
+  skyGrad.addColorStop(1, '#2a2040');
+  ctx.fillStyle = skyGrad;
+  ctx.fillRect(0, 0, W, 2 * TILE);
+
+  // Sun
+  ctx.fillStyle = '#f4b41b';
+  ctx.beginPath();
+  ctx.arc(W - TILE, TILE * 0.7, TILE * 0.4, 0, Math.PI * 2);
+  ctx.fill();
+  // Sun rays
+  ctx.strokeStyle = 'rgba(244,180,27,0.2)';
+  ctx.lineWidth = 1;
+  for (var r = 0; r < 8; r++) {
+    var ang = r * Math.PI / 4 + Date.now() * 0.0005;
+    ctx.beginPath();
+    ctx.moveTo(W - TILE + Math.cos(ang) * TILE * 0.5, TILE * 0.7 + Math.sin(ang) * TILE * 0.5);
+    ctx.lineTo(W - TILE + Math.cos(ang) * TILE * 0.8, TILE * 0.7 + Math.sin(ang) * TILE * 0.8);
+    ctx.stroke();
+  }
+
+  // Surface grass
+  ctx.fillStyle = '#38d97366';
+  ctx.fillRect(0, 1.8 * TILE, W, TILE * 0.3);
+  // Grass blades
+  ctx.strokeStyle = '#38d973';
+  ctx.lineWidth = 1;
+  for (var gi = 0; gi < COLS * 2; gi++) {
+    var gx = gi * TILE / 2;
+    var sway = Math.sin(Date.now() * 0.002 + gi * 0.5) * 2;
+    ctx.beginPath();
+    ctx.moveTo(gx, 1.8 * TILE);
+    ctx.lineTo(gx + sway, 1.65 * TILE);
+    ctx.stroke();
+  }
+
+  // Dirt tiles with zone-specific rendering
+  for (var y = 0; y < ROWS; y++) {
+    for (var x = 0; x < COLS; x++) {
+      var px = x * TILE, py = (y + 2) * TILE;
+      var layer = getLayer(y);
+      if (grid[y][x] === DIRT) {
+        ctx.drawImage(dirtCanvas, layer * TILE, 0, TILE, TILE, px, py, TILE, TILE);
+        // Edge shading
+        if (y > 0 && grid[y - 1][x] === TUNNEL) {
+          ctx.fillStyle = 'rgba(0,0,0,0.15)';
+          ctx.fillRect(px, py, TILE, 3);
+        }
+        if (x > 0 && grid[y][x - 1] === TUNNEL) {
+          ctx.fillStyle = 'rgba(0,0,0,0.1)';
+          ctx.fillRect(px, py, 3, TILE);
+        }
+        // Crystal sparkle in cavern zone
+        if (layer === 2 && Math.random() < 0.02) {
+          ctx.fillStyle = '#88CCFF';
+          ctx.globalAlpha = 0.6;
+          ctx.fillRect(px + Math.random() * TILE, py + Math.random() * TILE, 2, 2);
+          ctx.globalAlpha = 1;
+        }
+      } else if (grid[y][x] === TUNNEL && y >= 2) {
+        var zone = ZONES[layer];
+        ctx.fillStyle = zone.tunnelTint;
+        ctx.fillRect(px, py, TILE, TILE);
+        // Zone-specific tunnel decorations
+        if (layer === 2) {
+          // Crystal cavern glow on tunnel edges
+          if (Math.random() < 0.01) {
+            ctx.fillStyle = 'rgba(100,150,255,0.1)';
+            ctx.fillRect(px, py, TILE, TILE);
+          }
+        }
+        if (layer === 3) {
+          // Magma ambient glow
+          if (Math.random() < 0.005) {
+            ctx.fillStyle = 'rgba(255,50,0,0.05)';
+            ctx.fillRect(px, py, TILE, TILE);
+          }
+        }
+      } else if (grid[y][x] === LAVA) {
+        // Lava tile
+        var lavaPhase = Math.sin(Date.now() * 0.003 + x + y) * 0.2;
+        ctx.fillStyle = C_LAVA;
+        ctx.fillRect(px, py, TILE, TILE);
+        ctx.fillStyle = C_LAVA_GLOW;
+        ctx.globalAlpha = 0.3 + lavaPhase;
+        ctx.fillRect(px + 2, py + 2, TILE - 4, TILE - 4);
+        ctx.globalAlpha = 1;
+        // Lava bubbles
+        if (Math.random() < 0.02) {
+          ctx.fillStyle = '#FFCC00';
+          ctx.beginPath();
+          ctx.arc(px + Math.random() * TILE, py + Math.random() * TILE, 2, 0, Math.PI * 2);
+          ctx.fill();
+        }
+      }
+    }
+  }
+
+  // Zone divider lines (subtle)
+  for (var zi = 1; zi < 4; zi++) {
+    var divY = Math.floor(ROWS / 4) * zi;
+    if (divY < ROWS) {
+      ctx.strokeStyle = ZONES[zi].border;
+      ctx.lineWidth = 1;
+      ctx.globalAlpha = 0.3;
+      ctx.beginPath();
+      ctx.moveTo(0, (divY + 2) * TILE);
+      ctx.lineTo(W, (divY + 2) * TILE);
+      ctx.stroke();
+      ctx.globalAlpha = 1;
+    }
+  }
+
+  // Dig animations
+  for (var di = digAnimations.length - 1; di >= 0; di--) {
+    var da = digAnimations[di];
+    da.life -= 0.05;
+    ctx.globalAlpha = da.life * 0.5;
+    ctx.fillStyle = '#654';
+    ctx.fillRect(da.x, da.y, TILE, TILE);
+    ctx.globalAlpha = 1;
+    if (da.life <= 0) digAnimations.splice(di, 1);
+  }
+
+  // Hazard rendering
+  for (var hi = 0; hi < hazards.length; hi++) {
+    var h = hazards[hi];
+    if (h.type === 'poison' && h.active) {
+      var hpx = h.x * TILE, hpy = (h.y + 2) * TILE;
+      ctx.fillStyle = C_POISON;
+      ctx.globalAlpha = 0.15 + Math.sin(Date.now() * 0.005) * 0.05;
+      ctx.fillRect(hpx, hpy, TILE, TILE);
+      ctx.globalAlpha = 1;
+    }
+  }
+}
+
+function drawRocks() {
+  for (var ri = 0; ri < rocks.length; ri++) {
+    var rock = rocks[ri];
+    if (rock.crushed) continue;
+    var px = rock.x * TILE;
+    var py = (rock.y + 2) * TILE + (rock.falling ? rock.fallY : 0);
+    var s = TILE;
+
+    // Boulder — sea sprite with procedural fallback
+    var _rk = seaImg('rock');
+    if (_rk) { ctx.drawImage(_rk, px, py, s, s); continue; }
+
+    // Shadow
+    ctx.fillStyle = 'rgba(0,0,0,0.3)';
+    ctx.fillRect(px + 2, py + 2, s - 2, s - 2);
+
+    // Main rock body
+    ctx.fillStyle = C_ROCK;
+    ctx.beginPath();
+    ctx.moveTo(px + 4, py + 2);
+    ctx.lineTo(px + s - 4, py + 2);
+    ctx.lineTo(px + s - 1, py + s * 0.4);
+    ctx.lineTo(px + s - 3, py + s - 2);
+    ctx.lineTo(px + 3, py + s - 2);
+    ctx.lineTo(px + 1, py + s * 0.5);
+    ctx.closePath();
+    ctx.fill();
+
+    // Highlight
+    ctx.fillStyle = C_ROCK_LIGHT;
+    ctx.beginPath();
+    ctx.moveTo(px + 5, py + 3);
+    ctx.lineTo(px + s * 0.6, py + 3);
+    ctx.lineTo(px + s * 0.4, py + s * 0.35);
+    ctx.lineTo(px + 4, py + s * 0.3);
+    ctx.closePath();
+    ctx.fill();
+
+    // Crack lines
+    ctx.strokeStyle = C_ROCK_DARK;
+    ctx.lineWidth = 1;
+    var cx = px + s / 2, cy = py + s / 2;
+    ctx.beginPath();
+    ctx.moveTo(cx - 2, cy - 4);
+    ctx.lineTo(cx + 1, cy);
+    ctx.lineTo(cx - 3, cy + 5);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(cx + 3, cy - 2);
+    ctx.lineTo(cx + 6, cy + 3);
+    ctx.stroke();
+
+    // Zone-specific rock tint
+    if (currentZone === 2) {
+      ctx.fillStyle = 'rgba(100,150,255,0.1)';
+      ctx.fillRect(px, py, s, s);
+    }
+  }
+}
+
+function drawPowerups() {
+  for (var pi = 0; pi < powerups.length; pi++) {
+    var pu = powerups[pi];
+    if (pu.collected || !pu.visible) continue;
+    var px = pu.x * TILE, py = (pu.y + 2) * TILE;
+    var cx = px + TILE / 2, cy = py + TILE / 2;
+    var pulse = Math.sin(Date.now() * 0.005 + pu.bobPhase) * 0.15 + 0.85;
+    var itemDef = ITEM_TYPES[pu.type];
+
+    ctx.save();
+    ctx.translate(cx, cy);
+    ctx.scale(pulse, pulse);
+
+    // Buried loot — sea sprite with procedural fallback (coin / pearl / chest)
+    var _lootName = ({ mushroomCap: 'gold-coins', crystalShard: 'pearl', ancientRune: 'treasure-chest' })[pu.type];
+    var _loot = _lootName ? seaImg(_lootName) : null;
+    if (_loot) { ctx.drawImage(_loot, -TILE * 0.42, -TILE * 0.42, TILE * 0.84, TILE * 0.84); ctx.restore(); continue; }
+
+    // Item glow
+    ctx.shadowColor = itemDef.color;
+    ctx.shadowBlur = 6;
+
+    // Draw item symbol in a circle
+    ctx.fillStyle = 'rgba(0,0,0,0.5)';
+    ctx.beginPath();
+    ctx.arc(0, 0, TILE * 0.32, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.fillStyle = itemDef.color;
+    ctx.beginPath();
+    ctx.arc(0, 0, TILE * 0.28, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Symbol
+    ctx.fillStyle = '#000';
+    ctx.font = 'bold ' + Math.floor(TILE * 0.35) + 'px monospace';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(itemDef.symbol, 0, 1);
+
+    ctx.shadowColor = 'transparent';
+    ctx.shadowBlur = 0;
+    ctx.restore();
+  }
+
+  // WIS: show detection hints for unrevealed items near player
+  if (state === 'playing') {
+    var detectRange = getItemDetectRange();
+    for (var di = 0; di < powerups.length; di++) {
+      var dpu = powerups[di];
+      if (dpu.collected || dpu.visible) continue;
+      var dist = Math.abs(dpu.x - player.x) + Math.abs(dpu.y - player.y);
+      if (dist <= detectRange + 1 && dist > 0) {
+        var dpx = dpu.x * TILE + TILE / 2, dpy = (dpu.y + 2) * TILE + TILE / 2;
+        ctx.fillStyle = '#FFD700';
+        ctx.globalAlpha = 0.15 * (1 - dist / (detectRange + 2));
+        ctx.beginPath();
+        ctx.arc(dpx, dpy, TILE * 0.2, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.globalAlpha = 1;
+      }
+    }
+  }
+}
+
+// ============================================================
+// DRAWING - PLAYER (Baseling)
+// ============================================================
+function drawPlayer() {
+  if (player.dead) return;
+  var px = player.px, py = player.py;
+  var s = TILE;
+  var cx = px + s / 2;
+  var cy = py + s / 2;
+  var flip = player.dir === DIR.LEFT ? -1 : 1;
+  var bobY = player.moving ? Math.sin(player.animFrame * Math.PI) * 2 : 0;
+
+  // Invincibility blink
+  if (player.invincible > 0 && Math.floor(player.invincible * 10) % 2) return;
+
+  ctx.save();
+  ctx.translate(cx, cy + bobY);
+  ctx.scale(flip, 1);
+
+  // Shield effect
+  if (shieldTimer > 0) {
+    ctx.strokeStyle = 'rgba(100, 200, 255, ' + (0.4 + Math.sin(Date.now() * 0.01) * 0.2) + ')';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.arc(0, 0, s * 0.55, 0, Math.PI * 2);
+    ctx.stroke();
+    // Crystal shield sparkles
+    if (Math.random() < 0.3) {
+      spawnTrailParticle(cx, cy + bobY - s * 0.4, '#88CCFF');
+    }
+  }
+
+  // Speed effect trail lines
+  if (speedTimer > 0) {
+    ctx.globalAlpha = 0.3;
+    ctx.fillStyle = '#FFD700';
+    ctx.fillRect(-s * 0.5, -s * 0.1, s * 0.3, s * 0.05);
+    ctx.fillRect(-s * 0.45, s * 0.1, s * 0.25, s * 0.05);
+    ctx.globalAlpha = 1;
+  }
+
+  // === BASELING SPRITE ===
+  // Animation from player state: hurt (invincible) > walk (moving) > idle.
+  // Context is already flipped for direction above, so flipX stays false.
+  var _anim = 'idle';
+  if (player.invincible > 0) _anim = 'hurt';
+  else if (player.moving) _anim = 'walk';
+  if (!drawSelectedBaseling(ctx, 0, 0, s + 4, { flipX: false, frame: frame, anim: _anim })) {
+  // --- BASELING BODY ---
+  // The player IS the baseling, drawn in their statB.color
+  var bodyColor = statB.color;
+  var darkColor = shadeColor(bodyColor, -30);
+
+  // Body (round blob shape)
+  ctx.fillStyle = bodyColor;
+  ctx.beginPath();
+  ctx.ellipse(0, s * 0.05, s * 0.3, s * 0.28, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Belly highlight
+  ctx.fillStyle = shadeColor(bodyColor, 40);
+  ctx.beginPath();
+  ctx.ellipse(0, s * 0.08, s * 0.18, s * 0.15, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Legs (animated)
+  var legAnim = player.moving ? Math.sin(player.animFrame * Math.PI * 0.5) * 3 : 0;
+  ctx.fillStyle = darkColor;
+  ctx.fillRect(-s * 0.15, s * 0.25, s * 0.1, s * 0.15);
+  ctx.fillRect(s * 0.07, s * 0.25, s * 0.1, s * 0.15);
+  // Feet
+  ctx.fillStyle = shadeColor(bodyColor, -50);
+  ctx.fillRect(-s * 0.17, s * 0.36 + legAnim, s * 0.14, s * 0.06);
+  ctx.fillRect(s * 0.05, s * 0.36 - legAnim, s * 0.14, s * 0.06);
+
+  // Arms
+  ctx.fillStyle = bodyColor;
+  var armSwing = player.moving ? Math.sin(player.animFrame * Math.PI) * 12 : 0;
+  ctx.save();
+  ctx.translate(s * 0.25, s * 0.0);
+  ctx.rotate((armSwing + 15) * Math.PI / 180);
+  ctx.fillRect(0, -s * 0.03, s * 0.06, s * 0.18);
+  // Pickaxe in hand
+  ctx.fillStyle = '#884';
+  ctx.fillRect(s * 0.01, -s * 0.08, s * 0.04, s * 0.12);
+  ctx.fillStyle = '#AAB';
+  ctx.fillRect(-s * 0.04, -s * 0.1, s * 0.12, s * 0.04);
+  ctx.restore();
+
+  // Left arm
+  ctx.fillStyle = bodyColor;
+  ctx.save();
+  ctx.translate(-s * 0.25, s * 0.0);
+  ctx.rotate((-armSwing - 15) * Math.PI / 180);
+  ctx.fillRect(-s * 0.06, -s * 0.03, s * 0.06, s * 0.18);
+  ctx.restore();
+
+  // Head
+  ctx.fillStyle = bodyColor;
+  ctx.beginPath();
+  ctx.arc(0, -s * 0.2, s * 0.2, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Eyes
+  ctx.fillStyle = '#fff';
+  ctx.beginPath();
+  ctx.arc(s * 0.06, -s * 0.24, s * 0.07, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.arc(-s * 0.08, -s * 0.24, s * 0.07, 0, Math.PI * 2);
+  ctx.fill();
+  // Pupils
+  ctx.fillStyle = '#222';
+  ctx.beginPath();
+  ctx.arc(s * 0.08, -s * 0.24, s * 0.035, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.arc(-s * 0.06, -s * 0.24, s * 0.035, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Mouth
+  ctx.strokeStyle = '#222';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.arc(0, -s * 0.15, s * 0.06, 0.2, Math.PI - 0.2);
+  ctx.stroke();
+
+  // Mining helmet
+  ctx.fillStyle = '#a855f7';
+  ctx.beginPath();
+  ctx.ellipse(0, -s * 0.35, s * 0.22, s * 0.08, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillRect(-s * 0.18, -s * 0.42, s * 0.36, s * 0.1);
+  // Helmet light
+  ctx.fillStyle = '#FFE44D';
+  ctx.beginPath();
+  ctx.arc(s * 0.02, -s * 0.44, s * 0.04, 0, Math.PI * 2);
+  ctx.fill();
+  // Light beam when in tunnel
+  if (player.y >= 2) {
+    ctx.globalAlpha = 0.08;
+    ctx.fillStyle = '#FFE44D';
+    var beamDir = player.dir;
+    if (beamDir === DIR.RIGHT || beamDir === DIR.NONE) {
+      ctx.beginPath();
+      ctx.moveTo(s * 0.05, -s * 0.44);
+      ctx.lineTo(s * 0.8, -s * 0.7);
+      ctx.lineTo(s * 0.8, -s * 0.2);
+      ctx.closePath();
+      ctx.fill();
+    } else if (beamDir === DIR.LEFT) {
+      ctx.beginPath();
+      ctx.moveTo(-s * 0.05, -s * 0.44);
+      ctx.lineTo(-s * 0.8, -s * 0.7);
+      ctx.lineTo(-s * 0.8, -s * 0.2);
+      ctx.closePath();
+      ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  // Baseling icon indicator
+  ctx.fillStyle = '#000';
+  ctx.globalAlpha = 0.5;
+  ctx.font = 'bold ' + Math.floor(s * 0.2) + 'px monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText(statB.icon, 0, s * 0.15);
+  ctx.globalAlpha = 1;
+  }
+
+  // Pump line when pumping
+  if (player.pumping && player.pumpTarget) {
+    ctx.strokeStyle = '#FFD700';
+    ctx.lineWidth = 2;
+    ctx.setLineDash([4, 4]);
+    var tpx = player.pumpTarget.px + TILE / 2 - cx * flip;
+    var tpy = player.pumpTarget.py + TILE / 2 - cy;
+    ctx.beginPath();
+    ctx.moveTo(s * 0.15, 0);
+    ctx.lineTo(tpx * flip, tpy - bobY);
+    ctx.stroke();
+    ctx.setLineDash([]);
+  }
+
+  ctx.restore();
+}
+
+// Color helper
+function shadeColor(hex, amount) {
+  var num = parseInt(hex.replace('#', ''), 16);
+  var r = Math.min(255, Math.max(0, ((num >> 16) & 0xFF) + amount));
+  var g = Math.min(255, Math.max(0, ((num >> 8) & 0xFF) + amount));
+  var b = Math.min(255, Math.max(0, (num & 0xFF) + amount));
+  return '#' + ((1 << 24) + (r << 16) + (g << 8) + b).toString(16).slice(1);
+}
+
+// ============================================================
+// DRAWING - ENEMIES (Tasern themed)
+// ============================================================
+function drawBug(bug) {
+  if (bug.dead) return;
+  var px = bug.px, py = bug.py;
+  var s = TILE;
+  var cx = px + s / 2;
+  var cy = py + s / 2;
+  var inflate = 1 + bug.inflate * 0.6;
+  var flip = bug.dir === DIR.LEFT ? -1 : 1;
+
+  ctx.save();
+  ctx.translate(cx, cy);
+  var bossScale = bug.isBoss ? 1.4 : 1;
+  ctx.scale(flip * inflate * bossScale, inflate * bossScale);
+
+  var et = bug.enemyDef;
+  var bodyColor = et.color;
+  var legColor = et.legColor;
+  var eyeColor = et.eyeColor;
+
+  // Inflate color shift
+  if (bug.inflate > 0) {
+    var redness = bug.inflate;
+    bodyColor = 'rgb(' + Math.floor(200 + redness * 55) + ',' + Math.floor(100 * (1 - redness)) + ',' + Math.floor(50 * (1 - redness)) + ')';
+  }
+
+  // Stun visual
+  if (bug.stunTimer > 0) {
+    ctx.globalAlpha = 0.6 + Math.sin(Date.now() * 0.02) * 0.2;
+  }
+
+  // Draw based on enemy type
+  var drawType = et.draw;
+  if (drawType === 'myconid' || drawType === 'boss_myconid') {
+    drawMyconid(s, bodyColor, legColor, eyeColor, bug, drawType === 'boss_myconid');
+  } else if (drawType === 'burrower') {
+    drawBurrower(s, bodyColor, legColor, eyeColor, bug);
+  } else if (drawType === 'crystalBeetle' || drawType === 'boss_wyrm') {
+    drawCrystalBeetle(s, bodyColor, legColor, eyeColor, bug, drawType === 'boss_wyrm');
+  } else if (drawType === 'sporeFlyer') {
+    drawSporeFlyer(s, bodyColor, legColor, eyeColor, bug);
+  } else if (drawType === 'lavaCrawler' || drawType === 'boss_magma') {
+    drawLavaCrawler(s, bodyColor, legColor, eyeColor, bug, drawType === 'boss_magma');
+  }
+
+  // Boss HP bar
+  if (bug.isBoss && bug.hp > 0) {
+    ctx.fillStyle = '#333';
+    ctx.fillRect(-s * 0.4, -s * 0.55, s * 0.8, s * 0.08);
+    ctx.fillStyle = bug.hp > bug.maxHp * 0.3 ? '#44CC44' : '#FF4444';
+    ctx.fillRect(-s * 0.4, -s * 0.55, s * 0.8 * (bug.hp / bug.maxHp), s * 0.08);
+  }
+
+  // Stun stars
+  if (bug.stunTimer > 0) {
+    ctx.fillStyle = '#FFD700';
+    for (var si = 0; si < 3; si++) {
+      var starAng = Date.now() * 0.005 + si * 2.1;
+      var starX = Math.cos(starAng) * s * 0.35;
+      var starY = -s * 0.35 + Math.sin(starAng * 2) * s * 0.05;
+      ctx.fillRect(starX - 2, starY - 2, 4, 4);
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  ctx.restore();
+}
+
+function drawMyconid(s, bodyColor, legColor, eyeColor, bug, isBoss) {
+  // Mushroom cap
+  ctx.fillStyle = bodyColor;
+  ctx.beginPath();
+  ctx.ellipse(0, -s * 0.1, s * 0.3, s * 0.2, 0, Math.PI, 0);
+  ctx.fill();
+
+  // Cap spots
+  ctx.fillStyle = shadeColor(bodyColor, 40);
+  ctx.beginPath();
+  ctx.arc(-s * 0.1, -s * 0.18, s * 0.05, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.arc(s * 0.08, -s * 0.22, s * 0.04, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Stem
+  ctx.fillStyle = '#DDC89A';
+  ctx.fillRect(-s * 0.12, -s * 0.1, s * 0.24, s * 0.25);
+
+  // Eyes
+  ctx.fillStyle = '#fff';
+  ctx.beginPath();
+  ctx.arc(s * 0.06, -s * 0.02, s * 0.06, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.arc(-s * 0.06, -s * 0.02, s * 0.06, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = eyeColor;
+  ctx.beginPath();
+  ctx.arc(s * 0.08, -s * 0.02, s * 0.03, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.arc(-s * 0.04, -s * 0.02, s * 0.03, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Legs
+  ctx.fillStyle = legColor;
+  var lAnim = Math.sin(bug.animFrame * Math.PI * 0.5) * 3;
+  ctx.fillRect(-s * 0.1, s * 0.15, s * 0.08, s * 0.12 + lAnim);
+  ctx.fillRect(s * 0.04, s * 0.15, s * 0.08, s * 0.12 - lAnim);
+
+  // Boss crown
+  if (isBoss) {
+    ctx.fillStyle = '#FFD700';
+    ctx.beginPath();
+    ctx.moveTo(-s * 0.2, -s * 0.28);
+    ctx.lineTo(-s * 0.15, -s * 0.42);
+    ctx.lineTo(-s * 0.05, -s * 0.32);
+    ctx.lineTo(s * 0.05, -s * 0.42);
+    ctx.lineTo(s * 0.15, -s * 0.32);
+    ctx.lineTo(s * 0.2, -s * 0.42);
+    ctx.lineTo(s * 0.25, -s * 0.28);
+    ctx.closePath();
+    ctx.fill();
+    // Crown gems
+    ctx.fillStyle = '#FF0000';
+    ctx.beginPath();
+    ctx.arc(0, -s * 0.35, s * 0.03, 0, Math.PI * 2);
+    ctx.fill();
+  }
+}
+
+function drawBurrower(s, bodyColor, legColor, eyeColor, bug) {
+  // Worm-like segmented body
+  var segments = 4;
+  for (var i = segments - 1; i >= 0; i--) {
+    var segX = -i * s * 0.12;
+    var segY = Math.sin(bug.animFrame * Math.PI * 0.5 + i * 0.8) * 2;
+    ctx.fillStyle = i === 0 ? bodyColor : shadeColor(bodyColor, -i * 15);
+    ctx.beginPath();
+    ctx.ellipse(segX, segY, s * 0.12, s * 0.1, 0, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  // Head (front segment)
+  ctx.fillStyle = bodyColor;
+  ctx.beginPath();
+  ctx.ellipse(s * 0.1, 0, s * 0.15, s * 0.13, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Mandibles
+  ctx.strokeStyle = legColor;
+  ctx.lineWidth = 2;
+  var mandAnim = Math.sin(Date.now() * 0.008) * 3;
+  ctx.beginPath();
+  ctx.moveTo(s * 0.22, -s * 0.04);
+  ctx.lineTo(s * 0.3, -s * 0.08 - mandAnim);
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.moveTo(s * 0.22, s * 0.04);
+  ctx.lineTo(s * 0.3, s * 0.08 + mandAnim);
+  ctx.stroke();
+
+  // Eyes
+  ctx.fillStyle = eyeColor;
+  ctx.beginPath();
+  ctx.arc(s * 0.15, -s * 0.05, s * 0.04, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.arc(s * 0.15, s * 0.05, s * 0.04, 0, Math.PI * 2);
+  ctx.fill();
+}
+
+function drawCrystalBeetle(s, bodyColor, legColor, eyeColor, bug, isBoss) {
+  // Crystal shell
+  ctx.fillStyle = bodyColor;
+  ctx.beginPath();
+  ctx.moveTo(-s * 0.25, 0);
+  ctx.lineTo(-s * 0.1, -s * 0.25);
+  ctx.lineTo(s * 0.15, -s * 0.2);
+  ctx.lineTo(s * 0.25, 0);
+  ctx.lineTo(s * 0.15, s * 0.2);
+  ctx.lineTo(-s * 0.1, s * 0.25);
+  ctx.closePath();
+  ctx.fill();
+
+  // Crystal facets
+  ctx.strokeStyle = shadeColor(bodyColor, 40);
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(-s * 0.1, -s * 0.25);
+  ctx.lineTo(0, 0);
+  ctx.lineTo(s * 0.15, -s * 0.2);
+  ctx.moveTo(0, 0);
+  ctx.lineTo(-s * 0.1, s * 0.25);
+  ctx.moveTo(0, 0);
+  ctx.lineTo(s * 0.15, s * 0.2);
+  ctx.stroke();
+
+  // Crystal glow
+  ctx.fillStyle = shadeColor(bodyColor, 60);
+  ctx.globalAlpha = 0.3 + Math.sin(Date.now() * 0.004) * 0.1;
+  ctx.beginPath();
+  ctx.ellipse(0, -s * 0.08, s * 0.08, s * 0.06, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.globalAlpha = 1;
+
+  // Eyes
+  ctx.fillStyle = eyeColor;
+  ctx.beginPath();
+  ctx.arc(s * 0.12, -s * 0.06, s * 0.04, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.arc(s * 0.12, s * 0.06, s * 0.04, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Legs
+  ctx.strokeStyle = legColor;
+  ctx.lineWidth = 2;
+  for (var i = -1; i <= 1; i++) {
+    var lx = i * s * 0.1;
+    var legA = Math.sin((bug.animFrame + i) * Math.PI * 0.5) * 4;
+    ctx.beginPath();
+    ctx.moveTo(lx, s * 0.2);
+    ctx.lineTo(lx - 3, s * 0.32 - legA);
+    ctx.stroke();
+  }
+
+  if (isBoss) {
+    // Wyrm horn
+    ctx.fillStyle = '#FFD700';
+    ctx.beginPath();
+    ctx.moveTo(s * 0.2, -s * 0.15);
+    ctx.lineTo(s * 0.35, -s * 0.35);
+    ctx.lineTo(s * 0.15, -s * 0.2);
+    ctx.closePath();
+    ctx.fill();
+    // HP glow
+    ctx.strokeStyle = '#FFD700';
+    ctx.lineWidth = 1;
+    ctx.globalAlpha = 0.3 + Math.sin(Date.now() * 0.003) * 0.15;
+    ctx.beginPath();
+    ctx.arc(0, 0, s * 0.4, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.globalAlpha = 1;
+  }
+}
+
+function drawSporeFlyer(s, bodyColor, legColor, eyeColor, bug) {
+  // Wings
+  ctx.fillStyle = 'rgba(200,150,220,0.4)';
+  var wingFlap = Math.sin(Date.now() * 0.02) * 8;
+  ctx.save();
+  ctx.rotate((-25 + wingFlap) * Math.PI / 180);
+  ctx.beginPath();
+  ctx.ellipse(-s * 0.05, -s * 0.2, s * 0.18, s * 0.08, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+  ctx.save();
+  ctx.rotate((25 - wingFlap) * Math.PI / 180);
+  ctx.beginPath();
+  ctx.ellipse(-s * 0.05, s * 0.2, s * 0.18, s * 0.08, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+
+  // Body
+  ctx.fillStyle = bodyColor;
+  ctx.beginPath();
+  ctx.ellipse(0, 0, s * 0.2, s * 0.12, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Spore trail
+  if (Math.random() < 0.2) {
+    spawnTrailParticle(
+      bug.px + TILE / 2 + (Math.random() - 0.5) * 4,
+      bug.py + TILE / 2,
+      bodyColor
+    );
+  }
+
+  // Eyes
+  ctx.fillStyle = '#fff';
+  ctx.beginPath();
+  ctx.arc(s * 0.12, -s * 0.04, s * 0.05, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.arc(s * 0.12, s * 0.04, s * 0.05, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = eyeColor;
+  ctx.beginPath();
+  ctx.arc(s * 0.14, -s * 0.04, s * 0.025, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.arc(s * 0.14, s * 0.04, s * 0.025, 0, Math.PI * 2);
+  ctx.fill();
+}
+
+function drawLavaCrawler(s, bodyColor, legColor, eyeColor, bug, isBoss) {
+  // Molten body
+  ctx.fillStyle = bodyColor;
+  ctx.beginPath();
+  ctx.ellipse(0, 0, s * 0.28, s * 0.2, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Magma cracks
+  ctx.strokeStyle = '#FF8800';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(-s * 0.1, -s * 0.15);
+  ctx.lineTo(0, 0);
+  ctx.lineTo(s * 0.1, s * 0.1);
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.moveTo(s * 0.05, -s * 0.12);
+  ctx.lineTo(s * 0.15, s * 0.05);
+  ctx.stroke();
+
+  // Inner glow
+  ctx.fillStyle = '#FF8800';
+  ctx.globalAlpha = 0.3 + Math.sin(Date.now() * 0.006) * 0.15;
+  ctx.beginPath();
+  ctx.ellipse(0, 0, s * 0.15, s * 0.1, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.globalAlpha = 1;
+
+  // Eyes
+  ctx.fillStyle = eyeColor;
+  ctx.beginPath();
+  ctx.arc(s * 0.15, -s * 0.06, s * 0.05, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.arc(s * 0.15, s * 0.06, s * 0.05, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Legs (stubby)
+  ctx.fillStyle = legColor;
+  var lAnim = Math.sin(bug.animFrame * Math.PI * 0.5) * 3;
+  ctx.fillRect(-s * 0.15, s * 0.15, s * 0.08, s * 0.1 + lAnim);
+  ctx.fillRect(s * 0.08, s * 0.15, s * 0.08, s * 0.1 - lAnim);
+  ctx.fillRect(-s * 0.2, -s * 0.15, s * 0.08, s * 0.1);
+  ctx.fillRect(s * 0.14, -s * 0.15, s * 0.08, s * 0.1);
+
+  // Heat shimmer particles
+  if (Math.random() < 0.15) {
+    spawnTrailParticle(bug.px + TILE / 2, bug.py + TILE / 4, '#FF4400');
+  }
+
+  if (isBoss) {
+    // Magma Lord horns
+    ctx.fillStyle = '#CC3300';
+    ctx.beginPath();
+    ctx.moveTo(-s * 0.2, -s * 0.18);
+    ctx.lineTo(-s * 0.25, -s * 0.4);
+    ctx.lineTo(-s * 0.1, -s * 0.2);
+    ctx.closePath();
+    ctx.fill();
+    ctx.beginPath();
+    ctx.moveTo(s * 0.2, -s * 0.18);
+    ctx.lineTo(s * 0.25, -s * 0.4);
+    ctx.lineTo(s * 0.1, -s * 0.2);
+    ctx.closePath();
+    ctx.fill();
+    // Magma Lord crown glow
+    ctx.fillStyle = '#FFD700';
+    ctx.globalAlpha = 0.4;
+    ctx.beginPath();
+    ctx.arc(0, -s * 0.3, s * 0.06, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.globalAlpha = 1;
+  }
+}
+
+// ============================================================
+// HUD
+// ============================================================
+function drawHUD() {
+  var hudY = 0;
+  ctx.fillStyle = '#1a1c2c';
+  ctx.fillRect(0, hudY, W, TILE * 1.6);
+
+  ctx.font = 'bold ' + Math.floor(TILE * 0.45) + 'px monospace';
+
+  // Score
+  ctx.fillStyle = '#f4b41b';
+  ctx.textAlign = 'left';
+  ctx.fillText('SCORE: ' + score, TILE * 0.3, hudY + TILE * 0.5);
+
+  // Level + Zone name
+  ctx.fillStyle = '#3cacd7';
+  ctx.textAlign = 'center';
+  ctx.fillText('LV ' + level, W / 2, hudY + TILE * 0.5);
+  ctx.fillStyle = ZONES[currentZone].spec[0];
+  ctx.font = Math.floor(TILE * 0.28) + 'px monospace';
+  ctx.fillText(ZONES[currentZone].name, W / 2, hudY + TILE * 0.85);
+
+  // High score
+  ctx.fillStyle = '#888';
+  ctx.font = Math.floor(TILE * 0.3) + 'px monospace';
+  ctx.fillText('HI: ' + highScore, W / 2, hudY + TILE * 1.15);
+
+  // Lives
+  ctx.fillStyle = '#FF6644';
+  ctx.textAlign = 'right';
+  ctx.font = 'bold ' + Math.floor(TILE * 0.45) + 'px monospace';
+  for (var i = 0; i < lives; i++) {
+    var lx = W - TILE * 0.5 - i * TILE * 0.7;
+    ctx.fillStyle = statB.color;
+    ctx.beginPath();
+    ctx.arc(lx - 1, hudY + TILE * 0.48, TILE * 0.18, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = '#222';
+    ctx.beginPath();
+    ctx.arc(lx + 2, hudY + TILE * 0.44, 2, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.beginPath();
+    ctx.arc(lx - 4, hudY + TILE * 0.44, 2, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  // Baseling name
+  ctx.fillStyle = statB.color;
+  ctx.font = Math.floor(TILE * 0.28) + 'px monospace';
+  ctx.textAlign = 'right';
+  ctx.fillText(statB.name, W - TILE * 0.3, hudY + TILE * 0.85);
+
+  // Power-up indicators
+  var indicY = hudY + TILE * 1.0;
+  ctx.textAlign = 'left';
+  if (shieldTimer > 0) {
+    ctx.fillStyle = '#3cacd7';
+    ctx.font = Math.floor(TILE * 0.3) + 'px monospace';
+    ctx.fillText('DIVER SHIELD ' + Math.ceil(shieldTimer) + 's', TILE * 0.3, indicY);
+    indicY += TILE * 0.35;
+  }
+  if (speedTimer > 0) {
+    ctx.fillStyle = '#38d973';
+    ctx.font = Math.floor(TILE * 0.3) + 'px monospace';
+    ctx.fillText('SWIFT CURRENT ' + Math.ceil(speedTimer) + 's', TILE * 0.3, indicY);
+  }
+
+  // Boss HP bar (large, at top)
+  if (bossActive) {
+    for (var bi = 0; bi < bugs.length; bi++) {
+      var boss = bugs[bi];
+      if (boss.isBoss && !boss.dead) {
+        var barW = W * 0.6;
+        var barH = TILE * 0.2;
+        var barX = (W - barW) / 2;
+        var barY = hudY + TILE * 1.35;
+        ctx.fillStyle = '#222';
+        ctx.fillRect(barX, barY, barW, barH);
+        ctx.fillStyle = boss.hp > boss.maxHp * 0.3 ? '#CC3333' : '#FF0000';
+        ctx.fillRect(barX, barY, barW * (boss.hp / boss.maxHp), barH);
+        ctx.strokeStyle = '#666';
+        ctx.lineWidth = 1;
+        ctx.strokeRect(barX, barY, barW, barH);
+        ctx.fillStyle = '#fff';
+        ctx.font = Math.floor(TILE * 0.22) + 'px monospace';
+        ctx.textAlign = 'center';
+        ctx.fillText(boss.enemyDef.name + ' HP: ' + boss.hp + '/' + boss.maxHp, W / 2, barY - 2);
+        break;
+      }
+    }
+  }
+}
+
+// ============================================================
+// TITLE SCREEN
+// ============================================================
+function drawTitle() {
+  // Art background
+  if (window.TasernArt && TasernArt._auto) {
+    var _bgImg = TasernArt.getImg('art/backgrounds/' + TasernArt._auto.bg + (TasernArt._auto.bg.indexOf('bg-') === 0 || TasernArt._auto.bg === 'adventure-level1' || TasernArt._auto.bg === 'tavern-bg' ? '.webp' : '.jpg'));
+    if (_bgImg) { TasernArt.drawCover(ctx, _bgImg); ctx.fillStyle = 'rgba(0,0,0,0.55)'; ctx.fillRect(0, 0, W, H); }
+  }
+  ctx.fillStyle = C_BG;
+  ctx.fillRect(0, 0, W, H);
+  var _sbg = seaImg('seafloor');
+  if (_sbg) { ctx.drawImage(_sbg, 0, 0, W, H); ctx.fillStyle = 'rgba(6,14,26,0.5)'; ctx.fillRect(0, 0, W, H); }
+
+  // Animated dirt background
+  for (var y = 0; y < ROWS + 2; y++) {
+    for (var x = 0; x < COLS; x++) {
+      if ((x + y + Math.floor(Date.now() / 2000)) % 7 === 0) {
+        var lyr = Math.min(3, Math.floor(y / 4));
+        ctx.fillStyle = ZONES[lyr].dirt[0];
+        ctx.globalAlpha = 0.12;
+        ctx.fillRect(x * TILE, y * TILE, TILE, TILE);
+      }
+    }
+  }
+  ctx.globalAlpha = 1;
+
+  // Title
+  var titleY = H * 0.16;
+  ctx.save();
+  ctx.textAlign = 'center';
+
+  // Shadow
+  ctx.fillStyle = '#000';
+  ctx.font = 'bold ' + Math.floor(TILE * 2.0) + 'px monospace';
+  ctx.fillText('SEA', W / 2 + 3, titleY + 3);
+  ctx.fillText('FLOOR', W / 2 + 3, titleY + TILE * 2.0 + 3);
+
+  // Main title
+  ctx.fillStyle = '#a855f7';
+  ctx.fillText('SEA', W / 2, titleY);
+  ctx.fillStyle = '#38d973';
+  ctx.fillText('FLOOR', W / 2, titleY + TILE * 2.0);
+
+  // Subtitle
+  ctx.font = Math.floor(TILE * 0.5) + 'px monospace';
+  ctx.fillStyle = '#7a444a';
+  ctx.fillText('Salvage the Sea Floor for Sunken Loot', W / 2, titleY + TILE * 3.2);
+
+  // Instructions (NES style)
+  var instY = H * 0.53;
+  ctx.font = Math.floor(TILE * 0.4) + 'px monospace';
+
+  ctx.fillStyle = '#AAA';
+  ctx.fillText('[ARROWS / WASD]  Dig & Swim', W / 2, instY);
+  ctx.fillText('[SPACE]  Pump & Pop Eels', W / 2, instY + TILE * 0.65);
+  ctx.fillText('[R]  Drop Boulders for Combos!', W / 2, instY + TILE * 1.3);
+
+  // Arcade stat preview (5 race stats in their meta colors)
+  var _sel = (window.BaselingPlayer && BaselingPlayer.getSelected) ? BaselingPlayer.getSelected() : null;
+  if (_sel && _sel.stats && window.BaselingPlayer) {
+    var _meta = BaselingPlayer.STAT_META, _keys = BaselingPlayer.STAT_KEYS;
+    var _gap = TILE * 1.7, _sx = W / 2 - _gap * 2;
+    ctx.font = Math.floor(TILE * 0.3) + 'px monospace';
+    for (var _i = 0; _i < _keys.length; _i++) {
+      var _mm = _meta[_keys[_i]];
+      ctx.fillStyle = _mm.color;
+      ctx.fillText(_mm.label + ' ' + _sel.stats[_keys[_i]], _sx + _i * _gap, instY + TILE * 2.2);
+    }
+  }
+
+  // High score
+  if (highScore > 0) {
+    ctx.fillStyle = '#f4b41b';
+    ctx.font = Math.floor(TILE * 0.4) + 'px monospace';
+    ctx.fillText('High Score: ' + highScore, W / 2, instY + TILE * 2.8);
+  }
+
+  // Start prompt
+  var pulse = Math.sin(Date.now() * 0.004) * 0.3 + 0.7;
+  ctx.globalAlpha = pulse;
+  ctx.fillStyle = '#f4b41b';
+  ctx.font = 'bold ' + Math.floor(TILE * 0.55) + 'px monospace';
+  ctx.fillText('PRESS ANY KEY TO START', W / 2, H * 0.9);
+  ctx.globalAlpha = 1;
+
+  // Selected baseling preview sprite (idle bob) above the name
+  if (!drawSelectedBaseling(ctx, W / 2, H * 0.72, TILE * 1.6, { anim: 'idle', frame: frame })) {
+    // no sprite (e.g. Wimmple) — skip; the deco enemies + title carry the screen
+  }
+
+  // Selected baseling name (Base-blue accent)
+  ctx.fillStyle = '#0052FF';
+  ctx.font = 'bold ' + Math.floor(TILE * 0.4) + 'px monospace';
+  ctx.fillText((_sel ? _sel.charName : 'WIMMPLE') + (_sel && _sel.tokenId != null ? ' #' + _sel.tokenId : ''), W / 2, H * 0.80);
+
+  // SELECT BASELING prompt (Base-blue)
+  ctx.fillStyle = '#0052FF';
+  ctx.font = 'bold ' + Math.floor(TILE * 0.4) + 'px monospace';
+  ctx.fillText('[C] SELECT BASELING', W / 2, H * 0.85);
+
+  // Wallet connect hint when no wallet
+  if (window.NftLoader && !window.NftLoader.wallet && window.ethereum) {
+    ctx.globalAlpha = 0.6;
+    ctx.fillStyle = '#4ecdc4';
+    ctx.font = Math.floor(TILE * 0.32) + 'px monospace';
+    ctx.fillText('Press W to connect wallet for your own baselings', W / 2, H * 0.95);
+    ctx.globalAlpha = 1;
+  }
+
+  // Tasern enemy decorations
+  var bugPhase = Date.now() * 0.001;
+  drawDecoEnemy(W * 0.12, H * 0.28, bugPhase, 'myconid');
+  drawDecoEnemy(W * 0.88, H * 0.24, bugPhase + 1, 'sporeFlyer');
+  drawDecoEnemy(W * 0.5, H * 0.7, bugPhase + 2, 'crystalBeetle');
+  drawDecoEnemy(W * 0.25, H * 0.68, bugPhase + 3, 'burrower');
+
+  ctx.restore();
+}
+
+function drawDecoEnemy(x, y, phase, type) {
+  var bob = Math.sin(phase * 2) * 5;
+  ctx.save();
+  ctx.translate(x, y + bob);
+  var s = TILE * 1.0;
+  var et = ENEMY_TYPES[type];
+  if (!et) { ctx.restore(); return; }
+  ctx.fillStyle = et.color;
+  ctx.beginPath();
+  ctx.ellipse(0, 0, s * 0.3, s * 0.22, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = '#fff';
+  ctx.beginPath();
+  ctx.arc(s * 0.18, -s * 0.06, s * 0.07, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.arc(s * 0.18, s * 0.06, s * 0.07, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = et.eyeColor;
+  ctx.beginPath();
+  ctx.arc(s * 0.2, -s * 0.06, s * 0.035, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.arc(s * 0.2, s * 0.06, s * 0.035, 0, Math.PI * 2);
+  ctx.fill();
+  // Name tag
+  ctx.fillStyle = '#666';
+  ctx.font = Math.floor(s * 0.25) + 'px monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText(et.name, 0, s * 0.4);
+  ctx.restore();
+}
+
+// ============================================================
+// TUTORIAL OVERLAY
+// ============================================================
+function drawTutorial() {
+  ctx.fillStyle = 'rgba(0,0,0,0.85)';
+  ctx.fillRect(0, 0, W, H);
+
+  ctx.textAlign = 'center';
+
+  ctx.fillStyle = '#f4b41b';
+  ctx.font = 'bold ' + Math.floor(TILE * 1.0) + 'px monospace';
+  ctx.fillText('HOW TO PLAY', W / 2, H * 0.12);
+
+  var tutY = H * 0.2;
+  var lineH = TILE * 0.7;
+  ctx.font = Math.floor(TILE * 0.38) + 'px monospace';
+
+  var tutorials = [
+    { color: '#AAA',    text: 'Your baseling bug burrows the spore tunnels!' },
+    { color: '#f4b41b', text: '' },
+    { color: '#3cacd7', text: '[ARROWS/WASD] - Burrow through dirt & move' },
+    { color: '#3cacd7', text: '[SPACE] - Pump air into spores until they POP!' },
+    { color: '#f4b41b', text: '' },
+    { color: '#e6482e', text: 'Drop rocks on fungal creatures for combos!' },
+    { color: '#38d973', text: 'Find POOP tokens & spore gems in the dirt' },
+    { color: '#a855f7', text: 'Fungal boss guards every 5th garden' },
+    { color: '#f4b41b', text: '' },
+    { color: '#888',    text: 'STR = Dig Power   DEX = Speed   CON = Toughness' },
+    { color: '#888',    text: 'INT = Score Bonus  WIS = Detection  CHA = Combos' },
+    { color: '#f4b41b', text: '' },
+    { color: '#a855f7', text: 'Zones: Mycelium > Fungal > Spore > Magma Rot' }
+  ];
+
+  for (var i = 0; i < tutorials.length; i++) {
+    if (tutorials[i].text) {
+      ctx.fillStyle = tutorials[i].color;
+      ctx.fillText(tutorials[i].text, W / 2, tutY + i * lineH);
+    }
+  }
+
+  var pulse = Math.sin(Date.now() * 0.004) * 0.3 + 0.7;
+  ctx.globalAlpha = pulse;
+  ctx.fillStyle = '#f4b41b';
+  ctx.font = 'bold ' + Math.floor(TILE * 0.5) + 'px monospace';
+  ctx.fillText('PRESS ANY KEY TO BEGIN', W / 2, H * 0.92);
+  ctx.globalAlpha = 1;
+}
+
+// ============================================================
+// GAME OVER SCREEN
+// ============================================================
+function drawGameOver() {
+  // Art background
+  if (window.TasernArt && TasernArt._auto) {
+    var _eImg = TasernArt.getImg('art/enemies/enemy-' + TasernArt._auto.enemy + '.jpg');
+    if (_eImg) { ctx.fillStyle = '#0a0a15'; ctx.fillRect(0, 0, W, H); ctx.globalAlpha = 0.3; TasernArt.drawCover(ctx, _eImg); ctx.globalAlpha = 1; ctx.fillStyle = 'rgba(0,0,0,0.5)'; ctx.fillRect(0, 0, W, H); }
+  }
+  ctx.fillStyle = 'rgba(0,0,0,0.75)';
+  ctx.fillRect(0, 0, W, H);
+
+  ctx.textAlign = 'center';
+
+  ctx.fillStyle = '#e6482e';
+  ctx.font = 'bold ' + Math.floor(TILE * 1.6) + 'px monospace';
+  ctx.fillText('GAME', W / 2, H * 0.25);
+  ctx.fillText('OVER', W / 2, H * 0.25 + TILE * 1.7);
+
+  ctx.fillStyle = '#f4b41b';
+  ctx.font = 'bold ' + Math.floor(TILE * 0.65) + 'px monospace';
+  ctx.fillText('Score: ' + score, W / 2, H * 0.52);
+
+  if (score >= highScore && score > 0) {
+    var pulse = Math.sin(Date.now() * 0.005) * 0.3 + 0.7;
+    ctx.globalAlpha = pulse;
+    ctx.fillStyle = '#f4b41b';
+    ctx.font = 'bold ' + Math.floor(TILE * 0.5) + 'px monospace';
+    ctx.fillText('NEW HIGH SCORE!', W / 2, H * 0.6);
+    ctx.globalAlpha = 1;
+  } else {
+    ctx.fillStyle = '#888';
+    ctx.font = Math.floor(TILE * 0.4) + 'px monospace';
+    ctx.fillText('Best: ' + highScore, W / 2, H * 0.6);
+  }
+
+  ctx.fillStyle = '#fff';
+  ctx.font = Math.floor(TILE * 0.45) + 'px monospace';
+  ctx.fillText('Level Reached: ' + level, W / 2, H * 0.68);
+  ctx.fillStyle = ZONES[currentZone].spec[0];
+  ctx.fillText('Zone: ' + ZONES[currentZone].name, W / 2, H * 0.74);
+
+  // Stats summary
+  ctx.fillStyle = '#666';
+  ctx.font = Math.floor(TILE * 0.3) + 'px monospace';
+  ctx.fillText(statB.name + ' (LV' + statB.level + ') - STR:' + statB.str + ' DEX:' + statB.dex + ' CON:' + statB.con + ' INT:' + statB.int + ' WIS:' + statB.wis + ' CHA:' + statB.cha, W / 2, H * 0.8);
+
+  var pulse2 = Math.sin(Date.now() * 0.004) * 0.3 + 0.7;
+  ctx.globalAlpha = pulse2;
+  ctx.fillStyle = '#3cacd7';
+  ctx.font = 'bold ' + Math.floor(TILE * 0.5) + 'px monospace';
+  ctx.fillText('PRESS ANY KEY', W / 2, H * 0.9);
+  ctx.globalAlpha = 1;
+}
+
+// ============================================================
+// LEVEL COMPLETE
+// ============================================================
+function drawLevelComplete() {
+  ctx.fillStyle = 'rgba(0,0,0,0.5)';
+  ctx.fillRect(0, 0, W, H);
+
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#38d973';
+  ctx.font = 'bold ' + Math.floor(TILE * 1.1) + 'px monospace';
+  ctx.fillText('DEPTH ' + level, W / 2, H * 0.32);
+  ctx.fillText('SALVAGED!', W / 2, H * 0.32 + TILE * 1.2);
+
+  var lvlBonus = Math.floor(level * 100 * getScoreMult());
+  ctx.fillStyle = '#f4b41b';
+  ctx.font = Math.floor(TILE * 0.55) + 'px monospace';
+  ctx.fillText('Bonus: +' + lvlBonus, W / 2, H * 0.58);
+  ctx.fillStyle = '#fff';
+  ctx.fillText('Score: ' + score, W / 2, H * 0.67);
+
+  // Zone preview for next level
+  var nextZone = getZoneForLevel(level + 1);
+  if (nextZone !== currentZone) {
+    ctx.fillStyle = ZONES[nextZone].spec[0];
+    ctx.font = Math.floor(TILE * 0.4) + 'px monospace';
+    ctx.fillText('Entering: ' + ZONES[nextZone].name, W / 2, H * 0.78);
+  }
+}
+
+// ============================================================
+// BOSS INTRO
+// ============================================================
+function drawBossIntro() {
+  ctx.fillStyle = 'rgba(0,0,0,0.8)';
+  ctx.fillRect(0, 0, W, H);
+
+  ctx.textAlign = 'center';
+
+  // Warning flash
+  var warningPulse = Math.sin(Date.now() * 0.008) * 0.4 + 0.6;
+  ctx.globalAlpha = warningPulse;
+  ctx.fillStyle = '#FF0000';
+  ctx.font = 'bold ' + Math.floor(TILE * 0.6) + 'px monospace';
+  ctx.fillText('WARNING', W / 2, H * 0.2);
+  ctx.globalAlpha = 1;
+
+  ctx.fillStyle = '#f4b41b';
+  ctx.font = 'bold ' + Math.floor(TILE * 1.2) + 'px monospace';
+  ctx.fillText('BOSS', W / 2, H * 0.38);
+
+  // Find boss and show its name
+  for (var bi = 0; bi < bugs.length; bi++) {
+    if (bugs[bi].isBoss) {
+      ctx.fillStyle = bugs[bi].enemyDef.color;
+      ctx.font = 'bold ' + Math.floor(TILE * 0.7) + 'px monospace';
+      ctx.fillText(bugs[bi].enemyDef.name, W / 2, H * 0.52);
+      ctx.fillStyle = '#888';
+      ctx.font = Math.floor(TILE * 0.4) + 'px monospace';
+      ctx.fillText('HP: ' + bugs[bi].maxHp, W / 2, H * 0.62);
+      break;
+    }
+  }
+
+  ctx.fillStyle = '#AAA';
+  ctx.font = Math.floor(TILE * 0.38) + 'px monospace';
+  ctx.fillText('Use boulders and powder kegs to deal extra damage!', W / 2, H * 0.75);
+
+  var pulse = Math.sin(Date.now() * 0.006) * 0.3 + 0.7;
+  ctx.globalAlpha = pulse;
+  ctx.fillStyle = '#FF4444';
+  ctx.font = 'bold ' + Math.floor(TILE * 0.45) + 'px monospace';
+  ctx.fillText('DEFEND THE WRECK', W / 2, H * 0.88);
+  ctx.globalAlpha = 1;
+}
+
+// ============================================================
+// ZONE TRANSITION EFFECT
+// ============================================================
+function drawZoneTransition() {
+  if (zoneTransitionAlpha > 0) {
+    ctx.fillStyle = ZONES[currentZone].border;
+    ctx.globalAlpha = zoneTransitionAlpha * 0.3;
+    ctx.fillRect(0, 0, W, H);
+    ctx.globalAlpha = 1;
+
+    if (zoneTransitionAlpha > 0.5) {
+      ctx.fillStyle = '#fff';
+      ctx.globalAlpha = (zoneTransitionAlpha - 0.5) * 0.8;
+      ctx.font = 'bold ' + Math.floor(TILE * 0.8) + 'px monospace';
+      ctx.textAlign = 'center';
+      ctx.fillText(ZONES[currentZone].name, W / 2, H / 2);
+      ctx.globalAlpha = 1;
+    }
+  }
+}
+
+// ============================================================
+// MOBILE TOUCH CONTROLS
+// ============================================================
+var touchDpad = { active: false, x: 0, y: 0, dir: DIR.NONE };
+var touchAction = { active: false };
+var DPAD_SIZE = 120, DPAD_MARGIN = 20;
+var ACTION_SIZE = 70;
+var isMobile = false;
+
+function checkMobile() {
+  isMobile = 'ontouchstart' in window || navigator.maxTouchPoints > 0;
+}
+checkMobile();
+
+function getTouchPos(touch) {
+  var rect = canvas.getBoundingClientRect();
+  return { x: touch.clientX - rect.left, y: touch.clientY - rect.top };
+}
+
+function drawTouchControls() {
+  if (!isMobile) return;
+
+  var dpadX = DPAD_MARGIN + DPAD_SIZE / 2;
+  var dpadY = H - DPAD_MARGIN - DPAD_SIZE / 2;
+  var actionX = W - DPAD_MARGIN - ACTION_SIZE / 2;
+  var actionY = H - DPAD_MARGIN - ACTION_SIZE / 2;
+
+  ctx.globalAlpha = 0.25;
+
+  // D-pad
+  ctx.fillStyle = '#444';
+  ctx.beginPath();
+  ctx.arc(dpadX, dpadY, DPAD_SIZE / 2, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.fillStyle = '#aaa';
+  var arrowSize = 15;
+  // Up
+  ctx.beginPath();
+  ctx.moveTo(dpadX, dpadY - 30);
+  ctx.lineTo(dpadX - arrowSize, dpadY - 15);
+  ctx.lineTo(dpadX + arrowSize, dpadY - 15);
+  ctx.fill();
+  // Down
+  ctx.beginPath();
+  ctx.moveTo(dpadX, dpadY + 30);
+  ctx.lineTo(dpadX - arrowSize, dpadY + 15);
+  ctx.lineTo(dpadX + arrowSize, dpadY + 15);
+  ctx.fill();
+  // Left
+  ctx.beginPath();
+  ctx.moveTo(dpadX - 30, dpadY);
+  ctx.lineTo(dpadX - 15, dpadY - arrowSize);
+  ctx.lineTo(dpadX - 15, dpadY + arrowSize);
+  ctx.fill();
+  // Right
+  ctx.beginPath();
+  ctx.moveTo(dpadX + 30, dpadY);
+  ctx.lineTo(dpadX + 15, dpadY - arrowSize);
+  ctx.lineTo(dpadX + 15, dpadY + arrowSize);
+  ctx.fill();
+
+  // Action button
+  ctx.fillStyle = '#a855f7';
+  ctx.beginPath();
+  ctx.arc(actionX, actionY, ACTION_SIZE / 2, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = '#fff';
+  ctx.font = 'bold ' + Math.floor(ACTION_SIZE * 0.3) + 'px monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText('PUMP', actionX, actionY + ACTION_SIZE * 0.1);
+
+  ctx.globalAlpha = 1;
+}
+
+canvas.addEventListener('touchstart', function(e) {
+  e.preventDefault();
+  ensureAudio();
+
+  if (state === 'title') { startGame(); return; }
+  if (state === 'tutorial') { state = 'playing'; return; }
+  if (state === 'gameOver') { state = 'title'; return; }
+  if (state === 'bossIntro') return;
+
+  for (var ti = 0; ti < e.changedTouches.length; ti++) {
+    var touch = e.changedTouches[ti];
+    var pos = getTouchPos(touch);
+    var dpadX = DPAD_MARGIN + DPAD_SIZE / 2;
+    var dpadY = H - DPAD_MARGIN - DPAD_SIZE / 2;
+    var actionX = W - DPAD_MARGIN - ACTION_SIZE / 2;
+    var actionY = H - DPAD_MARGIN - ACTION_SIZE / 2;
+
+    var adx = pos.x - actionX, ady = pos.y - actionY;
+    if (adx * adx + ady * ady < ACTION_SIZE * ACTION_SIZE) {
+      touchAction.active = true;
+      inputPump = true;
+      tryPump();
+      continue;
+    }
+
+    var ddx = pos.x - dpadX, ddy = pos.y - dpadY;
+    if (ddx * ddx + ddy * ddy < DPAD_SIZE * DPAD_SIZE) {
+      touchDpad.active = true;
+      if (Math.abs(ddx) > Math.abs(ddy)) {
+        inputDir = ddx > 0 ? DIR.RIGHT : DIR.LEFT;
+      } else {
+        inputDir = ddy > 0 ? DIR.DOWN : DIR.UP;
+      }
+    }
+  }
+}, { passive: false });
+
+canvas.addEventListener('touchmove', function(e) {
+  e.preventDefault();
+  for (var ti = 0; ti < e.changedTouches.length; ti++) {
+    var touch = e.changedTouches[ti];
+    var pos = getTouchPos(touch);
+    var dpadX = DPAD_MARGIN + DPAD_SIZE / 2;
+    var dpadY = H - DPAD_MARGIN - DPAD_SIZE / 2;
+    var ddx = pos.x - dpadX, ddy = pos.y - dpadY;
+    if (ddx * ddx + ddy * ddy < DPAD_SIZE * DPAD_SIZE * 2) {
+      if (Math.abs(ddx) > Math.abs(ddy)) {
+        inputDir = ddx > 0 ? DIR.RIGHT : DIR.LEFT;
+      } else {
+        inputDir = ddy > 0 ? DIR.DOWN : DIR.UP;
+      }
+    }
+  }
+}, { passive: false });
+
+canvas.addEventListener('touchend', function(e) {
+  e.preventDefault();
+  if (e.touches.length === 0) {
+    inputDir = DIR.NONE;
+    inputPump = false;
+    touchDpad.active = false;
+    touchAction.active = false;
+  }
+}, { passive: false });
+
+// ============================================================
+// KEYBOARD INPUT (NES-style controls)
+// ============================================================
+window.addEventListener('keydown', function(e) {
+  ensureAudio();
+  keys[e.code] = true;
+
+  if (state === 'title') {
+    if (picking) return; // character-select overlay open — ignore game input
+    // C opens the baseling picker
+    if (e.code === 'KeyC') {
+      if (window.BaselingPlayer) {
+        picking = true;
+        BaselingPlayer.select(function () { recomputeStats(); picking = false; });
+      }
+      return;
+    }
+    if ((e.code === 'KeyW') && window.NftLoader && !window.NftLoader.wallet && window.ethereum) {
+      window.NftLoader.connectWallet().then(function(addr) {
+        if (addr) window.NftLoader.checkNFTs().then(function(chars) {
+          if (chars.length > 0) window.NftLoader.selectedCharacter = chars[0];
+        });
+      });
+      return;
+    }
+    startGame();
+    return;
+  }
+  if (state === 'tutorial') {
+    state = 'playing';
+    return;
+  }
+  if (state === 'gameOver') {
+    state = 'title';
+    return;
+  }
+
+  // NES-style: Arrows, WASD, or IJKL
+  if (e.code === 'ArrowUp' || e.code === 'KeyW' || e.code === 'KeyI') inputDir = DIR.UP;
+  else if (e.code === 'ArrowRight' || e.code === 'KeyD' || e.code === 'KeyL') inputDir = DIR.RIGHT;
+  else if (e.code === 'ArrowDown' || e.code === 'KeyS' || e.code === 'KeyK') inputDir = DIR.DOWN;
+  else if (e.code === 'ArrowLeft' || e.code === 'KeyA' || e.code === 'KeyJ') inputDir = DIR.LEFT;
+
+  // Space, Z, or X for pump (NES A/B buttons)
+  if (e.code === 'Space' || e.code === 'KeyZ' || e.code === 'KeyX') {
+    e.preventDefault();
+    inputPump = true;
+    tryPump();
+  }
+});
+
+window.addEventListener('keyup', function(e) {
+  keys[e.code] = false;
+
+  // Update direction based on remaining held keys
+  if (keys['ArrowUp'] || keys['KeyW'] || keys['KeyI']) inputDir = DIR.UP;
+  else if (keys['ArrowRight'] || keys['KeyD'] || keys['KeyL']) inputDir = DIR.RIGHT;
+  else if (keys['ArrowDown'] || keys['KeyS'] || keys['KeyK']) inputDir = DIR.DOWN;
+  else if (keys['ArrowLeft'] || keys['KeyA'] || keys['KeyJ']) inputDir = DIR.LEFT;
+  else inputDir = DIR.NONE;
+
+  if (e.code === 'Space' || e.code === 'KeyZ' || e.code === 'KeyX') inputPump = false;
+});
+
+// ============================================================
+// GAME FLOW
+// ============================================================
+function startGame() {
+  score = 0;
+  lives = 3 + getBonusLives();
+  level = 1;
+  genDirtTextures();
+  initLevel();
+  if (!tutorialShown) {
+    tutorialShown = true;
+    state = 'tutorial';
+  } else {
+    state = 'playing';
+  }
+}
+
+function nextLevel() {
+  level++;
+  genDirtTextures();
+  initLevel();
+  if (state !== 'bossIntro') {
+    state = 'playing';
+  }
+}
+
+// ============================================================
+// MAIN LOOP
+// ============================================================
+var lastTime = 0;
+
+function gameLoop(timestamp) {
+  var dt = Math.min((timestamp - lastTime) / 1000, 0.05);
+  lastTime = timestamp;
+  frame++; // global animation clock for baseling sprite animation
+
+  // Clear
+  ctx.fillStyle = C_BG;
+  ctx.fillRect(0, 0, W, H);
+
+  // Apply screen shake
+  updateShake(dt);
+  if (shakeX !== 0 || shakeY !== 0) {
+    ctx.save();
+    ctx.translate(shakeX, shakeY);
+  }
+
+  if (state === 'title') {
+    drawTitle();
+  } else if (state === 'tutorial') {
+    drawTutorial();
+  } else if (state === 'playing') {
+    movePlayer(dt);
+    updateBugs(dt);
+    updateRocks(dt);
+    updateHazards(dt);
+    updateTimers(dt);
+    updateParticles(dt);
+    updateFlash(dt);
+    updateScorePopups(dt);
+    if (zoneTransitionAlpha > 0) zoneTransitionAlpha -= dt * 0.8;
+
+    drawGrid();
+    drawPowerups();
+    drawRocks();
+    for (var bi = 0; bi < bugs.length; bi++) drawBug(bugs[bi]);
+    drawPlayer();
+    drawParticles();
+    drawScorePopups();
+    drawFlash();
+    drawZoneTransition();
+    drawHUD();
+    drawTouchControls();
+  } else if (state === 'dying') {
+    stateTimer -= dt;
+    updateParticles(dt);
+    updateFlash(dt);
+    updateScorePopups(dt);
+
+    drawGrid();
+    drawPowerups();
+    drawRocks();
+    for (var di = 0; di < bugs.length; di++) drawBug(bugs[di]);
+    drawParticles();
+    drawScorePopups();
+    drawFlash();
+    drawHUD();
+
+    if (stateTimer <= 0) {
+      if (lives <= 0) {
+        state = 'gameOver';
+        if (score > highScore) {
+          highScore = score;
+          try { localStorage.setItem('seafloor_hi', String(highScore)); } catch(e) { console.warn('localStorage save failed'); }
+        }
+        SFX.gameOver();
+      } else {
+        player.dead = false;
+        player.x = 1;
+        player.y = 2;
+        player.px = 1 * TILE;
+        player.py = 4 * TILE;
+        player.invincible = 2;
+        player.pumping = false;
+        player.pumpTarget = null;
+        state = 'playing';
+      }
+    }
+  } else if (state === 'levelComplete') {
+    stateTimer -= dt;
+    updateParticles(dt);
+    updateScorePopups(dt);
+
+    drawGrid();
+    drawRocks();
+    drawPlayer();
+    drawParticles();
+    drawScorePopups();
+    drawHUD();
+    drawLevelComplete();
+
+    if (stateTimer <= 0) {
+      nextLevel();
+    }
+  } else if (state === 'gameOver') {
+    drawGrid();
+    drawRocks();
+    drawHUD();
+    drawGameOver();
+  } else if (state === 'bossIntro') {
+    stateTimer -= dt;
+    drawGrid();
+    drawRocks();
+    drawPlayer();
+    drawHUD();
+    drawBossIntro();
+
+    if (stateTimer <= 0) {
+      state = 'playing';
+      SFX.bossRoar();
+      triggerShake(8, 0.4);
+    }
+  }
+
+  // Undo shake transform
+  if (shakeX !== 0 || shakeY !== 0) {
+    ctx.restore();
+  }
+
+  requestAnimationFrame(gameLoop);
+}
+
+// Kick off
+genDirtTextures();
+requestAnimationFrame(gameLoop);
+
+})();
+</script>
+<script src="/track.js" defer></script></body>
+</html>

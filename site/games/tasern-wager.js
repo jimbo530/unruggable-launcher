@@ -25,14 +25,15 @@ const TREASURY_FEE = 0.05; // 5% to treasury
 
 // Wager-ready games list
 const WAGER_GAMES = {
-  'poop-out':         { name: 'Poop Out',           type: 'score',   description: 'Breakout - highest score wins' },
+  'baseling-boxing':  { name: 'Baseling Boxing',    type: 'score',   description: 'Boxing - highest score wins' },
   'micro-baselings':  { name: 'Micro Baselings',    type: 'time',    description: 'Racing - fastest lap wins' },
   'token-columns':    { name: 'Token Columns',      type: 'score',   description: 'Puzzle - highest score wins' },
-  'super-dodge':      { name: 'Super Dodge',        type: 'score',   description: 'Dodgeball - most wins' },
+  'spore-dodgeball':      { name: 'Super Dodge',        type: 'score',   description: 'Dodgeball - most wins' },
   'baseling-grind':    { name: 'Baseling Grind',          type: 'score',   description: 'Skateboarding - trick score' },
-  'snow-bros':        { name: 'Snow Bros',          type: 'score',   description: 'Action - highest score wins' },
+  'frost-poppers':     { name: 'Frost Poppers',      type: 'score',   description: 'Action - highest score wins' },
   'streets-of-tasern':{ name: 'Streets of Tasern',  type: 'score',   description: 'Beat-em-up - highest score wins' },
-  'spore-breaker':    { name: 'Spore Breaker',      type: 'score',   description: 'Breakout - highest score wins' },
+  'spore-breaker':    { name: 'Spore Breaker',      type: 'score',   description: 'Brick-smash - highest score wins' },
+  'hull-breaker':     { name: 'Hull Breaker',       type: 'score',   description: 'Brick-smash - smash the hull, highest score wins' },
   'rc-reactor':       { name: 'RC Reactor',         type: 'time',    description: 'Racing - fastest time wins' },
   'spore-tributaries':{ name: 'Spore Tributaries',  type: 'score',   description: 'Boat racing - highest score wins' }
 };

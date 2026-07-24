@@ -52,7 +52,7 @@ Naval exploration and combat across a procedurally-arranged archipelago. Players
 
 ---
 
-### 9. Maniac Mansion
+### 9. Spore Mansion
 
 A point-and-click adventure game built for browser play. Players explore interconnected rooms, collecting items and solving environmental puzzles to progress through the story. Multiple solution paths exist for key puzzles, and item combinations create unexpected results. The verb-based interaction system (Look, Use, Take, Talk, Combine) gives players agency in how they approach each room. Touch controls adapt the point-and-click paradigm perfectly to mobile play.
 

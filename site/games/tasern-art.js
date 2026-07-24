@@ -34,12 +34,25 @@
   var ITEMS = ['salad','rice','burger','berry','orange','backpack','sprout','farmer','bloom-eth','bloom-btc','coin-btc','coin-eth','pickup-hp','pickup-magic'];
 
   // ── Loader ──────────────────────────────────────────────────
+  // Enemy sprites now have transparent cut-out PNGs alongside the old
+  // dark-background JPGs. Any request for art/enemies/enemy-<name>.jpg
+  // (name in ENEMIES) is redirected to the .png, with automatic fallback
+  // to the .jpg if the PNG fails to load. The cache stays keyed by the
+  // REQUESTED path, so existing getImg('...jpg') callers keep working.
+  var ENEMY_JPG_RE = /^art\/enemies\/enemy-([a-z-]+)\.jpg$/;
   function load(path, cb) {
     if (ready[path]) { if (cb) cb(cache[path]); return cache[path]; }
     if (loading[path]) { if (cb) loading[path].push(cb); return null; }
     loading[path] = cb ? [cb] : [];
     var img = new Image();
     img.crossOrigin = 'anonymous';
+    var src = path;
+    var m = ENEMY_JPG_RE.exec(path);
+    var triedPng = false;
+    if (m && ENEMIES.indexOf(m[1]) !== -1) {
+      src = path.slice(0, -4) + '.png';
+      triedPng = true;
+    }
     img.onload = function() {
       cache[path] = img;
       ready[path] = true;
@@ -48,9 +61,15 @@
       for (var i = 0; i < cbs.length; i++) cbs[i](img);
     };
     img.onerror = function() {
+      if (triedPng) {
+        // PNG missing/broken — fall back to the original JPG.
+        triedPng = false;
+        img.src = path;
+        return;
+      }
       delete loading[path];
     };
-    img.src = path;
+    img.src = src;
     return null;
   }
 

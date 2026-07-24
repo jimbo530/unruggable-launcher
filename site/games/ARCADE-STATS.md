@@ -93,8 +93,8 @@ wagers stay a contest of skill, not of who fed their pet more USDC**, not a styl
 choice. Show the stats in the UI either way (players want to see them); just bound their
 effect.
 
-Current wager games (must use `{ pvp: true }`): `poop-out`, `micro-baselings`,
-`token-columns`, `super-dodge`, `baseling-grind`, `snow-bros`, `streets-of-tasern`,
+Current wager games (must use `{ pvp: true }`): `baseling-boxing`, `micro-baselings`,
+`token-columns`, `super-dodge`, `baseling-grind`, `frost-poppers`, `streets-of-tasern`,
 `spore-breaker`, `rc-reactor`, `spore-tributaries`. If you add a game to `WAGER_GAMES`, you
 must also switch its `getMults()` call to `{ pvp: true }` in the same change.
 
@@ -115,7 +115,7 @@ must also switch its `getMults()` call to `{ pvp: true }` in the same change.
 Concrete wiring per genre. `m = BaselingPlayer.getMults()` (or `{pvp:true}` for wager
 games). Every example assumes `base*` constants are tuned for a neutral 1.0× baseling.
 
-### Platformer (e.g. Snow Bros, Super Mario-likes)
+### Platformer (e.g. Frost Poppers, run-and-jump games)
 - Move speed: `playerVx = baseVx * m.moveSpeed`
 - Jump height: `jumpV = baseJumpV * m.moveSpeed`, then **cap** so 1.6× can't overshoot level geometry
 - Damage taken from enemies: `hp -= baseHit / m.health` (more STA = soaks more hits)
@@ -135,7 +135,7 @@ games). Every example assumes `base*` constants are tuned for a neutral 1.0× ba
   consider this *player-friendly* only if speed helps them — for falling-block puzzles,
   prefer mapping SPD to a small soft-drop bonus, not the gravity that pressures them)
 - Lives / continues: `lives = baseLives + (m.health > 1.3 ? 1 : 0)` (STA buys a cushion)
-- Combo / break power: `breakRadius = baseRadius * m.damage` (e.g. bigger breakout paddle
+- Combo / break power: `breakRadius = baseRadius * m.damage` (e.g. bigger brick-breaker paddle
   or stronger line-clear)
 - Bonus-tile / special-piece chance: `specialP = baseSpecialP * m.luck`
 - SWM: ignore. **Puzzle wager games (Token Columns, Spore Breaker, Poop Out) use

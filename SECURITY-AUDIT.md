@@ -1,4 +1,4 @@
-# Security Audit — MfT Launch Platform
+﻿# Security Audit â€” MfT Launch Platform
 
 **Date:** 2026-05-07
 **Auditor:** Guardian agent (launch security)
@@ -8,18 +8,18 @@
 
 ## FIXED IN THIS SESSION
 
-- [x] Agent SDK stale factory address → updated to V5.2
-- [x] Agent SDK ABI mismatch → fixed to 7-field `launches()`, `launchToken()` disabled
-- [x] SVG serving in metadata API → removed from image extension list
-- [x] Error message leakage in API 500 responses → generic "internal error" + server-side logging
-- [x] Unescaped error in mycopad.html innerHTML → wrapped with `esc()`
-- [x] Share endpoint missing address validation → added regex check
+- [x] Agent SDK stale factory address â†’ updated to V5.2
+- [x] Agent SDK ABI mismatch â†’ fixed to 7-field `launches()`, `launchToken()` disabled
+- [x] SVG serving in metadata API â†’ removed from image extension list
+- [x] Error message leakage in API 500 responses â†’ generic "internal error" + server-side logging
+- [x] Unescaped error in mycopad.html innerHTML â†’ wrapped with `esc()`
+- [x] Share endpoint missing address validation â†’ added regex check
 
 ---
 
 ## SMART CONTRACT FINDINGS
 
-### HIGH (Contracts — cannot fix, already deployed)
+### HIGH (Contracts â€” cannot fix, already deployed)
 
 #### C1. SporeReactorV2: Lingering approval after fuel() failure
 **File:** `contracts/SporeReactorV2.sol:435-442`
@@ -58,7 +58,7 @@
 
 #### C9. Deadline = block.timestamp in all swaps
 **Files:** `MycoPadV5_2.sol`, `SporeReactorV4.sol`
-**Issue:** Using `block.timestamp` as swap deadline is ineffective — always passes. Transactions stuck in mempool execute at stale prices.
+**Issue:** Using `block.timestamp` as swap deadline is ineffective â€” always passes. Transactions stuck in mempool execute at stale prices.
 
 ### LOW (Contracts)
 
@@ -70,10 +70,10 @@
 - SporeReactorV3: hasXToken mapping never enforces uniqueness
 - MycoPadV3: Reactor admin not renounced after launch
 
-### INFO (Contracts — No Action Required)
+### INFO (Contracts â€” No Action Required)
 
 - LaunchToken: unchecked block in _transfer() is safe (balance check precedes it)
-- SporeReactorV3: Pool unlock check is best-effort TOCTOU — acceptable
+- SporeReactorV3: Pool unlock check is best-effort TOCTOU â€” acceptable
 - SporeReactorV3: clone initialize() correctly sets _locked = 1
 - **No CRITICAL vulnerabilities found in any contract**
 - Strong defense-in-depth: reentrancy guards, safe transfers, slippage protection in reactors
@@ -82,29 +82,29 @@
 
 ## SCRIPT & API FINDINGS
 
-### HIGH (Scripts — FIXED)
+### HIGH (Scripts â€” FIXED)
 
-#### S1. Agent SDK stale factory address — FIXED
+#### S1. Agent SDK stale factory address â€” FIXED
 Updated `agent-sdk/launch.js` from dead `0x88f6...` to active V5.2 `0xF0c1...`. ABI corrected. `launchToken()` disabled with hard throw until USDC flow rewrite.
 
-### HIGH (Scripts — Still Open)
+### HIGH (Scripts â€” Still Open)
 
 #### S2. Zero slippage in launch-buyer
 **File:** `tools/launch-buyer.js:151`
-`amountOutMinimum: 0n` — sandwich-attackable. $5 total per token.
+`amountOutMinimum: 0n` â€” sandwich-attackable. $5 total per token.
 
-### MEDIUM (Scripts — Some Fixed)
+### MEDIUM (Scripts â€” Some Fixed)
 
-#### S3. SVG serving — FIXED
+#### S3. SVG serving â€” FIXED
 Removed SVG from metadata API image serve/check lists.
 
-#### S4. Empty catch{} blocks — NOT FIXED
+#### S4. Empty catch{} blocks â€” NOT FIXED
 20+ across active scripts. See files: `deploy/server-update.js`, `tools/reactor-roll-call.js`, `tools/burn-leaderboard.js`, `tools/reactor-map-data.js`, `marketing/agent-scout.js` (6), `marketing/chain-data.js` (3), `site/reactor-dashboard.html`.
 
-#### S5. Error message leakage — FIXED
+#### S5. Error message leakage â€” FIXED
 All API 500 responses now return generic "internal error" with server-side logging.
 
-#### S6. Share endpoint missing validation — FIXED
+#### S6. Share endpoint missing validation â€” FIXED
 Added `^0x[0-9a-f]{40}$` regex check.
 
 ### LOW (Scripts)
@@ -136,7 +136,7 @@ Added `^0x[0-9a-f]{40}$` regex check.
 ### SAFE
 
 - **No XSS found:** Token names/symbols properly escaped with `esc()`, URL params validated
-- **No private keys** in any HTML file — all wallet ops via window.ethereum
+- **No private keys** in any HTML file â€” all wallet ops via window.ethereum
 - **Wallet handling correct:** All tx require user signature, addresses from validated config
 - **Referral parameter** validated on-chain (factory.isReactor()) before use
 - **Supabase anon key** in client JS is intentional (read-only, RLS protected)
@@ -147,10 +147,10 @@ Added `^0x[0-9a-f]{40}$` regex check.
 
 | Severity | Contracts | Scripts | HTML | Status |
 |----------|-----------|---------|------|--------|
-| CRITICAL | 0 | 0 | 0 | — |
+| CRITICAL | 0 | 0 | 0 | â€” |
 | HIGH | 2 (deployed, unfixable) | 1 open, 1 fixed | 0 | S2 needs fix |
 | MEDIUM | 7 (deployed) | 2 open, 3 fixed | 2 | S4, H1, H2 need fix |
-| LOW | 7 | 4 | 2 | — |
+| LOW | 7 | 4 | 2 | â€” |
 
 **Overall:** The platform is well-built with strong fundamentals. No critical vulnerabilities. The deployed contracts have medium-severity issues that cannot be patched but are mitigated by the known-owner trust model. The highest-priority open items are: launch-buyer slippage (S2), empty catch blocks (S4), and CDN SRI hashes (H1).
 

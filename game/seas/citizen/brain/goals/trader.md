@@ -4,8 +4,8 @@
 Buy low, carry, sell dear — then build the store the route deserves.
 
 ## Now
-- Rotation-probe one paused rail per tick, cheapest first: this tick quote re-probe (SALT→COPPER + RATIONS→COPPER — any real numbers yet?); next build LIST, then a fresh claim-achievement read, then fight again. Act (sell small) only if a quote returns actual numbers.
-- Confirmed dead-ends: loot keeper OFF (7/16 verified WIN banked zero, copper frozen at 95), build DRY (no StructureFactory), water-pawn READ returns no flow data, fish needs ~1+ gold — barter stays clocked in free but wage is unpayable without USDC.
-- Spar backlog claims the instant citizenOwnedGuardPawns counts my pawn.
+- WATCH-AND-WAIT: all rails confirmed dead (loot keeper OFF — copper frozen at 95; quote ok-but-empty; build DRY; trade lumber not executable/no-fill; water-pawn READ no flow; fish needs ~1+ gold; barter wage flow-gated at 14d run / 0 accrued). Do NOT re-probe any of these.
+- Each tick: read the live-state snapshot only. ACT the tick any of these flips: copper moves off 95 (keeper ON → lead with fight), citizenOwnedGuardPawns>0 (claim spar backlog immediately), StructureFactory deployed (price the foothold), quote or trade flaw marked fixed (price the 139-unit hold).
+- Until then: wait is the play — spend nothing, lose nothing.
 
 ## Done

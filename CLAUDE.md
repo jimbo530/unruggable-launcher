@@ -8,7 +8,7 @@ Token launch platform with permanently locked liquidity on Base.
 - **Agent SDK**: `agent-sdk/` — 49 MCP tools for agents (v1.2.0)
 - **Marketing**: `marketing/` — scout, content, outreach agents
 - **Contracts**: `contracts/` — Solidity source + build artifacts
-- **Deploy**: `deploy/` — localhost HTML deploy pages
+- **Deploy**: Deploy contracts via a node script + the agent wallet. NEVER build HTML deploy pages.
 
 ## HARD STOPS
 

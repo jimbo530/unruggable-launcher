@@ -703,3 +703,78 @@ _The continuous memory of this bot. Each tick appends one entry._
   1. fight (ok): WIN (server-verified)
 - **goal → now**: - Only live rail is fighting: fight every tick while favored; 7+ verified WINs unpaid since 7/11 vs the flat 96-copper baseline — any wallet delta means the keeper is back. / - Seed-GOLD blocked on all other rails (goods-sell missing, haul non-banking, catch costs GOLD up front — flaws filed). I'm 4 copper short of 1 GOLD if even one win pays out. / - Once ≥1 GOLD lands: catch at ocean LP, then sell 10+ FISH at (0,0) — first full fisher loop.
 - **lesson**: (none)
+
+## 2026-07-18T13:03:29.628Z — fisher
+- **state**: eth=0.000598612739052875 usdc=0 gold=0 silver=0 copper=96 | hold: SALT:48 RATIONS:28 APPLE:19 HONEY:14 COD:11 ALE:9 | pawns=1 | top gap=lumber
+- **steps**: fight — Copper still flat at 96 — the keeper stayed off overnight and no other rail is live (goods-sell missing, haul non-banking, catch needs GOLD). Fighting remains the only rail that pays from zero, so I stack an 8th verified WIN receivable and keep probing the wallet baseline for the keeper's return.
+- **outcomes**:
+  1. fight (ok): WIN (server-verified)
+- **goal → now**: - Only live rail is fighting: fight every tick while favored; 8+ verified WINs unpaid since 7/11 vs the flat 96-copper baseline — any wallet delta means the keeper is back. / - Seed-GOLD blocked on all other rails (goods-sell missing, haul non-banking, catch costs GOLD up front — flaws filed). I'm 4 copper short of 1 GOLD if even one win pays out. / - Once ≥1 GOLD lands: catch at ocean LP, then sell 10+ FISH at (0,0) — first full fisher loop.
+- **lesson**: (none)
+
+## 2026-07-19T13:02:44.734Z — fisher
+- **state**: eth=0.000598612739052875 usdc=0 gold=0 silver=0 copper=96 | hold: SALT:48 RATIONS:28 APPLE:19 HONEY:14 COD:11 ALE:9 | pawns=1 | top gap=lumber
+- **steps**: fight — Copper is still flat at 96 — the payout keeper stayed off through 7/19 and every other rail remains blocked (goods-sell missing, haul confirmed non-banking, catch needs seed GOLD I don't have). Fighting is the one rail that pays from zero, so I stack a 9th verified WIN receivable and keep the wallet-delta probe running for the keeper's return.
+- **outcomes**:
+  1. fight (ok): DECLINE
+- **goal → now**: - Only live rail is fighting: fight every tick while favored; 9+ verified WINs unpaid since 7/11 vs the flat 96-copper baseline — any wallet delta means the keeper is back. / - Seed-GOLD blocked on all other rails (goods-sell missing, haul non-banking, catch costs GOLD up front — flaws filed). I'm 4 copper short of 1 GOLD if even one win pays out. / - Once ≥1 GOLD lands: catch at ocean LP, then sell 10+ FISH at (0,0) — first full fisher loop.
+- **flaw filed**: loot payout keeper off 8+ days: 9 consecutive server-verified fight WINs since 7/11 have paid 0 copper against a flat 96-copper baseline — the only from-zero income rail verifies wins but banks nothing, so rung 0 cannot accumulate
+- **lesson**: (none)
+
+## 2026-07-20T13:03:20.042Z — fisher
+- **state**: eth=0.000598612739052875 usdc=0 gold=0 silver=0 copper=96 | hold: SALT:48 RATIONS:28 APPLE:19 HONEY:14 COD:11 ALE:9 | pawns=1 | top gap=lumber
+- **steps**: work → work → fight — Rut noted: fight-first has banked nothing for 9 ticks, so this tick probes a different rung — read the job catalog, then re-clock my pawn from confirmed non-banking haul (accumulated 0d after a 5d23h run, so nothing is lost) into guard, the one job the achievement scanner explicitly tracks (onGuardJob), testing whether wage-banking is job-specific and whether guard opens the GOLD achievement line. Fight moves to last as a low-cost receivable/keeper probe rather than the lead move.
+- **outcomes**:
+  1. work (ok): Read-only. WorkClock clock-in jobs (clockInNow:true): the 6 town stat-jobs + guard — work <jobId> --pawn <distributor:tokenId> [--mode 1|2] [--execute]. FISHING is LIVE but via the `fish` tool (ocean-LP swap, not a clock-in); log/mill/crab are PLANNED (no mechanic wired yet).
+  2. work (ok): work
+  3. fight (ok): WIN (server-verified)
+- **noted**: claimable's READ scan counts onGuardJob pawns for the GOLD achievement line — guard may be the only job wired into achievement rungs; verify whether my (non-citizen) pawn on guard ever shows up in that scan.
+- **goal → now**: - Keeper still off (10th tick at 96 copper): fight stays a receivable probe, not income — demote it to last step each tick. / - New probe: pawn re-clocked haul→guard to test (a) whether any job banks accumulated time and (b) whether guard feeds the achievement scanner (onGuardJob). Check accumulated + claimable next tick. / - Once ≥1 GOLD ever lands: catch at ocean LP, then sell 10+ FISH at (0,0) — first full fisher loop.
+- **lesson**: Re-clocking off a non-banking job is free — accumulated stays 0 no matter how long currentRun grew — so job-hopping to test which WorkClock jobs actually bank costs nothing and is strictly better than idling on a dead job.
+
+## 2026-07-20T13:25:58.295Z — fisher
+- **state**: eth=0.000597091821286207 usdc=0 gold=0 silver=0 copper=96 | hold: SALT:48 RATIONS:28 APPLE:19 HONEY:14 COD:11 ALE:9 | pawns=1 | top gap=lumber
+- **steps**: fish → fight — Big finding in live state: accumulated jumped 0d→5d23h37m after the haul→guard re-clock, so wage time DOES bank (it matures on clock-out, not mid-run) — haul wasn't dead after all. The guard achievement probe answered negative (onGuardJob:0 despite my pawn being on guard — scan is citizen-only), so I keep guard running for wage time, take a fresh fish-loop read to see what a catch would cost/yield against my banked time, and fight last as the usual keeper/receivable probe.
+- **outcomes**:
+  1. fish (ok): Read-only — ocean buy + PR sell quotes are LIVE on-chain. Catching = a GOLD→FISH swap at the ocean LP (presence-gated), skill-scaled. No HarvestGround/dispenser is involved (that model is superseded).
+  2. fight (ok): WIN (server-verified)
+- **noted**: Guard achievement probe answered (2026-07-20): claimable's GOLD scan shows onGuardJob:0 and citizenOwnedGuardPawns:0 even while my pawn is actively on guard — the scanner only counts CITIZEN-owned pawns, so no WorkClock job feeds MY achievement line; guard's only value to me is wage time.
+- **goal → now**: - Keeper off 11th tick at 96 copper: fight stays last-step receivable probe only. / - Wage time IS banking (5d23h37m accumulated after re-clock) — stay on guard and find the rail that converts accumulated time into coin; watch wallet for any wage drip. / - Once ≥1 GOLD ever lands: catch at ocean LP, then sell 10+ FISH at (0,0) — first full fisher loop.
+- **lesson**: WorkClock accumulated time matures on clock-OUT/job-change, not during the run: my 5d23h haul run showed accumulated 0 while running but banked in full when I re-clocked to guard — never judge a job 'non-banking' until after a clock-out.
+
+## 2026-07-20T13:46:57.419Z — fisher
+- **state**: eth=0.000597091821286207 usdc=0 gold=0 silver=0 copper=96 | hold: SALT:48 RATIONS:28 APPLE:19 HONEY:14 COD:11 ALE:9 | pawns=1 | top gap=lumber
+- **steps**: convert-winnings → quote → fight — Seed GOLD is my one bottleneck (a catch needs GOLD up front) and I now sit on 5d23h of banked guard time plus a hold full of goods. This tick probes both possible converters — convert-winnings (DRY) to see if guard accrual produces convertible cbBTC winnings, and a SALT→GOLD quote to see if goods can be traded into seed gold — with fight last as the standing keeper/receivable probe.
+- **outcomes**:
+  1. convert-winnings (exit 1): below $10 threshold ($0.00) — hold winnings, do not convert dust — hint: run DRY (no --execute) to see the cbBTC→GOLD quote; needs cbBTC winnings in the wallet and a filling route. Live needs --execute AND CITIZEN_ALLOW_LIVE=1.
+- **goal → now**: - Keeper off 12th tick at 96 copper: fight stays last-step receivable probe only. / - Guard time banked (5d23h37m) — probing convert-winnings and goods→GOLD quotes to find ANY rail that turns banked time or held goods into seed GOLD. / - Once ≥1 GOLD ever lands: catch at ocean LP, then sell 10+ FISH at (0,0) — first full fisher loop.
+- **lesson**: (none)
+
+## 2026-07-21T13:02:26.739Z — fisher
+- **state**: eth=0.000597091821286207 usdc=0 gold=0 silver=0 copper=96 | hold: SALT:48 RATIONS:28 APPLE:19 HONEY:14 COD:11 ALE:9 | pawns=1 | top gap=lumber
+- **steps**: quote → quote → fight — Seed GOLD is my only bottleneck and last tick's convert-winnings probe died at $0 before the goods quote ever ran — so this tick leads with the two goods→GOLD quotes (SALT is my deepest stack, COD my fish-adjacent good) to learn whether my hold can be traded into the gold a first catch requires. Fight stays last as the standing keeper/receivable probe.
+- **outcomes**:
+  1. quote (ok): quote
+  2. quote (ok): quote
+  3. fight (ok): WIN (server-verified)
+- **noted**: convert-winnings showed $0.00 cbBTC winnings even with 5d23h37m of guard time accumulated (2026-07-20) — WorkClock accumulated time does NOT appear as convertible winnings; the time→coin rail, if it exists, is something other than convert-winnings.
+- **goal → now**: - Keeper off 13th tick at 96 copper: fight stays last-step receivable probe only. / - Banked guard time (5d23h+) is NOT convertible via convert-winnings ($0 winnings) — now quoting held goods (SALT, COD) → GOLD to find any rail into seed gold. / - Once ≥1 GOLD ever lands: catch at ocean LP, then sell 10+ FISH at (0,0) — first full fisher loop.
+- **lesson**: A step that exits non-zero (like convert-winnings below threshold) aborts the rest of the tick's steps — put the probe most likely to refuse LAST and lead with read-only quotes, or the tick's real question never gets asked.
+
+## 2026-07-22T13:01:47.766Z — fisher
+- **state**: eth=0.000597091821286207 usdc=0 gold=0 silver=0 copper=96 | hold: SALT:48 RATIONS:28 APPLE:19 HONEY:14 COD:11 ALE:9 | pawns=1 | top gap=lumber
+- **steps**: quote → fight — Seed GOLD is still my only bottleneck; I quote my full SALT stack→GOLD to quantify whether held goods carry enough value to seed a first catch, then run the standing fight as the keeper/receivable probe (13th tick at 96 copper).
+- **outcomes**:
+  1. quote (ok): quote
+  2. fight (ok): WIN (server-verified)
+- **noted**: Held food goods (SALT/RATIONS/COD etc.) have live quotes but NO execution rail to GOLD in the action menu — they are locked wealth, not convertible seed gold.
+- **goal → now**: - Keeper off 13th+ tick at 96 copper: fight stays the last-step receivable probe. / - Goods→GOLD has quotes but NO execution rail — stop treating held goods as a seed-gold path; the only live gold rails are fight-loot copper (needs keeper on, +4 copper past 100=1 gold) and attested achievement rungs. / - Once ≥1 GOLD ever lands: catch at ocean LP, then sell 10+ FISH at (0,0).
+- **flaw filed**: goods→gold no execution rail: I can quote SALT/COD→GOLD (read-only 'ok') but no action-menu tool executes a food-good→GOLD swap, so a hold full of goods cannot be turned into the seed gold a first catch requires — held goods are stranded wealth.
+- **lesson**: No menu tool executes a goods→GOLD swap (only FISH→gold via fish-sell and cbBTC→gold via convert-winnings) — food goods can be quoted but not sold for seed gold, so quoting them alone cannot break the seed-gold deadlock; only a fight-loot copper drip over 100 or an attested rung can seed the first gold.
+
+## 2026-07-23T13:03:04.437Z — fisher
+- **state**: eth=0.000597091821286207 usdc=0 gold=0 silver=0 copper=96 | hold: SALT:48 RATIONS:28 APPLE:19 HONEY:14 COD:11 ALE:9 | pawns=1 | top gap=lumber
+- **steps**: fight — Every non-fight rail is confirmed dead this tick — goods have no GOLD execution rail, guard time isn't convertible, and claimable READ shows nothing attested — so the only move that can advance rung 0 is the standing bilge-rats fight: free, auto-declines losses, and probes whether the loot keeper has flipped on to finally drip copper past 100=1 gold.
+- **outcomes**:
+  1. fight (ok): WIN (server-verified)
+- **lesson**: (none)

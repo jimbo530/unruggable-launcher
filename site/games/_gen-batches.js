@@ -8,23 +8,23 @@ const path = require('path');
 const DIR = __dirname;
 
 // --- Exclusions (from Task #8 description) ---
-const FLAGSHIPS = ['poop-man', 'reactor-jump', 'tunnel-bug'];
+const FLAGSHIPS = ['poop-powers', 'reactor-jump', 'tunnel-bug'];
 const TOOLS = ['dice-roller', 'ttrpg-notepad'];
 const HUB_INFRA = ['index', 'arcade', 'GAME-TEMPLATE', 'wager-demo', 'tournament', 'sprite-test', '_player-test'];
 const EXCLUDE_EXACT = new Set([].concat(FLAGSHIPS, TOOLS, HUB_INFRA));
 function isBackup(base) { return /-backup$/i.test(base); }
 
 // --- Genre map, parsed from ARCADE-100.md batch headers ---
-// slug -> genre label. (ARCADE-100 groups by NES-classic genre.)
+// slug -> genre label. (ARCADE-100 groups by retro-arcade genre.)
 const GENRE = {};
 function tag(genre, slugs) { slugs.forEach(s => { GENRE[s] = genre; }); }
-tag('platformer-action', ['fungal-fury','spore-knight','poop-man','reactor-jump','spore-crystal','hex-ninja','iron-maw','baseling-bounce','chain-reaction','blaster-baseling','jumpy-bros']);
-tag('puzzle', ['poop-drop','bubble-baseling','spore-lemmings','token-columns','spore-n-ice','rainbow-bridge','reactor-pipes','boulder-baseling','poop-puzznic','kickle-spore','blocks-burg','solomon-key','spore-sphere','ooze-battle']);
-tag('shmup', ['reactor-force','spore-storm','baseling-horizon','super-turrican','scat-attack','zombie-nation','baseling-sky-patrol','power-blade','spore-force','metal-spore','spore-invaders','spore-defense']);
-tag('racing-sports', ['micro-baselings','rc-reactor','baseling-bowl','blades-of-poop','track-n-field','super-dodge','rad-racer','baseling-sluggers','spore-tributaries','baseling-grind']);
-tag('rpg-adventure', ['legend-of-tasern','tasern-quest','fungi-quest','river-city-brawl','sporegoyle-quest','willow-grove','solstice-tower','startropics-hex','spore-mansion','pirates-of-tasern','rygar-realm','spore-crystal','whodunit']);
-tag('strategy-board', ['garden-wars','spore-trader','spore-civil-war','rampart-siege','garden-guerrilla','spy-hunter','spore-breaker','poop-bomber','baseling-island','chess','checkers','meme-city']);
-tag('misc-action', ['spore-roll','snake-rattle','little-baseling','spore-icarus','bucky-baseling','dark-spore','snow-bros','spore-tales','ufouria','spore-samson','double-baseling','punch-out','shadow-baseling','toads-of-tasern','baseling-rescue','tiny-toons','shatter-hand','shadow-ninja','golden-spore','comix-spore','streets-of-tasern','spore-maze','rodeo-toad','swamp-hop','seasons','poop-chomp','poop-out','baseling-depths','rhythm-baseling','reactor-rash','spore-sprint','tasern-pinball']);
+tag('platformer-action', ['fungal-fury','spore-knight','poop-powers','reactor-jump','spore-crystal','hex-ninja','iron-maw','baseling-bounce','chain-reaction','blaster-baseling','spore-jumpers']);
+tag('puzzle', ['poop-drop','bubble-baseling','spore-march','token-columns','spore-n-ice','rainbow-bridge','reactor-pipes','boulder-baseling','sludge-slide','frost-spore','blocks-burg','spore-key','spore-sphere','ooze-battle']);
+tag('shmup', ['reactor-force','spore-storm','baseling-horizon','spore-trooper','spore-attack','spore-nation','baseling-sky-patrol','poop-blade','spore-force','metal-spore','spore-swarm','spore-defense']);
+tag('racing-sports', ['micro-baselings','rc-reactor','baseling-bowl','blades-of-poop','baseling-olympics','spore-dodgeball','spore-racer','baseling-sluggers','spore-tributaries','baseling-grind']);
+tag('rpg-adventure', ['legend-of-tasern','tasern-quest','fungi-quest','downtown-baselings','sporegoyle-quest','spore-grove','spore-tower','spore-tropics','spore-mansion','pirates-of-tasern','spore-realm','spore-crystal','whodunit']);
+tag('strategy-board', ['garden-wars','spore-trader','spore-civil-war','garden-siege','garden-guerrilla','spore-hunter','spore-breaker','poop-bomber','baseling-island','chess','checkers','meme-city']);
+tag('misc-action', ['spore-roll','spore-serpent','little-baseling','spore-icarus','spore-galaxy','dark-spore','frost-poppers','spore-tales','sporeouria','spore-samson','double-baseling','shadow-baseling','toads-of-tasern','baseling-rescue','tiny-baselings','shatter-spore','shadow-ninja','golden-spore','comix-spore','streets-of-tasern','spore-maze','rodeo-toad','swamp-hop','seasons','poop-chomp','baseling-boxing','baseling-depths','rhythm-baseling','reactor-rash','spore-sprint','tasern-pinball']);
 
 // --- WAGER_GAMES (from tasern-wager.js) — pvp:true required ---
 function parseWagerGames() {
@@ -51,7 +51,7 @@ const OVERRIDES = {
     avatar: 'procedural',
     focalEntity: 'P1 fighter body in drawFighter(f) (the !f.isP2 fighter). P2 is the opponent/NPC.',
     notes: [
-      'MISLABELED: this is a Street-Fighter-style 1v1 FIGHTER, not a city builder. Genre corrected to misc-action (brawler).',
+      'MISLABELED: this is a 1v1 arena FIGHTER, not a city builder. Genre corrected to misc-action (brawler).',
       'Avatar = P1 fighter, drawn procedurally in drawFighter(f) (~line 1441) from ch.height/body parts; already tinted by statB.color for !f.isP2.',
       'Remaster: replace P1 procedural body with TAS.drawBaseling()/BaselingPlayer.draw() at the fighter origin (X.translate(f.x,f.y), draw at head/body offsets). Keep P2 as a CHARS opponent.',
       'Has a PvP mode — if a wager mode is wired, gate stat effects with getMults({pvp:true}) (0.95-1.10). Single-player vs CPU: default 0.8-1.6.',
@@ -60,8 +60,8 @@ const OVERRIDES = {
     ],
     statMap: { speed: 'walk/dash speed', stamina: 'health bar (maxHp)', power: 'attack/special damage + block-break', luck: 'crit chance / super-meter gain rate', swim: 'unused (no water)' },
   },
-  // Snake Rattle N Roll — isometric snake. The HEAD (snake[0]) is the avatar.
-  'snake-rattle': {
+  // Spore Serpent — isometric snake. The HEAD (snake[0]) is the avatar.
+  'spore-serpent': {
     genre: 'misc-action',
     avatar: 'procedural',
     focalEntity: 'snake head = snake[0], drawn in the render loop where i===0 (~line 1889).',

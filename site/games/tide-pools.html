@@ -1,0 +1,493 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Tide Pools</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body { width: 100%; height: 100%; overflow: hidden; background: #0a1c2c; touch-action: none; }
+canvas { display: block; margin: 0 auto; image-rendering: pixelated; }
+#back-link {
+  position: fixed; bottom: 8px; left: 50%; transform: translateX(-50%);
+  color: #666; font-family: monospace; font-size: 12px; text-decoration: none; z-index: 10;
+}
+#back-link:hover { color: #aaa; }
+</style>
+<script src="tasern-art.js"></script>
+</head>
+<body>
+<canvas id="gc"></canvas>
+<a id="back-link" href="/games">Back to Arcade</a>
+<script src="nft-loader.js"></script>
+<script src="baseling-sprites.js"></script>
+<script src="baseling-player.js"></script>
+<script src="tasern-theme.js"></script>
+<script>if(window.NftLoader)NftLoader.gate();</script>
+<script>
+(function () {
+"use strict";
+
+// ============================================================
+// Tide Pools — Match-3 time attack (Seize the Seas pack).
+// Self-contained bespoke engine (no tasern-engine.js). Swap adjacent
+// treasures to line up 3+; cascades chain for combo points. Beat the
+// 90s clock. All art is reused from art/sea/ (gems + pearl + coins).
+// ============================================================
+
+// ---- Baseling integration (gate stays as-is; picker + gentle stat hook) ----
+var picking = false; // character-select overlay open
+var frame = 0;       // animation clock
+function mults() {
+  return (window.BaselingPlayer && BaselingPlayer.getMults)
+    ? BaselingPlayer.getMults() : { moveSpeed: 1, health: 1, damage: 1, luck: 1, swim: 1 };
+}
+var LUCK = 1, SPD = 1;
+function recomputeStats() {
+  var m = mults();
+  LUCK = Math.max(0.8, Math.min(1.6, m.luck));      // luck -> gentle score bonus
+  SPD = Math.max(0.8, Math.min(1.6, m.moveSpeed));  // speed -> keyboard cursor repeat
+}
+recomputeStats();
+if (window.BaselingPlayer && BaselingPlayer.init) {
+  BaselingPlayer.init().then(function () { recomputeStats(); })
+    .catch(function (e) { console.warn('[tide-pools] player init failed:', e && e.message); });
+}
+function drawSelectedBaseling(c, x, y, size, opts) {
+  if (!window.BaselingPlayer || !window.BaselingSprites) return false;
+  var sel = BaselingPlayer.getSelected();
+  if (!sel || !sel.charId) return false;
+  if (!BaselingSprites.isLoaded(sel.charId)) {
+    if (!BaselingSprites.hasFailed(sel.charId)) BaselingSprites.load(sel.charId, sel.colorVariant);
+    return false;
+  }
+  return BaselingSprites.draw(c, sel.charId, sel.colorVariant, sel.sparkle, x, y, size, opts || {});
+}
+
+// ---- Art (all under art/sea/, procedural fallback if not loaded) ----
+var ART = {};
+['gem-ruby', 'gem-emerald', 'gem-diamond', 'pearl', 'gold-coins', 'water'].forEach(function (n) {
+  var im = new Image(); im.src = 'art/sea/' + n + '.png'; ART[n] = im;
+});
+function img(n) { var im = ART[n]; return (im && im.complete && im.naturalWidth > 0) ? im : null; }
+
+// ---- Canvas (fixed logical resolution, fit-scaled to the window) ----
+var VW = 360, VH = 540;
+var canvas = document.getElementById('gc');
+var ctx = canvas.getContext('2d');
+function resize() {
+  var dpr = window.devicePixelRatio || 1;
+  var sw = window.innerWidth, sh = window.innerHeight;
+  var scale = Math.min(sw / VW, sh / VH);
+  var cssW = Math.floor(VW * scale), cssH = Math.floor(VH * scale);
+  canvas.width = Math.floor(VW * dpr);
+  canvas.height = Math.floor(VH * dpr);
+  canvas.style.width = cssW + 'px';
+  canvas.style.height = cssH + 'px';
+  canvas.style.marginTop = Math.max(0, Math.floor((sh - cssH) / 2)) + 'px';
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+}
+window.addEventListener('resize', resize);
+resize();
+
+// ---- Audio (tiny WebAudio, created on first gesture) ----
+var audioCtx = null;
+function ensureAudio() {
+  try {
+    if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    if (audioCtx.state === 'suspended') audioCtx.resume();
+  } catch (e) { audioCtx = null; }
+}
+function tone(freq, dur, type, vol, slide) {
+  if (!audioCtx) return;
+  try {
+    var o = audioCtx.createOscillator(), g = audioCtx.createGain();
+    o.type = type || 'square';
+    o.frequency.setValueAtTime(freq, audioCtx.currentTime);
+    if (slide) o.frequency.linearRampToValueAtTime(slide, audioCtx.currentTime + dur);
+    g.gain.setValueAtTime(vol || 0.08, audioCtx.currentTime);
+    g.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + dur);
+    o.connect(g); g.connect(audioCtx.destination);
+    o.start(); o.stop(audioCtx.currentTime + dur);
+  } catch (e) {}
+}
+function sfxSelect() { tone(440, 0.06, 'square', 0.05); }
+function sfxBad() { tone(180, 0.12, 'sawtooth', 0.06, 90); }
+function sfxMatch(chain) { tone(520 + chain * 80, 0.1, 'square', 0.07, 760 + chain * 80); }
+
+// ---- Board ----
+var GRID = 8, N = 5;
+var GEM_KEYS = ['ruby', 'emerald', 'diamond', 'pearl', 'gold'];
+var GEM_ART = { ruby: 'gem-ruby', emerald: 'gem-emerald', diamond: 'gem-diamond', pearl: 'pearl', gold: 'gold-coins' };
+var GEM_COLOR = { ruby: '#ef4444', emerald: '#34d399', diamond: '#60a5fa', pearl: '#e9d5ff', gold: '#fbbf24' };
+var HUD_H = 52, FOOT_H = 34;
+var CELL = Math.floor(Math.min((VW - 16) / GRID, (VH - HUD_H - FOOT_H) / GRID));
+var BOARD = CELL * GRID;
+var BOARD_X = Math.floor((VW - BOARD) / 2);
+var BOARD_Y = HUD_H;
+function cellCX(c) { return BOARD_X + c * CELL + CELL / 2; }
+function cellCY(r) { return BOARD_Y + r * CELL + CELL / 2; }
+
+var board = [];
+function newBoard() {
+  board = [];
+  for (var r = 0; r < GRID; r++) {
+    board[r] = [];
+    for (var c = 0; c < GRID; c++) {
+      var t;
+      do { t = (Math.random() * N) | 0; }
+      while ((c >= 2 && board[r][c - 1] === t && board[r][c - 2] === t) ||
+             (r >= 2 && board[r - 1][c] === t && board[r - 2][c] === t));
+      board[r][c] = t;
+    }
+  }
+}
+function swapCells(r1, c1, r2, c2) {
+  var t = board[r1][c1]; board[r1][c1] = board[r2][c2]; board[r2][c2] = t;
+}
+function findMatches() {
+  var matched = [], any = false, r, c, k, run;
+  for (r = 0; r < GRID; r++) { matched[r] = []; for (c = 0; c < GRID; c++) matched[r][c] = false; }
+  for (r = 0; r < GRID; r++) {
+    run = 1;
+    for (c = 1; c <= GRID; c++) {
+      if (c < GRID && board[r][c] >= 0 && board[r][c] === board[r][c - 1]) { run++; }
+      else { if (run >= 3) { for (k = 0; k < run; k++) { matched[r][c - 1 - k] = true; any = true; } } run = 1; }
+    }
+  }
+  for (c = 0; c < GRID; c++) {
+    run = 1;
+    for (r = 1; r <= GRID; r++) {
+      if (r < GRID && board[r][c] >= 0 && board[r][c] === board[r - 1][c]) { run++; }
+      else { if (run >= 3) { for (k = 0; k < run; k++) { matched[r - 1 - k][c] = true; any = true; } } run = 1; }
+    }
+  }
+  return { matched: matched, any: any };
+}
+function collapse() {
+  for (var c = 0; c < GRID; c++) {
+    var write = GRID - 1;
+    for (var r = GRID - 1; r >= 0; r--) {
+      if (board[r][c] >= 0) { board[write][c] = board[r][c]; write--; }
+    }
+    for (; write >= 0; write--) { board[write][c] = (Math.random() * N) | 0; }
+  }
+}
+function resolveBoard() {
+  var chain = 0, total = 0;
+  while (true) {
+    var fm = findMatches();
+    if (!fm.any) break;
+    chain++;
+    if (chain > 100) break; // safety: never spin on a pathological refill
+    var cnt = 0, sx = 0, sy = 0;
+    for (var r = 0; r < GRID; r++) {
+      for (var c = 0; c < GRID; c++) {
+        if (fm.matched[r][c]) { board[r][c] = -1; cnt++; sx += cellCX(c); sy += cellCY(r); }
+      }
+    }
+    var gain = Math.round(cnt * 10 * chain * LUCK);
+    score += gain; total += cnt;
+    addPopup(sx / cnt, sy / cnt, '+' + gain, chain >= 2 ? '#0052FF' : '#fbbf24');
+    flashAmt = Math.min(0.5, 0.18 + chain * 0.08);
+    shakeAmt = Math.min(8, chain * 2);
+    sfxMatch(chain);
+    collapse();
+  }
+  if (chain > 0) {
+    combo = chain; comboTimer = 1.3;
+    if (chain > bestCombo) bestCombo = chain;
+    timeLeft = Math.min(MAXT, timeLeft + Math.min(3, chain)); // small clock reward
+  }
+  return total;
+}
+function hasMove() {
+  for (var r = 0; r < GRID; r++) {
+    for (var c = 0; c < GRID; c++) {
+      if (c + 1 < GRID) { swapCells(r, c, r, c + 1); var a = findMatches().any; swapCells(r, c, r, c + 1); if (a) return true; }
+      if (r + 1 < GRID) { swapCells(r, c, r + 1, c); var b = findMatches().any; swapCells(r, c, r + 1, c); if (b) return true; }
+    }
+  }
+  return false;
+}
+function ensureMoves() {
+  var guard = 0;
+  while (!hasMove() && guard < 60) { newBoard(); guard++; }
+}
+function adjacent(a, b) { return Math.abs(a.r - b.r) + Math.abs(a.c - b.c) === 1; }
+function trySwap(a, b) {
+  swapCells(a.r, a.c, b.r, b.c);
+  if (findMatches().any) { resolveBoard(); ensureMoves(); return true; }
+  swapCells(a.r, a.c, b.r, b.c); // revert
+  shakeAmt = 5; sfxBad(); return false;
+}
+
+// ---- FX ----
+var popups = [], flashAmt = 0, shakeAmt = 0;
+function addPopup(x, y, txt, col) { popups.push({ x: x, y: y, txt: txt, col: col || '#fff', life: 1 }); }
+function updateFX(dt) {
+  flashAmt = Math.max(0, flashAmt - dt * 1.6);
+  shakeAmt = Math.max(0, shakeAmt - dt * 30);
+  for (var i = popups.length - 1; i >= 0; i--) {
+    popups[i].life -= dt * 1.2; popups[i].y -= dt * 26;
+    if (popups[i].life <= 0) popups.splice(i, 1);
+  }
+}
+
+// ---- Game state ----
+var state = 'title'; // title, playing, gameOver
+var score = 0, combo = 0, comboTimer = 0, bestCombo = 0;
+var timeLeft = 0, MAXT = 99, GAME_TIME = 90;
+var highScore = 0;
+try { highScore = parseInt(localStorage.getItem('tidepools_hi') || '0', 10) || 0; } catch (e) { highScore = 0; }
+var selected = null, cursor = { r: 4, c: 4 };
+
+function startGame() {
+  ensureAudio();
+  newBoard(); ensureMoves();
+  // clear any pre-existing matches without awarding the opening board
+  while (findMatches().any) { newBoard(); ensureMoves(); }
+  score = 0; combo = 0; comboTimer = 0; bestCombo = 0;
+  timeLeft = GAME_TIME; selected = null; cursor = { r: 4, c: 4 };
+  popups = []; flashAmt = 0; shakeAmt = 0;
+  state = 'playing';
+}
+function gameOver() {
+  state = 'gameOver';
+  if (score > highScore) { highScore = score; try { localStorage.setItem('tidepools_hi', String(highScore)); } catch (e) {} }
+  tone(330, 0.18, 'square', 0.07, 160);
+}
+function cellTap(r, c) {
+  if (state !== 'playing' || picking) return;
+  if (r < 0 || r >= GRID || c < 0 || c >= GRID) return;
+  if (!selected) { selected = { r: r, c: c }; sfxSelect(); return; }
+  if (selected.r === r && selected.c === c) { selected = null; return; }
+  if (adjacent(selected, { r: r, c: c })) { trySwap(selected, { r: r, c: c }); selected = null; }
+  else { selected = { r: r, c: c }; sfxSelect(); }
+}
+
+// ---- Input: keyboard ----
+window.addEventListener('keydown', function (e) {
+  if (picking) return;
+  var k = e.code;
+  if (state === 'title') {
+    if (k === 'KeyC') { openPicker(); e.preventDefault(); return; }
+    if (k === 'Enter' || k === 'Space') { startGame(); e.preventDefault(); return; }
+    return;
+  }
+  if (state === 'gameOver') {
+    if (k === 'Enter' || k === 'Space') { startGame(); e.preventDefault(); }
+    return;
+  }
+  if (state === 'playing') {
+    if (k === 'ArrowLeft' || k === 'KeyA') { cursor.c = Math.max(0, cursor.c - 1); e.preventDefault(); }
+    else if (k === 'ArrowRight' || k === 'KeyD') { cursor.c = Math.min(GRID - 1, cursor.c + 1); e.preventDefault(); }
+    else if (k === 'ArrowUp' || k === 'KeyW') { cursor.r = Math.max(0, cursor.r - 1); e.preventDefault(); }
+    else if (k === 'ArrowDown' || k === 'KeyS') { cursor.r = Math.min(GRID - 1, cursor.r + 1); e.preventDefault(); }
+    else if (k === 'Space' || k === 'Enter') { cellTap(cursor.r, cursor.c); e.preventDefault(); }
+  }
+});
+
+// ---- Input: pointer/touch ----
+function openPicker() {
+  if (!window.BaselingPlayer || !BaselingPlayer.select) return;
+  picking = true;
+  BaselingPlayer.select(function () { recomputeStats(); picking = false; });
+}
+function pointerAt(clientX, clientY) {
+  var rect = canvas.getBoundingClientRect();
+  var lx = (clientX - rect.left) * (VW / rect.width);
+  var ly = (clientY - rect.top) * (VH / rect.height);
+  return { x: lx, y: ly };
+}
+function handlePoint(clientX, clientY) {
+  ensureAudio();
+  var p = pointerAt(clientX, clientY);
+  if (state === 'title') {
+    // "[C] SELECT BASELING" hot-zone near the prompt, else start
+    if (p.y > VH - 70 && p.y < VH - 44) { openPicker(); return; }
+    startGame(); return;
+  }
+  if (state === 'gameOver') { startGame(); return; }
+  if (state === 'playing') {
+    var c = Math.floor((p.x - BOARD_X) / CELL);
+    var r = Math.floor((p.y - BOARD_Y) / CELL);
+    if (c >= 0 && c < GRID && r >= 0 && r < GRID) { cursor = { r: r, c: c }; cellTap(r, c); }
+  }
+}
+canvas.addEventListener('mousedown', function (e) { handlePoint(e.clientX, e.clientY); });
+canvas.addEventListener('touchstart', function (e) {
+  e.preventDefault();
+  if (e.changedTouches && e.changedTouches.length) handlePoint(e.changedTouches[0].clientX, e.changedTouches[0].clientY);
+}, { passive: false });
+
+// ---- Render ----
+function roundRect(x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r);
+  ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r);
+  ctx.arcTo(x, y, x + w, y, r);
+  ctx.closePath();
+}
+function drawBackground() {
+  var g = ctx.createLinearGradient(0, 0, 0, VH);
+  g.addColorStop(0, '#0a2236'); g.addColorStop(1, '#06121e');
+  ctx.fillStyle = g; ctx.fillRect(0, 0, VW, VH);
+  var w = img('water');
+  if (w) { ctx.globalAlpha = 0.12; ctx.drawImage(w, BOARD_X, BOARD_Y, BOARD, BOARD); ctx.globalAlpha = 1; }
+}
+function drawGem(r, c, type) {
+  var x = BOARD_X + c * CELL, y = BOARD_Y + r * CELL, pad = Math.max(2, CELL * 0.08);
+  var key = GEM_KEYS[type];
+  var im = img(GEM_ART[key]);
+  if (im) { ctx.drawImage(im, x + pad, y + pad, CELL - pad * 2, CELL - pad * 2); }
+  else {
+    ctx.fillStyle = GEM_COLOR[key];
+    roundRect(x + pad, y + pad, CELL - pad * 2, CELL - pad * 2, CELL * 0.18); ctx.fill();
+    ctx.fillStyle = 'rgba(255,255,255,0.25)';
+    roundRect(x + pad + 2, y + pad + 2, (CELL - pad * 2) * 0.5, (CELL - pad * 2) * 0.35, 3); ctx.fill();
+  }
+}
+function drawBoardGrid() {
+  ctx.fillStyle = 'rgba(0,0,0,0.28)';
+  roundRect(BOARD_X - 4, BOARD_Y - 4, BOARD + 8, BOARD + 8, 8); ctx.fill();
+  for (var r = 0; r < GRID; r++) {
+    for (var c = 0; c < GRID; c++) {
+      if (((r + c) & 1) === 0) { ctx.fillStyle = 'rgba(255,255,255,0.04)'; ctx.fillRect(BOARD_X + c * CELL, BOARD_Y + r * CELL, CELL, CELL); }
+      if (board[r][c] >= 0) drawGem(r, c, board[r][c]);
+    }
+  }
+  if (state === 'playing') {
+    if (selected) {
+      ctx.strokeStyle = '#fbbf24'; ctx.lineWidth = 3;
+      ctx.strokeRect(BOARD_X + selected.c * CELL + 1, BOARD_Y + selected.r * CELL + 1, CELL - 2, CELL - 2);
+    }
+    var pulse = 0.5 + 0.5 * Math.sin(frame * 0.18);
+    ctx.strokeStyle = 'rgba(0,82,255,' + (0.5 + pulse * 0.5) + ')'; ctx.lineWidth = 2;
+    ctx.strokeRect(BOARD_X + cursor.c * CELL + 1, BOARD_Y + cursor.r * CELL + 1, CELL - 2, CELL - 2);
+  }
+}
+function drawHUD() {
+  ctx.fillStyle = 'rgba(0,0,0,0.35)'; ctx.fillRect(0, 0, VW, HUD_H);
+  ctx.fillStyle = '#0052FF'; ctx.fillRect(0, HUD_H - 2, VW, 2);
+  ctx.textAlign = 'left'; ctx.fillStyle = '#fff'; ctx.font = 'bold 13px monospace';
+  ctx.fillText('SCORE', 10, 18); ctx.fillStyle = '#fbbf24'; ctx.font = 'bold 18px monospace';
+  ctx.fillText(String(score), 10, 38);
+  ctx.textAlign = 'right'; ctx.fillStyle = '#fff'; ctx.font = 'bold 11px monospace';
+  ctx.fillText('BEST ' + highScore, VW - 10, 16);
+  var t = Math.ceil(timeLeft);
+  ctx.fillStyle = t <= 10 ? '#ef4444' : '#fff';
+  ctx.font = 'bold 18px monospace'; ctx.fillText(t + 's', VW - 10, 38);
+  ctx.textAlign = 'center';
+  if (combo > 1 && comboTimer > 0) {
+    ctx.fillStyle = '#0052FF'; ctx.font = 'bold 13px monospace';
+    ctx.fillText('CHAIN x' + combo + '!', VW / 2, 24);
+  }
+}
+function drawFooter() {
+  ctx.textAlign = 'center'; ctx.fillStyle = '#7a8a9a'; ctx.font = '10px monospace';
+  ctx.fillText('Swap touching treasures to line up 3+', VW / 2, BOARD_Y + BOARD + 18);
+  ctx.fillText('Arrows move - Space/Tap swap', VW / 2, BOARD_Y + BOARD + 30);
+}
+function drawStatBars(cx, topY) {
+  var sel = window.BaselingPlayer && BaselingPlayer.getSelected ? BaselingPlayer.getSelected() : null;
+  if (!sel || !sel.stats || !window.BaselingPlayer || !BaselingPlayer.STAT_KEYS) return topY;
+  var meta = BaselingPlayer.STAT_META, keys = BaselingPlayer.STAT_KEYS;
+  var bw = 40, gap = 6, total = keys.length * (bw + gap) - gap, x0 = cx - total / 2;
+  ctx.font = '8px monospace';
+  for (var i = 0; i < keys.length; i++) {
+    var mm = meta[keys[i]], v = sel.stats[keys[i]] || 10, bx = x0 + i * (bw + gap);
+    ctx.fillStyle = mm.color; ctx.textAlign = 'left'; ctx.fillText(mm.label, bx, topY);
+    ctx.fillStyle = '#222'; ctx.fillRect(bx, topY + 3, bw, 5);
+    ctx.fillStyle = mm.color; ctx.fillRect(bx, topY + 3, bw * Math.max(0.04, Math.min(1, v / 200)), 5);
+  }
+  ctx.textAlign = 'center';
+  return topY + 16;
+}
+function drawTitle() {
+  drawBackground();
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#60a5fa'; ctx.font = 'bold 34px monospace';
+  ctx.fillText('TIDE POOLS', VW / 2, 90);
+  ctx.fillStyle = '#fbbf24'; ctx.font = '12px monospace';
+  ctx.fillText('Match the treasure - beat the tide', VW / 2, 112);
+
+  if (!drawSelectedBaseling(ctx, VW / 2, 188, 46, { anim: 'idle', frame: frame })) {
+    ctx.fillStyle = '#34d399'; ctx.beginPath(); ctx.arc(VW / 2, 188, 22, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#0a1c2c'; ctx.beginPath(); ctx.arc(VW / 2 - 7, 184, 3, 0, Math.PI * 2); ctx.arc(VW / 2 + 7, 184, 3, 0, Math.PI * 2); ctx.fill();
+  }
+  var sel = window.BaselingPlayer && BaselingPlayer.getSelected ? BaselingPlayer.getSelected() : null;
+  ctx.fillStyle = '#0052FF'; ctx.font = 'bold 12px monospace';
+  ctx.fillText((sel ? sel.charName : 'WIMMPLE') + (sel && sel.tokenId != null ? ' #' + sel.tokenId : ''), VW / 2, 232);
+  drawStatBars(VW / 2, 252);
+
+  // sample gem row
+  for (var i = 0; i < N; i++) {
+    var gx = VW / 2 - (N * 30) / 2 + i * 30 + 15, gy = 312;
+    var im = img(GEM_ART[GEM_KEYS[i]]);
+    if (im) ctx.drawImage(im, gx - 12, gy - 12, 24, 24);
+    else { ctx.fillStyle = GEM_COLOR[GEM_KEYS[i]]; ctx.beginPath(); ctx.arc(gx, gy, 11, 0, Math.PI * 2); ctx.fill(); }
+  }
+
+  ctx.fillStyle = '#fff'; ctx.font = 'bold 15px monospace';
+  if ((frame >> 4) & 1) ctx.fillText('TAP / SPACE TO PLAY', VW / 2, 380);
+  if (highScore > 0) { ctx.fillStyle = '#7a8a9a'; ctx.font = '11px monospace'; ctx.fillText('Best: ' + highScore, VW / 2, 406); }
+  ctx.fillStyle = '#0052FF'; ctx.font = 'bold 11px monospace';
+  ctx.fillText('[C] SELECT BASELING', VW / 2, VH - 52);
+}
+function drawGameOver() {
+  drawBackground(); drawBoardGrid();
+  ctx.fillStyle = 'rgba(4,12,22,0.8)'; ctx.fillRect(0, 0, VW, VH);
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#60a5fa'; ctx.font = 'bold 30px monospace';
+  ctx.fillText('TIDE OUT', VW / 2, 180);
+  ctx.fillStyle = '#fff'; ctx.font = 'bold 16px monospace';
+  ctx.fillText('Score: ' + score, VW / 2, 230);
+  ctx.fillStyle = '#fbbf24'; ctx.font = '13px monospace';
+  ctx.fillText('Best chain: x' + bestCombo, VW / 2, 256);
+  if (score >= highScore && score > 0) { ctx.fillStyle = '#0052FF'; ctx.font = 'bold 15px monospace'; ctx.fillText('NEW BEST!', VW / 2, 290); }
+  else { ctx.fillStyle = '#7a8a9a'; ctx.font = '13px monospace'; ctx.fillText('Best: ' + highScore, VW / 2, 290); }
+  ctx.fillStyle = '#fff'; ctx.font = 'bold 14px monospace';
+  if ((frame >> 4) & 1) ctx.fillText('TAP / SPACE TO RETRY', VW / 2, 350);
+}
+function drawPopups() {
+  ctx.textAlign = 'center'; ctx.font = 'bold 13px monospace';
+  for (var i = 0; i < popups.length; i++) {
+    ctx.globalAlpha = Math.max(0, Math.min(1, popups[i].life));
+    ctx.fillStyle = popups[i].col;
+    ctx.fillText(popups[i].txt, popups[i].x, popups[i].y);
+  }
+  ctx.globalAlpha = 1;
+}
+
+// ---- Loop ----
+var lastTime = 0;
+function loop(ts) {
+  var dt = Math.min((ts - lastTime) / 1000, 0.05); lastTime = ts; frame++;
+  if (state === 'playing') {
+    timeLeft -= dt;
+    if (comboTimer > 0) comboTimer -= dt;
+    updateFX(dt);
+    if (timeLeft <= 0) { timeLeft = 0; gameOver(); }
+  } else { updateFX(dt); }
+
+  ctx.save();
+  if (shakeAmt > 0) ctx.translate((Math.random() - 0.5) * shakeAmt, (Math.random() - 0.5) * shakeAmt);
+  if (state === 'title') drawTitle();
+  else if (state === 'gameOver') drawGameOver();
+  else {
+    drawBackground(); drawBoardGrid(); drawHUD(); drawFooter(); drawPopups();
+    if (flashAmt > 0) { ctx.fillStyle = 'rgba(255,255,255,' + flashAmt * 0.5 + ')'; ctx.fillRect(0, 0, VW, VH); }
+  }
+  ctx.restore();
+  requestAnimationFrame(loop);
+}
+newBoard();
+requestAnimationFrame(loop);
+
+})();
+</script>
+</body>
+</html>

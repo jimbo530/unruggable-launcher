@@ -736,3 +736,61 @@ _The continuous memory of this bot. Each tick appends one entry._
   2. quote (ok): quote
 - **goal → now**: - Rotation-probe one paused rail per tick, cheapest first: this tick quote re-probe (SALT→COPPER + RATIONS→COPPER — any real numbers yet?); next build LIST, then a fresh claim-achievement read, then fight again. Act (sell small) only if a quote returns actual numbers. / - Confirmed dead-ends: loot keeper OFF (7/16 verified WIN banked zero, copper frozen at 95), build DRY (no StructureFactory), water-pawn READ returns no flow data, fish needs ~1+ gold — barter stays clocked in free but wage is unpayable without USDC. / - Spar backlog claims the instant citizenOwnedGuardPawns counts my pawn.
 - **lesson**: A same-tick wallet read after a fight can return only the funding boilerplate instead of balances — the reliable keeper verdict is the NEXT tick's live-state copper (still 95 after the 7/16 win), so judge payout probes across ticks, not within them.
+
+## 2026-07-18T13:04:09.220Z — trader
+- **state**: eth=0.000596014624803331 usdc=0 gold=0 silver=0 copper=95 | hold: SALT:47 RATIONS:28 APPLE:19 HONEY:14 COD:11 ALE:9 | pawns=1 | top gap=lumber
+- **steps**: build — Yesterday's quote re-probe came back with no numbers again (ok-but-empty persists) and this tick's live state already answers claimable fresh (citizenOwnedGuardPawns=0, nothing claimable) and the loot keeper (copper still frozen at 95), so the rotation's next unprobed rail is build LIST — one read to see if StructureFactory finally deployed and my foothold path priced open.
+- **outcomes**:
+  1. build (ok): Read-only. Use `build plan <mill|farm>` to design + price a specific build (still DRY — no factory deployed).
+- **goal → now**: - Rotation-probe one paused rail per tick, cheapest first: this tick build LIST (StructureFactory deployed yet?); next fight+next-tick copper check, then quote re-probe only after its flaw is marked fixed. / - Confirmed dead-ends: loot keeper OFF (copper frozen at 95 through 7/18), quote ok-but-empty (re-confirmed 7/17), build DRY pending this probe, water-pawn READ returns no flow data, fish needs ~1+ gold — barter stays clocked in free (12d run, 0 accumulated) but wage is unpayable without USDC. / - Spar backlog claims the instant citizenOwnedGuardPawns counts my pawn.
+- **lesson**: When a probe outcome logs only the tool name with no payload (quote ok: 'quote'), treat that as the empty-payload flaw persisting and advance the rotation immediately — don't spend another tick re-confirming a rail that answered with silence.
+
+## 2026-07-18T13:27:28.386Z — trader
+- **state**: eth=0.000596014624803331 usdc=0 gold=0 silver=0 copper=95 | hold: SALT:47 RATIONS:28 APPLE:19 HONEY:14 COD:11 ALE:9 | pawns=1 | top gap=lumber
+- **steps**: fight — This tick's live state already answers build (still DRY per the 13:04 probe), claimable (citizenOwnedGuardPawns=0), and copper (still 95). The rotation's next rail is the fight probe: a verified WIN costs nothing (auto-declines if unfavored, pawn never risked), banks a would-claim for when the loot keeper flips, and next tick's copper snapshot gives the keeper verdict.
+- **outcomes**:
+  1. fight (ok): WIN (server-verified)
+- **goal → now**: - Rotation-probe one paused rail per tick, cheapest first: fight probe fired 7/18 (2nd tick); NEXT tick read live-state copper — if it moves off 95 the loot keeper is ON and fighting becomes the lead income rail; if frozen, rotate to a fresh claim-achievement read, then fight again in ~3 ticks. / - Confirmed dead-ends: loot keeper OFF (copper frozen at 95 through 7/18), quote ok-but-empty (7/17), build DRY re-confirmed 7/18 (no StructureFactory), water-pawn READ returns no flow data, fish needs ~1+ gold — barter clocked in free (12d run, 0 accumulated), wage unpayable without USDC. / - Spar backlog claims the instant citizenOwnedGuardPawns counts my pawn.
+- **lesson**: Ticks can land more than once per day (13:04 and 13:27 on 7/18), so pace the rotation by the goal's 'next' pointer and the live-state answers, not the calendar — a same-day second tick may already contain the prior probe's verdict.
+
+## 2026-07-19T13:03:15.044Z — trader
+- **state**: eth=0.000596014624803331 usdc=0 gold=0 silver=0 copper=95 | hold: SALT:47 RATIONS:28 APPLE:19 HONEY:14 COD:11 ALE:9 | pawns=1 | top gap=lumber
+- **steps**: trade — This tick's live state already delivers the rotation's verdicts: copper still 95 after the 7/18 verified WIN (loot keeper OFF, twice-confirmed) and claimable=0 (fresh read included). The one rail I have never probed is the trade planner on the top gap — a no-usd DRY plan costs nothing, can't spend USDC I don't have, and may return real route numbers even while quote is broken, which would finally price a path for my 139-unit hold.
+- **outcomes**:
+  1. trade (exit 1): this route is not executable yet (custom pool / no fill) — staying safe — hint: run `node citizen/tools/scan-gaps.js --actionable` for a valid gapId, then `trade.js <gapId>` DRY; live needs --execute AND CITIZEN_ALLOW_LIVE=1.
+- **noted**: Trade-tool probe status: as of 2026-07-19 the trade DRY planner (gapId=lumber) was the last never-probed pricing rail at Port Royal — record its verdict next tick; if it also returns no numbers, every pricing path (quote, build plan, trade plan) is dead and the only wake-up signals are live-state changes.
+- **goal → now**: - All active rails confirmed dead: loot keeper OFF (two verified WINs banked zero, copper 95 through 7/19), quote ok-but-empty, build DRY, water-pawn READ no flow, fish needs ~1+ gold, barter wage flow-gated (13d run, 0 accrued). Do NOT re-probe these until a flaw is marked fixed. / - This tick: trade DRY plan on lumber gap (last unprobed rail). If it prices, pricing lives; if empty, future ticks are watch-and-wait: scan live-state each tick for copper moving off 95, citizenOwnedGuardPawns>0, StructureFactory deployed, or quote flaw fixed — act the tick any of those flips. / - Spar backlog claims the instant citizenOwnedGuardPawns counts my pawn.
+- **flaw filed**: loot payout keeper still off (2nd confirmation): a second server-verified bilge-rat WIN (2026-07-18, pawn 0x2E2AB7ae48876f1b4497A04d864C025f7DF58e1f:53 at Port Royal) again banked zero — copper frozen at 95 in the 2026-07-19 snapshot, matching the 7/16 probe; wins verify but never pay out
+- **lesson**: Two independent verified WINs (7/16 and 7/18) both banking zero is a twice-confirmed keeper outage — stop re-probing a flaw confirmed by distinct events on a timer; park the rail until the flaw is marked fixed and spend those ticks on genuinely unprobed rails.
+
+## 2026-07-20T13:04:17.828Z — trader
+- **state**: eth=0.000596014624803331 usdc=0 gold=0 silver=0 copper=95 | hold: SALT:47 RATIONS:28 APPLE:19 HONEY:14 COD:11 ALE:9 | pawns=1 | top gap=lumber
+- **steps**: wait — The last unprobed rail (trade DRY on lumber) returned its verdict last tick: exit 1, not executable (custom pool / no fill) — so every pricing path is now confirmed dead and this tick's live state shows none of my wake-up signals flipped (copper still 95, citizenOwnedGuardPawns=0, no StructureFactory, quote flaw unfixed). Per my goal, the correct move is the patient one: spend nothing, wait for a signal to flip.
+- **outcomes**:
+  1. wait (waited): no action
+- **noted**: Trade DRY verdict landed 2026-07-19: lumber gap is NOT executable (exit 1, custom pool / no fill) despite scan-gaps flagging it actionable — all three pricing paths (quote, build plan, trade plan) are now confirmed dead at Port Royal; I am in pure watch-and-wait until a live-state signal flips.
+- **goal → now**: - WATCH-AND-WAIT: all rails confirmed dead (loot keeper OFF — copper frozen at 95; quote ok-but-empty; build DRY; trade lumber not executable/no-fill; water-pawn READ no flow; fish needs ~1+ gold; barter wage flow-gated at 14d run / 0 accrued). Do NOT re-probe any of these. / - Each tick: read the live-state snapshot only. ACT the tick any of these flips: copper moves off 95 (keeper ON → lead with fight), citizenOwnedGuardPawns>0 (claim spar backlog immediately), StructureFactory deployed (price the foothold), quote or trade flaw marked fixed (price the 139-unit hold). / - Until then: wait is the play — spend nothing, lose nothing.
+- **flaw filed**: scan-gaps flags a non-executable gap as actionable: Port Report lists lumber as the top gap with actionable:true, but the trade DRY planner refuses it (exit 1, custom pool / no fill) at Port Royal — the actionable flag misleads bots into planning routes that cannot fill
+- **lesson**: The Port Report's 'actionable: true' flag is a gap-ranking signal, not an executability promise — lumber is flagged actionable while the trade planner refuses it as no-fill, so never treat scan-gaps 'actionable' as proof a route will fill.
+
+## 2026-07-21T13:03:04.329Z — trader
+- **state**: eth=0.000596014624803331 usdc=0 gold=0 silver=0 copper=95 | hold: SALT:47 RATIONS:28 APPLE:19 HONEY:14 COD:11 ALE:9 | pawns=1 | top gap=lumber
+- **steps**: wait — None of my wake-up signals flipped this tick: copper is still frozen at 95 (loot keeper OFF), citizenOwnedGuardPawns=0 (spar backlog still unclaimable), no StructureFactory, quote/trade flaws unfixed, and barter shows 14d 23h run with 0 accrued (flow-gated). Per my goal, wait costs nothing and every other rail is a confirmed dead end.
+- **outcomes**:
+  1. wait (waited): no action
+- **lesson**: (none)
+
+## 2026-07-22T13:02:56.756Z — trader
+- **state**: eth=0.000596014624803331 usdc=0 gold=0 silver=0 copper=95 | hold: SALT:47 RATIONS:28 APPLE:19 HONEY:14 COD:11 ALE:9 | pawns=1 | top gap=lumber
+- **steps**: wait — No wake-up signal flipped: copper still frozen at 95 (loot keeper OFF), citizenOwnedGuardPawns=0 (spar backlog unclaimable), no StructureFactory, quote/trade flaws unfixed, barter at 15d 23h run with 0 accrued (flow-gated). Every actionable rail is a confirmed dead end, so the patient move spends nothing and loses nothing.
+- **outcomes**:
+  1. wait (waited): no action
+- **lesson**: (none)
+
+## 2026-07-23T13:03:33.636Z — trader
+- **state**: eth=0.000596014624803331 usdc=0 gold=0 silver=0 copper=95 | hold: SALT:47 RATIONS:28 APPLE:19 HONEY:14 COD:11 ALE:9 | pawns=1 | top gap=lumber
+- **steps**: wait — Every from-zero income rail is confirmed down and no wake-up signal flipped this tick (copper still 95 = loot keeper OFF; citizenOwnedGuardPawns=0; no StructureFactory; quote/trade dead; barter 16d23h run / 0 accrued). Fighting would only burn my last gas against a known-off keeper, violating my hard limit — so the patient move stands, but I'm filing the systemic block the rut notice asks for.
+- **outcomes**:
+  1. wait (waited): no action
+- **flaw filed**: zero-capital player has NO executable income rail: at Port Royal a 1-pawn/0-gold/0-flow player faces every from-zero path down at once — loot keeper OFF (verified wins bank 0, copper frozen 95), all pricing dead (quote empty, build DRY, trade lumber no-fill), no attested rungs, and the only employed job (barter) shows 16d23h run with exactly 0 accrued. This contradicts the charter premise that the climb is reachable from nothing; a new player literally cannot earn a first copper.
+- **lesson**: When the rut notice fires but every rail is genuinely gated and acting would risk my last gas, the right answer is wait-plus-flaw: name the systemic block rather than spend the base to escape a harness prod.

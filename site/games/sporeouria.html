@@ -1,0 +1,2647 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Sporeouria</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body { width: 100%; height: 100%; overflow: hidden; background: #1a1c2c; touch-action: none; }
+canvas { display: block; margin: 0 auto; }
+#back-link { position: fixed; bottom: 8px; left: 50%; transform: translateX(-50%); color: #666; font-family: monospace; font-size: 12px; text-decoration: none; z-index: 10; }
+#back-link:hover { color: #aaa; }
+</style>
+</head>
+<body>
+<canvas id="gc"></canvas>
+<a id="back-link" href="/games">Back to Arcade</a>
+<script src="nft-loader.js"></script>
+<script src="baseling-sprites.js"></script>
+<script src="baseling-player.js"></script>
+<script src="tasern-theme.js"></script>
+<script>if(window.NftLoader)NftLoader.gate();</script>
+<script src="tasern-art.js"></script>
+<script src="tasern-engine.js"></script>
+<script>
+(function(){
+"use strict";
+
+// === NFT STAT INTEGRATION ===
+var statB = { damage: 1, speed: 1, lives: 0, hpMult: 1, scoreMult: 1, cooldown: 1, luck: 1, str: 10, dex: 10, con: 10, int: 10, wis: 10, cha: 10, level: 0, color: '#44dd88', name: 'Baseling', icon: 'B' };
+try { if (window.NftLoader && NftLoader.getStatBonuses) statB = NftLoader.getStatBonuses(); } catch(e) {}
+
+// Bridge shared baseling stats (getMults, ARCADE-STATS.md) onto statB; helpers read statB live.
+function dnd(x){ return Math.round(10 + (x - 1) * 20); }
+function recomputeStats() {
+  var m = (window.TAS && TAS.player) ? TAS.player.mults() : { moveSpeed:1, health:1, damage:1, luck:1, swim:1 };
+  statB.str = dnd(m.damage); statB.dex = dnd(m.moveSpeed); statB.con = dnd(m.health);
+  statB.int = dnd(m.luck);   statB.wis = dnd(m.luck);      statB.cha = dnd(m.luck);
+  statB.speed = m.moveSpeed; statB.damage = m.damage; statB.luck = m.luck; statB.hpMult = m.health;
+  var sel = (window.BaselingPlayer && BaselingPlayer.getSelected) ? BaselingPlayer.getSelected() : null;
+  if (sel) statB.name = sel.charName || statB.name;
+}
+recomputeStats();
+var picking = false;
+if (window.TAS && TAS.player) {
+  TAS.player.init().then(function(){ recomputeStats(); })
+    .catch(function(e){ console.warn('[sporeouria] player init failed:', e && e.message); });
+}
+
+// === GAME CONSTANTS ===
+const GW = 480, GH = 320;
+const ctx = TAS.ctx;
+TAS.initCanvas(GW, GH);
+TAS.input.initTouch({ buttons: ['a', 'b'], labels: { a: 'JUMP', b: 'ATK' } });
+
+const TILE = 16;
+const COLS = 30; // 480/16
+const ROWS = 20; // 320/16
+const GRAVITY = 700;
+const MAX_FALL = 400;
+const INVULN_TIME = 1.5;
+const SAVE_KEY = 'sporeouria_save';
+const HIGH_KEY = 'sporeouria_high';
+
+// --- STR: damage multiplier (1.0-2.0) ---
+function getDamage(base) { return Math.ceil(base * statB.damage); }
+
+// --- DEX: speed multiplier (1.0-1.5) ---
+function getSpeed(base) { return base * statB.speed; }
+
+// --- CON: HP multiplier (1.0-1.5), bonus lives (0-4) ---
+function getMaxHearts() { return Math.ceil(3 * statB.hpMult); }
+function getBonusLives() { return statB.lives; }
+
+// --- INT: score multiplier (1.0-2.0) ---
+function getScore(base) { return Math.ceil(base * statB.scoreMult); }
+
+// --- WIS: cooldown multiplier (0.67-1.0, lower = faster) ---
+function getCooldown(base) { return base * statB.cooldown; }
+
+// --- CHA: luck multiplier (1.0-2.0) for drops ---
+function getLuckChance(base) { return Math.min(1.0, base * statB.luck); }
+
+// Baseling player color from NFT or default
+const PLAYER_COLOR = statB.color || '#44dd88';
+const PLAYER_NAME = statB.name || 'Baseling';
+
+// === ZONE DEFINITIONS (Tasern-themed) ===
+const ZONES = {
+  namaris_port:    { name: 'Spore Harbor',        bg: '#1a1c2c', ground: '#3a5a4a', accent: '#38d973', water: '#1a3a5a', particle: '#38d973' },
+  iron_maw:       { name: 'The Mycelium Maw',    bg: '#1a0a0a', ground: '#7a444a', accent: '#e6482e', water: '#2a1a2a', particle: '#e6482e' },
+  frost_reach:    { name: 'Frostcap Reach',       bg: '#1a2a3a', ground: '#5a9ab0', accent: '#3cacd7', water: '#3366cc', particle: '#3cacd7' },
+  deepwood:       { name: 'The Deepmoss',         bg: '#0a1a0a', ground: '#2a4a2a', accent: '#38d973', water: '#1a3a2a', particle: '#38d973' },
+  sky_spires:     { name: 'Sporeling Spires',     bg: '#1a1c2c', ground: '#6a4ab0', accent: '#a855f7', water: '#4a3acc', particle: '#a855f7' },
+  fungal_depths:  { name: 'The Fungal Heart',     bg: '#1a0a1a', ground: '#4a2a4a', accent: '#a855f7', water: '#3a1a4a', particle: '#a855f7' },
+  crystal_caves:  { name: 'Crystal Grottos',      bg: '#1a1c2c', ground: '#5a4a6a', accent: '#3cacd7', water: '#3a2a5a', particle: '#3cacd7' },
+  ashen_wastes:   { name: 'Ashen Mulch Flats',    bg: '#1a1a0a', ground: '#5a5a3a', accent: '#f4b41b', water: '#3a3a1a', particle: '#f4b41b' }
+};
+
+// World map: 12 columns x 10 rows of screens
+const MAP_W = 12, MAP_H = 10;
+
+// === GAME STATE ===
+let state = 'title';
+let frame = 0;
+let score = 0;
+let highScore = TAS.score.load(HIGH_KEY);
+let player = null;
+let camera = { x: 0, y: 0 };
+let hearts = 3, maxHearts = 3;
+let lives = 3;
+let invulnTimer = 0;
+let enemies = [];
+let projectiles = [];
+let items = [];
+let portals = [];
+let boss = null;
+let bossDefeated = {};
+let secretsFound = {};
+let explored = {};
+let mapOpen = false;
+let screenX = 5, screenY = 4;
+let screenTiles = [];
+let msgText = '';
+let msgTimer = 0;
+let deathTimer = 0;
+let victoryTimer = 0;
+let scorePopups = [];
+let tutorialShown = false;
+let tutorialTimer = 0;
+let tutorialStep = 0;
+let comboCount = 0;
+let comboTimer = 0;
+let totalKills = 0;
+let totalPickups = 0;
+
+// Key items for final area
+let keys_collected = [false, false, false];
+const KEY_NAMES = ['Spore Shard', 'Mycelium Heart', 'Garden Tear'];
+
+// === ZONE MAP ===
+const ZONE_MAP = [];
+function buildZoneMap() {
+  for (let y = 0; y < MAP_H; y++) {
+    ZONE_MAP[y] = [];
+    for (let x = 0; x < MAP_W; x++) {
+      if (y <= 1 && x >= 3 && x <= 8) ZONE_MAP[y][x] = 'sky_spires';
+      else if (y === 2 && x >= 4 && x <= 7) ZONE_MAP[y][x] = 'sky_spires';
+      else if (y >= 7 && x >= 2 && x <= 5) ZONE_MAP[y][x] = 'deepwood';
+      else if (y >= 8 && x >= 6 && x <= 8) ZONE_MAP[y][x] = 'deepwood';
+      else if (y >= 3 && y <= 6 && x <= 2) ZONE_MAP[y][x] = 'frost_reach';
+      else if (y >= 3 && y <= 5 && x >= 9 && x <= 11) ZONE_MAP[y][x] = 'crystal_caves';
+      else if (y >= 6 && y <= 8 && x >= 9) ZONE_MAP[y][x] = 'ashen_wastes';
+      else if (y >= 4 && y <= 6 && x >= 5 && x <= 7) ZONE_MAP[y][x] = 'fungal_depths';
+      else if (y >= 2 && y <= 4 && x >= 3 && x <= 4) ZONE_MAP[y][x] = 'iron_maw';
+      else ZONE_MAP[y][x] = 'namaris_port';
+    }
+  }
+}
+buildZoneMap();
+
+// === SEEDED RANDOM ===
+function seededRand(seed) {
+  let s = seed;
+  return function() {
+    s = (s * 1664525 + 1013904223) & 0xFFFFFFFF;
+    return (s >>> 0) / 4294967296;
+  };
+}
+
+// === SCREEN GENERATION ===
+function generateScreen(sx, sy) {
+  const zone = ZONE_MAP[sy][sx];
+  const rand = seededRand(sx * 1000 + sy * 37 + 7919);
+  const tiles = [];
+  for (let r = 0; r < ROWS; r++) {
+    tiles[r] = [];
+    for (let c = 0; c < COLS; c++) {
+      tiles[r][c] = 0; // 0=air, 1=solid, 2=platform, 3=water, 4=ice, 5=spikes, 6=lava, 7=vines
+    }
+  }
+
+  let groundY = ROWS - 2;
+  if (zone === 'sky_spires') groundY = ROWS - 1;
+  if (zone === 'deepwood') groundY = ROWS - 3;
+
+  // Bottom solid
+  for (let c = 0; c < COLS; c++) {
+    for (let r = groundY; r < ROWS; r++) {
+      if (zone === 'deepwood' && r >= groundY && r < ROWS - 1) tiles[r][c] = 3;
+      else if (zone === 'iron_maw' && r === ROWS - 1 && rand() < 0.3) tiles[r][c] = 6;
+      else tiles[r][c] = 1;
+    }
+  }
+
+  // Zone-specific terrain
+  if (zone === 'frost_reach') {
+    for (let c = 0; c < COLS; c++) {
+      if (tiles[groundY - 1]) tiles[groundY - 1][c] = 4;
+    }
+    for (let i = 0; i < 5; i++) {
+      let px = Math.floor(rand() * (COLS - 6)) + 3;
+      let py = Math.floor(rand() * (groundY - 6)) + 4;
+      let pw = Math.floor(rand() * 4) + 3;
+      for (let c = px; c < px + pw && c < COLS; c++) tiles[py][c] = 4;
+    }
+    for (let c = 0; c < COLS; c++) {
+      for (let r = 0; r < 2; r++) tiles[r][c] = 1;
+    }
+  } else if (zone === 'sky_spires') {
+    for (let c = 0; c < COLS; c++) tiles[ROWS - 1][c] = 0;
+    for (let i = 0; i < 7; i++) {
+      let px = Math.floor(rand() * (COLS - 5)) + 1;
+      let py = Math.floor(rand() * (ROWS - 6)) + 3;
+      let pw = Math.floor(rand() * 4) + 2;
+      for (let c = px; c < px + pw && c < COLS; c++) tiles[py][c] = 2;
+    }
+    for (let c = 4; c < COLS - 4; c++) tiles[ROWS - 3][c] = 2;
+  } else if (zone === 'deepwood') {
+    for (let i = 0; i < 5; i++) {
+      let px = Math.floor(rand() * (COLS - 5)) + 2;
+      let py = Math.floor(rand() * (groundY - 4)) + 2;
+      let pw = Math.floor(rand() * 4) + 2;
+      for (let c = px; c < px + pw && c < COLS; c++) tiles[py][c] = 2;
+    }
+    // Vines
+    for (let i = 0; i < 4; i++) {
+      let vx = Math.floor(rand() * (COLS - 4)) + 2;
+      for (let r = 1; r < groundY - 2; r++) {
+        if (rand() < 0.7) tiles[r][vx] = 7;
+      }
+    }
+  } else if (zone === 'crystal_caves') {
+    for (let c = 0; c < COLS; c++) {
+      for (let r = 0; r < 3; r++) tiles[r][c] = 1;
+    }
+    for (let i = 0; i < 3; i++) {
+      let gx = Math.floor(rand() * (COLS - 2)) + 1;
+      tiles[0][gx] = 0; tiles[1][gx] = 0; tiles[2][gx] = 0;
+    }
+    for (let i = 0; i < 6; i++) {
+      let px = Math.floor(rand() * (COLS - 4)) + 2;
+      let py = Math.floor(rand() * (ROWS - 8)) + 4;
+      let pw = Math.floor(rand() * 3) + 2;
+      for (let c = px; c < px + pw && c < COLS; c++) tiles[py][c] = 1;
+    }
+  } else if (zone === 'fungal_depths') {
+    for (let i = 0; i < 5; i++) {
+      let px = Math.floor(rand() * (COLS - 4)) + 2;
+      let py = Math.floor(rand() * (ROWS - 8)) + 4;
+      let pw = Math.floor(rand() * 4) + 2;
+      for (let c = px; c < px + pw && c < COLS; c++) tiles[py][c] = 1;
+    }
+    for (let c = 0; c < COLS; c++) {
+      if (rand() < 0.18 && tiles[groundY - 1][c] === 0) tiles[groundY - 1][c] = 5;
+    }
+  } else if (zone === 'iron_maw') {
+    // Tight corridors, lava pits, ceiling
+    for (let c = 0; c < COLS; c++) {
+      for (let r = 0; r < 2; r++) tiles[r][c] = 1;
+    }
+    for (let i = 0; i < 4; i++) {
+      let px = Math.floor(rand() * (COLS - 5)) + 2;
+      let py = Math.floor(rand() * (ROWS - 8)) + 4;
+      let pw = Math.floor(rand() * 4) + 2;
+      for (let c = px; c < px + pw && c < COLS; c++) tiles[py][c] = 1;
+    }
+    // Lava strips
+    for (let c = 0; c < COLS; c++) {
+      if (rand() < 0.2 && tiles[groundY - 1][c] === 0) tiles[groundY - 1][c] = 6;
+    }
+  } else if (zone === 'ashen_wastes') {
+    for (let i = 0; i < 5; i++) {
+      let px = Math.floor(rand() * (COLS - 5)) + 2;
+      let py = Math.floor(rand() * (groundY - 5)) + 4;
+      let pw = Math.floor(rand() * 5) + 3;
+      for (let c = px; c < px + pw && c < COLS; c++) tiles[py][c] = 2;
+    }
+    // Spike patches
+    for (let c = 0; c < COLS; c++) {
+      if (rand() < 0.12 && tiles[groundY - 1][c] === 0) tiles[groundY - 1][c] = 5;
+    }
+  } else {
+    // Namaris port: gentle platforms
+    for (let i = 0; i < 4; i++) {
+      let px = Math.floor(rand() * (COLS - 6)) + 2;
+      let py = Math.floor(rand() * (groundY - 5)) + 4;
+      let pw = Math.floor(rand() * 5) + 3;
+      for (let c = px; c < px + pw && c < COLS; c++) tiles[py][c] = 2;
+    }
+  }
+
+  // Ensure passages for screen transitions
+  if (sx > 0) {
+    let passY = Math.floor(ROWS * 0.6);
+    for (let r = passY - 2; r <= passY + 1; r++) {
+      if (r >= 0 && r < ROWS) tiles[r][0] = 0;
+    }
+  }
+  if (sx < MAP_W - 1) {
+    let passY = Math.floor(ROWS * 0.6);
+    for (let r = passY - 2; r <= passY + 1; r++) {
+      if (r >= 0 && r < ROWS) tiles[r][COLS - 1] = 0;
+    }
+  }
+  if (sy > 0) {
+    let passX = Math.floor(COLS * 0.5);
+    for (let c = passX - 1; c <= passX + 1; c++) {
+      if (c >= 0 && c < COLS) { tiles[0][c] = 0; tiles[1][c] = 0; }
+    }
+  }
+  if (sy < MAP_H - 1) {
+    let passX = Math.floor(COLS * 0.5);
+    for (let c = passX - 1; c <= passX + 1; c++) {
+      if (c >= 0 && c < COLS) { tiles[ROWS - 1][c] = 0; tiles[ROWS - 2][c] = 0; }
+    }
+  }
+
+  return tiles;
+}
+
+// === TASERN ENEMY TYPES ===
+const ENEMY_TYPES = {
+  gutter_rat:    { w: 14, h: 12, hp: 2, speed: 45, color: '#7a444a', behavior: 'crawl',   dmg: 1, score: 50,  drop: 'coin' },
+  dock_crab:     { w: 16, h: 10, hp: 3, speed: 30, color: '#e6482e', behavior: 'crawl',   dmg: 1, score: 75,  drop: 'coin' },
+  spore_wisp:    { w: 10, h: 10, hp: 1, speed: 55, color: '#a855f7', behavior: 'fly',     dmg: 1, score: 40,  drop: 'mana' },
+  maw_bat:       { w: 12, h: 10, hp: 2, speed: 65, color: '#e6482e', behavior: 'fly',     dmg: 1, score: 60,  drop: 'coin' },
+  iron_slime:    { w: 14, h: 14, hp: 4, speed: 25, color: '#38d973', behavior: 'bounce',  dmg: 1, score: 100, drop: 'heart' },
+  frost_imp:     { w: 12, h: 14, hp: 3, speed: 50, color: '#3cacd7', behavior: 'bounce',  dmg: 1, score: 80,  drop: 'mana' },
+  vine_creeper:  { w: 14, h: 14, hp: 3, speed: 35, color: '#38d973', behavior: 'crawl',   dmg: 1, score: 70,  drop: 'coin' },
+  deep_fish:     { w: 12, h: 8,  hp: 2, speed: 60, color: '#3cacd7', behavior: 'swim',    dmg: 1, score: 55,  drop: 'coin' },
+  crystal_golem: { w: 16, h: 16, hp: 5, speed: 20, color: '#a855f7', behavior: 'bounce',  dmg: 2, score: 150, drop: 'heart' },
+  ash_wraith:    { w: 14, h: 16, hp: 3, speed: 40, color: '#f4b41b', behavior: 'fly',     dmg: 2, score: 120, drop: 'mana' },
+  myco_plant:    { w: 14, h: 16, hp: 4, speed: 0,  color: '#a855f7', behavior: 'shoot',   dmg: 1, score: 90,  drop: 'coin' },
+  spire_hawk:    { w: 14, h: 10, hp: 2, speed: 80, color: '#a855f7', behavior: 'swoop',   dmg: 1, score: 85,  drop: 'mana' }
+};
+
+// Enemies per zone
+const ZONE_ENEMIES = {
+  namaris_port:   ['gutter_rat', 'dock_crab', 'maw_bat'],
+  iron_maw:       ['iron_slime', 'maw_bat', 'myco_plant'],
+  frost_reach:    ['frost_imp', 'spore_wisp', 'deep_fish'],
+  deepwood:       ['vine_creeper', 'spore_wisp', 'deep_fish'],
+  sky_spires:     ['spire_hawk', 'spore_wisp', 'maw_bat'],
+  fungal_depths:  ['spore_wisp', 'myco_plant', 'iron_slime'],
+  crystal_caves:  ['crystal_golem', 'frost_imp', 'maw_bat'],
+  ashen_wastes:   ['ash_wraith', 'gutter_rat', 'myco_plant']
+};
+
+// === BOSS DATA (Tasern-themed) ===
+const BOSS_SCREENS = {
+  '2,4':  { type: 'harbourmaster', hp: 14, name: 'Moldmaster Kren',       score: 500 },
+  '1,5':  { type: 'frost_wyrm',   hp: 16, name: 'Frostcap Wyrm',         score: 600, key: 0 },
+  '10,4': { type: 'gem_tyrant',   hp: 18, name: 'Spore Gem Tyrant',      score: 700, key: 1 },
+  '5,1':  { type: 'sky_sentinel', hp: 16, name: 'Sporeling Sentinel',    score: 650 },
+  '4,8':  { type: 'root_horror',  hp: 15, name: 'Deepmoss Horror',       score: 550 },
+  '10,7': { type: 'ash_king',     hp: 18, name: 'Mulch King',            score: 750, key: 2 },
+  '6,5':  { type: 'fungal_lord',  hp: 24, name: 'The POOP Overlord',     score: 1000 }
+};
+
+// Heart container locations
+const HEART_SCREENS = ['1,3', '7,2', '4,9', '8,6', '11,7', '3,7', '9,2'];
+
+// Mana crystal locations
+const MANA_SCREENS = ['0,4', '6,0', '8,8', '11,5', '2,8', '7,4'];
+
+// === ITEM TYPES ===
+const ITEM_TYPES = {
+  coin:            { color: '#f4b41b', shape: 'circle', score: 10  },
+  heart:           { color: '#e6482e', shape: 'heart',  score: 0   },
+  mana:            { color: '#a855f7', shape: 'diamond', score: 25 },
+  heart_container: { color: '#e6482e', shape: 'bigheart', score: 200 },
+  mana_crystal:    { color: '#a855f7', shape: 'bigdiamond', score: 300 },
+  key_shard:       { color: '#f4b41b', shape: 'star',  score: 500 }
+};
+
+// === SHARED ENEMY ART (art/enemies + art/sea pools — sprite first, procedural fallback kept) ===
+const ESPR = {}, BSPR = {};
+(function loadEnemyArt() {
+  function img(src) { const i = new Image(); i.src = src; return i; }
+  ESPR.gutter_rat    = [img('art/sea/scarab-walk1.png'), img('art/sea/scarab-walk2.png')]; // scuttling vermin, 2-frame walk
+  ESPR.dock_crab     = img('art/sea/enemy-beetle.png');
+  ESPR.spore_wisp    = img('art/enemies/enemy-will-o-wisp.png');
+  // maw_bat: no fitting sprite (bat) — stays procedural
+  ESPR.iron_slime    = img('art/enemies/enemy-slime-mold.png');
+  ESPR.frost_imp     = img('art/enemies/enemy-goblin.png');
+  ESPR.vine_creeper  = img('art/enemies/enemy-spriggan.png');
+  ESPR.deep_fish     = img('art/sea/enemy-snake.png');    // eel-like swimmer
+  ESPR.crystal_golem = img('art/enemies/enemy-troll.png');
+  ESPR.ash_wraith    = img('art/enemies/enemy-rot-walker.png');
+  ESPR.myco_plant    = img('art/enemies/enemy-myconid.png');
+  // spire_hawk: no fitting sprite (bird) — stays procedural
+  BSPR.harbourmaster = img('art/enemies/enemy-bog-wight.png');     // Moldmaster Kren
+  BSPR.frost_wyrm    = img('art/enemies/enemy-wyrm.png');
+  BSPR.gem_tyrant    = img('art/enemies/enemy-troll.png');
+  BSPR.sky_sentinel  = img('art/enemies/enemy-shroom-knight.png');
+  BSPR.root_horror   = img('art/enemies/enemy-spriggan.png');
+  BSPR.ash_king      = img('art/enemies/enemy-rot-walker.png');
+  BSPR.fungal_lord   = img('art/enemies/enemy-myconid.png');
+})();
+function esprReady(i) { return !!(i && i.complete && i.naturalWidth > 0); }
+// Draw a sprite bottom-anchored at (cx, bottom), aspect preserved, flipped when facing left.
+function drawEnemySprite(im, cx, bottom, size, flip) {
+  const s = size / Math.max(im.naturalWidth, im.naturalHeight);
+  const dw = im.naturalWidth * s, dh = im.naturalHeight * s;
+  const dx = cx - dw / 2, dy = bottom - dh;
+  ctx.save();
+  if (flip) { ctx.translate(dx + dw, dy); ctx.scale(-1, 1); ctx.drawImage(im, 0, 0, dw, dh); }
+  else { ctx.drawImage(im, dx, dy, dw, dh); }
+  ctx.restore();
+}
+
+// === SCORE POPUP SYSTEM ===
+function addScorePopup(x, y, text, color) {
+  scorePopups.push({ x: x, y: y, text: String(text), color: color || '#f4b41b', timer: 1.2, vy: -40 });
+}
+
+function updateScorePopups(dt) {
+  for (let i = scorePopups.length - 1; i >= 0; i--) {
+    const p = scorePopups[i];
+    p.y += p.vy * dt;
+    p.timer -= dt;
+    if (p.timer <= 0) scorePopups.splice(i, 1);
+  }
+}
+
+function drawScorePopups() {
+  for (const p of scorePopups) {
+    ctx.globalAlpha = Math.min(1, p.timer * 2);
+    ctx.fillStyle = p.color;
+    ctx.font = 'bold 10px monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText(p.text, p.x, p.y);
+  }
+  ctx.globalAlpha = 1;
+  ctx.textAlign = 'left';
+}
+
+// === PLAYER ===
+function createPlayer(x, y) {
+  return {
+    x: x, y: y, vx: 0, vy: 0,
+    w: 14, h: 14,
+    facing: 1,
+    grounded: false,
+    attacking: false,
+    attackTimer: 0,
+    attackCooldown: 0,
+    inWater: false,
+    wallSlide: 0,
+    mana: 0,
+    maxMana: 3
+  };
+}
+
+function initScreen() {
+  screenTiles = generateScreen(screenX, screenY);
+  enemies = [];
+  projectiles = [];
+  items = [];
+  portals = [];
+  boss = null;
+
+  explored[screenX + ',' + screenY] = true;
+  const zone = ZONE_MAP[screenY][screenX];
+  const rand = seededRand(screenX * 999 + screenY * 53 + 4321);
+  const bossKey = screenX + ',' + screenY;
+
+  // Spawn enemies based on zone
+  let numEnemies = Math.floor(rand() * 3) + 2;
+  if (BOSS_SCREENS[bossKey] && !bossDefeated[bossKey]) {
+    numEnemies = 0;
+    spawnBoss(BOSS_SCREENS[bossKey]);
+  }
+
+  const zoneEnemyList = ZONE_ENEMIES[zone] || ['gutter_rat'];
+  for (let i = 0; i < numEnemies; i++) {
+    let type = zoneEnemyList[Math.floor(rand() * zoneEnemyList.length)];
+
+    let ex = Math.floor(rand() * (GW - 60)) + 30;
+    let ey = Math.floor(rand() * (GH - 100)) + 40;
+    const et = ENEMY_TYPES[type];
+    if (et.behavior !== 'fly' && et.behavior !== 'swim' && et.behavior !== 'swoop') {
+      for (let r = Math.floor(ey / TILE); r < ROWS; r++) {
+        if (screenTiles[r] && screenTiles[r][Math.floor(ex / TILE)] === 1) {
+          ey = r * TILE - et.h;
+          break;
+        }
+      }
+    }
+    enemies.push(createEnemy(type, ex, ey, rand));
+  }
+
+  // Heart container
+  if (HEART_SCREENS.includes(bossKey) && !secretsFound[bossKey + '_heart']) {
+    items.push({ x: 240, y: 80, w: 12, h: 12, type: 'heart_container', bobOffset: Math.random() * Math.PI * 2 });
+  }
+
+  // Mana crystal
+  if (MANA_SCREENS.includes(bossKey) && !secretsFound[bossKey + '_mana']) {
+    items.push({ x: 200, y: 100, w: 12, h: 12, type: 'mana_crystal', bobOffset: Math.random() * Math.PI * 2 });
+  }
+
+  // Exit portal in fungal depths center
+  if (screenX === 6 && screenY === 5 && keys_collected[0] && keys_collected[1] && keys_collected[2]) {
+    portals.push({ x: 220, y: 100, w: 32, h: 32 });
+  }
+
+  // Ambient zone particles
+  spawnZoneParticles(zone);
+}
+
+function spawnZoneParticles(zone) {
+  const zoneData = ZONES[zone];
+  if (!zoneData) return;
+  if (zone === 'fungal_depths' || zone === 'deepwood') {
+    for (let i = 0; i < 6; i++) {
+      TAS.particles.spawn(
+        Math.random() * GW, Math.random() * GH,
+        zoneData.particle, 1, 0.3,
+        { size: 1, gravity: -0.02 }
+      );
+    }
+  }
+}
+
+function createEnemy(type, x, y, rand) {
+  const et = ENEMY_TYPES[type];
+  return {
+    type: type, x: x, y: y, w: et.w, h: et.h,
+    hp: et.hp, maxHp: et.hp,
+    vx: (rand() > 0.5 ? 1 : -1) * et.speed,
+    vy: 0,
+    color: et.color, behavior: et.behavior, dmg: et.dmg,
+    score: et.score, drop: et.drop,
+    shootTimer: 0, bounceTimer: 0, swoopTimer: 0, swoopDir: 1,
+    alive: true, flashTimer: 0
+  };
+}
+
+function spawnBoss(data) {
+  // Boss HP scales with CON inversely (harder if you're weaker -- or easier if strong)
+  let bossHp = data.hp;
+  boss = {
+    x: GW / 2 - 20, y: GH / 2 - 40, w: 40, h: 40,
+    hp: bossHp, maxHp: bossHp, type: data.type,
+    key: data.key !== undefined ? data.key : -1,
+    name: data.name, score: data.score || 500,
+    vx: 80, vy: 0, phase: 0,
+    attackTimer: 0, flashTimer: 0, pattern: 0,
+    shieldTimer: 0
+  };
+}
+
+// === COLLISION ===
+function tileAt(px, py) {
+  const c = Math.floor(px / TILE);
+  const r = Math.floor(py / TILE);
+  if (r < 0 || r >= ROWS || c < 0 || c >= COLS) return 1;
+  return screenTiles[r] ? screenTiles[r][c] : 0;
+}
+
+function isSolid(px, py) {
+  const t = tileAt(px, py);
+  return t === 1 || t === 4;
+}
+
+function isWater(px, py) { return tileAt(px, py) === 3; }
+function isIce(px, py) { return tileAt(px, py) === 4; }
+function isSpike(px, py) { return tileAt(px, py) === 5; }
+function isLava(px, py) { return tileAt(px, py) === 6; }
+function isVine(px, py) { return tileAt(px, py) === 7; }
+
+function rectOverlap(a, b) {
+  return a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
+}
+
+// === INPUT HELPERS (NES style: arrows + Z/X or touch A/B) ===
+function leftHeld() { return TAS.input.keys['ArrowLeft'] || TAS.input.touch.left; }
+function rightHeld() { return TAS.input.keys['ArrowRight'] || TAS.input.touch.right; }
+function upHeld() { return TAS.input.keys['ArrowUp'] || TAS.input.touch.up; }
+function downHeld() { return TAS.input.keys['ArrowDown'] || TAS.input.touch.down; }
+function jumpPressed() { return TAS.input.keys['KeyZ'] || TAS.input.keys['Space'] || TAS.input.touch.a; }
+function attackPressed() { return TAS.input.keys['KeyX'] || TAS.input.touch.b; }
+function mapPressed() { return TAS.input.keys['KeyM'] || TAS.input.keys['Tab']; }
+function startPressed() { return TAS.input.keys['Enter'] || TAS.input.keys['KeyZ'] || TAS.input.keys['Space'] || TAS.input.touch.a; }
+
+let prevJump = false, prevAttack = false, prevMap = false, prevStart = false;
+function jumpJustPressed() { return jumpPressed() && !prevJump; }
+function attackJustPressed() { return attackPressed() && !prevAttack; }
+function mapJustPressed() { return mapPressed() && !prevMap; }
+function startJustPressed() { return startPressed() && !prevStart; }
+
+// === SAVE/LOAD ===
+function saveGame() {
+  const data = {
+    screenX: screenX, screenY: screenY,
+    keys_collected: keys_collected,
+    hearts: hearts, maxHearts: maxHearts, lives: lives,
+    score: score,
+    bossDefeated: bossDefeated, secretsFound: secretsFound, explored: explored,
+    totalKills: totalKills, totalPickups: totalPickups
+  };
+  try { localStorage.setItem(SAVE_KEY, JSON.stringify(data)); } catch(e) { console.warn('Save failed:', e); }
+  if (score > highScore) {
+    highScore = score;
+    TAS.score.save(HIGH_KEY, score);
+  }
+}
+
+function loadGame() {
+  try {
+    const raw = localStorage.getItem(SAVE_KEY);
+    if (!raw) return false;
+    const data = JSON.parse(raw);
+    screenX = data.screenX; screenY = data.screenY;
+    keys_collected = data.keys_collected;
+    hearts = data.hearts; maxHearts = data.maxHearts;
+    lives = data.lives; score = data.score || 0;
+    bossDefeated = data.bossDefeated || {};
+    secretsFound = data.secretsFound || {};
+    explored = data.explored || {};
+    totalKills = data.totalKills || 0;
+    totalPickups = data.totalPickups || 0;
+    return true;
+  } catch(e) { console.warn('Load failed:', e); return false; }
+}
+
+// === START/RESET ===
+function startGame(loadSave) {
+  if (loadSave && loadGame()) {
+    // loaded
+  } else {
+    screenX = 5; screenY = 4;
+    keys_collected = [false, false, false];
+    maxHearts = getMaxHearts(); // CON determines max HP
+    hearts = maxHearts;
+    lives = 3 + getBonusLives(); // CON gives bonus lives
+    score = 0;
+    bossDefeated = {};
+    secretsFound = {};
+    explored = {};
+    totalKills = 0;
+    totalPickups = 0;
+    comboCount = 0;
+    comboTimer = 0;
+  }
+  player = createPlayer(GW / 2 - 7, GH / 2);
+  initScreen();
+  state = 'playing';
+  deathTimer = 0;
+  victoryTimer = 0;
+  scorePopups = [];
+  TAS.particles.clear();
+
+  // Show tutorial on first play
+  if (!tutorialShown) {
+    tutorialTimer = 8;
+    tutorialStep = 0;
+    tutorialShown = true;
+  }
+}
+
+// === PLAYER UPDATE ===
+function updatePlayer(dt) {
+  if (!player) return;
+
+  // DEX determines base speed
+  const baseSpeed = getSpeed(120);
+  const jumpPower = -290 - (statB.dex * 2); // DEX improves jump height slightly
+
+  // Horizontal movement
+  let moveDir = 0;
+  if (leftHeld()) moveDir = -1;
+  if (rightHeld()) moveDir = 1;
+  if (moveDir !== 0) player.facing = moveDir;
+
+  // Ice sliding
+  let accel = baseSpeed;
+  let friction = 0.85;
+  let onIce = player.grounded && isIce(player.x + player.w / 2, player.y + player.h + 2);
+  if (onIce) { accel = baseSpeed * 0.3; friction = 0.98; }
+
+  if (moveDir !== 0) {
+    player.vx += moveDir * accel * dt * 8;
+    if (Math.abs(player.vx) > baseSpeed) player.vx = moveDir * baseSpeed;
+  } else {
+    player.vx *= friction;
+    if (Math.abs(player.vx) < 5) player.vx = 0;
+  }
+
+  // Vine climbing (WIS helps: better climbers)
+  let onVine = isVine(player.x + player.w / 2, player.y + player.h / 2);
+  if (onVine) {
+    player.vy *= 0.8;
+    let climbSpeed = 60 + statB.wis * 3; // WIS: faster climbing
+    if (upHeld()) player.vy = -climbSpeed;
+    else if (downHeld()) player.vy = climbSpeed;
+    else player.vy *= 0.5;
+  }
+
+  // Wall slide (DEX helps with wall cling)
+  if (!player.grounded && !onVine) {
+    let touchLeft = isSolid(player.x - 2, player.y + 4) || isSolid(player.x - 2, player.y + player.h - 4);
+    let touchRight = isSolid(player.x + player.w + 2, player.y + 4) || isSolid(player.x + player.w + 2, player.y + player.h - 4);
+    if (touchLeft || touchRight) {
+      player.wallSlide = touchLeft ? -1 : 1;
+      let slideSpeed = 40 - statB.dex; // DEX: slower wall slide = better cling
+      if (slideSpeed < 10) slideSpeed = 10;
+      if (player.vy > slideSpeed) player.vy = slideSpeed;
+    } else {
+      player.wallSlide = 0;
+    }
+  } else {
+    player.wallSlide = 0;
+  }
+
+  // Water swimming (CON helps breathing / speed)
+  player.inWater = isWater(player.x + player.w / 2, player.y + player.h / 2);
+  if (player.inWater) {
+    player.vy *= 0.9;
+    let swimSpeed = 80 + statB.con * 2; // CON: better swimming
+    if (upHeld()) player.vy -= swimSpeed * dt * 4;
+    if (downHeld()) player.vy += swimSpeed * dt * 4;
+    if (Math.abs(player.vy) > swimSpeed) player.vy = Math.sign(player.vy) * swimSpeed;
+    // Water particles
+    if (frame % 15 === 0) {
+      TAS.particles.spawn(player.x + player.w / 2, player.y, '#88bbff', 2, 0.5, { size: 1, gravity: -0.05 });
+    }
+  }
+
+  // Gravity
+  if (!player.grounded && !onVine) {
+    let grav = GRAVITY;
+    if (player.inWater) grav *= 0.3;
+    player.vy += grav * dt;
+    if (player.vy > MAX_FALL) player.vy = MAX_FALL;
+  }
+
+  // Jump (Z or touch A)
+  if (jumpJustPressed()) {
+    if (player.grounded) {
+      player.vy = jumpPower;
+      player.grounded = false;
+      TAS.audio.playTone(300, 0.08, 'square');
+      TAS.particles.spawn(player.x + player.w / 2, player.y + player.h, '#fff', 4, 1, { size: 1 });
+    } else if (player.wallSlide !== 0) {
+      // Wall jump
+      player.vy = jumpPower * 0.8;
+      player.vx = -player.wallSlide * baseSpeed;
+      player.facing = -player.wallSlide;
+      TAS.audio.playTone(350, 0.08, 'square');
+      TAS.particles.spawn(player.x + (player.wallSlide < 0 ? 0 : player.w), player.y + player.h / 2, '#fff', 3, 1);
+    } else if (onVine) {
+      player.vy = jumpPower * 0.6;
+      TAS.audio.playTone(320, 0.06, 'square');
+    } else if (player.inWater) {
+      player.vy = -100;
+      TAS.audio.playTone(250, 0.06, 'triangle');
+    }
+  }
+
+  // Attack (X or touch B) -- STR determines damage, WIS determines cooldown
+  if (player.attackCooldown > 0) player.attackCooldown -= dt;
+  if (player.attacking) {
+    player.attackTimer -= dt;
+    if (player.attackTimer <= 0) player.attacking = false;
+  }
+  if (attackJustPressed() && player.attackCooldown <= 0) {
+    player.attacking = true;
+    player.attackTimer = 0.25;
+    player.attackCooldown = getCooldown(0.5); // WIS: faster attack cooldown
+    TAS.audio.playTone(400, 0.06, 'square');
+    // Attack particle burst
+    let atkX = player.x + (player.facing > 0 ? player.w + 4 : -8);
+    TAS.particles.spawn(atkX, player.y + player.h / 2, PLAYER_COLOR, 4, 2, { size: 2 });
+  }
+
+  // Move with collision
+  let newX = player.x + player.vx * dt;
+  let newY = player.y + player.vy * dt;
+
+  // X collision
+  if (player.vx !== 0) {
+    let checkX = player.vx > 0 ? newX + player.w : newX;
+    if (isSolid(checkX, player.y + 2) || isSolid(checkX, player.y + player.h - 2)) {
+      newX = player.x;
+      player.vx = 0;
+    }
+  }
+  player.x = newX;
+
+  // Y collision
+  player.grounded = false;
+  if (player.vy > 0) {
+    if (isSolid(player.x + 2, newY + player.h) || isSolid(player.x + player.w - 2, newY + player.h)) {
+      newY = Math.floor((newY + player.h) / TILE) * TILE - player.h;
+      player.vy = 0;
+      player.grounded = true;
+    }
+    // Platform (one-way)
+    if (!player.grounded) {
+      let tc = Math.floor((player.x + player.w / 2) / TILE);
+      let tr = Math.floor((newY + player.h) / TILE);
+      let prevR = Math.floor((player.y + player.h) / TILE);
+      if (tr >= 0 && tr < ROWS && tc >= 0 && tc < COLS && screenTiles[tr] && screenTiles[tr][tc] === 2 && prevR < tr) {
+        if (!downHeld()) {
+          newY = tr * TILE - player.h;
+          player.vy = 0;
+          player.grounded = true;
+        }
+      }
+    }
+  }
+  if (player.vy < 0) {
+    if (isSolid(player.x + 2, newY) || isSolid(player.x + player.w - 2, newY)) {
+      newY = Math.floor(newY / TILE + 1) * TILE;
+      player.vy = 0;
+    }
+  }
+  player.y = newY;
+
+  // Hazard damage
+  if (isSpike(player.x + player.w / 2, player.y + player.h + 1)) {
+    takeDamage(1);
+  }
+  if (isLava(player.x + player.w / 2, player.y + player.h + 1) ||
+      isLava(player.x + player.w / 2, player.y + player.h / 2)) {
+    takeDamage(2); // Lava hurts more
+    // Lava particles
+    TAS.particles.spawn(player.x + player.w / 2, player.y + player.h, '#ff4400', 3, 2, { size: 2, gravity: -0.1 });
+  }
+
+  // Screen transitions
+  if (player.x < -4 && screenX > 0) transition(-1, 0);
+  else if (player.x > GW - player.w + 4 && screenX < MAP_W - 1) transition(1, 0);
+  else if (player.y < -4 && screenY > 0) transition(0, -1);
+  else if (player.y > GH + 4) {
+    if (screenY < MAP_H - 1) transition(0, 1);
+    else takeDamage(99);
+  }
+
+  // Sky spire fall death
+  if (ZONE_MAP[screenY][screenX] === 'sky_spires' && player.y > GH) {
+    takeDamage(99);
+  }
+
+  // Combo timer decay
+  if (comboTimer > 0) {
+    comboTimer -= dt;
+    if (comboTimer <= 0) comboCount = 0;
+  }
+}
+
+function transition(dx, dy) {
+  screenX += dx;
+  screenY += dy;
+  initScreen();
+  if (dx < 0) player.x = GW - player.w - 8;
+  if (dx > 0) player.x = 8;
+  if (dy < 0) player.y = GH - player.h - 20;
+  if (dy > 0) player.y = 20;
+  saveGame();
+  TAS.audio.playTone(200, 0.05, 'triangle');
+}
+
+function takeDamage(amt) {
+  if (invulnTimer > 0) return;
+  hearts -= amt;
+  invulnTimer = INVULN_TIME;
+  TAS.fx.shake(8, 0.3);
+  TAS.fx.flash('#f00', 0.2);
+  TAS.audio.playTone(150, 0.2, 'sawtooth');
+  TAS.particles.spawn(player.x + player.w / 2, player.y + player.h / 2, '#f44', 10, 2, { size: 2 });
+  if (hearts <= 0) {
+    lives--;
+    if (lives <= 0) {
+      state = 'gameOver';
+      deathTimer = 3;
+      saveGame();
+      TAS.audio.playMelody([[150, 0.2, 'square'], [100, 0.3, 'square'], [75, 0.5, 'sawtooth']]);
+    } else {
+      hearts = maxHearts;
+      player.x = GW / 2 - 7;
+      player.y = GH / 2;
+      player.vx = 0;
+      player.vy = 0;
+      showMessage('Lives: ' + lives);
+    }
+  }
+}
+
+// === ENEMY UPDATE ===
+function updateEnemies(dt) {
+  for (let i = enemies.length - 1; i >= 0; i--) {
+    const e = enemies[i];
+    if (!e.alive) { enemies.splice(i, 1); continue; }
+    e.flashTimer = Math.max(0, e.flashTimer - dt);
+
+    switch (e.behavior) {
+      case 'bounce':
+        e.x += e.vx * dt;
+        e.bounceTimer += dt;
+        if (e.bounceTimer > 0.8) { e.bounceTimer = 0; e.vy = -180; }
+        e.vy += GRAVITY * 0.7 * dt;
+        e.y += e.vy * dt;
+        if (e.y + e.h > GH - TILE * 2) { e.y = GH - TILE * 2 - e.h; e.vy = 0; }
+        if (isSolid(e.x, e.y + e.h) || isSolid(e.x + e.w, e.y + e.h)) e.vy = 0;
+        if (e.x < 8 || e.x > GW - 20) e.vx = -e.vx;
+        break;
+      case 'fly':
+        e.x += e.vx * dt;
+        e.y += Math.sin(frame * 0.05 + i) * 30 * dt;
+        if (e.x < 8 || e.x > GW - 20) e.vx = -e.vx;
+        break;
+      case 'swim':
+        e.x += e.vx * dt;
+        e.y += Math.sin(frame * 0.03 + i * 2) * 20 * dt;
+        if (e.x < 8 || e.x > GW - 20) e.vx = -e.vx;
+        break;
+      case 'crawl':
+        e.x += e.vx * dt;
+        if (e.x < 8 || e.x > GW - 20) e.vx = -e.vx;
+        if (!isSolid(e.x + (e.vx > 0 ? e.w + 2 : -2), e.y + e.h + 2)) e.vx = -e.vx;
+        break;
+      case 'shoot':
+        e.shootTimer += dt;
+        let shootInterval = getCooldown(2.5); // WIS affects enemy shoot timing too (player advantage)
+        if (e.shootTimer > shootInterval) {
+          e.shootTimer = 0;
+          let dx = player.x - e.x;
+          let dy = player.y - e.y;
+          let dist = Math.sqrt(dx * dx + dy * dy) || 1;
+          projectiles.push({ x: e.x + e.w / 2, y: e.y, vx: (dx / dist) * 120, vy: (dy / dist) * 120, w: 6, h: 6, timer: 3, color: '#ff6644' });
+          TAS.audio.playTone(100, 0.1, 'sawtooth');
+        }
+        break;
+      case 'swoop':
+        e.swoopTimer += dt;
+        if (e.swoopTimer > 1.5) {
+          // Swoop toward player
+          let sdx = player.x - e.x;
+          let sdy = player.y - e.y;
+          let sdist = Math.sqrt(sdx * sdx + sdy * sdy) || 1;
+          e.vx = (sdx / sdist) * e.maxHp * 30; // faster swoop for tougher hawks
+          e.vy = (sdy / sdist) * 100;
+          if (e.swoopTimer > 2.5) e.swoopTimer = 0;
+        } else {
+          e.x += e.vx * dt;
+          e.y += Math.sin(frame * 0.06 + i) * 20 * dt;
+          if (e.x < 8 || e.x > GW - 20) e.vx = -e.vx;
+        }
+        e.x += e.vx * dt * 0.3;
+        e.y += e.vy * dt * 0.3;
+        e.vy *= 0.98;
+        break;
+    }
+
+    // Player collision with enemy
+    if (invulnTimer <= 0 && player && rectOverlap(player, e)) {
+      if (player.attacking) {
+        // STR determines attack damage
+        hitEnemy(e, getDamage(2));
+      } else if (player.vy > 0 && player.y + player.h - 4 < e.y + e.h / 2) {
+        // Stomp - always does 1 base damage
+        hitEnemy(e, getDamage(1));
+        player.vy = -200;
+        TAS.audio.playTone(350, 0.06, 'square');
+      } else {
+        takeDamage(e.dmg);
+      }
+    }
+  }
+
+  // Projectiles
+  for (let i = projectiles.length - 1; i >= 0; i--) {
+    const p = projectiles[i];
+    p.x += p.vx * dt;
+    p.y += p.vy * dt;
+    p.timer -= dt;
+    if (p.timer <= 0 || p.x < 0 || p.x > GW || p.y < 0 || p.y > GH) {
+      projectiles.splice(i, 1); continue;
+    }
+    if (player && rectOverlap(player, p) && invulnTimer <= 0) {
+      takeDamage(1);
+      projectiles.splice(i, 1);
+    }
+  }
+}
+
+function hitEnemy(e, dmg) {
+  e.hp -= dmg;
+  e.flashTimer = 0.15;
+  TAS.audio.playTone(500, 0.08, 'square');
+  TAS.particles.spawn(e.x + e.w / 2, e.y + e.h / 2, e.color, 6, 1.5, { size: 2 });
+
+  if (e.hp <= 0) {
+    e.alive = false;
+    totalKills++;
+
+    // Combo system (INT helps score, CHA helps luck)
+    comboCount++;
+    comboTimer = 2.0;
+    let comboMult = Math.min(comboCount, 5);
+    let enemyScore = getScore(e.score * comboMult);
+    score += enemyScore;
+
+    // Score popup with combo indicator
+    let popText = '+' + enemyScore;
+    let popColor = '#f4b41b';
+    if (comboCount > 1) {
+      popText += ' x' + comboCount;
+      popColor = comboCount >= 5 ? '#a855f7' : comboCount >= 3 ? '#3cacd7' : '#f4b41b';
+    }
+    addScorePopup(e.x + e.w / 2, e.y, popText, popColor);
+
+    // Death particles
+    TAS.particles.spawn(e.x + e.w / 2, e.y + e.h / 2, '#fff', 14, 2, { size: 2 });
+    TAS.particles.spawn(e.x + e.w / 2, e.y + e.h / 2, e.color, 8, 1.5, { size: 3 });
+    TAS.audio.playTone(600, 0.15, 'square');
+    TAS.fx.shake(3, 0.15);
+
+    // CHA-based drop chance
+    if (e.drop) {
+      let dropChance = getLuckChance(0.35);
+      if (Math.random() < dropChance) {
+        spawnDrop(e.x, e.y, e.drop);
+      }
+    }
+  }
+}
+
+function spawnDrop(x, y, type) {
+  items.push({ x: x, y: y, w: 10, h: 10, type: type, vy: -80, grounded: false, bobOffset: Math.random() * Math.PI * 2 });
+}
+
+// === BOSS UPDATE ===
+function updateBoss(dt) {
+  if (!boss) return;
+  boss.flashTimer = Math.max(0, boss.flashTimer - dt);
+  boss.attackTimer += dt;
+  if (boss.shieldTimer > 0) boss.shieldTimer -= dt;
+
+  // Movement
+  boss.x += boss.vx * dt;
+  if (boss.x < 40 || boss.x > GW - 80) boss.vx = -boss.vx;
+
+  // Phase change at half HP
+  if (boss.hp < boss.maxHp * 0.5 && boss.phase === 0) {
+    boss.phase = 1;
+    boss.vx *= 1.5;
+    TAS.fx.shake(8, 0.3);
+    TAS.fx.flash('#ff0', 0.15);
+    showMessage(boss.name + ' releases toxic spores!');
+    TAS.audio.playTone(200, 0.3, 'sawtooth');
+  }
+
+  // Boss attacks (speed influenced by WIS -- player WIS means boss attacks seem slower)
+  let atkInterval = boss.phase === 0 ? 2.0 : 1.2;
+  if (boss.attackTimer > atkInterval) {
+    boss.attackTimer = 0;
+    boss.pattern = (boss.pattern + 1) % 4;
+
+    if (boss.pattern === 0) {
+      boss.vy = -300;
+      TAS.audio.playTone(180, 0.1, 'square');
+    } else if (boss.pattern === 1) {
+      // Fan projectiles
+      let numProj = boss.phase === 0 ? 3 : 5;
+      for (let a = 0; a < numProj; a++) {
+        let angle = ((a - Math.floor(numProj / 2)) * 0.4);
+        projectiles.push({
+          x: boss.x + boss.w / 2, y: boss.y + boss.h,
+          vx: Math.sin(angle) * 100, vy: Math.cos(angle) * 120,
+          w: 8, h: 8, timer: 3, color: '#ff8844'
+        });
+      }
+      TAS.audio.playTone(80, 0.15, 'sawtooth');
+    } else if (boss.pattern === 2) {
+      // Charge
+      boss.vx = (player.x > boss.x ? 1 : -1) * 220;
+      TAS.audio.playTone(120, 0.1, 'square');
+    } else {
+      // Shield (blocks damage briefly)
+      boss.shieldTimer = 1.0;
+      TAS.audio.playTone(500, 0.2, 'sine');
+    }
+  }
+
+  // Boss gravity
+  boss.vy += GRAVITY * 0.5 * dt;
+  boss.y += boss.vy * dt;
+  if (boss.y > GH - TILE * 3 - boss.h) {
+    boss.y = GH - TILE * 3 - boss.h;
+    boss.vy = 0;
+  }
+
+  // Player hits boss
+  if (player && rectOverlap(player, boss)) {
+    if (boss.shieldTimer > 0) {
+      // Shielded - deflect player
+      if (invulnTimer <= 0) {
+        player.vx = -player.facing * 150;
+        player.vy = -150;
+        TAS.audio.playTone(300, 0.1, 'triangle');
+        TAS.particles.spawn(boss.x + boss.w / 2, boss.y, '#88ccff', 6, 2);
+        invulnTimer = 0.3;
+      }
+    } else if (player.attacking || (player.vy > 0 && player.y + player.h - 8 < boss.y + boss.h / 2)) {
+      let bossDmg = getDamage(player.attacking ? 2 : 1); // STR affects boss damage
+      boss.hp -= bossDmg;
+      boss.flashTimer = 0.2;
+      player.vy = -250;
+      TAS.fx.shake(6, 0.2);
+      TAS.audio.playTone(200, 0.15, 'square');
+      TAS.particles.spawn(boss.x + boss.w / 2, boss.y + boss.h / 2, '#ff0', 8, 2, { size: 3 });
+      addScorePopup(boss.x + boss.w / 2, boss.y, '-' + bossDmg, '#ff4444');
+
+      if (boss.hp <= 0) {
+        defeatBoss();
+      }
+    } else if (invulnTimer <= 0) {
+      takeDamage(2);
+    }
+  }
+}
+
+function defeatBoss() {
+  TAS.fx.shake(12, 0.5);
+  TAS.fx.flash('#fff', 0.4);
+  TAS.audio.playMelody([[800, 0.1, 'square'], [1000, 0.1, 'square'], [1200, 0.2, 'square']]);
+  TAS.particles.spawn(boss.x + boss.w / 2, boss.y + boss.h / 2, '#ff0', 30, 3, { size: 3 });
+  TAS.particles.spawn(boss.x + boss.w / 2, boss.y + boss.h / 2, '#fff', 20, 2, { size: 2 });
+
+  const bossKey = screenX + ',' + screenY;
+  bossDefeated[bossKey] = true;
+
+  // Score for boss
+  let bossScore = getScore(boss.score);
+  score += bossScore;
+  addScorePopup(boss.x + boss.w / 2, boss.y - 20, '+' + bossScore + ' BOSS!', '#ff44ff');
+
+  if (boss.key >= 0) {
+    keys_collected[boss.key] = true;
+    showMessage('Got ' + KEY_NAMES[boss.key] + '!');
+    TAS.audio.playMelody([[523, 0.1, 'square'], [659, 0.1, 'square'], [784, 0.2, 'square']]);
+  } else if (boss.type === 'fungal_lord') {
+    state = 'victory';
+    victoryTimer = 6;
+    TAS.audio.playMelody([[523, 0.15, 'sine'], [659, 0.15, 'sine'], [784, 0.15, 'sine'], [1047, 0.4, 'sine']]);
+  } else {
+    showMessage(boss.name + ' composted!');
+  }
+
+  boss = null;
+  saveGame();
+}
+
+// === ITEMS UPDATE ===
+function updateItems(dt) {
+  for (let i = items.length - 1; i >= 0; i--) {
+    const item = items[i];
+
+    // Dropped items have physics
+    if (item.vy !== undefined && !item.grounded) {
+      item.vy += GRAVITY * 0.5 * dt;
+      item.y += item.vy * dt;
+      if (item.y + item.h > GH - TILE * 2) {
+        item.y = GH - TILE * 2 - item.h;
+        item.vy = 0;
+        item.grounded = true;
+      }
+    }
+
+    if (player && rectOverlap(player, item)) {
+      const itype = ITEM_TYPES[item.type];
+      if (!itype) { items.splice(i, 1); continue; }
+
+      if (item.type === 'heart_container') {
+        maxHearts++;
+        hearts = maxHearts;
+        secretsFound[screenX + ',' + screenY + '_heart'] = true;
+        showMessage('Spore Heart! Max HP up!');
+        TAS.audio.playMelody([[523, 0.1, 'square'], [659, 0.1, 'square'], [784, 0.2, 'square']]);
+      } else if (item.type === 'mana_crystal') {
+        player.maxMana++;
+        player.mana = player.maxMana;
+        secretsFound[screenX + ',' + screenY + '_mana'] = true;
+        showMessage('POOP Crystal! Spore power up!');
+        TAS.audio.playMelody([[440, 0.1, 'sine'], [660, 0.1, 'sine'], [880, 0.2, 'sine']]);
+      } else if (item.type === 'heart') {
+        if (hearts < maxHearts) hearts++;
+        TAS.audio.playTone(523, 0.08, 'square');
+      } else if (item.type === 'mana') {
+        if (player.mana < player.maxMana) player.mana++;
+        TAS.audio.playTone(660, 0.08, 'sine');
+      } else if (item.type === 'coin') {
+        TAS.audio.playTone(880, 0.05, 'square');
+      }
+
+      // Score from item (INT boosts)
+      let itemScore = getScore(itype.score);
+      if (itemScore > 0) {
+        score += itemScore;
+        addScorePopup(item.x, item.y, '+' + itemScore, itype.color);
+      }
+
+      totalPickups++;
+      TAS.particles.spawn(item.x + 5, item.y + 5, itype.color, 6, 1.5, { size: 2 });
+      items.splice(i, 1);
+      saveGame();
+    }
+  }
+
+  // Portal check
+  for (const p of portals) {
+    if (player && rectOverlap(player, p)) {
+      state = 'victory';
+      victoryTimer = 6;
+      TAS.audio.playMelody([[523, 0.2, 'sine'], [659, 0.2, 'sine'], [784, 0.2, 'sine'], [1047, 0.4, 'sine']]);
+    }
+  }
+}
+
+// === MESSAGE SYSTEM ===
+function showMessage(text) {
+  msgText = text;
+  msgTimer = 3;
+}
+
+// === TUTORIAL ===
+const TUTORIAL_STEPS = [
+  { text: 'Arrows to move your baseling, Z or A to jump', duration: 2.5 },
+  { text: 'X or B to fling spores at strange fungi', duration: 2.5 },
+  { text: 'M/Tab: Spore Map | Down+Jump: Drop through', duration: 2.5 },
+  { text: 'Gather 3 Garden Seeds to face the POOP Overlord!', duration: 2.5 }
+];
+
+function updateTutorial(dt) {
+  if (tutorialTimer <= 0) return;
+  tutorialTimer -= dt;
+  let elapsed = 0;
+  for (let i = 0; i < TUTORIAL_STEPS.length; i++) {
+    elapsed += TUTORIAL_STEPS[i].duration;
+    if (8 - (8 - tutorialTimer) < elapsed) {
+      tutorialStep = i;
+      break;
+    }
+    tutorialStep = i;
+  }
+}
+
+function drawTutorial() {
+  if (tutorialTimer <= 0) return;
+  let step = TUTORIAL_STEPS[tutorialStep];
+  if (!step) return;
+
+  let alpha = Math.min(1, tutorialTimer, (8 - tutorialTimer) < 0.5 ? (8 - tutorialTimer) * 2 : 1);
+  ctx.globalAlpha = alpha * 0.85;
+  ctx.fillStyle = '#000';
+  ctx.fillRect(GW / 2 - 180, GH - 55, 360, 28);
+  ctx.globalAlpha = alpha;
+  ctx.fillStyle = '#38d973';
+  ctx.font = 'bold 10px monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText(step.text, GW / 2, GH - 37);
+  ctx.globalAlpha = 1;
+  ctx.textAlign = 'left';
+}
+
+// === MAIN UPDATE ===
+function update(dt) {
+  frame++;
+  TAS.particles.update(dt);
+  TAS.fx.updateEffects(dt);
+  updateScorePopups(dt);
+
+  // Store prev input AFTER checking
+  let curJump = jumpPressed();
+  let curAttack = attackPressed();
+  let curMap = mapPressed();
+  let curStart = startPressed();
+
+  if (state === 'title') {
+    if (picking) { prevJump = curJump; prevAttack = curAttack; prevMap = curMap; prevStart = curStart; return; }
+    if (TAS.input.keys['KeyC'] || TAS.input.touch.c) {
+      TAS.input.keys['KeyC'] = false; TAS.input.touch.c = false;
+      picking = true;
+      TAS.player.select(function(){ recomputeStats(); picking = false; });
+      prevJump = curJump; prevAttack = curAttack; prevMap = curMap; prevStart = curStart;
+      return;
+    }
+    if (startJustPressed()) {
+      let hasSave = localStorage.getItem(SAVE_KEY) !== null;
+      startGame(hasSave);
+    }
+    prevJump = curJump; prevAttack = curAttack; prevMap = curMap; prevStart = curStart;
+    return;
+  }
+
+  if (state === 'gameOver') {
+    deathTimer -= dt;
+    if (deathTimer <= 0 && startJustPressed()) {
+      state = 'title';
+    }
+    prevJump = curJump; prevAttack = curAttack; prevMap = curMap; prevStart = curStart;
+    return;
+  }
+
+  if (state === 'victory') {
+    victoryTimer -= dt;
+    if (victoryTimer <= 0 && startJustPressed()) {
+      localStorage.removeItem(SAVE_KEY);
+      state = 'title';
+    }
+    prevJump = curJump; prevAttack = curAttack; prevMap = curMap; prevStart = curStart;
+    return;
+  }
+
+  if (state === 'playing') {
+    // Map toggle
+    if (mapJustPressed()) { mapOpen = !mapOpen; prevJump = curJump; prevAttack = curAttack; prevMap = curMap; prevStart = curStart; return; }
+    if (mapOpen) { prevJump = curJump; prevAttack = curAttack; prevMap = curMap; prevStart = curStart; return; }
+
+    // Invuln timer
+    if (invulnTimer > 0) invulnTimer -= dt;
+
+    // Message timer
+    if (msgTimer > 0) msgTimer -= dt;
+
+    // Tutorial
+    updateTutorial(dt);
+
+    updatePlayer(dt);
+    updateEnemies(dt);
+    updateBoss(dt);
+    updateItems(dt);
+  }
+
+  prevJump = curJump; prevAttack = curAttack; prevMap = curMap; prevStart = curStart;
+}
+
+// === DRAWING ===
+
+// --- TILE DRAWING ---
+function drawTile(c, r, tile) {
+  const x = c * TILE, y = r * TILE;
+  const zone = ZONES[ZONE_MAP[screenY][screenX]];
+  if (!zone) return;
+
+  switch (tile) {
+    case 1: // Solid
+      ctx.fillStyle = zone.ground;
+      ctx.fillRect(x, y, TILE, TILE);
+      ctx.fillStyle = zone.accent;
+      ctx.fillRect(x + 1, y + 1, TILE - 2, 2);
+      // Texture detail
+      ctx.fillStyle = zone.ground;
+      ctx.globalAlpha = 0.3;
+      ctx.fillRect(x + 4, y + 6, 3, 2);
+      ctx.fillRect(x + 10, y + 10, 2, 2);
+      ctx.globalAlpha = 1;
+      break;
+    case 2: // Platform
+      ctx.fillStyle = zone.accent;
+      ctx.fillRect(x, y, TILE, 4);
+      ctx.fillStyle = zone.ground;
+      ctx.fillRect(x + 2, y + 4, TILE - 4, 2);
+      break;
+    case 3: // Water
+      ctx.fillStyle = zone.water;
+      ctx.globalAlpha = 0.6 + Math.sin(frame * 0.04 + c * 0.3) * 0.15;
+      ctx.fillRect(x, y, TILE, TILE);
+      ctx.globalAlpha = 1;
+      if (r > 0 && screenTiles[r - 1] && screenTiles[r - 1][c] !== 3) {
+        ctx.fillStyle = '#aae';
+        ctx.globalAlpha = 0.4;
+        ctx.fillRect(x, y, TILE, 2);
+        ctx.globalAlpha = 1;
+      }
+      break;
+    case 4: // Ice
+      ctx.fillStyle = '#a0d8f0';
+      ctx.fillRect(x, y, TILE, TILE);
+      ctx.fillStyle = '#d0f0ff';
+      ctx.fillRect(x + 2, y + 2, 4, 4);
+      ctx.fillRect(x + 10, y + 8, 3, 3);
+      // Sparkle
+      if ((frame + c * 7 + r * 13) % 40 < 5) {
+        ctx.fillStyle = '#fff';
+        ctx.fillRect(x + 7, y + 5, 2, 2);
+      }
+      break;
+    case 5: // Spikes
+      ctx.fillStyle = '#c44';
+      for (let s = 0; s < 3; s++) {
+        ctx.beginPath();
+        ctx.moveTo(x + s * 5 + 1, y + TILE);
+        ctx.lineTo(x + s * 5 + 3, y + 4);
+        ctx.lineTo(x + s * 5 + 5, y + TILE);
+        ctx.fill();
+      }
+      break;
+    case 6: // Lava
+      ctx.fillStyle = '#cc3300';
+      ctx.fillRect(x, y, TILE, TILE);
+      ctx.fillStyle = '#ff6600';
+      ctx.globalAlpha = 0.5 + Math.sin(frame * 0.06 + c * 0.5) * 0.3;
+      ctx.fillRect(x + 2, y + 2, TILE - 4, TILE - 4);
+      ctx.globalAlpha = 1;
+      // Lava glow
+      ctx.fillStyle = '#ff9900';
+      ctx.globalAlpha = 0.3;
+      ctx.fillRect(x, y - 2, TILE, 3);
+      ctx.globalAlpha = 1;
+      // Bubbles
+      if ((frame + c * 11) % 30 < 3) {
+        ctx.fillStyle = '#ffaa00';
+        ctx.beginPath();
+        ctx.arc(x + 4 + Math.sin(frame * 0.1 + c) * 3, y + 6, 2, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      break;
+    case 7: // Vines
+      ctx.fillStyle = '#2a6a2a';
+      ctx.fillRect(x + 6, y, 4, TILE);
+      // Leaves
+      ctx.fillStyle = '#4a9a4a';
+      if ((r + c) % 3 === 0) {
+        ctx.fillRect(x + 2, y + 4, 5, 3);
+      }
+      if ((r + c) % 3 === 1) {
+        ctx.fillRect(x + 9, y + 8, 5, 3);
+      }
+      break;
+  }
+}
+
+// --- BASELING PLAYER DRAWING ---
+function drawBaseling(x, y, facing, attacking, invuln) {
+  if (invuln && Math.floor(frame / 4) % 2 === 0) return;
+
+  ctx.save();
+  ctx.translate(x + 7, y + 7);
+  if (facing < 0) ctx.scale(-1, 1);
+
+  // Body (round baseling shape)
+  ctx.fillStyle = PLAYER_COLOR;
+  ctx.beginPath();
+  ctx.arc(0, 0, 7, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Darker belly
+  ctx.fillStyle = PLAYER_COLOR;
+  ctx.globalAlpha = 0.6;
+  ctx.beginPath();
+  ctx.arc(0, 2, 5, 0, Math.PI);
+  ctx.fill();
+  ctx.globalAlpha = 1;
+
+  // Eyes
+  ctx.fillStyle = '#fff';
+  ctx.fillRect(1, -4, 4, 4);
+  ctx.fillStyle = '#111';
+  ctx.fillRect(2, -3, 2, 2);
+
+  // Feet
+  ctx.fillStyle = PLAYER_COLOR;
+  ctx.fillRect(-4, 5, 4, 3);
+  ctx.fillRect(1, 5, 4, 3);
+
+  // Antenna/horn
+  ctx.strokeStyle = PLAYER_COLOR;
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  ctx.moveTo(0, -7);
+  ctx.lineTo(-1, -11);
+  ctx.stroke();
+
+  // Antenna tip glow
+  ctx.fillStyle = '#fff';
+  ctx.globalAlpha = 0.6 + Math.sin(frame * 0.1) * 0.3;
+  ctx.beginPath();
+  ctx.arc(-1, -11, 1.5, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.globalAlpha = 1;
+
+  // Attack indicator
+  if (attacking) {
+    ctx.fillStyle = '#fff';
+    ctx.globalAlpha = 0.8;
+    ctx.beginPath();
+    ctx.moveTo(7, -2);
+    ctx.lineTo(13, 0);
+    ctx.lineTo(7, 2);
+    ctx.fill();
+    ctx.globalAlpha = 1;
+    // Attack swipe arc
+    ctx.strokeStyle = '#fff';
+    ctx.lineWidth = 2;
+    ctx.globalAlpha = 0.6;
+    ctx.beginPath();
+    ctx.arc(8, 0, 6, -0.8, 0.8);
+    ctx.stroke();
+    ctx.globalAlpha = 1;
+  }
+
+  // STR indicator: baseling glows brighter with higher STR
+  if (statB.str > 12) {
+    ctx.fillStyle = PLAYER_COLOR;
+    ctx.globalAlpha = 0.15;
+    ctx.beginPath();
+    ctx.arc(0, 0, 10, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.globalAlpha = 1;
+  }
+
+  ctx.restore();
+}
+
+// --- ENEMY DRAWING ---
+function drawEnemy(e) {
+  if (e.flashTimer > 0) ctx.globalAlpha = 0.5;
+
+  // Library enemy sprite first; procedural drawing below is KEPT as fallback.
+  let _spr = ESPR[e.type];
+  if (Array.isArray(_spr)) _spr = _spr[Math.floor(frame / 8) % _spr.length]; // walk cycle
+  if (esprReady(_spr)) {
+    drawEnemySprite(_spr, e.x + e.w / 2, e.y + e.h + 1, Math.max(e.w, e.h) + 5, e.vx < 0);
+    ctx.globalAlpha = 1;
+    return;
+  }
+
+  ctx.fillStyle = e.color;
+
+  switch (e.type) {
+    case 'gutter_rat':
+      // Small rat body
+      ctx.fillRect(e.x + 2, e.y + 4, 10, 6);
+      ctx.fillStyle = '#6a4a3a';
+      ctx.fillRect(e.x + 10, e.y + 2, 4, 5); // head
+      ctx.fillStyle = '#fff';
+      ctx.fillRect(e.x + 12, e.y + 3, 1, 1); // eye
+      // Tail
+      ctx.strokeStyle = e.color;
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(e.x + 2, e.y + 7);
+      ctx.quadraticCurveTo(e.x - 3, e.y + 3, e.x - 1, e.y + 1);
+      ctx.stroke();
+      break;
+    case 'dock_crab':
+      ctx.fillRect(e.x + 2, e.y + 3, 12, 6);
+      // Claws
+      ctx.fillRect(e.x, e.y, 4, 4);
+      ctx.fillRect(e.x + 12, e.y, 4, 4);
+      // Eyes
+      ctx.fillStyle = '#fff';
+      ctx.fillRect(e.x + 5, e.y + 2, 2, 2);
+      ctx.fillRect(e.x + 9, e.y + 2, 2, 2);
+      // Legs
+      ctx.strokeStyle = e.color;
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      for (let l = 0; l < 3; l++) {
+        ctx.moveTo(e.x + 4 + l * 4, e.y + 9);
+        ctx.lineTo(e.x + 3 + l * 4, e.y + 12);
+      }
+      ctx.stroke();
+      break;
+    case 'spore_wisp':
+      ctx.beginPath();
+      ctx.arc(e.x + e.w / 2, e.y + e.h / 2, 5, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = '#fff';
+      ctx.globalAlpha = 0.4 + Math.sin(frame * 0.1) * 0.2;
+      ctx.beginPath();
+      ctx.arc(e.x + e.w / 2, e.y + e.h / 2, 3, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.globalAlpha = 1;
+      // Trail particles
+      if (frame % 8 === 0) {
+        TAS.particles.spawn(e.x + e.w / 2, e.y + e.h / 2, e.color, 1, 0.3, { size: 1, gravity: 0.02 });
+      }
+      break;
+    case 'maw_bat':
+      // Wings
+      ctx.beginPath();
+      let wingAngle = Math.sin(frame * 0.15) * 0.4;
+      ctx.moveTo(e.x + e.w / 2, e.y + e.h / 2);
+      ctx.lineTo(e.x - 2, e.y + 2 + wingAngle * 5);
+      ctx.lineTo(e.x + 2, e.y + e.h / 2);
+      ctx.fill();
+      ctx.beginPath();
+      ctx.moveTo(e.x + e.w / 2, e.y + e.h / 2);
+      ctx.lineTo(e.x + e.w + 2, e.y + 2 - wingAngle * 5);
+      ctx.lineTo(e.x + e.w - 2, e.y + e.h / 2);
+      ctx.fill();
+      // Body
+      ctx.beginPath();
+      ctx.arc(e.x + e.w / 2, e.y + e.h / 2, 4, 0, Math.PI * 2);
+      ctx.fill();
+      // Eyes
+      ctx.fillStyle = '#f44';
+      ctx.fillRect(e.x + 4, e.y + 3, 2, 2);
+      ctx.fillRect(e.x + 7, e.y + 3, 2, 2);
+      break;
+    case 'iron_slime':
+      // Metallic blob
+      ctx.beginPath();
+      ctx.arc(e.x + e.w / 2, e.y + e.h / 2 + 2, 7, Math.PI, 0);
+      ctx.fillRect(e.x + 1, e.y + e.h / 2 + 2, e.w - 2, 5);
+      ctx.fill();
+      // Shine
+      ctx.fillStyle = '#aaaa';
+      ctx.fillRect(e.x + 3, e.y + 4, 3, 2);
+      // Eyes
+      ctx.fillStyle = '#000';
+      ctx.fillRect(e.x + 4, e.y + 7, 2, 2);
+      ctx.fillRect(e.x + 9, e.y + 7, 2, 2);
+      break;
+    case 'frost_imp':
+      ctx.fillRect(e.x + 2, e.y + 2, 8, 10);
+      // Head
+      ctx.fillStyle = '#66ccee';
+      ctx.beginPath();
+      ctx.arc(e.x + e.w / 2, e.y + 3, 5, 0, Math.PI * 2);
+      ctx.fill();
+      // Horns
+      ctx.fillStyle = e.color;
+      ctx.beginPath();
+      ctx.moveTo(e.x + 2, e.y + 1); ctx.lineTo(e.x + 1, e.y - 4); ctx.lineTo(e.x + 4, e.y + 1);
+      ctx.fill();
+      ctx.beginPath();
+      ctx.moveTo(e.x + 8, e.y + 1); ctx.lineTo(e.x + 11, e.y - 4); ctx.lineTo(e.x + 10, e.y + 1);
+      ctx.fill();
+      // Eyes
+      ctx.fillStyle = '#fff';
+      ctx.fillRect(e.x + 3, e.y + 2, 2, 2);
+      ctx.fillRect(e.x + 7, e.y + 2, 2, 2);
+      break;
+    case 'vine_creeper':
+      ctx.fillRect(e.x + 1, e.y + 2, 12, 10);
+      // Vine tendrils
+      ctx.strokeStyle = '#2a6a2a';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(e.x, e.y + 6); ctx.lineTo(e.x - 4, e.y + 3);
+      ctx.moveTo(e.x + e.w, e.y + 6); ctx.lineTo(e.x + e.w + 4, e.y + 3);
+      ctx.stroke();
+      // Eyes (angry)
+      ctx.fillStyle = '#ff4';
+      ctx.fillRect(e.x + 3, e.y + 4, 3, 2);
+      ctx.fillRect(e.x + 8, e.y + 4, 3, 2);
+      break;
+    case 'deep_fish':
+      ctx.beginPath();
+      ctx.ellipse(e.x + e.w / 2, e.y + e.h / 2, 6, 4, 0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = '#fff';
+      ctx.fillRect(e.x + 8, e.y + 1, 2, 2);
+      ctx.fillStyle = e.color;
+      ctx.beginPath();
+      ctx.moveTo(e.x, e.y + e.h / 2);
+      ctx.lineTo(e.x - 4, e.y); ctx.lineTo(e.x - 4, e.y + e.h);
+      ctx.fill();
+      break;
+    case 'crystal_golem':
+      // Blocky crystal body
+      ctx.fillRect(e.x + 2, e.y + 4, 12, 10);
+      // Crystal head
+      ctx.fillStyle = '#aa88cc';
+      ctx.beginPath();
+      ctx.moveTo(e.x + 4, e.y + 4);
+      ctx.lineTo(e.x + e.w / 2, e.y - 2);
+      ctx.lineTo(e.x + 12, e.y + 4);
+      ctx.fill();
+      // Gem eyes
+      ctx.fillStyle = '#ff44ff';
+      ctx.fillRect(e.x + 5, e.y + 6, 2, 2);
+      ctx.fillRect(e.x + 9, e.y + 6, 2, 2);
+      break;
+    case 'ash_wraith':
+      // Ghostly floating shape
+      ctx.globalAlpha = 0.7;
+      ctx.beginPath();
+      ctx.arc(e.x + e.w / 2, e.y + 5, 6, Math.PI, 0);
+      ctx.fill();
+      // Tattered bottom
+      for (let t = 0; t < 4; t++) {
+        ctx.fillRect(e.x + 2 + t * 3, e.y + 5, 2, 8 + Math.sin(frame * 0.1 + t) * 3);
+      }
+      ctx.globalAlpha = 1;
+      // Glowing eyes
+      ctx.fillStyle = '#ff8800';
+      ctx.fillRect(e.x + 4, e.y + 3, 2, 2);
+      ctx.fillRect(e.x + 8, e.y + 3, 2, 2);
+      break;
+    case 'myco_plant':
+      // Mushroom stem
+      ctx.fillStyle = '#4a2a4a';
+      ctx.fillRect(e.x + 5, e.y + 8, 4, 8);
+      // Mushroom cap
+      ctx.fillStyle = e.color;
+      ctx.beginPath();
+      ctx.arc(e.x + e.w / 2, e.y + 6, 7, Math.PI, 0);
+      ctx.fill();
+      // Spots
+      ctx.fillStyle = '#fff';
+      ctx.fillRect(e.x + 3, e.y + 2, 2, 2);
+      ctx.fillRect(e.x + 8, e.y + 3, 2, 2);
+      // Mouth
+      ctx.fillStyle = '#822';
+      ctx.fillRect(e.x + 4, e.y + 6, 6, 3);
+      break;
+    case 'spire_hawk':
+      // Bird shape
+      let swoopAngle = Math.sin(frame * 0.12) * 0.3;
+      ctx.save();
+      ctx.translate(e.x + e.w / 2, e.y + e.h / 2);
+      ctx.rotate(swoopAngle);
+      ctx.fillStyle = e.color;
+      // Body
+      ctx.beginPath();
+      ctx.ellipse(0, 0, 7, 4, 0, 0, Math.PI * 2);
+      ctx.fill();
+      // Wings
+      ctx.beginPath();
+      ctx.moveTo(-3, 0); ctx.lineTo(-8, -5 + Math.sin(frame * 0.2) * 3); ctx.lineTo(0, 0);
+      ctx.fill();
+      ctx.beginPath();
+      ctx.moveTo(3, 0); ctx.lineTo(8, -5 + Math.sin(frame * 0.2) * 3); ctx.lineTo(0, 0);
+      ctx.fill();
+      // Eye
+      ctx.fillStyle = '#fff';
+      ctx.fillRect(4, -2, 2, 2);
+      // Beak
+      ctx.fillStyle = '#ffaa00';
+      ctx.fillRect(6, 0, 3, 1);
+      ctx.restore();
+      break;
+  }
+  ctx.globalAlpha = 1;
+}
+
+// --- BOSS DRAWING ---
+function drawBoss() {
+  if (!boss) return;
+  if (boss.flashTimer > 0) ctx.globalAlpha = 0.6;
+
+  // Boss color by type
+  let bossColor = '#e6482e';
+  if (boss.type === 'frost_wyrm') bossColor = '#3cacd7';
+  else if (boss.type === 'gem_tyrant') bossColor = '#a855f7';
+  else if (boss.type === 'sky_sentinel') bossColor = '#a855f7';
+  else if (boss.type === 'root_horror') bossColor = '#38d973';
+  else if (boss.type === 'ash_king') bossColor = '#f4b41b';
+  else if (boss.type === 'harbourmaster') bossColor = '#7a444a';
+  else if (boss.type === 'fungal_lord') bossColor = '#a855f7';
+
+  // Shield effect
+  if (boss.shieldTimer > 0) {
+    ctx.strokeStyle = '#88ccff';
+    ctx.lineWidth = 3;
+    ctx.globalAlpha = 0.5 + Math.sin(frame * 0.15) * 0.3;
+    ctx.beginPath();
+    ctx.arc(boss.x + boss.w / 2, boss.y + boss.h / 2, 28, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.globalAlpha = boss.flashTimer > 0 ? 0.6 : 1;
+  }
+
+  // Library boss sprite first (bigger than mobs); procedural boss KEPT as fallback.
+  const _bspr = BSPR[boss.type];
+  if (esprReady(_bspr)) {
+    drawEnemySprite(_bspr, boss.x + boss.w / 2, boss.y + boss.h, Math.max(boss.w, boss.h) + 20, boss.vx < 0);
+    // Phase-2 rage glow telegraph stays on top
+    if (boss.phase === 1) {
+      ctx.strokeStyle = '#f00';
+      ctx.lineWidth = 2;
+      ctx.globalAlpha = 0.35 + Math.sin(frame * 0.2) * 0.2;
+      ctx.strokeRect(boss.x - 2, boss.y - 2, boss.w + 4, boss.h + 4);
+      ctx.globalAlpha = boss.flashTimer > 0 ? 0.6 : 1;
+    }
+  } else {
+    // Body
+    ctx.fillStyle = bossColor;
+    ctx.fillRect(boss.x + 4, boss.y + 4, boss.w - 8, boss.h - 4);
+    // Head
+    ctx.beginPath();
+    ctx.arc(boss.x + boss.w / 2, boss.y + 8, 14, Math.PI, 0);
+    ctx.fill();
+
+    // Eyes
+    ctx.fillStyle = '#fff';
+    ctx.fillRect(boss.x + 10, boss.y + 8, 6, 6);
+    ctx.fillRect(boss.x + boss.w - 16, boss.y + 8, 6, 6);
+    let eyeColor = boss.phase === 1 ? '#f00' : '#ff0';
+    ctx.fillStyle = eyeColor;
+    ctx.fillRect(boss.x + 12, boss.y + 10, 3, 3);
+    ctx.fillRect(boss.x + boss.w - 14, boss.y + 10, 3, 3);
+
+    // Crown/spikes
+    ctx.fillStyle = bossColor;
+    for (let s = 0; s < 4; s++) {
+      ctx.beginPath();
+      ctx.moveTo(boss.x + 5 + s * 9, boss.y);
+      ctx.lineTo(boss.x + 8 + s * 9, boss.y - 8);
+      ctx.lineTo(boss.x + 11 + s * 9, boss.y);
+      ctx.fill();
+    }
+  }
+
+  // HP bar
+  let hpBarW = boss.w + 20;
+  let hpBarX = boss.x - 10;
+  ctx.fillStyle = '#400';
+  ctx.fillRect(hpBarX, boss.y - 18, hpBarW, 6);
+  let hpPct = boss.hp / boss.maxHp;
+  let hpColor = hpPct > 0.5 ? '#38d973' : hpPct > 0.25 ? '#f4b41b' : '#e6482e';
+  ctx.fillStyle = hpColor;
+  ctx.fillRect(hpBarX, boss.y - 18, hpBarW * hpPct, 6);
+  // HP bar border
+  ctx.strokeStyle = '#888';
+  ctx.lineWidth = 1;
+  ctx.strokeRect(hpBarX, boss.y - 18, hpBarW, 6);
+
+  ctx.globalAlpha = 1;
+
+  // Boss name
+  ctx.fillStyle = '#fff';
+  ctx.font = 'bold 10px monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText(boss.name, boss.x + boss.w / 2, boss.y - 22);
+  ctx.textAlign = 'left';
+}
+
+// --- MAP DRAWING ---
+function drawMap() {
+  ctx.fillStyle = 'rgba(0,0,0,0.9)';
+  ctx.fillRect(0, 0, GW, GH);
+
+  ctx.fillStyle = '#fff';
+  ctx.font = 'bold 12px monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText('SPORE MAP', GW / 2, 18);
+  ctx.fillStyle = '#888';
+  ctx.font = '8px monospace';
+  ctx.fillText('(M or Tab to close spore map)', GW / 2, 28);
+
+  const cellW = 32, cellH = 24;
+  const ox = (GW - MAP_W * cellW) / 2;
+  const oy = 34;
+
+  for (let y = 0; y < MAP_H; y++) {
+    for (let x = 0; x < MAP_W; x++) {
+      const cx = ox + x * cellW;
+      const cy = oy + y * cellH;
+      const zone = ZONES[ZONE_MAP[y][x]];
+
+      if (explored[x + ',' + y]) {
+        ctx.fillStyle = zone.ground;
+        ctx.fillRect(cx + 1, cy + 1, cellW - 2, cellH - 2);
+        const bk = x + ',' + y;
+        if (BOSS_SCREENS[bk]) {
+          ctx.fillStyle = bossDefeated[bk] ? '#38d973' : '#e6482e';
+          ctx.beginPath();
+          ctx.arc(cx + cellW / 2, cy + cellH / 2, 3, 0, Math.PI * 2);
+          ctx.fill();
+        }
+      } else {
+        ctx.fillStyle = '#1a1a1a';
+        ctx.fillRect(cx + 1, cy + 1, cellW - 2, cellH - 2);
+        ctx.fillStyle = '#333';
+        ctx.font = '6px monospace';
+        ctx.textAlign = 'center';
+        ctx.fillText('?', cx + cellW / 2, cy + cellH / 2 + 2);
+      }
+
+      // Current position pulse
+      if (x === screenX && y === screenY) {
+        ctx.strokeStyle = '#f4b41b';
+        ctx.lineWidth = 2;
+        ctx.globalAlpha = 0.7 + Math.sin(frame * 0.08) * 0.3;
+        ctx.strokeRect(cx, cy, cellW, cellH);
+        ctx.globalAlpha = 1;
+      }
+    }
+  }
+
+  // Legend
+  ctx.textAlign = 'left';
+  ctx.font = '8px monospace';
+  ctx.fillStyle = '#f4b41b'; ctx.fillText('[ ] You', ox, oy + MAP_H * cellH + 12);
+  ctx.fillStyle = '#38d973'; ctx.fillText('o Cleared', ox + 60, oy + MAP_H * cellH + 12);
+  ctx.fillStyle = '#e6482e'; ctx.fillText('o Fungi Lord', ox + 130, oy + MAP_H * cellH + 12);
+
+  // Seeds collected
+  ctx.fillStyle = '#f4b41b';
+  ctx.font = 'bold 9px monospace';
+  let keyStr = 'Seeds: ';
+  for (let i = 0; i < 3; i++) keyStr += keys_collected[i] ? '[*] ' : '[ ] ';
+  ctx.fillText(keyStr, ox, oy + MAP_H * cellH + 24);
+
+  // Stats summary
+  ctx.fillStyle = '#aaa';
+  ctx.font = '7px monospace';
+  let explored_count = Object.keys(explored).length;
+  ctx.fillText('Explored: ' + explored_count + '/' + (MAP_W * MAP_H) + '  Kills: ' + totalKills + '  Score: ' + score, ox, oy + MAP_H * cellH + 36);
+
+  ctx.textAlign = 'left';
+}
+
+// --- HUD DRAWING ---
+function drawHUD() {
+  // Hearts
+  for (let i = 0; i < maxHearts; i++) {
+    ctx.fillStyle = i < hearts ? '#e6482e' : '#444';
+    ctx.beginPath();
+    let hx = 10 + i * 16, hy = 10;
+    ctx.moveTo(hx + 5, hy + 3);
+    ctx.arc(hx + 3, hy + 2, 3, Math.PI, 0);
+    ctx.arc(hx + 7, hy + 2, 3, Math.PI, 0);
+    ctx.lineTo(hx + 5, hy + 10);
+    ctx.fill();
+  }
+
+  // Lives
+  ctx.fillStyle = '#fff';
+  ctx.font = '9px monospace';
+  ctx.fillText('x' + lives, 10 + maxHearts * 16 + 4, 14);
+
+  // Score (INT boosts the multiplier shown)
+  ctx.fillStyle = '#f4b41b';
+  ctx.font = 'bold 10px monospace';
+  ctx.textAlign = 'right';
+  ctx.fillText(String(score), GW - 8, 14);
+  ctx.textAlign = 'left';
+
+  // High score
+  if (highScore > 0) {
+    ctx.fillStyle = '#888';
+    ctx.font = '7px monospace';
+    ctx.textAlign = 'right';
+    ctx.fillText('HI ' + highScore, GW - 8, 22);
+    ctx.textAlign = 'left';
+  }
+
+  // Combo indicator
+  if (comboCount > 1 && comboTimer > 0) {
+    ctx.fillStyle = comboCount >= 5 ? '#a855f7' : comboCount >= 3 ? '#3cacd7' : '#f4b41b';
+    ctx.font = 'bold 12px monospace';
+    ctx.textAlign = 'center';
+    ctx.globalAlpha = Math.min(1, comboTimer);
+    ctx.fillText('COMBO x' + comboCount, GW / 2, 30);
+    ctx.globalAlpha = 1;
+    ctx.textAlign = 'left';
+  }
+
+  // Zone name
+  const zone = ZONES[ZONE_MAP[screenY][screenX]];
+  if (zone) {
+    ctx.fillStyle = '#888';
+    ctx.font = '8px monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText(zone.name, GW / 2, 12);
+    ctx.textAlign = 'left';
+  }
+
+  // Keys indicator
+  for (let i = 0; i < 3; i++) {
+    ctx.fillStyle = keys_collected[i] ? '#f4b41b' : '#333';
+    ctx.beginPath();
+    let kx = GW - 30 + i * 9, ky = 30;
+    ctx.moveTo(kx + 3, ky);
+    ctx.lineTo(kx + 6, ky + 3);
+    ctx.lineTo(kx + 3, ky + 6);
+    ctx.lineTo(kx, ky + 3);
+    ctx.fill();
+  }
+
+  // Baseling name and level
+  ctx.fillStyle = PLAYER_COLOR;
+  ctx.font = 'bold 8px monospace';
+  ctx.fillText(PLAYER_NAME, 10, 24);
+  if (statB.level > 0) {
+    ctx.fillStyle = '#aaa';
+    ctx.font = '7px monospace';
+    ctx.fillText('LV' + statB.level, 10 + PLAYER_NAME.length * 5 + 4, 24);
+  }
+
+  // Message
+  if (msgTimer > 0) {
+    ctx.fillStyle = 'rgba(0,0,0,0.75)';
+    let msgW = Math.max(200, msgText.length * 7 + 20);
+    ctx.fillRect(GW / 2 - msgW / 2, GH - 44, msgW, 26);
+    ctx.strokeStyle = '#38d973';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(GW / 2 - msgW / 2, GH - 44, msgW, 26);
+    ctx.fillStyle = '#f4b41b';
+    ctx.font = 'bold 10px monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText(msgText, GW / 2, GH - 27);
+    ctx.textAlign = 'left';
+  }
+}
+
+// --- BACKGROUND DRAWING ---
+function drawBackground() {
+  const zoneId = ZONE_MAP[screenY][screenX];
+  const zone = ZONES[zoneId];
+  if (!zone) return;
+  ctx.fillStyle = zone.bg;
+  ctx.fillRect(0, 0, GW, GH);
+
+  const rand = seededRand(screenX * 77 + screenY * 13 + 1234);
+
+  if (zoneId === 'namaris_port') {
+    // Harbor buildings silhouette
+    ctx.fillStyle = '#1a2a2a';
+    for (let i = 0; i < 4; i++) {
+      let bx = rand() * GW;
+      let bw = rand() * 40 + 20;
+      let bh = rand() * 60 + 30;
+      ctx.fillRect(bx, GH - bh - 10, bw, bh);
+      // Window lights
+      ctx.fillStyle = '#443322';
+      for (let wy = 0; wy < 3; wy++) {
+        ctx.fillRect(bx + 4, GH - bh - 5 + wy * 15, 4, 4);
+        if (bw > 30) ctx.fillRect(bx + bw - 8, GH - bh - 5 + wy * 15, 4, 4);
+      }
+      ctx.fillStyle = '#1a2a2a';
+    }
+    // Mist
+    ctx.fillStyle = '#2a3a3a';
+    ctx.globalAlpha = 0.2;
+    for (let i = 0; i < 3; i++) {
+      ctx.beginPath();
+      ctx.arc(((rand() * GW + frame * 0.15) % (GW + 40)) - 20, GH - 40 + rand() * 20, rand() * 20 + 15, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+  } else if (zoneId === 'iron_maw') {
+    // Forge glow
+    ctx.fillStyle = '#2a1a0a';
+    ctx.globalAlpha = 0.3 + Math.sin(frame * 0.02) * 0.1;
+    ctx.fillRect(0, GH - 60, GW, 60);
+    ctx.globalAlpha = 1;
+    // Chains hanging
+    ctx.strokeStyle = '#3a2a2a';
+    ctx.lineWidth = 2;
+    for (let i = 0; i < 4; i++) {
+      let cx = rand() * GW;
+      let cl = rand() * 50 + 20;
+      ctx.beginPath();
+      ctx.moveTo(cx, 0);
+      ctx.lineTo(cx + Math.sin(frame * 0.01 + i) * 3, cl);
+      ctx.stroke();
+    }
+    // Ember particles
+    ctx.fillStyle = '#ff4400';
+    ctx.globalAlpha = 0.4;
+    for (let i = 0; i < 6; i++) {
+      let ex = (rand() * GW + frame * 0.3 * (i % 2 === 0 ? 1 : -1)) % GW;
+      let ey = (rand() * GH - frame * 0.5) % GH;
+      if (ey < 0) ey += GH;
+      ctx.beginPath();
+      ctx.arc(ex, ey, 1.5, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+  } else if (zoneId === 'frost_reach') {
+    // Stalactites
+    ctx.fillStyle = '#5a8aaa';
+    for (let i = 0; i < 6; i++) {
+      let sx = rand() * GW;
+      let sh = rand() * 30 + 10;
+      ctx.beginPath();
+      ctx.moveTo(sx - 4, 0); ctx.lineTo(sx, sh); ctx.lineTo(sx + 4, 0);
+      ctx.fill();
+    }
+    // Frost sparkles
+    ctx.fillStyle = '#fff';
+    ctx.globalAlpha = 0.3;
+    for (let i = 0; i < 8; i++) {
+      let fx = rand() * GW;
+      let fy = rand() * GH;
+      if ((frame + Math.floor(fx)) % 20 < 3) {
+        ctx.fillRect(fx, fy, 1, 1);
+      }
+    }
+    ctx.globalAlpha = 1;
+  } else if (zoneId === 'deepwood') {
+    // Giant trees in background
+    ctx.fillStyle = '#0a2a0a';
+    for (let i = 0; i < 3; i++) {
+      let tx = rand() * GW;
+      let tw = rand() * 15 + 8;
+      ctx.fillRect(tx, 30, tw, GH - 30);
+      // Canopy
+      ctx.beginPath();
+      ctx.arc(tx + tw / 2, 30, tw + 10, Math.PI, 0);
+      ctx.fill();
+    }
+    // Fireflies
+    ctx.fillStyle = '#aaff44';
+    ctx.globalAlpha = 0.5 + Math.sin(frame * 0.03) * 0.3;
+    for (let i = 0; i < 5; i++) {
+      let fx = (rand() * GW + Math.sin(frame * 0.01 + i * 2) * 20) % GW;
+      let fy = rand() * GH * 0.7 + 20;
+      ctx.beginPath();
+      ctx.arc(fx, fy, 1.5, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+  } else if (zoneId === 'sky_spires') {
+    // Distant floating towers
+    ctx.fillStyle = '#2a2a4a';
+    for (let i = 0; i < 3; i++) {
+      let tx = rand() * GW;
+      let tw = rand() * 20 + 10;
+      let th = rand() * 100 + 80;
+      ctx.fillRect(tx, GH - th, tw, th);
+      // Spire top
+      ctx.beginPath();
+      ctx.moveTo(tx, GH - th);
+      ctx.lineTo(tx + tw / 2, GH - th - 15);
+      ctx.lineTo(tx + tw, GH - th);
+      ctx.fill();
+    }
+    // Cloud wisps
+    ctx.fillStyle = '#3a3a5a';
+    ctx.globalAlpha = 0.25;
+    for (let i = 0; i < 4; i++) {
+      ctx.beginPath();
+      ctx.arc(((rand() * GW + frame * 0.08) % (GW + 40)) - 20, rand() * 60 + 20, rand() * 15 + 10, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+  } else if (zoneId === 'fungal_depths') {
+    // Giant mushroom silhouettes
+    ctx.fillStyle = '#2a1a2a';
+    for (let i = 0; i < 4; i++) {
+      let mx = rand() * GW;
+      let ms = rand() * 30 + 20;
+      ctx.beginPath();
+      ctx.arc(mx, GH - 20, ms, Math.PI, 0);
+      ctx.fill();
+      ctx.fillRect(mx - 4, GH - 20, 8, 20);
+    }
+    // Floating spores
+    ctx.fillStyle = '#8a4a8a';
+    ctx.globalAlpha = 0.4;
+    for (let i = 0; i < 10; i++) {
+      let px = (rand() * GW + frame * 0.2 * (i % 2 === 0 ? 1 : -1)) % GW;
+      let py = (rand() * GH + frame * 0.3) % GH;
+      ctx.beginPath();
+      ctx.arc(px, py, 2, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+  } else if (zoneId === 'crystal_caves') {
+    // Glowing crystals
+    ctx.globalAlpha = 0.3;
+    for (let i = 0; i < 8; i++) {
+      ctx.fillStyle = ['#a855f7', '#3cacd7', '#f4b41b', '#38d973'][Math.floor(rand() * 4)];
+      let cx = rand() * GW;
+      let cy = rand() * GH;
+      ctx.beginPath();
+      ctx.moveTo(cx, cy - 8);
+      ctx.lineTo(cx + 4, cy);
+      ctx.lineTo(cx, cy + 8);
+      ctx.lineTo(cx - 4, cy);
+      ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+  } else if (zoneId === 'ashen_wastes') {
+    // Ash drifting
+    ctx.fillStyle = '#5a5a4a';
+    ctx.globalAlpha = 0.3;
+    for (let i = 0; i < 12; i++) {
+      let ax = (rand() * GW + frame * 0.4) % GW;
+      let ay = (rand() * GH + frame * 0.15 + i * 30) % GH;
+      ctx.fillRect(ax, ay, 2, 1);
+    }
+    ctx.globalAlpha = 1;
+    // Dead trees
+    ctx.strokeStyle = '#3a3a2a';
+    ctx.lineWidth = 2;
+    for (let i = 0; i < 3; i++) {
+      let tx = rand() * GW;
+      ctx.beginPath();
+      ctx.moveTo(tx, GH - 20);
+      ctx.lineTo(tx - 3, GH - 60 - rand() * 30);
+      ctx.moveTo(tx, GH - 40);
+      ctx.lineTo(tx + 8, GH - 55);
+      ctx.stroke();
+    }
+  }
+}
+
+// --- ITEM DRAWING ---
+function drawItems() {
+  for (const item of items) {
+    const itype = ITEM_TYPES[item.type];
+    if (!itype) continue;
+    let ix = item.x, iy = item.y;
+    // Bobbing for grounded / static items
+    if (item.grounded || item.vy === undefined) {
+      iy += Math.sin(frame * 0.05 + (item.bobOffset || 0)) * 2;
+    }
+
+    ctx.fillStyle = itype.color;
+    switch (itype.shape) {
+      case 'circle':
+        ctx.beginPath();
+        ctx.arc(ix + 5, iy + 5, 4, 0, Math.PI * 2);
+        ctx.fill();
+        // Shine
+        ctx.fillStyle = '#fff';
+        ctx.fillRect(ix + 3, iy + 2, 2, 2);
+        break;
+      case 'heart':
+        ctx.beginPath();
+        ctx.moveTo(ix + 5, iy + 3);
+        ctx.arc(ix + 3, iy + 2, 3, Math.PI, 0);
+        ctx.arc(ix + 7, iy + 2, 3, Math.PI, 0);
+        ctx.lineTo(ix + 5, iy + 9);
+        ctx.fill();
+        break;
+      case 'diamond':
+        ctx.beginPath();
+        ctx.moveTo(ix + 5, iy);
+        ctx.lineTo(ix + 9, iy + 5);
+        ctx.lineTo(ix + 5, iy + 10);
+        ctx.lineTo(ix + 1, iy + 5);
+        ctx.fill();
+        break;
+      case 'bigheart':
+        // Glow
+        ctx.fillStyle = 'rgba(255,100,100,0.3)';
+        ctx.beginPath();
+        ctx.arc(ix + 6, iy + 5, 10, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = itype.color;
+        ctx.beginPath();
+        ctx.moveTo(ix + 6, iy + 4);
+        ctx.arc(ix + 4, iy + 3, 4, Math.PI, 0);
+        ctx.arc(ix + 8, iy + 3, 4, Math.PI, 0);
+        ctx.lineTo(ix + 6, iy + 12);
+        ctx.fill();
+        break;
+      case 'bigdiamond':
+        ctx.fillStyle = 'rgba(100,100,255,0.3)';
+        ctx.beginPath();
+        ctx.arc(ix + 6, iy + 6, 10, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = itype.color;
+        ctx.beginPath();
+        ctx.moveTo(ix + 6, iy);
+        ctx.lineTo(ix + 12, iy + 6);
+        ctx.lineTo(ix + 6, iy + 12);
+        ctx.lineTo(ix, iy + 6);
+        ctx.fill();
+        break;
+      case 'star':
+        ctx.beginPath();
+        for (let s = 0; s < 5; s++) {
+          let angle = (s * 72 - 90) * Math.PI / 180;
+          let r = s % 2 === 0 ? 6 : 3;
+          let sx = ix + 5 + Math.cos(angle) * r;
+          let sy = iy + 5 + Math.sin(angle) * r;
+          if (s === 0) ctx.moveTo(sx, sy);
+          else ctx.lineTo(sx, sy);
+          // Inner point
+          let angle2 = ((s * 72 + 36) - 90) * Math.PI / 180;
+          ctx.lineTo(ix + 5 + Math.cos(angle2) * 3, iy + 5 + Math.sin(angle2) * 3);
+        }
+        ctx.fill();
+        break;
+    }
+  }
+}
+
+// --- PORTAL DRAWING ---
+function drawPortals() {
+  for (const p of portals) {
+    ctx.fillStyle = 'hsl(' + (frame * 2 % 360) + ', 80%, 50%)';
+    ctx.globalAlpha = 0.6 + Math.sin(frame * 0.08) * 0.2;
+    ctx.beginPath();
+    ctx.ellipse(p.x + p.w / 2, p.y + p.h / 2, p.w / 2, p.h / 2, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.globalAlpha = 1;
+    ctx.strokeStyle = '#fff';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+    // Inner swirl
+    ctx.strokeStyle = 'hsl(' + ((frame * 3 + 120) % 360) + ', 90%, 70%)';
+    ctx.beginPath();
+    ctx.arc(p.x + p.w / 2, p.y + p.h / 2, 8 + Math.sin(frame * 0.1) * 3, frame * 0.05, frame * 0.05 + Math.PI);
+    ctx.stroke();
+    // Label
+    ctx.fillStyle = '#fff';
+    ctx.font = 'bold 8px monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText('EXIT', p.x + p.w / 2, p.y - 4);
+    ctx.textAlign = 'left';
+  }
+}
+
+// === DRAW MAIN ===
+function draw(dt) {
+  if (state === 'title') {
+    drawTitleScreen();
+    return;
+  }
+
+  if (state === 'gameOver') {
+    drawGameOverScreen();
+    return;
+  }
+
+  if (state === 'victory') {
+    drawVictoryScreen();
+    return;
+  }
+
+  // === PLAYING STATE DRAW ===
+  ctx.save();
+  TAS.fx.applyShake();
+
+  drawBackground();
+
+  // Draw tiles
+  for (let r = 0; r < ROWS; r++) {
+    for (let c = 0; c < COLS; c++) {
+      if (screenTiles[r] && screenTiles[r][c] !== 0) drawTile(c, r, screenTiles[r][c]);
+    }
+  }
+
+  // Items
+  drawItems();
+
+  // Portals
+  drawPortals();
+
+  // Enemies
+  for (const e of enemies) drawEnemy(e);
+
+  // Boss
+  drawBoss();
+
+  // Projectiles
+  for (const p of projectiles) {
+    ctx.fillStyle = p.color || '#f84';
+    ctx.beginPath();
+    ctx.arc(p.x + p.w / 2, p.y + p.h / 2, 3, 0, Math.PI * 2);
+    ctx.fill();
+    // Projectile trail
+    ctx.globalAlpha = 0.4;
+    ctx.beginPath();
+    ctx.arc(p.x + p.w / 2 - p.vx * 0.02, p.y + p.h / 2 - p.vy * 0.02, 2, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.globalAlpha = 1;
+  }
+
+  // Player = selected baseling sprite; fall back to the procedural drawing if not loaded.
+  if (player) {
+    var _pa = player.attacking ? 'attack' : (invulnTimer > 0 ? 'hurt' : 'idle');
+    if (!TAS.drawBaseling(ctx, player.x + player.w / 2, player.y + player.h / 2, Math.max(player.w, player.h) + 6, { flipX: player.facing < 0, frame: frame, anim: _pa })) {
+      drawBaseling(player.x, player.y, player.facing, player.attacking, invulnTimer > 0);
+    }
+  }
+
+  // Particles
+  TAS.particles.draw();
+  ctx.restore();
+
+  TAS.fx.drawFlash(GW, GH);
+
+  // Score popups (above HUD layer)
+  drawScorePopups();
+
+  drawHUD();
+  drawTutorial();
+
+  // Zone transition arrows
+  if (screenX > 0) {
+    ctx.fillStyle = '#fff';
+    ctx.globalAlpha = 0.3 + Math.sin(frame * 0.05) * 0.15;
+    ctx.beginPath();
+    ctx.moveTo(4, GH / 2); ctx.lineTo(12, GH / 2 - 6); ctx.lineTo(12, GH / 2 + 6);
+    ctx.fill();
+    ctx.globalAlpha = 1;
+  }
+  if (screenX < MAP_W - 1) {
+    ctx.fillStyle = '#fff';
+    ctx.globalAlpha = 0.3 + Math.sin(frame * 0.05) * 0.15;
+    ctx.beginPath();
+    ctx.moveTo(GW - 4, GH / 2); ctx.lineTo(GW - 12, GH / 2 - 6); ctx.lineTo(GW - 12, GH / 2 + 6);
+    ctx.fill();
+    ctx.globalAlpha = 1;
+  }
+
+  // Map overlay
+  if (mapOpen) drawMap();
+
+  TAS.input.drawTouchControls(GW, GH);
+}
+
+// --- TITLE SCREEN ---
+function drawTitleScreen() {
+  ctx.fillStyle = '#1a1c2c';
+  ctx.fillRect(0, 0, GW, GH);
+  if (window.TasernArt && TasernArt._auto) { var _bi = TasernArt.getImg('art/backgrounds/' + TasernArt._auto.bg + (TasernArt._auto.bg.indexOf('bg-') === 0 || TasernArt._auto.bg === 'adventure-level1' || TasernArt._auto.bg === 'tavern-bg' ? '.webp' : '.jpg')); if (_bi) { TasernArt.drawCover(ctx, _bi); ctx.fillStyle = 'rgba(0,0,0,0.55)'; ctx.fillRect(0, 0, GW, GH); } }
+
+  // Floating spore particles
+  ctx.fillStyle = '#a855f7';
+  ctx.globalAlpha = 0.3;
+  for (let i = 0; i < 20; i++) {
+    let px = (i * 47 + frame * 0.2) % GW;
+    let py = (i * 31 + frame * 0.1) % GH;
+    ctx.beginPath();
+    ctx.arc(px, py, 1.5, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+
+  // Title baseling mascot
+  const bobY = Math.sin(frame * 0.03) * 5;
+  drawBaseling(GW / 2 - 7, 75 + bobY, 1, false, false);
+
+  // Orbiting particles around baseling
+  for (let i = 0; i < 3; i++) {
+    let angle = frame * 0.03 + i * (Math.PI * 2 / 3);
+    let ox = GW / 2 + Math.cos(angle) * 20;
+    let oy = 82 + bobY + Math.sin(angle) * 12;
+    ctx.fillStyle = ['#a855f7', '#38d973', '#f4b41b'][i];
+    ctx.globalAlpha = 0.5;
+    ctx.beginPath();
+    ctx.arc(ox, oy, 2, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.globalAlpha = 1;
+  }
+
+  // Title
+  ctx.fillStyle = '#000';
+  ctx.font = 'bold 28px monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText('SPOREOURIA', GW / 2 + 2, 52);
+  ctx.fillStyle = '#a855f7';
+  ctx.fillText('SPOREOURIA', GW / 2, 50);
+
+  // Subtitle
+  ctx.fillStyle = '#38d973';
+  ctx.font = '11px monospace';
+  ctx.fillText('Lost in the Spore Dimension', GW / 2, 115);
+
+  ctx.fillStyle = '#aaa';
+  ctx.font = '9px monospace';
+  ctx.fillText('Explore 8 strange gardens. Gather 3 seeds. Defeat the Overlord.', GW / 2, 140);
+
+  // Controls
+  ctx.fillStyle = '#666';
+  ctx.font = '8px monospace';
+  ctx.fillText('Arrows: Move  |  Z/A: Jump  |  X/B: Fling Spores', GW / 2, 170);
+  ctx.fillText('M/Tab: Spore Map  |  Down+Jump: Drop through', GW / 2, 183);
+
+  // Stat bonuses display (shows what NFT gives you)
+  if (statB.level > 0) {
+    ctx.fillStyle = '#555';
+    ctx.fillRect(GW / 2 - 100, 195, 200, 70);
+    ctx.strokeStyle = PLAYER_COLOR;
+    ctx.lineWidth = 1;
+    ctx.strokeRect(GW / 2 - 100, 195, 200, 70);
+
+    // Selected baseling: name (Base blue) + 5 stat bars + [C] SELECT
+    var _sel = window.BaselingPlayer && BaselingPlayer.getSelected ? BaselingPlayer.getSelected() : null;
+    ctx.fillStyle = '#0052FF'; ctx.textAlign = 'center'; ctx.font = 'bold 9px monospace';
+    ctx.fillText('[C] ' + (_sel ? _sel.charName : 'WIMMPLE') + (_sel && _sel.tokenId != null ? ' #' + _sel.tokenId : ''), GW / 2, 218);
+    if (_sel && _sel.stats && window.BaselingPlayer) {
+      var _meta = BaselingPlayer.STAT_META, _keys = BaselingPlayer.STAT_KEYS, _x0 = GW/2 - 115;
+      ctx.font = '7px monospace';
+      for (var _i = 0; _i < _keys.length; _i++) {
+        var _mm = _meta[_keys[_i]], _v = _sel.stats[_keys[_i]], _bx = _x0 + _i * 47, _yy = 230;
+        ctx.fillStyle = _mm.color; ctx.textAlign = 'left'; ctx.fillText(_mm.label, _bx, _yy);
+        ctx.fillStyle = '#222'; ctx.fillRect(_bx, _yy + 3, 40, 4);
+        ctx.fillStyle = _mm.color; ctx.fillRect(_bx, _yy + 3, 40 * Math.max(0.04, Math.min(1, _v/200)), 4);
+      }
+      ctx.textAlign = 'center';
+    }
+  }
+
+  // Start prompt
+  if (Math.floor(frame / 30) % 2 === 0) {
+    ctx.fillStyle = '#f4b41b';
+    ctx.font = 'bold 12px monospace';
+    ctx.fillText('Press Z or START to Play', GW / 2, statB.level > 0 ? 285 : 230);
+  }
+
+  if (localStorage.getItem(SAVE_KEY)) {
+    ctx.fillStyle = '#38d973';
+    ctx.font = '8px monospace';
+    ctx.fillText('(Spore data found - will continue)', GW / 2, statB.level > 0 ? 300 : 248);
+  }
+
+  ctx.textAlign = 'left';
+  TAS.input.drawTouchControls(GW, GH);
+}
+
+// --- GAME OVER SCREEN ---
+function drawGameOverScreen() {
+  ctx.fillStyle = '#1a1c2c';
+  ctx.fillRect(0, 0, GW, GH);
+  if (window.TasernArt && TasernArt._auto) { var _ei = TasernArt.getImg('art/enemies/enemy-' + TasernArt._auto.enemy + '.jpg'); if (_ei) { ctx.fillStyle = '#0a0a15'; ctx.fillRect(0, 0, GW, GH); ctx.globalAlpha = 0.3; TasernArt.drawCover(ctx, _ei); ctx.globalAlpha = 1; ctx.fillStyle = 'rgba(0,0,0,0.5)'; ctx.fillRect(0, 0, GW, GH); } }
+
+  // Death particles
+  ctx.fillStyle = '#7a444a';
+  ctx.globalAlpha = 0.5;
+  for (let i = 0; i < 15; i++) {
+    let px = (i * 43 + frame * 0.1) % GW;
+    let py = (i * 29 + frame * 0.15) % GH;
+    ctx.beginPath();
+    ctx.arc(px, py, 1.5, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+
+  ctx.fillStyle = '#e6482e';
+  ctx.font = 'bold 24px monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText('COMPOSTED', GW / 2, GH / 2 - 40);
+
+  ctx.fillStyle = '#aaa';
+  ctx.font = '10px monospace';
+  ctx.fillText('The spore dimension reclaims your baseling...', GW / 2, GH / 2 - 10);
+
+  // Final stats
+  ctx.fillStyle = '#f4b41b';
+  ctx.font = 'bold 12px monospace';
+  ctx.fillText('POOP Tokens: ' + score, GW / 2, GH / 2 + 20);
+
+  if (score >= highScore && score > 0) {
+    ctx.fillStyle = '#f4b41b';
+    ctx.globalAlpha = 0.7 + Math.sin(frame * 0.06) * 0.3;
+    ctx.font = 'bold 10px monospace';
+    ctx.fillText('NEW HIGH POOP!', GW / 2, GH / 2 + 38);
+    ctx.globalAlpha = 1;
+  } else if (highScore > 0) {
+    ctx.fillStyle = '#888';
+    ctx.font = '9px monospace';
+    ctx.fillText('Best: ' + highScore, GW / 2, GH / 2 + 38);
+  }
+
+  ctx.fillStyle = '#888';
+  ctx.font = '8px monospace';
+  ctx.fillText('Gardens explored: ' + Object.keys(explored).length + '  |  Fungi defeated: ' + totalKills, GW / 2, GH / 2 + 58);
+
+  if (deathTimer <= 0) {
+    ctx.fillStyle = '#666';
+    ctx.font = '10px monospace';
+    ctx.fillText('Press any button to continue', GW / 2, GH / 2 + 85);
+  }
+  ctx.textAlign = 'left';
+  TAS.input.drawTouchControls(GW, GH);
+}
+
+// --- VICTORY SCREEN ---
+function drawVictoryScreen() {
+  ctx.fillStyle = '#1a1c2c';
+  ctx.fillRect(0, 0, GW, GH);
+
+  // Celebration particles
+  if (frame % 5 === 0) {
+    TAS.particles.spawn(
+      Math.random() * GW, Math.random() * GH * 0.5,
+      ['#f4b41b', '#e6482e', '#3cacd7', '#38d973', '#a855f7'][Math.floor(Math.random() * 5)],
+      3, 1.5, { size: 2 }
+    );
+  }
+  TAS.particles.draw();
+
+  ctx.fillStyle = '#38d973';
+  ctx.font = 'bold 22px monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText('SPROUTED!', GW / 2, 55);
+
+  ctx.fillStyle = '#fff';
+  ctx.font = '11px monospace';
+  ctx.fillText('The mycelium gate opens! Your baseling is free!', GW / 2, 85);
+
+  // Draw baseling celebrating
+  let cx = GW / 2 - 7;
+  let cy = 110 + Math.sin(frame * 0.06) * 8;
+  drawBaseling(cx, cy, 1, false, false);
+
+  // Orbiting stars
+  for (let i = 0; i < 5; i++) {
+    let angle = frame * 0.04 + i * (Math.PI * 2 / 5);
+    let ox = cx + 7 + Math.cos(angle) * 25;
+    let oy = cy + 7 + Math.sin(angle) * 15;
+    ctx.fillStyle = '#f4b41b';
+    ctx.beginPath();
+    ctx.arc(ox, oy, 2, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  ctx.fillStyle = '#3cacd7';
+  ctx.font = '9px monospace';
+  ctx.fillText('Your baseling escapes the bizarre spore dimension', GW / 2, 165);
+  ctx.fillText('and returns to the strange gardens of Tasern!', GW / 2, 180);
+
+  // Stats
+  ctx.fillStyle = '#f4b41b';
+  ctx.font = 'bold 14px monospace';
+  ctx.fillText('POOP Tokens: ' + score, GW / 2, 210);
+
+  ctx.fillStyle = '#aaa';
+  ctx.font = '9px monospace';
+  let explored_count = Object.keys(explored).length;
+  ctx.fillText('Gardens explored: ' + explored_count + '/' + (MAP_W * MAP_H), GW / 2, 235);
+  ctx.fillText('Fungi lords defeated: ' + Object.keys(bossDefeated).length + '/7', GW / 2, 250);
+  ctx.fillText('Spores flung: ' + totalKills + '  |  Seeds collected: ' + totalPickups, GW / 2, 265);
+
+  if (score >= highScore && score > 0) {
+    ctx.fillStyle = '#f4b41b';
+    ctx.globalAlpha = 0.7 + Math.sin(frame * 0.06) * 0.3;
+    ctx.font = 'bold 10px monospace';
+    ctx.fillText('NEW HIGH POOP!', GW / 2, 285);
+    ctx.globalAlpha = 1;
+  }
+
+  if (victoryTimer <= 0) {
+    ctx.fillStyle = '#f4b41b';
+    ctx.font = '10px monospace';
+    ctx.fillText('Press any button', GW / 2, 305);
+  }
+  ctx.textAlign = 'left';
+  TAS.input.drawTouchControls(GW, GH);
+}
+
+// === START ===
+TAS.loop.start(update, draw);
+
+})();
+</script>
+<script src="/track.js" defer></script></body>
+</html>

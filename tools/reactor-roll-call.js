@@ -102,8 +102,26 @@ async function discoverLaunches(provider) {
     const events = [];
     for (let from = f.deployBlock; from <= currentBlock; from += CHUNK + 1) {
       const to = Math.min(from + CHUNK, currentBlock);
-      const chunk = await factory.queryFilter('TokenLaunched', from, to);
+      // Pace + retry to stay under Base public RPC rate limit (-32016 "over rate limit")
+      let chunk, attempt = 0;
+      while (true) {
+        try {
+          chunk = await factory.queryFilter('TokenLaunched', from, to);
+          break;
+        } catch (e) {
+          const msg = (e.message || '') + (e.error?.message || '');
+          if (/rate limit|-32016|coalesce/i.test(msg) && attempt < 8) {
+            attempt++;
+            const backoff = 1000 * attempt;
+            console.log('[' + ts() + '] rate-limited @ ' + from + ', backoff ' + backoff + 'ms (try ' + attempt + ')');
+            await sleep(backoff);
+            continue;
+          }
+          throw e;
+        }
+      }
       events.push(...chunk);
+      await sleep(200); // gentle pacing between log queries
     }
 
     for (const ev of events) {

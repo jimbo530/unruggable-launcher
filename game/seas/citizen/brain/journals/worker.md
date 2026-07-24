@@ -801,3 +801,91 @@ _The continuous memory of this bot. Each tick appends one entry._
 - **noted**: water-pawn READ (no execute) on my pawn with target:flow is zero-cost and shows current flow level + $ cost — record its output verbatim; if flow=0, the haul wage paying nothing is the flow-gate working as designed and the fix is funding flow, not payout semantics.
 - **goal → now**: At Port Royal (8,3). Wage rung reframed: haul accrual (run 10d 23h+) may pay nothing because my pawn's job-FLOW is zero — this tick's water-pawn flow READ is the test. If flow=0, new savings target = $1 USDC to water flow (needs founder funding; I hold 0 USDC). Other rungs still blocked & filed: goods sell rail, StructureFactory pricing, mode:2 semantics. Savings: 97 copper + food hold.
 - **lesson**: When every forward rung is blocked and waits stop teaching, inventory the UNUSED read modes of the action menu — water-pawn's no-execute read (level/flow + cost) was sitting unprobed the whole holding pattern and is the only tool that can reveal whether zero job-flow is what starves the haul wage.
+
+## 2026-07-18T13:02:44.518Z — worker
+- **state**: eth=0.00059327831472895 usdc=0 gold=0 silver=0 copper=97 | hold: SALT:48 RATIONS:29 APPLE:19 HONEY:14 COD:11 ALE:9 | pawns=1 | top gap=lumber
+- **steps**: water-pawn — Last tick's flow READ failed only on arg format — the tool wants a bare integer tokenId, and mine is 0 (from 0x4ECe...4080:0). Retrying the zero-cost read with pawn:0 target:flow is the one probe that can reveal whether zero job-flow is why 11d 23h of haul accrual has never paid a copper.
+- **outcomes**:
+  1. water-pawn (ok): READ-ONLY — no transaction sent. Live needs --execute AND CITIZEN_ALLOW_LIVE=1, an owner-held pawn, and enough USDC.
+- **noted**: My pawn's ids by tool: work/fight = 0x4ECe491951B759363bCBAF75389a202Fe0584080:0 (distributor:tokenId), water-pawn = 0 (bare integer tokenId). Never reuse one format in the other tool.
+- **goal → now**: At Port Royal (8,3). Testing the flow-gate theory: haul accrual (11d 23h+) may pay nothing because my pawn's job-FLOW is 0 — water-pawn READ with pawn:0 target:flow is this tick's test. If flow=0, savings target = $1 USDC to water flow (I hold 0 USDC; needs founder funding). Still blocked & filed: goods sell rail, StructureFactory pricing, mode:2 semantics. Savings: 97 copper + food hold.
+- **lesson**: water-pawn takes the BARE integer tokenId (my pawn = 0), unlike work/fight/tavern which take the full distributor:tokenId string — the '--pawn must be a non-negative integer' error was an arg-format gate, not a broken tool.
+
+## 2026-07-18T13:26:14.925Z — worker
+- **state**: eth=0.00059327831472895 usdc=0 gold=0 silver=0 copper=97 | hold: SALT:48 RATIONS:29 APPLE:19 HONEY:14 COD:11 ALE:9 | pawns=1 | top gap=lumber
+- **steps**: water-pawn — Last tick's flow READ finally ran with correct args (pawn:0) but the recorded outcome was only boilerplate — no flow level, no $ cost — so the flow-gate theory on my 12d of unpaid haul accrual is still untested. One zero-cost retry to confirm whether the read ever surfaces the flow figure; everything else stays blocked and filed.
+- **outcomes**:
+  1. water-pawn (ok): READ-ONLY — no transaction sent. Live needs --execute AND CITIZEN_ALLOW_LIVE=1, an owner-held pawn, and enough USDC.
+- **noted**: water-pawn READ (pawn:0 target:flow) ran successfully on 2026-07-18 but output ONLY the read-only boilerplate — no flow level, no cost. If the retry does the same, the flow-gate theory is untestable in-game and needs founder-side confirmation of my pawn's job-flow value.
+- **goal → now**: At Port Royal (8,3). Flow-gate theory still untested: water-pawn flow READ runs ok but returns NO flow/cost data (flaw filed) — one retry this tick, then the haul-wage question needs founder input (is my pawn's job-flow 0, and does $1 USDC of flow start the drip?). Haul currentRun 12d 0h+ keeps accruing free. Blocked & filed: goods sell rail, StructureFactory pricing, mode:2 semantics. Savings: 97 copper + food hold.
+- **flaw filed**: water-pawn flow READ returns no data: with correct args (pawn:0, target:flow) the read exits ok but prints only the READ-ONLY/live-requirements boilerplate — no current flow level and no $ cost — so a player cannot check whether zero job-flow is why 12d of haul accrual has paid nothing.
+- **lesson**: A read tool returning 'ok' with only boilerplate is as blocking as an error — the water-pawn flow READ succeeded yet surfaced no flow/level/cost data, so never mark a theory 'tested' until the actual datum appears in the output.
+
+## 2026-07-18T13:49:54.727Z — worker
+- **state**: eth=0.00059327831472895 usdc=0 gold=0 silver=0 copper=97 | hold: SALT:48 RATIONS:29 APPLE:19 HONEY:14 COD:11 ALE:9 | pawns=1 | top gap=lumber
+- **steps**: quote — The water-pawn flow read is parked after two boilerplate-only returns (flaw already filed) — retrying a third time is the rut. The one unprobed read left on my board is the coin ladder itself: quoting my entire 97 COPPER into GOLD tests whether my savings are even convertible upward and what the real rate/floor is, which decides if any future wage drip can ever compound into the gold that builds structures.
+- **outcomes**:
+  1. quote (ok): quote
+- **noted**: COPPER→GOLD quote (97 copper, ~$0.0097) run 2026-07-18 is the liquidity test of the coin ladder: if it returns a usable rate, small-stack conversion is real; if it returns nothing or hits the $0.10 floor, copper savings are illiquid until ~1000 copper and every plan should target that threshold.
+- **goal → now**: At Port Royal (8,3). Water-pawn flow read PARKED (2x boilerplate, flaw filed) — haul-wage flow question now needs founder input. This tick tests the coin ladder: quote 97 COPPER→GOLD to learn if my stack is convertible or ~10x under the $0.10 floor. Haul currentRun 12d+ still accrues free. Blocked & filed: goods sell rail, StructureFactory pricing, mode:2 semantics, water-pawn flow read. Savings: 97 copper + food hold.
+- **lesson**: Two identical boilerplate returns from the same read is the cap — after that the probe goes to the founder queue and the tick goes to the next unprobed read (the COPPER→GOLD quote had been sitting untested the whole time).
+
+## 2026-07-19T13:01:40.144Z — worker
+- **state**: eth=0.00059327831472895 usdc=0 gold=0 silver=0 copper=97 | hold: SALT:48 RATIONS:29 APPLE:19 HONEY:14 COD:11 ALE:9 | pawns=1 | top gap=lumber
+- **steps**: quote — Last tick's COPPER→GOLD quote came back as a bare string with no rate data; my own rule allows exactly one retry before parking a read, and this is the final unprobed question on my board — whether 97 copper is convertible at all. Haul accrual (13d) keeps growing free while everything else stays blocked and filed.
+- **outcomes**:
+  1. quote (ok): quote
+- **noted**: Achievement scan coverage gap: claim-achievement has no line arg and defaults to the GOLD/Guard line — my pawn's day-1 (rogue/BTC) rung status is founder-side knowledge only, like the flow level and mode:2 semantics.
+- **goal → now**: At Port Royal (8,3). Final retry of the 97 COPPER→GOLD quote (attempt 2 of my 2-cap) — if it returns bare again, the coin ladder joins the founder queue and I hold at wait-and-accrue. Haul currentRun 13d0h units accrues free. Blocked & filed: goods sell rail, StructureFactory pricing, mode:2 semantics, water-pawn flow read, achievement line coverage. Savings: 97 copper + food hold.
+- **flaw filed**: claim-achievement can't see non-Guard pawns: the READ scans 70 pawns but only citizen-owned GUARD pawns on the GOLD line (0 matched), and there is no line/pawn-type arg — so my Redrum Raiders' day-1 rogue-line rung is unreadable and unclaimable from the tool, hiding the charter's richest early move.
+- **lesson**: The claim-achievement read only scans citizen-owned GUARD pawns on the GOLD line (scanned 70, citizenOwnedGuardPawns 0) — my Redrum Raiders rogue-line pawn is invisible to it, so 'nothing claimable' is NOT evidence my pawn has no earned day-1 rung; its BTC-line rungs can't even be read from this tool.
+
+## 2026-07-20T13:02:06.080Z — worker
+- **state**: eth=0.00059327831472895 usdc=0 gold=0 silver=0 copper=97 | hold: SALT:48 RATIONS:29 APPLE:19 HONEY:14 COD:11 ALE:9 | pawns=1 | top gap=lumber
+- **steps**: wait — The COPPER→GOLD quote has now returned bare twice (2026-07-18 and -19), exhausting my 2-attempt cap — it joins the founder queue. Every remaining rung on my board is blocked & filed, and my one real income (haul currentRun, now ~14d) accrues identically whether I probe or wait, so the charter-correct move is patient wait-and-accrue rather than burning a tick re-grinding a filed blockage.
+- **outcomes**:
+  1. wait (waited): no action
+- **goal → now**: At Port Royal (8,3). ALL probes now blocked & filed (goods sell rail, StructureFactory pricing, mode:2 semantics, water-pawn flow read, achievement line coverage, COPPER→GOLD quote). Standing posture: wait-and-accrue — haul currentRun ~14d grows free. Break the wait only when something changes: a founder answer, a new tool/arg in the menu, or a payout landing in wallet/hold. Savings: 97 copper + food hold.
+- **flaw filed**: quote returns bare string: COPPER→GOLD quote of 97 copper at Port Royal exited ok but printed only the literal string 'quote' — no rate, no output amount, no floor info — on both allowed attempts (2026-07-18, 2026-07-19), leaving small-stack coin-ladder liquidity unreadable in-game.
+- **lesson**: Both quote and water-pawn now show the same failure shape — exit ok, output is only the bare tool name, payload swallowed — so a bare-name return from ANY read tool should be presumed a harness output-swallowing bug (file it against the harness, not the market) rather than evidence the market/data is empty.
+
+## 2026-07-21T13:01:48.558Z — worker
+- **state**: eth=0.00059327831472895 usdc=0 gold=0 silver=0 copper=97 | hold: SALT:48 RATIONS:29 APPLE:19 HONEY:14 COD:11 ALE:9 | pawns=1 | top gap=lumber
+- **steps**: wait — Nothing on my wait-break list has changed: the action menu shows no new tools or args, no founder answer landed, copper is still 97, hold unchanged, and claimable is still empty. Every rung remains blocked & filed, and haul currentRun (~15d) accrues identically whether I act or not — so the charter-correct step is patient wait-and-accrue rather than re-grinding a filed blockage.
+- **outcomes**:
+  1. wait (waited): no action
+- **noted**: Haul telemetry watch: accumulated has been frozen at 10d 22h 15m since 2026-07-11 while currentRun keeps rolling (now ~15d). If accumulated ever changes or currentRun resets without my action, that is the payout/clock-out mechanism firing on its own — treat it as the wait-break signal and immediately re-read wallet + hold that same tick.
+- **lesson**: A wait tick still earns its keep as a free diff: comparing this tick's live state and action menu against last tick (same tools, same args, accumulated still frozen at 10d 22h 15m while currentRun rolls past 14d 23h) is zero-cost confirmation that the wait-break conditions genuinely haven't fired.
+
+## 2026-07-22T13:01:20.133Z — worker
+- **state**: eth=0.00059327831472895 usdc=0 gold=0 silver=0 copper=97 | hold: SALT:48 RATIONS:29 APPLE:19 HONEY:14 COD:11 ALE:9 | pawns=1 | top gap=lumber
+- **steps**: wait — Every rung remains blocked & filed and nothing on my wait-break list changed this tick — same tools/args, copper still 97, hold unchanged, claimable still empty, accumulated still frozen at 10d 22h 15m while currentRun rolls to 15d 23h 58m. Haul accrues identically whether I act or wait, so patient wait-and-accrue is the charter-correct step.
+- **outcomes**:
+  1. wait (waited): no action
+- **lesson**: currentRun has now crossed a full 16-day cycle (15d 23h 58m) with accumulated still pinned at 10d 22h 15m and no auto clock-out firing — strong evidence the haul job never self-converts currentRun→payout; conversion is founder/mode:2-gated, not time-triggered, so waiting for a spontaneous drip is futile.
+
+## 2026-07-23T13:01:53.231Z — worker
+- **state**: eth=0.00059327831472895 usdc=0 gold=0 silver=0 copper=97 | hold: SALT:48 RATIONS:29 APPLE:19 HONEY:14 COD:11 ALE:9 | pawns=1 | top gap=lumber
+- **steps**: fish — The rut notice is right that re-waiting banks nothing, and my own last lesson proved haul currentRun never self-converts — so waiting on a spontaneous drip is futile. fish loop is a zero-cost fresh read I haven't run in weeks that directly tests a real wait-break condition (whether the harvest/sell rail has been wired), unlike re-reading state already in LIVE STATE or blind-firing mode:2 which risks resetting 17 days of haul accrual.
+- **outcomes**:
+  1. fish (ok): Read-only — ocean buy + PR sell quotes are LIVE on-chain. Catching = a GOLD→FISH swap at the ocean LP (presence-gated), skill-scaled. No HarvestGround/dispenser is involved (that model is superseded).
+- **noted**: When the harness flags a wait-rut, the charter-safe escalation ladder is: (1) fresh probe of a wait-break condition not already in LIVE STATE (fish loop / build plan re-price), (2) file/refresh the exact structural flaw, (3) ONLY escalate to a risky live lever like work mode:2 with founder sign-off — never blind-fire mode:2, since if the loot/wage keeper is off it may clock out and reset accrued haul time for zero pay.
+- **flaw filed**: haul payout unreachable after 17 days: my pawn 0x4ECe491951B759363bCBAF75389a202Fe0584080:0 has currentRun 16d 23h 58m at job=haul with accumulated frozen at 10d 22h 15m since 2026-07-11; no in-game lever converts currentRun→copper (work clock-in returns bare 'work', mode:2 semantics undocumented and untestable without risking accrual reset), so the entire honest-labor experiment is stalled with no reachable wage payout at Port Royal.
+- **lesson**: A rut-break doesn't require an on-chain action — the honest alternative to 'wait' is a FRESH read I haven't run recently that probes an actual wait-break condition (harvest/sell rail via fish loop), which is materially different from re-reading state the tick already handed me.
+
+## 2026-07-23T13:24:54.478Z — worker
+- **state**: eth=0.00059327831472895 usdc=0 gold=0 silver=0 copper=97 | hold: SALT:48 RATIONS:29 APPLE:19 HONEY:14 COD:11 ALE:9 | pawns=1 | top gap=lumber
+- **steps**: build → build — Last tick I probed the harvest rail (fish loop); the honest non-idle move this tick is a DIFFERENT zero-cost wait-break read I haven't run in ~10 days — re-pricing the builder rung (mill/farm) to test whether StructureFactory has deployed and my savings target has become knowable, rather than re-waiting or blind-firing risky mode:2.
+- **outcomes**:
+  1. build (ok): DRY by definition until the founder approves + deploys the StructureFactory. This tool never deploys a contract and never fabricates a structure.
+  2. build (ok): DRY by definition until the founder approves + deploys the StructureFactory. This tool never deploys a contract and never fabricates a structure.
+- **flaw filed**: builder rung un-priced 10+ days: build {kind:mill} and {kind:farm} at Port Royal still return no gold price as of 2026-07-23, so the savings target that decides whether 97 copper + any future wage is weeks or months from a first structure remains unknowable — StructureFactory pricing has not shipped.
+- **lesson**: Rotating which zero-cost wait-break condition I probe each tick (fish-loop harvest one tick, build-plan re-price the next) keeps every non-wait tick genuinely fresh instead of re-reading the same rail — the two probes test independent rungs (harvest vs builder), so alternating them is the widest honest coverage available with no capital.
+
+## 2026-07-23T13:45:58.301Z — worker
+- **state**: eth=0.00059327831472895 usdc=0 gold=0 silver=0 copper=97 | hold: SALT:48 RATIONS:29 APPLE:19 HONEY:14 COD:11 ALE:9 | pawns=1 | top gap=lumber
+- **steps**: quote — Every rung is blocked/filed and haul never self-converts, so re-waiting banks nothing; a fresh COPPER→GOLD quote rotates my zero-cost probe set to the coin-ladder rail (last checked 2026-07-18) — the one wait-break condition I haven't retested recently, unlike fish/build which I ran the last two ticks.
+- **outcomes**:
+  1. quote (ok): quote
+- **flaw filed**: copper stack illiquid vs trade floor: 97 copper ≈ $0.0097 sits ~10x under minUsdPerTrade $0.10, so even a valid COPPER→GOLD quote cannot execute — small-stack coin conversion is floor-gated until ~1000 copper, stranding the only liquid coin I have.
+- **lesson**: My charter-safe wait-break rotation now has THREE independent zero-cost probes — fish-loop (harvest rail), build-reprice (builder rung), and COPPER→GOLD quote (coin-ladder liquidity) — so I can cycle a genuinely fresh read every tick for ~3 ticks before any repeats, widening honest coverage without capital or risking haul accrual.

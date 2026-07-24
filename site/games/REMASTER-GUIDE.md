@@ -4,7 +4,7 @@ A mechanical recipe to remaster one MfT Arcade game to the Base + Baseling stand
 ~30–60 minutes. Follow it top to bottom. Read **ARCADE-STATS.md** first — it owns the
 stat math; this guide is the plumbing.
 
-The three reference remasters are `poop-man.html`, `reactor-jump.html`, and
+The three reference remasters are `poop-powers.html`, `reactor-jump.html`, and
 `tunnel-bug.html`. When in doubt, open the closest one and copy its pattern.
 
 What "remastered" means (the checklist you're satisfying):
@@ -23,10 +23,10 @@ What "remastered" means (the checklist you're satisfying):
 
 Grep the file for `tasern-engine.js`:
 
-- **Archetype A — TAS-engine game** (≈81 of the games; e.g. poop-man, reactor-jump). It
+- **Archetype A — TAS-engine game** (≈81 of the games; e.g. poop-powers, reactor-jump). It
   has `<script src="tasern-engine.js">` and a `TAS` global. **Use the `TAS.player.*`
   bridge** — least code.
-- **Archetype B — bespoke-engine game** (≈22; e.g. tunnel-bug, poop-out, spore-breaker). No
+- **Archetype B — bespoke-engine game** (≈22; e.g. tunnel-bug, baseling-boxing, spore-breaker). No
   `tasern-engine.js`, its own input/audio/loop. **Call `BaselingPlayer` / `BaselingSprites`
   directly** via a tiny local helper. Do **not** add `tasern-engine.js` to a Type B game —
   it would spin up a second canvas/loop and conflict.
@@ -38,7 +38,7 @@ Grep the file for `tasern-engine.js`:
 
 Also check **`tasern-wager.js`**: if the game's id is in `WAGER_GAMES`, it's a **wager
 game** → you must call `getMults({ pvp: true })` everywhere (Step 4). Current wager games:
-`poop-out, micro-baselings, token-columns, super-dodge, baseling-grind, snow-bros,
+`baseling-boxing, micro-baselings, token-columns, super-dodge, baseling-grind, frost-poppers,
 streets-of-tasern, spore-breaker, rc-reactor, spore-tributaries`.
 
 Some "games" are non-action (chess, checkers, dice-roller, ttrpg-notepad, whodunit). They

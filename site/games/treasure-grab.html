@@ -1,0 +1,2195 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Treasure Grab</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body { width: 100%; height: 100%; overflow: hidden; background: #1a1c2c; touch-action: none; }
+canvas { display: block; margin: 0 auto; }
+#back-link {
+  position: fixed; bottom: 8px; left: 50%; transform: translateX(-50%);
+  color: #666; font-family: monospace; font-size: 12px; text-decoration: none; z-index: 10;
+}
+#back-link:hover { color: #aaa; }
+</style>
+</head>
+<body>
+<canvas id="gc"></canvas>
+<a id="back-link" href="/games">Back to Arcade</a>
+<script src="nft-loader.js"></script>
+<script src="baseling-sprites.js"></script>
+<script src="baseling-player.js"></script>
+<script src="tasern-theme.js"></script>
+<script>if(window.NftLoader)NftLoader.gate();</script>
+<script src="tasern-art.js"></script>
+<script src="tasern-engine.js"></script>
+<script>
+(function() {
+"use strict";
+
+// ============================================================
+// BASELING STAT INTEGRATION
+// ============================================================
+// Stats come from BaselingPlayer.getMults() (see ARCADE-STATS.md), the single source of
+// stat math, clamped to the single-player band (0.8-1.6). The helpers below read D&D-style
+// fields on statB; rather than rewrite them, we synthesize statB from the five bounded
+// multipliers in recomputeStats(), re-run after a title-screen baseling pick.
+//   SPD -> move speed,  STA -> lives,  PWR -> power-pellet strength,  LCK -> fruit luck/score.
+var statB = {
+  damage: 1, speed: 1, lives: 0, hpMult: 1, scoreMult: 1, cooldown: 1, luck: 1,
+  str: 10, dex: 10, con: 10, int: 10, wis: 10, cha: 10,
+  level: 0, color: '#38d973', name: 'Baseling', icon: 'B'
+};
+function recomputeStats() {
+  var m = (window.TAS && TAS.player) ? TAS.player.mults() : { moveSpeed: 1, health: 1, damage: 1, luck: 1, swim: 1 };
+  function dnd(x) { return Math.round(10 + (x - 1) * 20); } // mult 1.0->10, 0.8->6, 1.6->22
+  statB.damage = m.damage; statB.speed = m.moveSpeed; statB.hpMult = m.health; statB.luck = m.luck;
+  statB.scoreMult = 1; statB.lives = m.health > 1.3 ? 1 : 0;
+  statB.str = dnd(m.damage);    // STR -> power-pellet strength
+  statB.dex = dnd(m.moveSpeed); // DEX -> movement speed
+  statB.con = dnd(m.health);    // CON -> extra lives
+  statB.int = dnd(m.luck);      // INT -> score multiplier (luck flavor)
+  statB.wis = dnd(m.luck);      // WIS -> power-up duration (luck flavor)
+  statB.cha = dnd(m.luck);      // CHA -> fruit/bonus luck
+}
+try {
+  if (window.NftLoader && NftLoader.getStatBonuses) {
+    var _b = NftLoader.getStatBonuses();
+    if (_b) { statB.color = _b.color || statB.color; statB.name = _b.name || statB.name; statB.icon = _b.icon || statB.icon; }
+  }
+} catch(e) { console.warn('[treasure-grab] NftLoader display info failed:', e && e.message); }
+recomputeStats();
+var picking = false; // baseling character-select overlay open
+
+// Stat helpers — scale modifiers from the five bounded multipliers
+// STR: power pellet damage/knockback, pellet eating speed
+// DEX: movement speed bonus
+// CON: extra lives, damage reduction
+// INT: score multiplier
+// WIS: power-up duration extension
+// CHA: fruit/bonus spawn luck, better fruit types
+function statMod(val) { return (val - 10) / 10; } // 0 at 10, +1 at 20, -0.5 at 5
+function strBonus() { return 1 + statMod(statB.str) * 0.5; }           // 0.5x–1.5x power pellet strength
+function dexBonus() { return 1 + statMod(statB.dex) * 0.3; }           // 0.7x–1.3x movement speed
+function conLives() { return Math.max(0, Math.floor(statMod(statB.con) * 2)); } // 0-2 extra lives
+function intScoreMult() { return 1 + statMod(statB.int) * 0.4; }       // 0.6x–1.4x score multiplier
+function wisExtend() { return 1 + statMod(statB.wis) * 0.5; }          // 0.5x–1.5x power-up duration
+function chaLuck() { return Math.min(2.0, 1 + statMod(statB.cha) * 0.35); } // 0.65x–1.35x fruit luck
+
+// ============================================================
+// CONSTANTS
+// ============================================================
+const GW = 480, GH = 320;
+const ctx = TAS.ctx;
+TAS.initCanvas(GW, GH);
+TAS.input.initTouch({ buttons: ['a', 'c'], labels: { a: 'BOOST', c: 'PICK' } });
+
+// === SEA RESKIN ART (Treasure Grab) — preloaded images, procedural fallback ===
+var SEA_ART = {};
+['barrel','treasure-chest','gold-coins','scarab-walk1','scarab-walk2','docks','deck'].forEach(function(n){
+  var im = new Image(); im.src = 'art/sea/' + n + '.png'; SEA_ART[n] = im;
+});
+function seaImg(n){ var im = SEA_ART[n]; return (im && im.complete && im.naturalWidth > 0) ? im : null; }
+if (window.TAS && TAS.player) {
+  TAS.player.init().then(function () { recomputeStats(); }).catch(function (e) { console.warn('[treasure-grab] player init failed:', e && e.message); });
+}
+
+const TILE = 16;
+const COLS = 28;
+const ROWS = 17;
+const MAZE_OX = Math.floor((GW - COLS * TILE) / 2);
+const MAZE_OY = 30;
+const HUD_H = 28;
+
+// Tile types
+const W = 1; // wall (mycelial barrier)
+const D = 2; // dot (spore pellet)
+const P = 3; // power pellet (reactor core)
+const E = 0; // empty
+const T = 4; // tunnel (mycelial passage)
+const G = 5; // spore den door
+
+// ============================================================
+// BASELING-UNIVERSE SPORE CREATURE DEFINITIONS
+// ============================================================
+// Ghosts are Spore Creatures from the POOP garden underground
+const SPORE_COLORS = ['#e6482e', '#a855f7', '#3cacd7', '#f4b41b'];
+const SPORE_NAMES  = ['Pincher', 'Scuttler', 'Snapclaw', 'Barnacle'];
+const SPORE_TITLES = ['The Relentless', 'The Stalker', 'The Poisoner', 'The Coward'];
+const SPORE_SCARED_COLOR = '#3cacd7';
+const SPORE_FLASH_COLOR  = '#ffffff';
+
+// Boss spore creatures — appear every 5 levels
+const BOSS_SPORE_COLORS = ['#e6482e', '#a855f7', '#38d973', '#f4b41b'];
+const BOSS_SPORE_NAMES  = ['Reef Tyrant', 'Tide Lord', 'Drowned Wraith', 'Coral Golem'];
+
+// ============================================================
+// MAZE TEMPLATES — Multiple themed mazes
+// ============================================================
+// Template 0: POOP Garden Maze
+const MAZE_TEMPLATE_0 = [
+  [W,W,W,W,W,W,W,W,W,W,W,W,W,W,W,W,W,W,W,W,W,W,W,W,W,W,W,W],
+  [W,D,D,D,D,D,D,D,D,D,D,D,D,W,W,D,D,D,D,D,D,D,D,D,D,D,D,W],
+  [W,D,W,W,W,D,W,W,W,W,W,D,D,W,W,D,D,W,W,W,W,W,D,W,W,W,D,W],
+  [W,P,W,W,W,D,W,W,W,W,W,D,D,D,D,D,D,W,W,W,W,W,D,W,W,W,P,W],
+  [W,D,D,D,D,D,D,D,D,D,D,D,D,W,W,D,D,D,D,D,D,D,D,D,D,D,D,W],
+  [W,D,W,W,W,D,W,D,W,W,W,W,D,W,W,D,W,W,W,W,D,W,D,W,W,W,D,W],
+  [W,D,D,D,D,D,W,D,D,D,D,D,D,D,D,D,D,D,D,D,D,W,D,D,D,D,D,W],
+  [W,W,W,W,W,D,W,W,W,D,W,E,E,E,E,E,E,W,D,W,W,W,D,W,W,W,W,W],
+  [T,E,E,E,E,D,W,E,E,E,W,G,G,G,G,G,G,W,E,E,E,W,D,E,E,E,E,T],
+  [W,W,W,W,W,D,W,E,W,E,E,E,E,E,E,E,E,E,E,W,E,W,D,W,W,W,W,W],
+  [W,D,D,D,D,D,D,D,W,E,E,E,E,E,E,E,E,E,E,W,D,D,D,D,D,D,D,W],
+  [W,D,W,W,W,D,W,D,W,W,W,W,W,W,W,W,W,W,W,W,D,W,D,W,W,W,D,W],
+  [W,D,D,D,W,D,D,D,D,D,D,D,D,W,W,D,D,D,D,D,D,D,D,W,D,D,D,W],
+  [W,W,W,D,W,D,W,D,W,W,W,W,D,D,D,D,W,W,W,W,D,W,D,W,D,W,W,W],
+  [W,D,D,D,D,D,W,D,D,D,D,D,D,W,W,D,D,D,D,D,D,W,D,D,D,D,D,W],
+  [W,P,W,W,W,D,W,W,W,W,W,W,D,W,W,D,W,W,W,W,W,W,D,W,W,W,P,W],
+  [W,W,W,W,W,W,W,W,W,W,W,W,W,W,W,W,W,W,W,W,W,W,W,W,W,W,W,W],
+];
+
+// Template 1: Compost Chamber
+const MAZE_TEMPLATE_1 = [
+  [W,W,W,W,W,W,W,W,W,W,W,W,W,W,W,W,W,W,W,W,W,W,W,W,W,W,W,W],
+  [W,D,D,D,D,D,W,D,D,D,D,D,D,D,D,D,D,D,D,D,W,D,D,D,D,D,D,W],
+  [W,D,W,W,D,D,W,D,W,W,W,D,W,W,W,W,D,W,W,D,W,D,D,W,W,W,D,W],
+  [W,P,D,W,D,D,D,D,D,D,D,D,D,D,D,D,D,D,D,D,D,D,D,W,D,D,P,W],
+  [W,D,D,W,D,W,W,W,D,W,D,W,W,D,D,W,W,D,W,D,W,W,D,W,D,D,D,W],
+  [W,D,W,W,D,D,D,D,D,W,D,D,D,D,D,D,D,D,W,D,D,D,D,W,W,D,D,W],
+  [W,D,D,D,D,W,D,W,D,W,W,D,D,D,D,D,D,W,W,D,W,D,W,D,D,D,D,W],
+  [W,W,W,D,W,W,D,W,W,W,W,E,E,E,E,E,E,W,W,W,W,D,W,W,D,W,W,W],
+  [T,E,E,D,D,D,D,E,E,E,W,G,G,G,G,G,G,W,E,E,E,D,D,D,D,E,E,T],
+  [W,W,W,D,W,W,D,W,E,W,E,E,E,E,E,E,E,E,W,E,W,D,W,W,D,W,W,W],
+  [W,D,D,D,D,D,D,W,E,W,E,E,E,E,E,E,E,E,W,E,W,D,D,D,D,D,D,W],
+  [W,D,W,W,W,D,W,W,D,W,W,W,W,W,W,W,W,W,W,D,W,W,D,W,W,W,D,W],
+  [W,D,D,D,D,D,D,D,D,D,D,D,D,W,W,D,D,D,D,D,D,D,D,D,D,D,D,W],
+  [W,D,W,D,W,W,D,W,W,W,D,W,D,D,D,D,W,D,W,W,W,D,W,W,D,W,D,W],
+  [W,D,W,D,D,D,D,D,D,D,D,W,D,W,W,D,W,D,D,D,D,D,D,D,D,W,D,W],
+  [W,P,W,W,W,D,W,W,D,W,D,W,D,W,W,D,W,D,W,D,W,W,D,W,W,W,P,W],
+  [W,W,W,W,W,W,W,W,W,W,W,W,W,W,W,W,W,W,W,W,W,W,W,W,W,W,W,W],
+];
+
+// Template 2: Mycelium Cavern
+const MAZE_TEMPLATE_2 = [
+  [W,W,W,W,W,W,W,W,W,W,W,W,W,W,W,W,W,W,W,W,W,W,W,W,W,W,W,W],
+  [W,D,D,D,D,W,D,D,D,D,D,D,D,W,W,D,D,D,D,D,D,D,W,D,D,D,D,W],
+  [W,D,W,W,D,W,D,W,W,W,W,W,D,D,D,D,W,W,W,W,W,D,W,D,W,W,D,W],
+  [W,P,W,W,D,D,D,D,D,D,D,D,D,W,W,D,D,D,D,D,D,D,D,D,W,W,P,W],
+  [W,D,D,D,D,W,W,D,W,W,D,W,D,D,D,D,W,D,W,W,D,W,W,D,D,D,D,W],
+  [W,W,W,D,D,D,W,D,W,D,D,D,D,W,W,D,D,D,D,W,D,W,D,D,D,W,W,W],
+  [W,D,D,D,W,D,D,D,D,D,W,W,D,D,D,D,W,W,D,D,D,D,D,W,D,D,D,W],
+  [W,D,W,W,W,D,W,W,W,D,W,E,E,E,E,E,E,W,D,W,W,W,D,W,W,W,D,W],
+  [T,E,E,E,E,D,W,E,E,E,W,G,G,G,G,G,G,W,E,E,E,W,D,E,E,E,E,T],
+  [W,D,W,W,W,D,W,E,W,E,E,E,E,E,E,E,E,E,E,W,E,W,D,W,W,W,D,W],
+  [W,D,D,D,D,D,D,D,W,E,E,E,E,E,E,E,E,E,E,W,D,D,D,D,D,D,D,W],
+  [W,D,W,D,W,W,W,D,W,W,W,W,W,W,W,W,W,W,W,W,D,W,W,W,D,W,D,W],
+  [W,D,W,D,D,D,D,D,D,D,D,D,D,W,W,D,D,D,D,D,D,D,D,D,D,W,D,W],
+  [W,D,W,W,D,W,D,W,D,W,W,W,D,D,D,D,W,W,W,D,W,D,W,D,W,W,D,W],
+  [W,D,D,D,D,W,D,W,D,D,D,D,D,W,W,D,D,D,D,D,W,D,W,D,D,D,D,W],
+  [W,P,W,W,D,W,D,W,W,W,W,W,D,W,W,D,W,W,W,W,W,D,W,D,W,W,P,W],
+  [W,W,W,W,W,W,W,W,W,W,W,W,W,W,W,W,W,W,W,W,W,W,W,W,W,W,W,W],
+];
+
+const MAZE_TEMPLATES = [MAZE_TEMPLATE_0, MAZE_TEMPLATE_1, MAZE_TEMPLATE_2];
+
+// Wall color themes per maze
+const WALL_THEMES = [
+  { outer: '#0e2236', inner: '#3cacd7', core: '#0e2236', dot: '#f4b41b' },   // old wharf planks, gold coins
+  { outer: '#10283a', inner: '#5a86b8', core: '#10283a', dot: '#ffd24a' },   // smugglers hold, deep blue
+  { outer: '#0e2e34', inner: '#38b2a8', core: '#0e2e34', dot: '#ffd24a' },   // coral cavern, teal
+];
+
+// Fruit definitions per level — Baseling garden themed
+const FRUITS = [
+  { name: 'doubloon',      pts: 100,  color: '#7a444a', shape: 'mushroom' },
+  { name: 'ruby gem',      pts: 300,  color: '#a855f7', shape: 'berry' },
+  { name: 'pearl',         pts: 500,  color: '#38d973', shape: 'truffle' },
+  { name: 'silver bar',    pts: 700,  color: '#3cacd7', shape: 'moon' },
+  { name: 'emerald',       pts: 1000, color: '#38d973', shape: 'crystal' },
+  { name: 'sapphire',      pts: 2000, color: '#3cacd7', shape: 'shard' },
+  { name: 'gold chest',    pts: 3000, color: '#f4b41b', shape: 'spore' },
+  { name: 'black pearl',   pts: 5000, color: '#a855f7', shape: 'pearl' },
+];
+
+// ============================================================
+// STATE
+// ============================================================
+let state = 'title';
+let score = 0;
+let highScore = TAS.score.load('treasuregrab_hi');
+let lives = 3;
+let level = 1;
+let frame = 0;
+let maze = [];
+let dotsLeft = 0;
+let totalDots = 0;
+let player = null;
+let ghosts = [];
+let bossGhost = null;           // Boss spore creature
+let fruitActive = false;
+let fruitTimer = 0;
+let fruitType = 0;
+let fruitEaten = 0;
+let powerTimer = 0;
+let ghostCombo = 0;
+let freezeTimer = 0;
+let deathTimer = 0;
+let readyTimer = 0;
+let levelClearTimer = 0;
+let cutSceneTimer = 0;
+let cutSceneLevel = 0;
+let extraLifeGiven = false;
+let boostTimer = 0;
+let boostCooldown = 0;
+let wakaToggle = false;
+let sirenTimer = 0;
+let floatingTexts = [];
+let scorePopups = [];           // Score popup particles
+let currentMazeIdx = 0;
+let tutorialShown = false;
+let tutorialTimer = 0;
+let showTutorial = false;
+let wallTheme = WALL_THEMES[0];
+let comboStreak = 0;            // Consecutive ghost eats without dying
+let pelletGlow = [];            // Glowing reactor pellet particles
+let mazeRevealTimer = 0;        // Maze reveal animation on level start
+
+// ============================================================
+// SPEED CONFIG — DEX wired in
+// ============================================================
+function getSpeed(lv) {
+  var base = 60 + Math.min(lv - 1, 10) * 4;
+  return base * dexBonus();
+}
+
+function getGhostSpeed(lv, scared) {
+  if (scared) return getSpeed(lv) * 0.5;
+  return getSpeed(lv) * (0.85 + Math.min(lv - 1, 10) * 0.02);
+}
+
+function getBossSpeed(lv) {
+  return getGhostSpeed(lv, false) * 1.15;
+}
+
+// ============================================================
+// MAZE
+// ============================================================
+function buildMaze() {
+  maze = [];
+  dotsLeft = 0;
+  totalDots = 0;
+  currentMazeIdx = (level - 1) % MAZE_TEMPLATES.length;
+  wallTheme = WALL_THEMES[currentMazeIdx];
+  var tmpl = MAZE_TEMPLATES[currentMazeIdx];
+  for (var r = 0; r < ROWS; r++) {
+    maze[r] = [];
+    for (var c = 0; c < COLS; c++) {
+      maze[r][c] = tmpl[r][c];
+      if (maze[r][c] === D || maze[r][c] === P) {
+        dotsLeft++;
+        totalDots++;
+      }
+    }
+  }
+  // Pellet glow particles for reactor cores (power pellets)
+  pelletGlow = [];
+  for (var r2 = 0; r2 < ROWS; r2++) {
+    for (var c2 = 0; c2 < COLS; c2++) {
+      if (maze[r2][c2] === P) {
+        pelletGlow.push({ col: c2, row: r2, phase: Math.random() * Math.PI * 2 });
+      }
+    }
+  }
+}
+
+function isWall(col, row) {
+  if (row < 0 || row >= ROWS) return true;
+  if (col < 0 || col >= COLS) return false;
+  var t = maze[row][col];
+  return t === W || t === G;
+}
+
+function canMove(col, row, isGhost) {
+  if (row < 0 || row >= ROWS) return false;
+  if (col < 0 || col >= COLS) return true;
+  var t = maze[row][col];
+  if (t === W) return false;
+  if (t === G && !isGhost) return false;
+  return true;
+}
+
+// ============================================================
+// PLAYER — the baseling
+// ============================================================
+function createPlayer() {
+  return {
+    col: 13, row: 10,
+    px: 0, py: 0,
+    dir: 0,
+    nextDir: -1,
+    moving: false,
+    mouthAngle: 0,
+    mouthOpen: true,
+    trail: [],          // afterimage trail positions
+    trailTimer: 0,
+    eatAnim: 0,         // chomp animation timer
+  };
+}
+
+function resetPlayerPos() {
+  player.col = 13;
+  player.row = 10;
+  player.px = (player.col + 0.5) * TILE;
+  player.py = (player.row + 0.5) * TILE;
+  player.dir = 0;
+  player.nextDir = -1;
+  player.moving = false;
+  player.trail = [];
+  player.eatAnim = 0;
+}
+
+var DIR_DX = [1, 0, -1, 0];
+var DIR_DY = [0, 1, 0, -1];
+
+function tileCenter(col, row) {
+  return { x: (col + 0.5) * TILE, y: (row + 0.5) * TILE };
+}
+
+// ============================================================
+// SPORE CREATURES (formerly ghosts)
+// ============================================================
+function createGhost(idx) {
+  var startCols = [13, 12, 14, 11];
+  var startRows = [8,  9,  9,  8];
+  return {
+    idx: idx,
+    col: startCols[idx],
+    row: startRows[idx],
+    px: 0, py: 0,
+    dir: idx % 2 === 0 ? 0 : 2,
+    scared: false,
+    eaten: false,
+    inHouse: idx > 0,
+    houseTimer: idx * 3,
+    flashTimer: 0,
+    isBoss: false,
+    sporeParticles: [],    // ambient spore particles around creature
+    hitFlash: 0,           // flash when hit by powered player
+  };
+}
+
+function createBossGhost(lv) {
+  var bossIdx = ((lv / 5) | 0) % 4;
+  var g = {
+    idx: bossIdx,
+    col: 13,
+    row: 7,
+    px: (13 + 0.5) * TILE,
+    py: (7 + 0.5) * TILE,
+    dir: 2,
+    scared: false,
+    eaten: false,
+    inHouse: false,
+    houseTimer: 0,
+    flashTimer: 0,
+    isBoss: true,
+    hp: 2 + Math.floor(lv / 5),  // takes multiple power pellet hits
+    maxHp: 2 + Math.floor(lv / 5),
+    sporeParticles: [],
+    hitFlash: 0,
+  };
+  return g;
+}
+
+function resetGhosts() {
+  ghosts = [];
+  for (var i = 0; i < 4; i++) {
+    var g = createGhost(i);
+    g.px = (g.col + 0.5) * TILE;
+    g.py = (g.row + 0.5) * TILE;
+    ghosts.push(g);
+  }
+  ghosts[0].row = 7;
+  ghosts[0].col = 13;
+  ghosts[0].px = (13 + 0.5) * TILE;
+  ghosts[0].py = (7 + 0.5) * TILE;
+  ghosts[0].inHouse = false;
+  ghosts[0].dir = 2;
+
+  // Boss spore creature every 5 levels
+  bossGhost = null;
+  if (level % 5 === 0 && level > 0) {
+    bossGhost = createBossGhost(level);
+  }
+}
+
+function getGhostTarget(g, playerCol, playerRow, playerDir) {
+  if (g.eaten) {
+    return { col: 13, row: 8 };
+  }
+  if (g.scared) {
+    return { col: TAS.math.randInt(0, COLS - 1), row: TAS.math.randInt(0, ROWS - 1) };
+  }
+
+  // Boss ghost is more aggressive — always targets player with some prediction
+  if (g.isBoss) {
+    return {
+      col: playerCol + DIR_DX[playerDir] * 2,
+      row: playerRow + DIR_DY[playerDir] * 2
+    };
+  }
+
+  switch (g.idx) {
+    case 0: // Moldghast - direct chase
+      return { col: playerCol, row: playerRow };
+    case 1: // Spore Chaser - ambush (4 tiles ahead)
+      return {
+        col: playerCol + DIR_DX[playerDir] * 4,
+        row: playerRow + DIR_DY[playerDir] * 4
+      };
+    case 2: { // Toxic Phantom - flanking
+      var aheadCol = playerCol + DIR_DX[playerDir] * 2;
+      var aheadRow = playerRow + DIR_DY[playerDir] * 2;
+      var blazecap = ghosts[0];
+      return {
+        col: aheadCol + (aheadCol - blazecap.col),
+        row: aheadRow + (aheadRow - blazecap.row)
+      };
+    }
+    case 3: { // Rot Lurker - chase when far, scatter when close
+      var dist = Math.abs(g.col - playerCol) + Math.abs(g.row - playerRow);
+      if (dist > 8) {
+        return { col: playerCol, row: playerRow };
+      }
+      return { col: 0, row: ROWS - 1 };
+    }
+    default:
+      return { col: playerCol, row: playerRow };
+  }
+}
+
+function moveGhost(g, dt) {
+  if (g.inHouse) {
+    g.houseTimer -= dt;
+    if (g.houseTimer <= 0) {
+      g.col = 13;
+      g.row = 7;
+      g.px = (13 + 0.5) * TILE;
+      g.py = (7 + 0.5) * TILE;
+      g.inHouse = false;
+      g.dir = 2;
+    } else {
+      g.py += Math.sin(frame * 0.1 + g.idx) * 0.5;
+    }
+    return;
+  }
+
+  var speed = g.eaten ? getSpeed(level) * 2 :
+              g.scared ? getGhostSpeed(level, true) :
+              g.isBoss ? getBossSpeed(level) :
+              getGhostSpeed(level, false);
+
+  var moveAmt = speed * dt;
+  var cx = (g.col + 0.5) * TILE;
+  var cy = (g.row + 0.5) * TILE;
+  var distToCenter = Math.abs(g.px - cx) + Math.abs(g.py - cy);
+
+  if (distToCenter < moveAmt + 0.5) {
+    g.px = cx;
+    g.py = cy;
+
+    if (g.eaten && g.row >= 8 && g.row <= 9 && g.col >= 12 && g.col <= 14) {
+      g.eaten = false;
+      g.scared = false;
+      if (g.isBoss) {
+        // Boss respawns outside
+        g.col = 13;
+        g.row = 7;
+        g.px = (13 + 0.5) * TILE;
+        g.py = (7 + 0.5) * TILE;
+      } else {
+        g.inHouse = true;
+        g.houseTimer = 1;
+      }
+      return;
+    }
+
+    if (g.col < 0) { g.col = COLS - 1; g.px = (g.col + 0.5) * TILE; }
+    if (g.col >= COLS) { g.col = 0; g.px = 0.5 * TILE; }
+
+    var target = getGhostTarget(g, player.col, player.row, player.dir);
+    var reverseDir = (g.dir + 2) % 4;
+
+    var bestDir = g.dir;
+    var bestDist = 999999;
+    for (var d = 0; d < 4; d++) {
+      if (d === reverseDir) continue;
+      var nc = g.col + DIR_DX[d];
+      var nr = g.row + DIR_DY[d];
+      if (!canMove(nc, nr, !g.eaten)) continue;
+      var ddx = nc - target.col;
+      var ddy = nr - target.row;
+      var dd = ddx * ddx + ddy * ddy;
+      if (dd < bestDist) {
+        bestDist = dd;
+        bestDir = d;
+      }
+    }
+    g.dir = bestDir;
+  }
+
+  g.px += DIR_DX[g.dir] * moveAmt;
+  g.py += DIR_DY[g.dir] * moveAmt;
+  g.col = Math.floor(g.px / TILE);
+  g.row = Math.floor(g.py / TILE);
+
+  if (g.px < -TILE) { g.px = COLS * TILE; g.col = COLS - 1; }
+  if (g.px > (COLS + 1) * TILE) { g.px = 0; g.col = 0; }
+
+  // Update hit flash
+  if (g.hitFlash > 0) g.hitFlash -= dt;
+}
+
+// ============================================================
+// AUDIO
+// ============================================================
+function playWaka() {
+  wakaToggle = !wakaToggle;
+  TAS.audio.playTone(wakaToggle ? 260 : 330, 0.06, 'square', 0.06);
+}
+
+function playSiren(dt) {
+  sirenTimer -= dt;
+  if (sirenTimer <= 0) {
+    sirenTimer = 0.35;
+    if (powerTimer > 0) {
+      TAS.audio.playTone(180, 0.15, 'sine', 0.03, 120);
+    } else {
+      TAS.audio.playTone(200 + Math.sin(frame * 0.02) * 60, 0.2, 'sine', 0.02);
+    }
+  }
+}
+
+function playEatGhost() {
+  TAS.audio.playTone(600, 0.1, 'square', 0.08, 1200);
+  TAS.audio.playTone(900, 0.15, 'square', 0.06, 300);
+}
+
+function playDeath() {
+  TAS.audio.playMelody([
+    [400, 0.15], [350, 0.15], [300, 0.15], [250, 0.15],
+    [200, 0.2],  [150, 0.3],  [100, 0.4]
+  ], 100);
+}
+
+function playPowerUp() {
+  TAS.audio.playMelody([
+    [300, 0.08], [400, 0.08], [500, 0.08], [600, 0.1]
+  ], 60);
+}
+
+function playLevelClear() {
+  TAS.audio.playMelody([
+    [400, 0.1], [500, 0.1], [600, 0.1], [700, 0.1], [800, 0.15], [1000, 0.2]
+  ], 80);
+}
+
+function playFruitEat() {
+  TAS.audio.playTone(800, 0.1, 'square', 0.08);
+  setTimeout(function() { TAS.audio.playTone(1200, 0.15, 'square', 0.06); }, 80);
+}
+
+function playExtraLife() {
+  TAS.audio.playMelody([
+    [523, 0.1], [659, 0.1], [784, 0.1], [1047, 0.2]
+  ], 100);
+}
+
+function playBossHit() {
+  TAS.audio.playTone(150, 0.2, 'sawtooth', 0.1, 80);
+  TAS.audio.playTone(400, 0.1, 'square', 0.08);
+}
+
+function playBossDeath() {
+  TAS.audio.playMelody([
+    [200, 0.1], [300, 0.08], [400, 0.08], [600, 0.08], [800, 0.1], [1000, 0.15], [1200, 0.2]
+  ], 100);
+}
+
+function playCombo(count) {
+  var freq = 400 + count * 150;
+  TAS.audio.playTone(Math.min(freq, 1600), 0.08, 'square', 0.06);
+}
+
+// ============================================================
+// DRAWING HELPERS — Baseling themed
+// ============================================================
+function drawWall(x, y, r, c) {
+  // Mycelial barrier walls with organic feel
+  ctx.fillStyle = wallTheme.outer;
+  ctx.fillRect(x, y, TILE, TILE);
+
+  // Inner mycelial texture
+  ctx.fillStyle = wallTheme.inner;
+  ctx.fillRect(x + 2, y + 2, TILE - 4, TILE - 4);
+  ctx.fillStyle = wallTheme.core;
+  ctx.fillRect(x + 4, y + 4, TILE - 8, TILE - 8);
+
+  // Subtle vein pattern on edge walls
+  if (r === 0 || r === ROWS - 1 || c === 0 || c === COLS - 1) {
+    ctx.fillStyle = wallTheme.inner;
+    var veinOffset = Math.sin((r + c) * 0.7 + frame * 0.01) * 1;
+    ctx.fillRect(x + 6 + veinOffset, y + 3, 2, TILE - 6);
+  }
+}
+
+function drawDot(x, y) {
+  // Spore pellet
+  ctx.fillStyle = wallTheme.dot;
+  ctx.beginPath();
+  ctx.arc(x + TILE / 2, y + TILE / 2, 2, 0, Math.PI * 2);
+  ctx.fill();
+  // Tiny glow
+  ctx.globalAlpha = 0.2;
+  ctx.fillStyle = wallTheme.dot;
+  ctx.beginPath();
+  ctx.arc(x + TILE / 2, y + TILE / 2, 4, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.globalAlpha = 1;
+}
+
+function drawPowerPellet(x, y, pg) {
+  // Grog barrel power-pellet — sea sprite with procedural fallback
+  var _grog = seaImg('barrel');
+  if (_grog) { ctx.drawImage(_grog, x, y, TILE, TILE); return; }
+  // Reactor core with pulsing glow
+  var pulse = Math.sin(frame * 0.08 + (pg ? pg.phase : 0)) * 0.3 + 0.7;
+
+  // Outer glow
+  ctx.globalAlpha = pulse * 0.3;
+  ctx.fillStyle = '#f4b41b';
+  ctx.beginPath();
+  ctx.arc(x + TILE / 2, y + TILE / 2, 8, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Core
+  ctx.globalAlpha = pulse;
+  ctx.fillStyle = '#f4b41b';
+  ctx.beginPath();
+  ctx.arc(x + TILE / 2, y + TILE / 2, 5, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Inner bright spot
+  ctx.fillStyle = '#ffffff';
+  ctx.beginPath();
+  ctx.arc(x + TILE / 2 - 1, y + TILE / 2 - 1, 2, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.globalAlpha = 1;
+
+  // STR indicator — stronger pellets glow more
+  if (statB.str > 12) {
+    ctx.globalAlpha = 0.15 * statMod(statB.str);
+    ctx.fillStyle = '#e6482e';
+    ctx.beginPath();
+    ctx.arc(x + TILE / 2, y + TILE / 2, 10, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.globalAlpha = 1;
+  }
+}
+
+function drawGhostDoor(x, y) {
+  // Spore den entrance — garden gate
+  ctx.fillStyle = '#38d973';
+  ctx.fillRect(x + 2, y + 6, TILE - 4, 3);
+  ctx.fillStyle = '#7a444a';
+  ctx.fillRect(x + 3, y + 7, TILE - 6, 1);
+}
+
+function drawPlayer(px, py, dir, mouthAngle) {
+  var cx = MAZE_OX + px;
+  var cy = MAZE_OY + py;
+  var r = TILE / 2 - 1;
+
+  // Baseling body with stat-based color
+  var bodyColor = statB.color || '#38d973';
+
+  // Trail afterimages when boosting
+  if (boostTimer > 0 && player.trail.length > 0) {
+    for (var ti = 0; ti < player.trail.length; ti++) {
+      var t = player.trail[ti];
+      ctx.globalAlpha = 0.15 * (1 - ti / player.trail.length);
+      ctx.fillStyle = bodyColor;
+      ctx.beginPath();
+      ctx.arc(MAZE_OX + t.x, MAZE_OY + t.y, r - 1, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  // === BASELING SPRITE ===
+  if (!TAS.drawBaseling(ctx, cx, cy, r * 2, { flipX: dir === 2, frame: frame })) {
+    // Main body — mushroom-cap baseling
+    ctx.fillStyle = bodyColor;
+    ctx.beginPath();
+    var startAngle = dir * Math.PI / 2 + mouthAngle;
+    var endAngle = dir * Math.PI / 2 - mouthAngle + Math.PI * 2;
+    ctx.arc(cx, cy, r, startAngle, endAngle);
+    ctx.lineTo(cx, cy);
+    ctx.fill();
+
+    // Mushroom cap spots
+    ctx.fillStyle = 'rgba(255,255,255,0.3)';
+    var spotAngle1 = dir * Math.PI / 2 + Math.PI * 0.7;
+    var spotAngle2 = dir * Math.PI / 2 - Math.PI * 0.7;
+    ctx.beginPath();
+    ctx.arc(cx + Math.cos(spotAngle1) * r * 0.4, cy + Math.sin(spotAngle1) * r * 0.4, 1.5, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.beginPath();
+    ctx.arc(cx + Math.cos(spotAngle2) * r * 0.5, cy + Math.sin(spotAngle2) * r * 0.5, 1, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Eye
+    if (mouthAngle < 0.3) {
+      var eyeAngle = dir * Math.PI / 2 - 0.4;
+      ctx.fillStyle = '#111';
+      ctx.beginPath();
+      ctx.arc(cx + Math.cos(eyeAngle) * r * 0.45, cy + Math.sin(eyeAngle) * r * 0.45, 1.5, 0, Math.PI * 2);
+      ctx.fill();
+      // Eye highlight
+      ctx.fillStyle = '#fff';
+      ctx.beginPath();
+      ctx.arc(cx + Math.cos(eyeAngle) * r * 0.45 + 0.5, cy + Math.sin(eyeAngle) * r * 0.45 - 0.5, 0.5, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+
+  // Boost glow — DEX aura
+  if (boostTimer > 0) {
+    ctx.globalAlpha = 0.3;
+    ctx.fillStyle = '#3cacd7';
+    ctx.beginPath();
+    ctx.arc(cx, cy, r + 3, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.globalAlpha = 1;
+  }
+
+  // Power mode aura — STR glow
+  if (powerTimer > 0) {
+    var powerPulse = Math.sin(frame * 0.15) * 0.2 + 0.3;
+    ctx.globalAlpha = powerPulse;
+    ctx.fillStyle = '#f4b41b';
+    ctx.beginPath();
+    ctx.arc(cx, cy, r + 4 + Math.sin(frame * 0.1) * 2, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.globalAlpha = 1;
+  }
+
+  // Eat animation burst
+  if (player.eatAnim > 0) {
+    ctx.globalAlpha = player.eatAnim;
+    ctx.strokeStyle = '#ffffff';
+    ctx.lineWidth = 1;
+    var eRadius = r + 3 + (1 - player.eatAnim) * 8;
+    ctx.beginPath();
+    ctx.arc(cx, cy, eRadius, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.globalAlpha = 1;
+  }
+
+  // Level icon badge
+  if (statB.level > 0) {
+    ctx.fillStyle = 'rgba(0,0,0,0.5)';
+    ctx.beginPath();
+    ctx.arc(cx + r, cy - r, 4, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = '#f4b41b';
+    ctx.font = 'bold 5px monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText('' + statB.level, cx + r, cy - r + 2);
+  }
+}
+
+function drawSporeCreature(g) {
+  var cx = MAZE_OX + g.px;
+  var cy = MAZE_OY + g.py;
+  var r = TILE / 2 - 1;
+  var bossScale = g.isBoss ? 1.3 : 1.0;
+  r *= bossScale;
+
+  if (g.eaten) {
+    drawSporeEyes(cx, cy, g.dir, g.isBoss);
+    return;
+  }
+
+  // Hit flash
+  if (g.hitFlash > 0) {
+    ctx.globalAlpha = 0.5 + Math.sin(g.hitFlash * 20) * 0.5;
+  }
+
+  var bodyColor;
+  if (g.scared) {
+    if (g.flashTimer > 0 && Math.floor(g.flashTimer * 8) % 2 === 0) {
+      bodyColor = SPORE_FLASH_COLOR;
+    } else {
+      bodyColor = SPORE_SCARED_COLOR;
+    }
+  } else if (g.isBoss) {
+    bodyColor = BOSS_SPORE_COLORS[g.idx];
+  } else {
+    bodyColor = SPORE_COLORS[g.idx];
+  }
+
+  // Spore creature body — mushroom-like cap
+  ctx.fillStyle = bodyColor;
+  ctx.beginPath();
+  ctx.arc(cx, cy - 2 * bossScale, r, Math.PI, 0);
+  ctx.lineTo(cx + r, cy + r);
+
+  // Tendrils at bottom instead of wavy ghost skirt
+  var wave = Math.sin(frame * 0.15 + g.idx) * 2;
+  var tendrils = g.isBoss ? 5 : 3;
+  for (var i = 0; i < tendrils; i++) {
+    var sx = cx + r - (i * 2 + 1) * (r * 2 / (tendrils * 2));
+    var tendrilLen = 2 + Math.sin(frame * 0.2 + i + g.idx) * 1.5;
+    ctx.lineTo(sx, cy + r - tendrilLen + wave * (i % 2 === 0 ? 1 : -1));
+  }
+  ctx.lineTo(cx - r, cy + r);
+  ctx.fill();
+
+  // Spore spots on cap
+  if (!g.scared) {
+    ctx.fillStyle = 'rgba(255,255,255,0.25)';
+    ctx.beginPath();
+    ctx.arc(cx - r * 0.3, cy - 3 * bossScale, r * 0.2, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.beginPath();
+    ctx.arc(cx + r * 0.4, cy - 4 * bossScale, r * 0.15, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  // Boss HP bar
+  if (g.isBoss && g.hp !== undefined) {
+    var barW = r * 2;
+    var barH = 2;
+    var barX = cx - r;
+    var barY = cy - r - 6;
+    ctx.fillStyle = '#333';
+    ctx.fillRect(barX, barY, barW, barH);
+    ctx.fillStyle = g.hp > g.maxHp * 0.3 ? '#38d973' : '#e6482e';
+    ctx.fillRect(barX, barY, barW * (g.hp / g.maxHp), barH);
+  }
+
+  // Eyes
+  if (g.scared) {
+    ctx.fillStyle = '#fff';
+    ctx.beginPath();
+    ctx.arc(cx - 3 * bossScale, cy - 3 * bossScale, 2 * bossScale, 0, Math.PI * 2);
+    ctx.arc(cx + 3 * bossScale, cy - 3 * bossScale, 2 * bossScale, 0, Math.PI * 2);
+    ctx.fill();
+    // Zigzag mouth
+    ctx.strokeStyle = '#fff';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(cx - 4 * bossScale, cy + 2 * bossScale);
+    for (var mi = 0; mi < 4; mi++) {
+      ctx.lineTo(cx + (-4 + mi * 2.5) * bossScale, cy + (mi % 2 === 0 ? 2 : 4) * bossScale);
+    }
+    ctx.stroke();
+  } else {
+    drawSporeEyes(cx, cy, g.dir, g.isBoss);
+  }
+
+  ctx.globalAlpha = 1;
+}
+
+function drawSporeEyes(cx, cy, dir, isBoss) {
+  var sc = isBoss ? 1.3 : 1.0;
+  // Glowing eyes
+  ctx.fillStyle = '#d4f7d4';
+  ctx.beginPath();
+  ctx.ellipse(cx - 3 * sc, cy - 3 * sc, 3 * sc, 4 * sc, 0, 0, Math.PI * 2);
+  ctx.ellipse(cx + 3 * sc, cy - 3 * sc, 3 * sc, 4 * sc, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Pupils
+  var pdx = DIR_DX[dir] * 1.5;
+  var pdy = DIR_DY[dir] * 1.5;
+  ctx.fillStyle = isBoss ? '#e6482e' : '#7a444a';
+  ctx.beginPath();
+  ctx.arc(cx - 3 * sc + pdx, cy - 3 * sc + pdy, 1.5 * sc, 0, Math.PI * 2);
+  ctx.arc(cx + 3 * sc + pdx, cy - 3 * sc + pdy, 1.5 * sc, 0, Math.PI * 2);
+  ctx.fill();
+}
+
+function drawFruit(col, row) {
+  if (!fruitActive) return;
+  var ft = FRUITS[Math.min(fruitType, FRUITS.length - 1)];
+  var cx = MAZE_OX + (col + 0.5) * TILE;
+  var cy = MAZE_OY + (row + 0.5) * TILE;
+  var bob = Math.sin(frame * 0.08) * 2;
+
+  // Glow
+  ctx.globalAlpha = 0.25;
+  ctx.fillStyle = ft.color;
+  ctx.beginPath();
+  ctx.arc(cx, cy + bob, 9, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.globalAlpha = 1;
+
+  // Treasure-chest bonus — sea sprite with procedural fallback
+  var _chest = seaImg('treasure-chest');
+  if (_chest) { ctx.drawImage(_chest, cx - 9, cy - 9 + bob, 18, 18); return; }
+
+  // Shape based on fruit type
+  switch(ft.shape) {
+    case 'mushroom':
+      // Mushroom cap
+      ctx.fillStyle = ft.color;
+      ctx.beginPath();
+      ctx.arc(cx, cy - 2 + bob, 5, Math.PI, 0);
+      ctx.lineTo(cx + 2, cy + 4 + bob);
+      ctx.lineTo(cx - 2, cy + 4 + bob);
+      ctx.fill();
+      // Stem
+      ctx.fillStyle = '#ddd';
+      ctx.fillRect(cx - 1.5, cy + bob, 3, 5);
+      break;
+    case 'berry':
+      ctx.fillStyle = ft.color;
+      ctx.beginPath();
+      ctx.arc(cx, cy + bob, 5, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = 'rgba(255,255,255,0.3)';
+      ctx.beginPath();
+      ctx.arc(cx - 1.5, cy - 1.5 + bob, 1.5, 0, Math.PI * 2);
+      ctx.fill();
+      break;
+    case 'truffle':
+      ctx.fillStyle = ft.color;
+      ctx.beginPath();
+      ctx.arc(cx, cy + bob, 5, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = 'rgba(0,0,0,0.2)';
+      for (var ti = 0; ti < 3; ti++) {
+        ctx.beginPath();
+        ctx.arc(cx - 2 + ti * 2, cy - 1 + bob, 1, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      break;
+    case 'crystal':
+      ctx.fillStyle = ft.color;
+      ctx.beginPath();
+      ctx.moveTo(cx, cy - 6 + bob);
+      ctx.lineTo(cx + 4, cy + bob);
+      ctx.lineTo(cx + 2, cy + 5 + bob);
+      ctx.lineTo(cx - 2, cy + 5 + bob);
+      ctx.lineTo(cx - 4, cy + bob);
+      ctx.fill();
+      ctx.fillStyle = 'rgba(255,255,255,0.4)';
+      ctx.beginPath();
+      ctx.moveTo(cx, cy - 6 + bob);
+      ctx.lineTo(cx + 1, cy + bob);
+      ctx.lineTo(cx - 1, cy + bob);
+      ctx.fill();
+      break;
+    case 'shard':
+      ctx.fillStyle = ft.color;
+      ctx.beginPath();
+      ctx.moveTo(cx, cy - 5 + bob);
+      ctx.lineTo(cx + 3, cy + 2 + bob);
+      ctx.lineTo(cx, cy + 5 + bob);
+      ctx.lineTo(cx - 3, cy + 2 + bob);
+      ctx.fill();
+      // Glow center
+      ctx.fillStyle = '#fff';
+      ctx.beginPath();
+      ctx.arc(cx, cy + bob, 1.5, 0, Math.PI * 2);
+      ctx.fill();
+      break;
+    case 'pearl':
+      ctx.fillStyle = ft.color;
+      ctx.beginPath();
+      ctx.arc(cx, cy + bob, 5, 0, Math.PI * 2);
+      ctx.fill();
+      // Shell shimmer
+      ctx.fillStyle = 'rgba(255,255,255,0.5)';
+      ctx.beginPath();
+      ctx.arc(cx - 1.5, cy - 1.5 + bob, 2, 0, Math.PI * 2);
+      ctx.fill();
+      break;
+    default:
+      // Generic spore/moon
+      ctx.fillStyle = ft.color;
+      ctx.beginPath();
+      ctx.arc(cx, cy + bob, 5, 0, Math.PI * 2);
+      ctx.fill();
+      break;
+  }
+
+  // Stem for mushroom types
+  if (ft.shape === 'mushroom' || ft.shape === 'spore') {
+    ctx.fillStyle = '#38d973';
+    ctx.fillRect(cx - 1, cy - 7 + bob, 2, 3);
+  }
+}
+
+function drawMaze() {
+  // Maze reveal animation
+  var revealProgress = 1;
+  if (mazeRevealTimer > 0) {
+    revealProgress = 1 - (mazeRevealTimer / 1.5);
+  }
+
+  for (var r = 0; r < ROWS; r++) {
+    for (var c = 0; c < COLS; c++) {
+      // Reveal animation — tiles appear from center outward
+      if (revealProgress < 1) {
+        var distFromCenter = Math.abs(c - COLS / 2) / (COLS / 2) + Math.abs(r - ROWS / 2) / (ROWS / 2);
+        if (distFromCenter > revealProgress * 2) continue;
+      }
+
+      var x = MAZE_OX + c * TILE;
+      var y = MAZE_OY + r * TILE;
+      var t = maze[r][c];
+      if (t === W) drawWall(x, y, r, c);
+      else if (t === D) drawDot(x, y);
+      else if (t === P) {
+        var pg = null;
+        for (var pi = 0; pi < pelletGlow.length; pi++) {
+          if (pelletGlow[pi].col === c && pelletGlow[pi].row === r) { pg = pelletGlow[pi]; break; }
+        }
+        drawPowerPellet(x, y, pg);
+      }
+      else if (t === G) drawGhostDoor(x, y);
+    }
+  }
+}
+
+// ============================================================
+// SCORE POPUPS — Baseling style
+// ============================================================
+function spawnScorePopup(text, x, y, color, big) {
+  scorePopups.push({
+    text: text,
+    x: x,
+    y: y,
+    life: big ? 2.0 : 1.2,
+    maxLife: big ? 2.0 : 1.2,
+    color: color || '#fff',
+    big: !!big,
+    vx: (Math.random() - 0.5) * 20,
+    vy: -30 - Math.random() * 20,
+    scale: big ? 1.5 : 1.0,
+  });
+}
+
+function updateScorePopups(dt) {
+  for (var i = scorePopups.length - 1; i >= 0; i--) {
+    var sp = scorePopups[i];
+    sp.life -= dt;
+    sp.x += sp.vx * dt;
+    sp.y += sp.vy * dt;
+    sp.vy += 40 * dt; // gravity
+    if (sp.life <= 0) scorePopups.splice(i, 1);
+  }
+}
+
+function drawScorePopups() {
+  for (var i = 0; i < scorePopups.length; i++) {
+    var sp = scorePopups[i];
+    var alpha = Math.min(1, sp.life / (sp.maxLife * 0.3));
+    ctx.globalAlpha = alpha;
+    ctx.fillStyle = sp.color;
+    var fontSize = sp.big ? 14 : 10;
+    ctx.font = 'bold ' + fontSize + 'px monospace';
+    ctx.textAlign = 'center';
+
+    // Shadow
+    ctx.fillStyle = 'rgba(0,0,0,0.5)';
+    ctx.fillText(sp.text, sp.x + 1, sp.y + 1);
+    ctx.fillStyle = sp.color;
+    ctx.fillText(sp.text, sp.x, sp.y);
+  }
+  ctx.globalAlpha = 1;
+}
+
+// ============================================================
+// GAME LOGIC
+// ============================================================
+function startGame() {
+  state = 'playing';
+  score = 0;
+  lives = 3 + conLives(); // CON grants extra starting lives
+  level = 1;
+  extraLifeGiven = false;
+  comboStreak = 0;
+  TAS.particles.clear();
+  floatingTexts = [];
+  scorePopups = [];
+  buildMaze();
+  player = createPlayer();
+  resetPlayerPos();
+  resetGhosts();
+  fruitActive = false;
+  fruitEaten = 0;
+  powerTimer = 0;
+  ghostCombo = 0;
+  boostTimer = 0;
+  boostCooldown = 0;
+  readyTimer = 2.0;
+  deathTimer = 0;
+  levelClearTimer = 0;
+  cutSceneTimer = 0;
+  mazeRevealTimer = 1.5;
+
+  // Show tutorial on first play
+  if (!tutorialShown) {
+    showTutorial = true;
+    tutorialTimer = 6.0;
+    tutorialShown = true;
+  }
+}
+
+function nextLevel() {
+  level++;
+  buildMaze();
+  resetPlayerPos();
+  resetGhosts();
+  fruitActive = false;
+  fruitEaten = 0;
+  powerTimer = 0;
+  ghostCombo = 0;
+  boostTimer = 0;
+  boostCooldown = 0;
+  readyTimer = 2.0;
+  deathTimer = 0;
+  levelClearTimer = 0;
+  mazeRevealTimer = 1.5;
+
+  // Cut-scene after levels 2, 5, 9 and every 5 (boss)
+  if (level === 3 || level === 6 || level === 10 || level % 5 === 0) {
+    cutSceneTimer = 3.0;
+    cutSceneLevel = level;
+  }
+}
+
+function loseLife() {
+  lives--;
+  comboStreak = 0;
+  playDeath();
+  deathTimer = 2.0;
+  if (lives <= 0) {
+    if (score > highScore) {
+      highScore = score;
+      TAS.score.save('treasuregrab_hi', highScore);
+    }
+    state = 'gameOver';
+    deathTimer = 0;
+  }
+}
+
+function addScore(pts) {
+  // INT multiplier
+  var finalPts = Math.round(pts * intScoreMult());
+  score += finalPts;
+  if (!extraLifeGiven && score >= 10000) {
+    extraLifeGiven = true;
+    lives++;
+    playExtraLife();
+    floatingTexts.push({ text: '1UP!', x: GW / 2, y: GH / 2 - 30, life: 2.0, color: '#38d973' });
+    spawnScorePopup('EXTRA LIFE!', GW / 2, GH / 2 - 50, '#38d973', true);
+  }
+  return finalPts;
+}
+
+function spawnFloatingText(text, col, row, color) {
+  floatingTexts.push({
+    text: text,
+    x: MAZE_OX + (col + 0.5) * TILE,
+    y: MAZE_OY + (row + 0.5) * TILE,
+    life: 1.5,
+    color: color || '#fff'
+  });
+}
+
+// ============================================================
+// UPDATE
+// ============================================================
+function update(dt) {
+  frame++;
+  TAS.particles.update(dt);
+  TAS.fx.updateEffects(dt);
+  updateScorePopups(dt);
+
+  // Update floating texts
+  for (var i = floatingTexts.length - 1; i >= 0; i--) {
+    floatingTexts[i].life -= dt;
+    floatingTexts[i].y -= dt * 20;
+    if (floatingTexts[i].life <= 0) floatingTexts.splice(i, 1);
+  }
+
+  // Tutorial timer
+  if (showTutorial) {
+    tutorialTimer -= dt;
+    if (tutorialTimer <= 0) showTutorial = false;
+  }
+
+  // Maze reveal
+  if (mazeRevealTimer > 0) mazeRevealTimer -= dt;
+
+  // Eat animation decay
+  if (player && player.eatAnim > 0) player.eatAnim -= dt * 3;
+
+  if (state === 'title') {
+    if (picking) return; // baseling picker overlay open — ignore game input
+    if (TAS.input.keys['KeyC'] || TAS.input.touch.c) {
+      TAS.input.keys['KeyC'] = false; TAS.input.touch.c = false;
+      picking = true;
+      TAS.player.select(function () { recomputeStats(); picking = false; });
+      return;
+    }
+    if (Object.values(TAS.input.keys).some(Boolean) || TAS.input.touch.a ||
+        TAS.input.touch.up || TAS.input.touch.down || TAS.input.touch.left || TAS.input.touch.right) {
+      startGame();
+      TAS.audio.ensureAudio();
+    }
+    return;
+  }
+
+  if (state === 'gameOver') {
+    if (Object.values(TAS.input.keys).some(Boolean) || TAS.input.touch.a) {
+      state = 'title';
+    }
+    return;
+  }
+
+  if (state !== 'playing') return;
+
+  // Cut-scene
+  if (cutSceneTimer > 0) {
+    cutSceneTimer -= dt;
+    return;
+  }
+
+  // Ready screen
+  if (readyTimer > 0) {
+    readyTimer -= dt;
+    return;
+  }
+
+  // Death animation
+  if (deathTimer > 0) {
+    deathTimer -= dt;
+    if (deathTimer <= 0) {
+      resetPlayerPos();
+      resetGhosts();
+      powerTimer = 0;
+      readyTimer = 1.5;
+    }
+    return;
+  }
+
+  // Level clear
+  if (levelClearTimer > 0) {
+    levelClearTimer -= dt;
+    if (levelClearTimer <= 0) {
+      nextLevel();
+    }
+    return;
+  }
+
+  // Freeze (after eating a spore creature)
+  if (freezeTimer > 0) {
+    freezeTimer -= dt;
+    return;
+  }
+
+  // --- PLAYER INPUT ---
+  var keys = TAS.input.keys;
+  var tch = TAS.input.touch;
+
+  if (keys['ArrowLeft'] || keys['KeyA'] || tch.left) player.nextDir = 2;
+  else if (keys['ArrowRight'] || keys['KeyD'] || tch.right) player.nextDir = 0;
+  else if (keys['ArrowUp'] || keys['KeyW'] || tch.up) player.nextDir = 3;
+  else if (keys['ArrowDown'] || keys['KeyS'] || tch.down) player.nextDir = 1;
+
+  // Boost — cooldown scaled by DEX
+  var boostCooldownTime = Math.max(1.0, 3.0 / dexBonus());
+  if ((keys['Space'] || tch.a) && boostCooldown <= 0 && boostTimer <= 0) {
+    boostTimer = 0.5;
+    boostCooldown = boostCooldownTime;
+  }
+  if (boostTimer > 0) boostTimer -= dt;
+  if (boostCooldown > 0) boostCooldown -= dt;
+
+  // --- PLAYER MOVEMENT ---
+  var speed = getSpeed(level);
+  if (boostTimer > 0) speed *= 1.5;
+  var moveAmt = speed * dt;
+
+  var pcx = (player.col + 0.5) * TILE;
+  var pcy = (player.row + 0.5) * TILE;
+  var distToCenter = Math.abs(player.px - pcx) + Math.abs(player.py - pcy);
+
+  // Trail for boost
+  if (boostTimer > 0) {
+    player.trailTimer -= dt;
+    if (player.trailTimer <= 0) {
+      player.trailTimer = 0.03;
+      player.trail.push({ x: player.px, y: player.py });
+      if (player.trail.length > 8) player.trail.shift();
+    }
+  } else {
+    if (player.trail.length > 0) player.trail.shift();
+    if (player.trail.length > 0) player.trail.shift();
+  }
+
+  if (distToCenter < moveAmt + 0.5) {
+    player.px = pcx;
+    player.py = pcy;
+
+    // Wrap tunnel
+    if (player.col < 0) { player.col = COLS - 1; player.px = (COLS - 0.5) * TILE; }
+    if (player.col >= COLS) { player.col = 0; player.px = 0.5 * TILE; }
+
+    // Try queued direction
+    if (player.nextDir >= 0) {
+      var nc = player.col + DIR_DX[player.nextDir];
+      var nr = player.row + DIR_DY[player.nextDir];
+      if (canMove(nc, nr, false)) {
+        player.dir = player.nextDir;
+        player.nextDir = -1;
+        player.moving = true;
+      }
+    }
+
+    // Check if current direction is still valid
+    var fc = player.col + DIR_DX[player.dir];
+    var fr = player.row + DIR_DY[player.dir];
+    if (!canMove(fc, fr, false)) {
+      player.moving = false;
+    } else {
+      player.moving = true;
+    }
+
+    // Eat dot
+    if (player.row >= 0 && player.row < ROWS && player.col >= 0 && player.col < COLS) {
+      var tile = maze[player.row][player.col];
+      if (tile === D) {
+        maze[player.row][player.col] = E;
+        dotsLeft--;
+        var dotPts = addScore(10);
+        playWaka();
+        player.eatAnim = 0.3;
+
+        // Score popup on every 10th dot
+        if ((totalDots - dotsLeft) % 10 === 0) {
+          spawnScorePopup('+' + dotPts, MAZE_OX + player.px, MAZE_OY + player.py, wallTheme.dot, false);
+        }
+      } else if (tile === P) {
+        maze[player.row][player.col] = E;
+        dotsLeft--;
+        addScore(50);
+        // WIS extends power-up duration, STR boosts pellet power
+        powerTimer = 8.0 * wisExtend();
+        ghostCombo = 0;
+        playPowerUp();
+        player.eatAnim = 0.5;
+
+        // Score popup for reactor core
+        spawnScorePopup('REACTOR CORE!', MAZE_OX + player.px, MAZE_OY + player.py - 10, '#f4b41b', true);
+
+        // Scare all spore creatures
+        for (var gi = 0; gi < ghosts.length; gi++) {
+          var sg = ghosts[gi];
+          if (!sg.eaten && !sg.inHouse) {
+            sg.scared = true;
+            sg.flashTimer = 0;
+            sg.dir = (sg.dir + 2) % 4;
+          }
+        }
+        // Boss takes damage from STR-boosted pellets
+        if (bossGhost && !bossGhost.eaten) {
+          var bDmg = Math.ceil(strBonus());
+          bossGhost.hp -= bDmg;
+          bossGhost.hitFlash = 0.5;
+          bossGhost.scared = true;
+          bossGhost.flashTimer = 0;
+          bossGhost.dir = (bossGhost.dir + 2) % 4;
+          playBossHit();
+          TAS.fx.shake(4, 0.3);
+
+          if (bossGhost.hp <= 0) {
+            bossGhost.eaten = true;
+            bossGhost.scared = false;
+            var bossPts = 5000 * (level / 5);
+            addScore(bossPts);
+            spawnScorePopup(BOSS_SPORE_NAMES[bossGhost.idx] + ' DEFEATED!', MAZE_OX + bossGhost.px, MAZE_OY + bossGhost.py - 15, BOSS_SPORE_COLORS[bossGhost.idx], true);
+            spawnScorePopup('+' + bossPts, MAZE_OX + bossGhost.px, MAZE_OY + bossGhost.py, '#f4b41b', true);
+            playBossDeath();
+            TAS.fx.shake(8, 0.6);
+            TAS.fx.flash('#ffffff', 0.3);
+            TAS.particles.spawn(MAZE_OX + bossGhost.px, MAZE_OY + bossGhost.py, BOSS_SPORE_COLORS[bossGhost.idx], 30, 5);
+          }
+        }
+
+        // Particle burst
+        TAS.particles.spawn(MAZE_OX + player.px, MAZE_OY + player.py, '#ffee88', 15, 4);
+
+        // Remove from pelletGlow
+        for (var pgi = pelletGlow.length - 1; pgi >= 0; pgi--) {
+          if (pelletGlow[pgi].col === player.col && pelletGlow[pgi].row === player.row) {
+            pelletGlow.splice(pgi, 1);
+            break;
+          }
+        }
+      }
+
+      // Fruit spawn check — CHA luck affects spawn chance and quality
+      var fruitChance = chaLuck();
+      if (!fruitActive && fruitEaten < 2 && (dotsLeft === totalDots - 70 || dotsLeft === totalDots - 170)) {
+        fruitActive = true;
+        fruitTimer = 10.0;
+        // CHA can bump fruit type up
+        var baseFruitType = Math.min(level - 1, FRUITS.length - 1);
+        var luckBonus = Math.random() < (fruitChance - 1) ? 1 : 0;
+        fruitType = Math.min(baseFruitType + luckBonus, FRUITS.length - 1);
+        spawnScorePopup('BONUS!', GW / 2, MAZE_OY + 10 * TILE, '#38d973', false);
+      }
+      // CHA grants extra fruit spawn chance at random dot counts
+      if (!fruitActive && fruitEaten < 3 && Math.random() < 0.005 * fruitChance) {
+        fruitActive = true;
+        fruitTimer = 6.0;
+        fruitType = Math.min(level - 1, FRUITS.length - 1);
+      }
+
+      // Level clear
+      if (dotsLeft <= 0) {
+        levelClearTimer = 2.0;
+        playLevelClear();
+        TAS.fx.flash('#ffffff', 0.5);
+        var clearBonus = level * 100;
+        addScore(clearBonus);
+        spawnScorePopup('LEVEL CLEAR! +' + clearBonus, GW / 2, GH / 2, '#38d973', true);
+        return;
+      }
+    }
+
+    // Eat fruit
+    if (fruitActive && player.col === 13 && player.row === 10) {
+      var ft = FRUITS[Math.min(fruitType, FRUITS.length - 1)];
+      var fPts = addScore(ft.pts);
+      fruitActive = false;
+      fruitEaten++;
+      spawnFloatingText(fPts.toString(), 13, 10, ft.color);
+      spawnScorePopup(ft.name.toUpperCase() + '! +' + fPts, MAZE_OX + 13.5 * TILE, MAZE_OY + 9 * TILE, ft.color, true);
+      playFruitEat();
+      TAS.particles.spawn(MAZE_OX + 13.5 * TILE, MAZE_OY + 10.5 * TILE, ft.color, 15, 4);
+      player.eatAnim = 0.4;
+    }
+  }
+
+  if (player.moving) {
+    player.px += DIR_DX[player.dir] * moveAmt;
+    player.py += DIR_DY[player.dir] * moveAmt;
+    player.col = Math.floor(player.px / TILE);
+    player.row = Math.floor(player.py / TILE);
+
+    if (player.px < -TILE) { player.px = COLS * TILE; player.col = COLS - 1; }
+    if (player.px > (COLS + 1) * TILE) { player.px = 0; player.col = 0; }
+  }
+
+  // Mouth animation
+  if (player.moving) {
+    player.mouthAngle = Math.abs(Math.sin(frame * 0.2)) * 0.5;
+  } else {
+    player.mouthAngle = 0.1;
+  }
+
+  // --- POWER TIMER ---
+  if (powerTimer > 0) {
+    powerTimer -= dt;
+    if (powerTimer <= 0) {
+      for (var gi2 = 0; gi2 < ghosts.length; gi2++) {
+        ghosts[gi2].scared = false;
+        ghosts[gi2].flashTimer = 0;
+      }
+      if (bossGhost) {
+        bossGhost.scared = false;
+        bossGhost.flashTimer = 0;
+      }
+    } else if (powerTimer < 2.5) {
+      for (var gi3 = 0; gi3 < ghosts.length; gi3++) {
+        if (ghosts[gi3].scared && !ghosts[gi3].eaten) {
+          ghosts[gi3].flashTimer = powerTimer;
+        }
+      }
+      if (bossGhost && bossGhost.scared && !bossGhost.eaten) {
+        bossGhost.flashTimer = powerTimer;
+      }
+    }
+  }
+
+  // --- FRUIT TIMER ---
+  if (fruitActive) {
+    fruitTimer -= dt;
+    if (fruitTimer <= 0) fruitActive = false;
+  }
+
+  // --- SPORE CREATURE MOVEMENT ---
+  for (var gi4 = 0; gi4 < ghosts.length; gi4++) {
+    moveGhost(ghosts[gi4], dt);
+  }
+  if (bossGhost && !bossGhost.eaten) {
+    moveGhost(bossGhost, dt);
+  }
+
+  // --- COLLISION DETECTION ---
+  var allCreatures = ghosts.slice();
+  if (bossGhost && !bossGhost.eaten) allCreatures.push(bossGhost);
+
+  for (var ci = 0; ci < allCreatures.length; ci++) {
+    var cg = allCreatures[ci];
+    if (cg.inHouse) continue;
+    var cdx = player.px - cg.px;
+    var cdy = player.py - cg.py;
+    var cdist = Math.sqrt(cdx * cdx + cdy * cdy);
+    var hitDist = cg.isBoss ? TILE * 1.0 : TILE * 0.8;
+    if (cdist < hitDist) {
+      if (cg.scared && !cg.eaten) {
+        if (cg.isBoss) {
+          // Boss takes hit but might not die from contact
+          // (boss dies from pellet damage, not contact while scared)
+          cg.eaten = true;
+          cg.scared = false;
+        } else {
+          // Eat spore creature
+          cg.eaten = true;
+          cg.scared = false;
+          ghostCombo++;
+          comboStreak++;
+          var gPts = 200 * Math.pow(2, ghostCombo - 1);
+          // Combo streak bonus
+          if (comboStreak > 4) gPts = Math.round(gPts * 1.5);
+          var finalGPts = addScore(gPts);
+          spawnFloatingText(finalGPts.toString(), cg.col, cg.row, '#3cacd7');
+          spawnScorePopup(SPORE_NAMES[cg.idx] + '!', MAZE_OX + cg.px, MAZE_OY + cg.py - 12, SPORE_COLORS[cg.idx], true);
+          if (comboStreak > 2) {
+            spawnScorePopup('COMBO x' + comboStreak + '!', MAZE_OX + cg.px, MAZE_OY + cg.py - 24, '#f4b41b', true);
+          }
+          playEatGhost();
+          playCombo(ghostCombo);
+          freezeTimer = 0.5;
+          TAS.particles.spawn(MAZE_OX + cg.px, MAZE_OY + cg.py, SPORE_COLORS[cg.idx], 12, 4);
+          TAS.fx.shake(3, 0.2);
+        }
+      } else if (!cg.eaten) {
+        // Player dies — CON reduces damage frequency (still dies but with more lives)
+        loseLife();
+        TAS.fx.shake(8, 0.85);
+        TAS.fx.flash('#e6482e', 0.4);
+        TAS.particles.spawn(MAZE_OX + player.px, MAZE_OY + player.py, statB.color || '#38d973', 25, 5);
+        return;
+      }
+    }
+  }
+
+  // Siren sound
+  playSiren(dt);
+}
+
+// ============================================================
+// DRAW
+// ============================================================
+function draw(dt) {
+  // Background — dark POOP garden underground
+  ctx.fillStyle = '#1a1c2c';
+  ctx.fillRect(0, 0, GW, GH);
+
+  // Subtle background spore particles
+  ctx.globalAlpha = 0.06;
+  for (var bi = 0; bi < 20; bi++) {
+    var bx = ((frame * 0.3 + bi * 47) % (GW + 20)) - 10;
+    var by = ((frame * 0.15 + bi * 31) % (GH + 20)) - 10;
+    ctx.fillStyle = wallTheme.dot;
+    ctx.beginPath();
+    ctx.arc(bx, by, 1 + Math.sin(frame * 0.02 + bi) * 0.5, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+
+  if (state === 'title') {
+    drawTitleScreen();
+    return;
+  }
+
+  if (state === 'gameOver') {
+    drawGameOverScreen();
+    return;
+  }
+
+  // Cut-scene
+  if (cutSceneTimer > 0) {
+    drawCutScene();
+    return;
+  }
+
+  ctx.save();
+  TAS.fx.applyShake();
+
+  // Draw maze
+  drawMaze();
+
+  // Draw fruit
+  drawFruit(13, 10);
+
+  // Draw player (not during death)
+  if (deathTimer <= 0) {
+    drawPlayer(player.px, player.py, player.dir, player.mouthAngle);
+  } else {
+    // Death burst animation — spores fly out
+    var dt2 = 1 - (deathTimer / 2.0);
+    var shrink = Math.max(0, 1 - dt2 * 1.5);
+    if (shrink > 0) {
+      ctx.save();
+      ctx.translate(MAZE_OX + player.px, MAZE_OY + player.py);
+      ctx.scale(shrink, shrink);
+      ctx.translate(-(MAZE_OX + player.px), -(MAZE_OY + player.py));
+      drawPlayer(player.px, player.py, player.dir, dt2 * Math.PI);
+      ctx.restore();
+    }
+    // Death spore ring
+    if (dt2 > 0.3) {
+      ctx.globalAlpha = Math.max(0, 1 - (dt2 - 0.3) * 2);
+      ctx.strokeStyle = statB.color || '#38d973';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(MAZE_OX + player.px, MAZE_OY + player.py, (dt2 - 0.3) * 80, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.globalAlpha = 1;
+    }
+  }
+
+  // Draw spore creatures
+  if (deathTimer <= 0) {
+    for (var dgi = 0; dgi < ghosts.length; dgi++) {
+      drawSporeCreature(ghosts[dgi]);
+    }
+    if (bossGhost) {
+      drawSporeCreature(bossGhost);
+    }
+  }
+
+  // Floating texts
+  for (var fti = 0; fti < floatingTexts.length; fti++) {
+    var ft = floatingTexts[fti];
+    ctx.globalAlpha = Math.min(1, ft.life);
+    ctx.fillStyle = ft.color;
+    ctx.font = 'bold 10px monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText(ft.text, ft.x, ft.y);
+  }
+  ctx.globalAlpha = 1;
+
+  // Score popups
+  drawScorePopups();
+
+  TAS.particles.draw();
+  ctx.restore();
+
+  TAS.fx.drawFlash(GW, GH);
+
+  // Ready text
+  if (readyTimer > 0) {
+    ctx.fillStyle = '#38d973';
+    ctx.font = 'bold 16px monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText('READY!', GW / 2, GH / 2 + 5);
+
+    // Show baseling name
+    if (statB.name !== 'Baseling' || statB.level > 0) {
+      ctx.fillStyle = statB.color || '#38d973';
+      ctx.font = '10px monospace';
+      ctx.fillText(statB.name + ' Lv.' + statB.level, GW / 2, GH / 2 + 20);
+    }
+  }
+
+  // Level clear flash
+  if (levelClearTimer > 0) {
+    var lcFlash = Math.floor(levelClearTimer * 6) % 2;
+    if (lcFlash) {
+      ctx.globalAlpha = 0.15;
+      ctx.fillStyle = '#fff';
+      ctx.fillRect(0, 0, GW, GH);
+      ctx.globalAlpha = 1;
+    }
+    // Level clear text
+    ctx.fillStyle = '#38d973';
+    ctx.font = 'bold 20px monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText('LEVEL CLEAR!', GW / 2, GH / 2);
+  }
+
+  // HUD
+  drawHUD();
+
+  // Tutorial overlay
+  if (showTutorial) {
+    drawTutorial();
+  }
+
+  TAS.input.drawTouchControls(GW, GH);
+}
+
+function drawHUD() {
+  // Top bar
+  ctx.fillStyle = 'rgba(26,28,44,0.9)';
+  ctx.fillRect(0, 0, GW, HUD_H);
+
+  ctx.font = 'bold 13px monospace';
+
+  // Score — INT affects display
+  ctx.fillStyle = '#f4b41b';
+  ctx.textAlign = 'left';
+  ctx.fillText('SCORE: ' + score, 6, 18);
+
+  // INT bonus indicator
+  if (statB.int > 12) {
+    ctx.fillStyle = '#aaaaff';
+    ctx.font = '8px monospace';
+    ctx.fillText('x' + intScoreMult().toFixed(1), 100, 18);
+    ctx.font = 'bold 13px monospace';
+  }
+
+  // Level + maze name
+  ctx.fillStyle = '#3cacd7';
+  ctx.textAlign = 'center';
+  var mazeNames = ['Old Wharf', 'Smugglers Hold', 'Coral Cavern'];
+  ctx.fillText('LV ' + level, GW / 2, 12);
+  ctx.font = '8px monospace';
+  ctx.fillStyle = '#668899';
+  ctx.fillText(mazeNames[currentMazeIdx], GW / 2, 22);
+
+  // Lives — baseling icons
+  ctx.textAlign = 'right';
+  for (var li = 0; li < Math.min(lives, 5); li++) {
+    ctx.fillStyle = statB.color || '#38d973';
+    ctx.beginPath();
+    ctx.arc(GW - 12 - li * 18, 14, 6, 0.3, Math.PI * 2 - 0.3);
+    ctx.lineTo(GW - 12 - li * 18, 14);
+    ctx.fill();
+  }
+  if (lives > 5) {
+    ctx.fillStyle = '#aaa';
+    ctx.font = '9px monospace';
+    ctx.fillText('+' + (lives - 5), GW - 12 - 5 * 18, 17);
+  }
+
+  // Bottom info bar
+  ctx.fillStyle = 'rgba(26,28,44,0.8)';
+  ctx.fillRect(0, GH - 16, GW, 16);
+
+  ctx.font = '10px monospace';
+  ctx.textAlign = 'left';
+
+  // Boost cooldown indicator
+  if (boostCooldown > 0) {
+    ctx.fillStyle = '#555';
+    ctx.fillText('BOOST: ' + Math.ceil(boostCooldown) + 's', 6, GH - 4);
+  } else {
+    ctx.fillStyle = '#3cacd7';
+    ctx.fillText('BOOST: READY', 6, GH - 4);
+  }
+
+  // Power timer
+  if (powerTimer > 0) {
+    ctx.fillStyle = powerTimer < 2.5 ? '#e6482e' : '#f4b41b';
+    ctx.textAlign = 'center';
+    ctx.fillText('POWER: ' + Math.ceil(powerTimer) + 's', GW / 2 - 40, GH - 4);
+  }
+
+  // Combo streak
+  if (comboStreak > 1) {
+    ctx.fillStyle = '#f4b41b';
+    ctx.textAlign = 'center';
+    ctx.fillText('COMBO: ' + comboStreak, GW / 2 + 40, GH - 4);
+  }
+
+  // Dots remaining
+  ctx.fillStyle = '#aaa';
+  ctx.textAlign = 'right';
+  ctx.fillText('LOOT: ' + dotsLeft, GW - 6, GH - 4);
+
+  // Persistent controls legend for keyboard players (hidden behind NFT gate on title).
+  // Bright on level 1, faint after. Skipped on touch devices (D-pad/buttons are on-screen).
+  if (!('ontouchstart' in window)) {
+    ctx.save();
+    ctx.globalAlpha = (level === 1) ? 0.7 : 0.3;
+    ctx.fillStyle = 'rgba(26,28,44,0.7)';
+    ctx.fillRect(0, HUD_H, GW, 11);
+    ctx.fillStyle = '#cfc6b8';
+    ctx.font = '8px monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText('ARROWS / WASD  Move      SPACE  Boost', GW / 2, HUD_H + 8);
+    ctx.restore();
+    ctx.textAlign = 'left';
+  }
+}
+
+function drawTutorial() {
+  var alpha = Math.min(1, tutorialTimer / 1.0);
+  if (tutorialTimer < 1) alpha = tutorialTimer;
+
+  ctx.globalAlpha = alpha * 0.7;
+  ctx.fillStyle = '#000';
+  ctx.fillRect(GW / 2 - 140, GH / 2 - 60, 280, 120);
+  ctx.globalAlpha = alpha;
+
+  ctx.strokeStyle = '#38d973';
+  ctx.lineWidth = 1;
+  ctx.strokeRect(GW / 2 - 140, GH / 2 - 60, 280, 120);
+
+  ctx.fillStyle = '#38d973';
+  ctx.font = 'bold 12px monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText('HOW TO PLAY', GW / 2, GH / 2 - 42);
+
+  ctx.fillStyle = '#ccc';
+  ctx.font = '9px monospace';
+  var tips = [
+    'Arrow Keys / WASD / D-Pad to move',
+    'Space / BOOST button for speed burst',
+    'Grab every gold coin in the wharf maze',
+    'Grog barrels let you chase down the crabs',
+    'Avoid the dock crabs or lose a life!',
+    'Snag the treasure chest for bonus loot',
+  ];
+  for (var ti = 0; ti < tips.length; ti++) {
+    ctx.fillText(tips[ti], GW / 2, GH / 2 - 25 + ti * 14);
+  }
+
+  ctx.fillStyle = '#888';
+  ctx.fillText('(disappears in ' + Math.ceil(tutorialTimer) + 's)', GW / 2, GH / 2 + 55);
+  ctx.globalAlpha = 1;
+}
+
+function drawTitleScreen() {
+  if (window.TasernArt && TasernArt._auto) { var _bi = TasernArt.getImg('art/backgrounds/' + TasernArt._auto.bg + (TasernArt._auto.bg.indexOf('bg-') === 0 || TasernArt._auto.bg === 'adventure-level1' || TasernArt._auto.bg === 'tavern-bg' ? '.webp' : '.jpg')); if (_bi) { TasernArt.drawCover(ctx, _bi); ctx.fillStyle = 'rgba(0,0,0,0.55)'; ctx.fillRect(0, 0, GW, GH); } }
+  // Animated harbor background
+  ctx.fillStyle = '#1a1c2c';
+  ctx.fillRect(0, 0, GW, GH);
+  var _dbg = seaImg('docks');
+  if (_dbg) { ctx.drawImage(_dbg, 0, 0, GW, GH); ctx.fillStyle = 'rgba(10,22,40,0.5)'; ctx.fillRect(0, 0, GW, GH); }
+
+  // Garden maze pattern in background
+  ctx.globalAlpha = 0.12;
+  for (var r = 0; r < 6; r++) {
+    for (var c = 0; c < 30; c++) {
+      if ((r + c + Math.floor(frame * 0.02)) % 3 === 0) {
+        ctx.fillStyle = wallTheme.outer;
+        ctx.fillRect(c * 16, 175 + r * 16, 14, 14);
+      }
+    }
+  }
+  ctx.globalAlpha = 1;
+
+  // Floating spore particles in title
+  ctx.globalAlpha = 0.15;
+  for (var sp = 0; sp < 15; sp++) {
+    var spx = ((frame * 0.5 + sp * 37) % (GW + 10)) - 5;
+    var spy = ((frame * 0.2 + sp * 23) % (GH + 10)) - 5;
+    ctx.fillStyle = SPORE_COLORS[sp % 4];
+    ctx.beginPath();
+    ctx.arc(spx, spy, 2, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+
+  // Title shadow
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#000';
+  ctx.font = 'bold 32px monospace';
+  ctx.fillText('TREASURE GRAB', GW / 2 + 2, 52);
+  // Title
+  ctx.fillStyle = '#38d973';
+  ctx.fillText('TREASURE GRAB', GW / 2, 50);
+
+  // Subtitle
+  ctx.fillStyle = '#7a444a';
+  ctx.font = '12px monospace';
+  ctx.fillText('Raid the Wharf', GW / 2, 70);
+
+  // Animated baseling player
+  var pmx = GW / 2 - 60 + Math.sin(frame * 0.03) * 40;
+  ctx.fillStyle = statB.color || '#38d973';
+  ctx.beginPath();
+  var ma = Math.abs(Math.sin(frame * 0.15)) * 0.5;
+  ctx.arc(pmx, 110, 12, ma, Math.PI * 2 - ma);
+  ctx.lineTo(pmx, 110);
+  ctx.fill();
+  // Baseling cap spots
+  ctx.fillStyle = 'rgba(255,255,255,0.3)';
+  ctx.beginPath();
+  ctx.arc(pmx - 4, 106, 2, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Chasing spore pellets
+  for (var di = 0; di < 8; di++) {
+    var ddx = pmx + 20 + di * 14;
+    if (ddx < GW - 20 && ddx > 20) {
+      ctx.fillStyle = '#38d973';
+      ctx.beginPath();
+      ctx.arc(ddx, 110, 2.5, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+
+  // Spore creature parade
+  for (var si = 0; si < 4; si++) {
+    var gx = GW / 2 + 80 - si * 22 + Math.sin(frame * 0.025 + si) * 30;
+    ctx.fillStyle = SPORE_COLORS[si];
+    ctx.beginPath();
+    ctx.arc(gx, 110, 10, Math.PI, 0);
+    ctx.lineTo(gx + 10, 122);
+    ctx.lineTo(gx + 5, 120);
+    ctx.lineTo(gx, 122);
+    ctx.lineTo(gx - 5, 120);
+    ctx.lineTo(gx - 10, 122);
+    ctx.fill();
+    // Eyes
+    ctx.fillStyle = '#d4f7d4';
+    ctx.beginPath();
+    ctx.arc(gx - 3, 108, 2.5, 0, Math.PI * 2);
+    ctx.arc(gx + 3, 108, 2.5, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = '#7a444a';
+    ctx.beginPath();
+    ctx.arc(gx - 4, 108, 1, 0, Math.PI * 2);
+    ctx.arc(gx + 2, 108, 1, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  // Spore creature names + titles
+  ctx.font = '9px monospace';
+  for (var ni = 0; ni < 4; ni++) {
+    ctx.fillStyle = SPORE_COLORS[ni];
+    ctx.fillText(SPORE_NAMES[ni], 80 + ni * 85, 145);
+    ctx.fillStyle = '#666';
+    ctx.font = '7px monospace';
+    ctx.fillText(SPORE_TITLES[ni], 80 + ni * 85, 154);
+    ctx.font = '9px monospace';
+  }
+
+  // NES-style controls info
+  ctx.fillStyle = '#38d973';
+  ctx.font = 'bold 11px monospace';
+  ctx.fillText('--- CONTROLS ---', GW / 2, 175);
+
+  ctx.fillStyle = '#aaa';
+  ctx.font = '10px monospace';
+  ctx.fillText('[Arrow Keys] / [WASD] / D-Pad = Move', GW / 2, 192);
+  ctx.fillText('[Space] / BOOST button = Speed Burst', GW / 2, 206);
+
+  ctx.fillStyle = '#888';
+  ctx.font = '9px monospace';
+  ctx.fillText('Steer your crew through the wharf, grabbing every coin', GW / 2, 224);
+  ctx.fillText('Grab a grog barrel to chase down the dock crabs', GW / 2, 236);
+  ctx.fillText('Snag the treasure chest for big bonus points', GW / 2, 248);
+
+  // Selected baseling preview (idle bob) + name + 5 ARCADE stat bars (Base-blue accents)
+  if (!TAS.drawBaseling(ctx, GW / 2 - 150, 240, 34, { anim: 'idle', frame: frame })) { /* Wimmple fallback: skip */ }
+  var _sel = (window.BaselingPlayer && BaselingPlayer.getSelected) ? BaselingPlayer.getSelected() : null;
+  ctx.fillStyle = '#0052FF';
+  ctx.font = 'bold 9px monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText((_sel ? _sel.charName : 'WIMMPLE') + (_sel && _sel.tokenId != null ? ' #' + _sel.tokenId : ''), GW / 2, 258);
+  if (_sel && _sel.stats && window.BaselingPlayer) {
+    var _meta = BaselingPlayer.STAT_META, _keys = BaselingPlayer.STAT_KEYS;
+    var _bw = 36, _bx0 = GW / 2 - (_keys.length * (_bw + 8)) / 2, _by = 268;
+    ctx.font = '8px monospace';
+    for (var _i = 0; _i < _keys.length; _i++) {
+      var _mm = _meta[_keys[_i]], _v = _sel.stats[_keys[_i]], _bx = _bx0 + _i * (_bw + 8);
+      ctx.fillStyle = _mm.color; ctx.textAlign = 'left'; ctx.fillText(_mm.label, _bx, _by);
+      ctx.fillStyle = '#222'; ctx.fillRect(_bx, _by + 3, _bw, 5);
+      ctx.fillStyle = _mm.color; ctx.fillRect(_bx, _by + 3, _bw * Math.max(0.04, Math.min(1, _v / 200)), 5);
+    }
+    ctx.textAlign = 'center';
+  }
+
+  // High score
+  if (highScore > 0) {
+    ctx.fillStyle = '#f4b41b';
+    ctx.font = 'bold 11px monospace';
+    ctx.fillText('HIGH SCORE: ' + highScore, GW / 2, 284);
+  }
+
+  // Start prompt + [C] SELECT BASELING (Base-blue)
+  var pulse = Math.sin(frame * 0.05) * 0.3 + 0.7;
+  ctx.globalAlpha = pulse;
+  ctx.fillStyle = '#38d973';
+  ctx.font = 'bold 13px monospace';
+  ctx.fillText('PRESS ANY KEY TO START', GW / 2, 300);
+  ctx.globalAlpha = 1;
+  ctx.fillStyle = '#0052FF';
+  ctx.font = 'bold 9px monospace';
+  ctx.fillText('[C] SELECT BASELING', GW / 2, 314);
+}
+
+function drawGameOverScreen() {
+  if (window.TasernArt && TasernArt._auto) { var _ei = TasernArt.getImg('art/enemies/enemy-' + TasernArt._auto.enemy + '.jpg'); if (_ei) { ctx.fillStyle = '#0a0a15'; ctx.fillRect(0, 0, GW, GH); ctx.globalAlpha = 0.3; TasernArt.drawCover(ctx, _ei); ctx.globalAlpha = 1; ctx.fillStyle = 'rgba(0,0,0,0.5)'; ctx.fillRect(0, 0, GW, GH); } }
+  ctx.fillStyle = '#1a1c2c';
+  ctx.fillRect(0, 0, GW, GH);
+
+  // Death particles in background
+  ctx.globalAlpha = 0.1;
+  for (var dp = 0; dp < 30; dp++) {
+    var dpx = ((frame * 0.4 + dp * 29) % (GW + 10)) - 5;
+    var dpy = ((frame * 0.25 + dp * 17) % (GH + 10)) - 5;
+    ctx.fillStyle = '#e6482e';
+    ctx.beginPath();
+    ctx.arc(dpx, dpy, 1, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+
+  ctx.textAlign = 'center';
+
+  // Game over text with glow
+  ctx.fillStyle = '#e6482e';
+  ctx.font = 'bold 28px monospace';
+  ctx.fillText('GAME OVER', GW / 2, 80);
+
+  // Stats
+  ctx.fillStyle = '#f4b41b';
+  ctx.font = 'bold 18px monospace';
+  ctx.fillText('SCORE: ' + score, GW / 2, 120);
+
+  ctx.fillStyle = '#3cacd7';
+  ctx.font = '14px monospace';
+  ctx.fillText('Level Reached: ' + level, GW / 2, 150);
+
+  if (score >= highScore && score > 0) {
+    var hsPulse = Math.sin(frame * 0.08) * 0.3 + 0.7;
+    ctx.globalAlpha = hsPulse;
+    ctx.fillStyle = '#f4b41b';
+    ctx.font = 'bold 14px monospace';
+    ctx.fillText('NEW HIGH SCORE!', GW / 2, 175);
+    ctx.globalAlpha = 1;
+  }
+
+  ctx.fillStyle = '#888';
+  ctx.font = '12px monospace';
+  ctx.fillText('HIGH SCORE: ' + highScore, GW / 2, 200);
+
+  // Spore creatures eaten stat
+  if (comboStreak > 0) {
+    ctx.fillStyle = '#38d973';
+    ctx.fillText('Best Combo: ' + comboStreak, GW / 2, 220);
+  }
+
+  // Baseling info
+  if (statB.level > 0) {
+    ctx.fillStyle = statB.color || '#38d973';
+    ctx.font = '10px monospace';
+    ctx.fillText(statB.name + ' Lv.' + statB.level, GW / 2, 245);
+  }
+
+  // Restart prompt
+  var rPulse = Math.sin(frame * 0.05) * 0.3 + 0.7;
+  ctx.globalAlpha = rPulse;
+  ctx.fillStyle = '#38d973';
+  ctx.font = 'bold 14px monospace';
+  ctx.fillText('PRESS ANY KEY TO CONTINUE', GW / 2, 285);
+  ctx.globalAlpha = 1;
+}
+
+function drawCutScene() {
+  ctx.fillStyle = '#1a1c2c';
+  ctx.fillRect(0, 0, GW, GH);
+
+  var t = 1 - (cutSceneTimer / 3.0);
+
+  ctx.textAlign = 'center';
+
+  // Boss level announcement
+  if (level % 5 === 0) {
+    ctx.fillStyle = '#e6482e';
+    ctx.font = 'bold 12px monospace';
+    ctx.fillText('BOSS LEVEL!', GW / 2, 55);
+  }
+
+  ctx.fillStyle = '#38d973';
+  ctx.font = 'bold 20px monospace';
+  ctx.fillText('LEVEL ' + cutSceneLevel, GW / 2, 80);
+
+  // Maze name
+  var mazeNames = ['Old Wharf', 'Smugglers Hold', 'Coral Cavern'];
+  ctx.fillStyle = '#7a444a';
+  ctx.font = '12px monospace';
+  ctx.fillText(mazeNames[(cutSceneLevel - 1) % 3], GW / 2, 100);
+
+  // Animated chase scene
+  var cpx = -30 + t * (GW + 60);
+  ctx.fillStyle = statB.color || '#38d973';
+  ctx.beginPath();
+  var cma = Math.abs(Math.sin(frame * 0.2)) * 0.5;
+  ctx.arc(cpx, GH / 2, 14, cma, Math.PI * 2 - cma);
+  ctx.lineTo(cpx, GH / 2);
+  ctx.fill();
+
+  // Spore creatures chasing (or running if powered)
+  var powered = t > 0.5;
+  for (var ci = 0; ci < 4; ci++) {
+    var cgx = powered ? cpx + 30 + ci * 25 : cpx - 30 - ci * 25;
+    var cgc = powered ? SPORE_SCARED_COLOR : SPORE_COLORS[ci];
+    ctx.fillStyle = cgc;
+    ctx.beginPath();
+    ctx.arc(cgx, GH / 2, 12, Math.PI, 0);
+    ctx.lineTo(cgx + 12, GH / 2 + 12);
+    ctx.lineTo(cgx + 6, GH / 2 + 10);
+    ctx.lineTo(cgx, GH / 2 + 12);
+    ctx.lineTo(cgx - 6, GH / 2 + 10);
+    ctx.lineTo(cgx - 12, GH / 2 + 12);
+    ctx.fill();
+  }
+
+  // Boss preview on boss levels
+  if (level % 5 === 0) {
+    var bossIdx = ((level / 5) | 0) % 4;
+    ctx.fillStyle = BOSS_SPORE_COLORS[bossIdx];
+    ctx.font = 'bold 14px monospace';
+    ctx.fillText('BOSS: ' + BOSS_SPORE_NAMES[bossIdx], GW / 2, GH - 80);
+
+    // Animated boss
+    var bossPulse = Math.sin(frame * 0.05) * 3;
+    ctx.beginPath();
+    ctx.arc(GW / 2, GH - 50 + bossPulse, 16, Math.PI, 0);
+    ctx.lineTo(GW / 2 + 16, GH - 34 + bossPulse);
+    ctx.lineTo(GW / 2 + 8, GH - 36 + bossPulse);
+    ctx.lineTo(GW / 2, GH - 34 + bossPulse);
+    ctx.lineTo(GW / 2 - 8, GH - 36 + bossPulse);
+    ctx.lineTo(GW / 2 - 16, GH - 34 + bossPulse);
+    ctx.fill();
+  }
+
+  // Level info
+  var cft = FRUITS[Math.min(cutSceneLevel - 1, FRUITS.length - 1)];
+  ctx.fillStyle = '#aaa';
+  ctx.font = '12px monospace';
+  ctx.fillText('Treasure Bonus: ' + cft.name.toUpperCase() + ' (' + cft.pts + ' pts)', GW / 2, GH - 25);
+
+  ctx.fillStyle = '#666';
+  ctx.font = '10px monospace';
+  ctx.fillText('Speed: ' + Math.round(getSpeed(cutSceneLevel)) + ' px/s', GW / 2, GH - 10);
+}
+
+// ============================================================
+// START
+// ============================================================
+TAS.loop.start(update, draw);
+
+})();
+</script>
+<script src="/track.js" defer></script></body>
+</html>

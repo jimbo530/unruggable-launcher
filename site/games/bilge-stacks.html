@@ -1,0 +1,461 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Bilge Stacks</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body { width: 100%; height: 100%; overflow: hidden; background: #0a1622; touch-action: none; }
+canvas { display: block; margin: 0 auto; }
+#back-link {
+  position: fixed; bottom: 8px; left: 50%; transform: translateX(-50%);
+  color: #666; font-family: monospace; font-size: 12px; text-decoration: none; z-index: 10;
+}
+#back-link:hover { color: #aaa; }
+</style>
+<script src="tasern-art.js"></script>
+</head>
+<body>
+<canvas id="gc"></canvas>
+<a id="back-link" href="/games">Back to Arcade</a>
+<script src="nft-loader.js"></script>
+<script src="baseling-sprites.js"></script>
+<script src="baseling-player.js"></script>
+<script src="tasern-theme.js"></script>
+<script>if(window.NftLoader)NftLoader.gate();</script>
+<script>
+(function () {
+"use strict";
+
+// ============================================================
+// Bilge Stacks — stack the cargo, clear full rows before the hold
+// floods (Seize the Seas pack). Self-contained bespoke engine.
+// Blocks reuse crate/barrel art from art/sea/. SPD stat -> control
+// (DAS), never gravity (fairness/clip rule, ARCADE-STATS.md).
+// ============================================================
+
+// ---- Baseling integration ----
+var picking = false, frame = 0;
+function mults() {
+  return (window.BaselingPlayer && BaselingPlayer.getMults)
+    ? BaselingPlayer.getMults() : { moveSpeed: 1, health: 1, damage: 1, luck: 1, swim: 1 };
+}
+function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+var SPD = 1, DAS_DELAY = 0.16, DAS_RATE = 0.045, SOFT_IV = 0.04;
+function recomputeStats() {
+  var m = mults();
+  SPD = clamp(m.moveSpeed, 0.8, 1.6);
+  DAS_DELAY = Math.max(0.08, 0.18 / SPD);
+  DAS_RATE = Math.max(0.025, 0.05 / SPD);
+}
+recomputeStats();
+if (window.BaselingPlayer && BaselingPlayer.init) {
+  BaselingPlayer.init().then(function () { recomputeStats(); })
+    .catch(function (e) { console.warn('[bilge-stacks] player init failed:', e && e.message); });
+}
+function drawSelectedBaseling(c, x, y, size, opts) {
+  if (!window.BaselingPlayer || !window.BaselingSprites) return false;
+  var sel = BaselingPlayer.getSelected();
+  if (!sel || !sel.charId) return false;
+  if (!BaselingSprites.isLoaded(sel.charId)) {
+    if (!BaselingSprites.hasFailed(sel.charId)) BaselingSprites.load(sel.charId, sel.colorVariant);
+    return false;
+  }
+  return BaselingSprites.draw(c, sel.charId, sel.colorVariant, sel.sparkle, x, y, size, opts || {});
+}
+
+// ---- Art ----
+var ART = {};
+['crate', 'barrel', 'deck', 'water'].forEach(function (n) {
+  var im = new Image(); im.src = 'art/sea/' + n + '.png'; ART[n] = im;
+});
+function img(n) { var im = ART[n]; return (im && im.complete && im.naturalWidth > 0) ? im : null; }
+
+// ---- Canvas ----
+var VW = 360, VH = 540;
+var canvas = document.getElementById('gc');
+var ctx = canvas.getContext('2d');
+function resize() {
+  var dpr = window.devicePixelRatio || 1;
+  var sw = window.innerWidth, sh = window.innerHeight;
+  var scale = Math.min(sw / VW, sh / VH);
+  canvas.width = Math.floor(VW * dpr);
+  canvas.height = Math.floor(VH * dpr);
+  canvas.style.width = Math.floor(VW * scale) + 'px';
+  canvas.style.height = Math.floor(VH * scale) + 'px';
+  canvas.style.marginTop = Math.max(0, Math.floor((sh - VH * scale) / 2)) + 'px';
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+}
+window.addEventListener('resize', resize);
+resize();
+
+// ---- Audio ----
+var audioCtx = null;
+function ensureAudio() {
+  try {
+    if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    if (audioCtx.state === 'suspended') audioCtx.resume();
+  } catch (e) { audioCtx = null; }
+}
+function tone(freq, dur, type, vol, slide) {
+  if (!audioCtx) return;
+  try {
+    var o = audioCtx.createOscillator(), g = audioCtx.createGain();
+    o.type = type || 'square';
+    o.frequency.setValueAtTime(freq, audioCtx.currentTime);
+    if (slide) o.frequency.linearRampToValueAtTime(slide, audioCtx.currentTime + dur);
+    g.gain.setValueAtTime(vol || 0.07, audioCtx.currentTime);
+    g.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + dur);
+    o.connect(g); g.connect(audioCtx.destination);
+    o.start(); o.stop(audioCtx.currentTime + dur);
+  } catch (e) {}
+}
+function sfxMove() { tone(300, 0.03, 'square', 0.03); }
+function sfxRotate() { tone(420, 0.05, 'square', 0.04); }
+function sfxLock() { tone(200, 0.06, 'square', 0.05, 140); }
+function sfxClear(n) { tone(440 + n * 90, 0.16, 'square', 0.08, 720 + n * 90); }
+function sfxDrop() { tone(160, 0.08, 'sawtooth', 0.06, 80); }
+
+// ---- Board / pieces ----
+var COLS = 10, ROWS = 16, HUD_H = 44, BTN_H = 58;
+var CELL = Math.floor(Math.min((VW - 16) / COLS, (VH - HUD_H - BTN_H - 12) / ROWS));
+var BOARD_W = CELL * COLS, BOARD_H = CELL * ROWS;
+var BOARD_X = Math.floor((VW - BOARD_W) / 2), BOARD_Y = HUD_H;
+var BTN_Y = VH - BTN_H;
+
+var SHAPES = {
+  I: [[[0,0],[1,0],[2,0],[3,0]],[[2,0],[2,1],[2,2],[2,3]],[[0,2],[1,2],[2,2],[3,2]],[[1,0],[1,1],[1,2],[1,3]]],
+  O: [[[0,0],[1,0],[0,1],[1,1]],[[0,0],[1,0],[0,1],[1,1]],[[0,0],[1,0],[0,1],[1,1]],[[0,0],[1,0],[0,1],[1,1]]],
+  T: [[[0,0],[1,0],[2,0],[1,1]],[[1,0],[1,1],[1,2],[0,1]],[[0,1],[1,1],[2,1],[1,0]],[[0,0],[0,1],[0,2],[1,1]]],
+  S: [[[1,0],[2,0],[0,1],[1,1]],[[0,0],[0,1],[1,1],[1,2]],[[1,0],[2,0],[0,1],[1,1]],[[0,0],[0,1],[1,1],[1,2]]],
+  Z: [[[0,0],[1,0],[1,1],[2,1]],[[1,0],[0,1],[1,1],[0,2]],[[0,0],[1,0],[1,1],[2,1]],[[1,0],[0,1],[1,1],[0,2]]],
+  L: [[[0,0],[0,1],[1,1],[2,1]],[[0,0],[1,0],[0,1],[0,2]],[[0,0],[1,0],[2,0],[2,1]],[[1,0],[1,1],[1,2],[0,2]]],
+  J: [[[2,0],[0,1],[1,1],[2,1]],[[0,0],[0,1],[0,2],[1,2]],[[0,0],[1,0],[2,0],[0,1]],[[0,0],[1,0],[1,1],[1,2]]]
+};
+var TYPES = ['I', 'O', 'T', 'S', 'Z', 'L', 'J'];
+var COLORS = { I: '#60a5fa', O: '#fbbf24', T: '#a855f7', S: '#34d399', Z: '#ef4444', L: '#f59e0b', J: '#3b82f6' };
+var TEX = { I: 'crate', O: 'barrel', T: 'crate', S: 'barrel', Z: 'crate', L: 'barrel', J: 'crate' };
+
+var board = [];
+function emptyRow() { var a = []; for (var c = 0; c < COLS; c++) a.push(null); return a; }
+function clearBoard() { board = []; for (var r = 0; r < ROWS; r++) board.push(emptyRow()); }
+
+var bag = [];
+function bagNext() {
+  if (bag.length === 0) {
+    bag = TYPES.slice();
+    for (var i = bag.length - 1; i > 0; i--) { var j = (Math.random() * (i + 1)) | 0; var t = bag[i]; bag[i] = bag[j]; bag[j] = t; }
+  }
+  return bag.pop();
+}
+function collides(x, y, type, rot) {
+  var cells = SHAPES[type][rot];
+  for (var i = 0; i < 4; i++) {
+    var cx = x + cells[i][0], cy = y + cells[i][1];
+    if (cx < 0 || cx >= COLS || cy >= ROWS) return true;
+    if (cy >= 0 && board[cy][cx]) return true;
+  }
+  return false;
+}
+function ghostY() { var y = cur.y; while (!collides(cur.x, y + 1, cur.type, cur.rot)) y++; return y; }
+function move(dir) { if (!collides(cur.x + dir, cur.y, cur.type, cur.rot)) { cur.x += dir; sfxMove(); return true; } return false; }
+function rotate(dir) {
+  var nr = (cur.rot + (dir > 0 ? 1 : 3)) & 3, kicks = [0, -1, 1, -2, 2];
+  for (var i = 0; i < kicks.length; i++) {
+    if (!collides(cur.x + kicks[i], cur.y, cur.type, nr)) { cur.x += kicks[i]; cur.rot = nr; sfxRotate(); return; }
+  }
+}
+function clearLines() {
+  var n = 0;
+  for (var r = ROWS - 1; r >= 0;) {
+    var full = true;
+    for (var c = 0; c < COLS; c++) { if (!board[r][c]) { full = false; break; } }
+    if (full) { board.splice(r, 1); board.unshift(emptyRow()); n++; } else { r--; }
+  }
+  return n;
+}
+function lockPiece() {
+  var cells = SHAPES[cur.type][cur.rot], topOut = false, sx = 0, sy = 0;
+  for (var i = 0; i < 4; i++) {
+    var cx = cur.x + cells[i][0], cy = cur.y + cells[i][1];
+    sx += BOARD_X + cx * CELL + CELL / 2; sy += BOARD_Y + cy * CELL + CELL / 2;
+    if (cy < 0) { topOut = true; continue; }
+    if (cy < ROWS && cx >= 0 && cx < COLS) board[cy][cx] = cur.type;
+  }
+  sfxLock();
+  var n = clearLines();
+  if (n > 0) {
+    var pts = [0, 100, 300, 500, 800][n] * level;
+    score += pts; lines += n;
+    addPopup(sx / 4, sy / 4, '+' + pts, n >= 4 ? '#0052FF' : '#fbbf24');
+    flashAmt = Math.min(0.5, 0.15 + n * 0.1); shakeAmt = n * 2; sfxClear(n);
+    level = 1 + Math.floor(lines / 10);
+    dropInterval = Math.max(0.07, 0.8 - (level - 1) * 0.07);
+  }
+  if (topOut) { gameOver(); return; }
+  spawnNext();
+}
+function spawnNext() {
+  cur = { type: next, rot: 0, x: 3, y: 0 };
+  next = bagNext(); dropTimer = 0;
+  if (collides(cur.x, cur.y, cur.type, cur.rot)) gameOver();
+}
+function hardDrop() {
+  var d = 0;
+  while (!collides(cur.x, cur.y + 1, cur.type, cur.rot)) { cur.y++; d++; }
+  score += d * 2; sfxDrop(); lockPiece();
+}
+function gravityStep(soft) {
+  if (!collides(cur.x, cur.y + 1, cur.type, cur.rot)) { cur.y++; if (soft) score += 1; return false; }
+  lockPiece(); return true;
+}
+
+// ---- FX ----
+var popups = [], flashAmt = 0, shakeAmt = 0;
+function addPopup(x, y, txt, col) { popups.push({ x: x, y: y, txt: txt, col: col || '#fff', life: 1 }); }
+function updateFX(dt) {
+  flashAmt = Math.max(0, flashAmt - dt * 1.6);
+  shakeAmt = Math.max(0, shakeAmt - dt * 30);
+  for (var i = popups.length - 1; i >= 0; i--) { popups[i].life -= dt * 1.1; popups[i].y -= dt * 22; if (popups[i].life <= 0) popups.splice(i, 1); }
+}
+
+// ---- Game state ----
+var state = 'title';
+var cur = null, next = 'T';
+var score = 0, lines = 0, level = 1, dropInterval = 0.8, dropTimer = 0;
+var held = { left: false, right: false, down: false }, dasTimer = 0;
+var highScore = 0;
+try { highScore = parseInt(localStorage.getItem('bilgestacks_hi') || '0', 10) || 0; } catch (e) { highScore = 0; }
+
+function startGame() {
+  ensureAudio();
+  clearBoard(); bag = [];
+  score = 0; lines = 0; level = 1; dropInterval = 0.8; dropTimer = 0;
+  held = { left: false, right: false, down: false }; dasTimer = 0;
+  popups = []; flashAmt = 0; shakeAmt = 0;
+  next = bagNext(); spawnNext();
+  state = 'playing';
+}
+function gameOver() {
+  state = 'gameOver';
+  if (score > highScore) { highScore = score; try { localStorage.setItem('bilgestacks_hi', String(highScore)); } catch (e) {} }
+  tone(300, 0.2, 'square', 0.07, 120);
+}
+
+// ---- Input ----
+function openPicker() {
+  if (!window.BaselingPlayer || !BaselingPlayer.select) return;
+  picking = true;
+  BaselingPlayer.select(function () { recomputeStats(); picking = false; });
+}
+window.addEventListener('keydown', function (e) {
+  if (picking) return;
+  var k = e.code;
+  if (state === 'title') {
+    if (k === 'KeyC') { openPicker(); e.preventDefault(); return; }
+    if (k === 'Enter' || k === 'Space') { startGame(); e.preventDefault(); }
+    return;
+  }
+  if (state === 'gameOver') { if (k === 'Enter' || k === 'Space') { startGame(); e.preventDefault(); } return; }
+  if (state !== 'playing') return;
+  if (e.repeat) { e.preventDefault(); return; } // OS repeat ignored; DAS handles it
+  if (k === 'ArrowLeft' || k === 'KeyA') { held.left = true; move(-1); dasTimer = DAS_DELAY; e.preventDefault(); }
+  else if (k === 'ArrowRight' || k === 'KeyD') { held.right = true; move(1); dasTimer = DAS_DELAY; e.preventDefault(); }
+  else if (k === 'ArrowDown' || k === 'KeyS') { held.down = true; e.preventDefault(); }
+  else if (k === 'ArrowUp' || k === 'KeyW' || k === 'KeyX') { rotate(1); e.preventDefault(); }
+  else if (k === 'KeyZ') { rotate(-1); e.preventDefault(); }
+  else if (k === 'Space') { hardDrop(); e.preventDefault(); }
+});
+window.addEventListener('keyup', function (e) {
+  var k = e.code;
+  if (k === 'ArrowLeft' || k === 'KeyA') held.left = false;
+  else if (k === 'ArrowRight' || k === 'KeyD') held.right = false;
+  else if (k === 'ArrowDown' || k === 'KeyS') held.down = false;
+});
+
+function pointerAt(clientX, clientY) {
+  var rect = canvas.getBoundingClientRect();
+  return { x: (clientX - rect.left) * (VW / rect.width), y: (clientY - rect.top) * (VH / rect.height) };
+}
+function touchAction(p) {
+  // bottom button row: 5 zones
+  if (p.y >= BTN_Y) {
+    var zone = Math.floor(p.x / (VW / 5));
+    if (zone === 0) { held.left = true; move(-1); held.left = false; }
+    else if (zone === 1) { held.right = true; move(1); held.right = false; }
+    else if (zone === 2) rotate(1);
+    else if (zone === 3) gravityStep(true);
+    else hardDrop();
+    return;
+  }
+  // tap upper board to rotate as a convenience
+  if (p.y >= BOARD_Y && p.y < BTN_Y) rotate(1);
+}
+canvas.addEventListener('mousedown', function (e) {
+  ensureAudio(); var p = pointerAt(e.clientX, e.clientY);
+  if (state === 'title') { if (p.y > VH - 86 && p.y < VH - 60) openPicker(); else startGame(); return; }
+  if (state === 'gameOver') { startGame(); return; }
+  touchAction(p);
+});
+canvas.addEventListener('touchstart', function (e) {
+  e.preventDefault(); ensureAudio();
+  if (!e.changedTouches || !e.changedTouches.length) return;
+  var p = pointerAt(e.changedTouches[0].clientX, e.changedTouches[0].clientY);
+  if (state === 'title') { if (p.y > VH - 86 && p.y < VH - 60) openPicker(); else startGame(); return; }
+  if (state === 'gameOver') { startGame(); return; }
+  touchAction(p);
+}, { passive: false });
+
+// ---- Render ----
+function roundRect(x, y, w, h, r) {
+  ctx.beginPath(); ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r); ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r); ctx.arcTo(x, y, x + w, y, r); ctx.closePath();
+}
+function drawBackground() {
+  var g = ctx.createLinearGradient(0, 0, 0, VH);
+  g.addColorStop(0, '#0e2336'); g.addColorStop(1, '#081019');
+  ctx.fillStyle = g; ctx.fillRect(0, 0, VW, VH);
+  var d = img('deck');
+  if (d) { ctx.globalAlpha = 0.10; ctx.drawImage(d, BOARD_X, BOARD_Y, BOARD_W, BOARD_H); ctx.globalAlpha = 1; }
+}
+function drawBlock(px, py, type, alpha) {
+  ctx.globalAlpha = alpha == null ? 1 : alpha;
+  var im = img(TEX[type]);
+  if (im) ctx.drawImage(im, px, py, CELL, CELL);
+  else {
+    ctx.fillStyle = COLORS[type]; ctx.fillRect(px, py, CELL, CELL);
+    ctx.fillStyle = 'rgba(255,255,255,0.22)'; ctx.fillRect(px, py, CELL, CELL * 0.28);
+    ctx.fillStyle = 'rgba(0,0,0,0.22)'; ctx.fillRect(px, py + CELL * 0.72, CELL, CELL * 0.28);
+  }
+  ctx.strokeStyle = COLORS[type]; ctx.lineWidth = 2;
+  ctx.strokeRect(px + 1, py + 1, CELL - 2, CELL - 2);
+  ctx.globalAlpha = 1;
+}
+function drawWell() {
+  ctx.fillStyle = 'rgba(0,0,0,0.45)'; ctx.fillRect(BOARD_X, BOARD_Y, BOARD_W, BOARD_H);
+  ctx.strokeStyle = '#0052FF'; ctx.lineWidth = 2; ctx.strokeRect(BOARD_X - 1, BOARD_Y - 1, BOARD_W + 2, BOARD_H + 2);
+  ctx.strokeStyle = 'rgba(255,255,255,0.04)'; ctx.lineWidth = 1;
+  for (var c = 1; c < COLS; c++) { ctx.beginPath(); ctx.moveTo(BOARD_X + c * CELL, BOARD_Y); ctx.lineTo(BOARD_X + c * CELL, BOARD_Y + BOARD_H); ctx.stroke(); }
+  for (var r = 1; r < ROWS; r++) { ctx.beginPath(); ctx.moveTo(BOARD_X, BOARD_Y + r * CELL); ctx.lineTo(BOARD_X + BOARD_W, BOARD_Y + r * CELL); ctx.stroke(); }
+  for (r = 0; r < ROWS; r++) for (c = 0; c < COLS; c++) if (board[r][c]) drawBlock(BOARD_X + c * CELL, BOARD_Y + r * CELL, board[r][c], 1);
+  if (state === 'playing' && cur) {
+    var gy = ghostY(), cells = SHAPES[cur.type][cur.rot], i;
+    for (i = 0; i < 4; i++) { var gx2 = cur.x + cells[i][0], gy2 = gy + cells[i][1]; if (gy2 >= 0) { ctx.strokeStyle = 'rgba(255,255,255,0.25)'; ctx.lineWidth = 1; ctx.strokeRect(BOARD_X + gx2 * CELL + 2, BOARD_Y + gy2 * CELL + 2, CELL - 4, CELL - 4); } }
+    for (i = 0; i < 4; i++) { var bx = cur.x + cells[i][0], by = cur.y + cells[i][1]; if (by >= 0) drawBlock(BOARD_X + bx * CELL, BOARD_Y + by * CELL, cur.type, 1); }
+  }
+}
+function drawMini(type, cx, cy, sz) {
+  var cells = SHAPES[type][0], minX = 9, minY = 9, maxX = 0, maxY = 0, i;
+  for (i = 0; i < 4; i++) { minX = Math.min(minX, cells[i][0]); minY = Math.min(minY, cells[i][1]); maxX = Math.max(maxX, cells[i][0]); maxY = Math.max(maxY, cells[i][1]); }
+  var w = (maxX - minX + 1) * sz, h = (maxY - minY + 1) * sz, ox = cx - w / 2, oy = cy - h / 2;
+  for (i = 0; i < 4; i++) {
+    var x = ox + (cells[i][0] - minX) * sz, y = oy + (cells[i][1] - minY) * sz;
+    ctx.fillStyle = COLORS[type]; ctx.fillRect(x, y, sz - 1, sz - 1);
+  }
+}
+function drawHUD() {
+  ctx.fillStyle = 'rgba(0,0,0,0.4)'; ctx.fillRect(0, 0, VW, HUD_H);
+  ctx.fillStyle = '#0052FF'; ctx.fillRect(0, HUD_H - 2, VW, 2);
+  ctx.textAlign = 'left'; ctx.fillStyle = '#fbbf24'; ctx.font = 'bold 17px monospace';
+  ctx.fillText(String(score), 8, 26);
+  ctx.fillStyle = '#7a8a9a'; ctx.font = '9px monospace'; ctx.fillText('HOLD SCORE', 8, 38);
+  ctx.textAlign = 'center'; ctx.fillStyle = '#fff'; ctx.font = 'bold 12px monospace';
+  ctx.fillText('LVL ' + level, VW / 2, 18); ctx.fillText('LINES ' + lines, VW / 2, 34);
+  ctx.textAlign = 'right'; ctx.fillStyle = '#7a8a9a'; ctx.font = '9px monospace'; ctx.fillText('NEXT', VW - 8, 12);
+  if (next) drawMini(next, VW - 30, 28, 8);
+}
+function drawButtons() {
+  var labels = ['<', '>', 'ROT', 'v', 'DROP'];
+  for (var i = 0; i < 5; i++) {
+    var x = i * (VW / 5);
+    ctx.fillStyle = i % 2 ? 'rgba(0,82,255,0.16)' : 'rgba(0,82,255,0.10)';
+    ctx.fillRect(x + 1, BTN_Y + 1, VW / 5 - 2, BTN_H - 2);
+    ctx.strokeStyle = 'rgba(0,82,255,0.4)'; ctx.lineWidth = 1; ctx.strokeRect(x + 1, BTN_Y + 1, VW / 5 - 2, BTN_H - 2);
+    ctx.fillStyle = '#cfe0ff'; ctx.textAlign = 'center'; ctx.font = 'bold 13px monospace';
+    ctx.fillText(labels[i], x + VW / 10, BTN_Y + BTN_H / 2 + 5);
+  }
+}
+function drawStatBars(cx, topY) {
+  var sel = window.BaselingPlayer && BaselingPlayer.getSelected ? BaselingPlayer.getSelected() : null;
+  if (!sel || !sel.stats || !window.BaselingPlayer || !BaselingPlayer.STAT_KEYS) return;
+  var meta = BaselingPlayer.STAT_META, keys = BaselingPlayer.STAT_KEYS;
+  var bw = 40, gap = 6, total = keys.length * (bw + gap) - gap, x0 = cx - total / 2;
+  ctx.font = '8px monospace';
+  for (var i = 0; i < keys.length; i++) {
+    var mm = meta[keys[i]], v = sel.stats[keys[i]] || 10, bx = x0 + i * (bw + gap);
+    ctx.fillStyle = mm.color; ctx.textAlign = 'left'; ctx.fillText(mm.label, bx, topY);
+    ctx.fillStyle = '#222'; ctx.fillRect(bx, topY + 3, bw, 5);
+    ctx.fillStyle = mm.color; ctx.fillRect(bx, topY + 3, bw * Math.max(0.04, Math.min(1, v / 200)), 5);
+  }
+  ctx.textAlign = 'center';
+}
+function drawTitle() {
+  drawBackground(); ctx.textAlign = 'center';
+  ctx.fillStyle = '#f59e0b'; ctx.font = 'bold 30px monospace'; ctx.fillText('BILGE STACKS', VW / 2, 86);
+  ctx.fillStyle = '#fbbf24'; ctx.font = '12px monospace'; ctx.fillText('Stack the cargo - clear the rows', VW / 2, 108);
+  if (!drawSelectedBaseling(ctx, VW / 2, 184, 46, { anim: 'idle', frame: frame })) {
+    ctx.fillStyle = '#34d399'; ctx.beginPath(); ctx.arc(VW / 2, 184, 22, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#0a1622'; ctx.beginPath(); ctx.arc(VW / 2 - 7, 180, 3, 0, Math.PI * 2); ctx.arc(VW / 2 + 7, 180, 3, 0, Math.PI * 2); ctx.fill();
+  }
+  var sel = window.BaselingPlayer && BaselingPlayer.getSelected ? BaselingPlayer.getSelected() : null;
+  ctx.fillStyle = '#0052FF'; ctx.font = 'bold 12px monospace';
+  ctx.fillText((sel ? sel.charName : 'WIMMPLE') + (sel && sel.tokenId != null ? ' #' + sel.tokenId : ''), VW / 2, 228);
+  drawStatBars(VW / 2, 248);
+  var demo = ['I', 'O', 'T', 'L'];
+  for (var i = 0; i < 4; i++) drawMini(demo[i], VW / 2 - 90 + i * 60, 312, 9);
+  ctx.fillStyle = '#fff'; ctx.font = 'bold 15px monospace';
+  if ((frame >> 4) & 1) ctx.fillText('TAP / SPACE TO PLAY', VW / 2, 372);
+  if (highScore > 0) { ctx.fillStyle = '#7a8a9a'; ctx.font = '11px monospace'; ctx.fillText('Best: ' + highScore, VW / 2, 398); }
+  ctx.fillStyle = '#0052FF'; ctx.font = 'bold 11px monospace'; ctx.fillText('[C] SELECT BASELING', VW / 2, VH - 70);
+  ctx.fillStyle = '#5a6a7a'; ctx.font = '9px monospace'; ctx.fillText('Arrows move - Up rotate - Space drop', VW / 2, VH - 20);
+}
+function drawGameOver() {
+  drawBackground(); drawWell();
+  ctx.fillStyle = 'rgba(4,10,18,0.82)'; ctx.fillRect(0, 0, VW, VH); ctx.textAlign = 'center';
+  ctx.fillStyle = '#ef4444'; ctx.font = 'bold 28px monospace'; ctx.fillText('HOLD FLOODED', VW / 2, 180);
+  ctx.fillStyle = '#fff'; ctx.font = 'bold 16px monospace'; ctx.fillText('Score: ' + score, VW / 2, 228);
+  ctx.fillStyle = '#fbbf24'; ctx.font = '13px monospace'; ctx.fillText('Lines: ' + lines + '   Level: ' + level, VW / 2, 254);
+  if (score >= highScore && score > 0) { ctx.fillStyle = '#0052FF'; ctx.font = 'bold 15px monospace'; ctx.fillText('NEW BEST!', VW / 2, 288); }
+  else { ctx.fillStyle = '#7a8a9a'; ctx.font = '13px monospace'; ctx.fillText('Best: ' + highScore, VW / 2, 288); }
+  ctx.fillStyle = '#fff'; ctx.font = 'bold 14px monospace';
+  if ((frame >> 4) & 1) ctx.fillText('TAP / SPACE TO RETRY', VW / 2, 350);
+}
+function drawPopups() {
+  ctx.textAlign = 'center'; ctx.font = 'bold 13px monospace';
+  for (var i = 0; i < popups.length; i++) { ctx.globalAlpha = Math.max(0, Math.min(1, popups[i].life)); ctx.fillStyle = popups[i].col; ctx.fillText(popups[i].txt, popups[i].x, popups[i].y); }
+  ctx.globalAlpha = 1;
+}
+
+// ---- Loop ----
+var lastTime = 0;
+function loop(ts) {
+  var dt = Math.min((ts - lastTime) / 1000, 0.05); lastTime = ts; frame++;
+  if (state === 'playing') {
+    var dir = (held.left && !held.right) ? -1 : ((held.right && !held.left) ? 1 : 0);
+    if (dir !== 0) { dasTimer -= dt; var safety = 0; while (dasTimer <= 0 && safety < 12) { move(dir); dasTimer += DAS_RATE; safety++; } }
+    var iv = held.down ? Math.min(dropInterval, SOFT_IV) : dropInterval;
+    dropTimer += dt; var sg = 0;
+    while (dropTimer >= iv && state === 'playing' && sg < 30) { dropTimer -= iv; if (gravityStep(held.down)) { dropTimer = 0; break; } sg++; }
+    updateFX(dt);
+  } else { updateFX(dt); }
+
+  ctx.save();
+  if (shakeAmt > 0) ctx.translate((Math.random() - 0.5) * shakeAmt, (Math.random() - 0.5) * shakeAmt);
+  if (state === 'title') drawTitle();
+  else if (state === 'gameOver') drawGameOver();
+  else {
+    drawBackground(); drawWell(); drawHUD(); drawButtons(); drawPopups();
+    if (flashAmt > 0) { ctx.fillStyle = 'rgba(255,255,255,' + flashAmt * 0.5 + ')'; ctx.fillRect(0, 0, VW, VH); }
+  }
+  ctx.restore();
+  requestAnimationFrame(loop);
+}
+clearBoard();
+requestAnimationFrame(loop);
+
+})();
+</script>
+</body>
+</html>

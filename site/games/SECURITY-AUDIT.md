@@ -91,7 +91,7 @@ Complete localStorage key inventory (68 unique keys across 55 games):
 | `poopbomber_hi` | poop-bomber |
 | `bstars` | baseling-sluggers |
 | `bubblebaseling_hi` | bubble-baseling |
-| `buckybaseling_save` | bucky-baseling |
+| `sporegalaxy_save` | spore-galaxy |
 | `chain_reaction_save` | chain-reaction |
 | `sporecrystal_save` | spore-crystal |
 | `dice-roller-history` | dice-roller |
@@ -101,8 +101,8 @@ Complete localStorage key inventory (68 unique keys across 55 games):
 | `sporennice_hi` | spore-n-ice |
 | `sporegoylequest_save` | sporegoyle-quest |
 | `ironmaw_save` | iron-maw |
-| `jumpyBrosHiScore` | jumpy-bros |
-| `kicklespore_progress` | kickle-spore |
+| `sporeJumpersHiScore` | spore-jumpers |
+| `frostspore_progress` | frost-spore |
 | `legend_of_tasern_save` | legend-of-tasern |
 | `sporesamson_progress` | spore-samson |
 | `sporesphere_progress` | spore-sphere |
@@ -112,11 +112,11 @@ Complete localStorage key inventory (68 unique keys across 55 games):
 | `spore_civil_war_campaign` | spore-civil-war |
 | `pirates_tasern_save` | pirates-of-tasern |
 | `poopdrop_hi` | poop-drop |
-| `poopman_save` | poop-man |
-| `poop_puzznic_level` | poop-puzznic |
+| `poop_powers_save` | poop-powers |
+| `sludge_slide_level` | sludge-slide |
 | `power_blade_save` | power-blade |
-| `radracer_progress` | rad-racer |
-| `rcb_save` | river-city-brawl |
+| `sporeracer_progress` | spore-racer |
+| `rcb_save` | downtown-baselings |
 | `reactorforce_hi` | reactor-force |
 | `reactor_jump_progress` | reactor-jump |
 | `rhythm_baseling_unlocks` | rhythm-baseling |
@@ -127,7 +127,7 @@ Complete localStorage key inventory (68 unique keys across 55 games):
 | `solomonkey_progress` | solomon-key |
 | `sot_highscore` | streets-of-tasern |
 | `sporesprint_hi` | spore-sprint |
-| `startropics_hex` | startropics-hex |
+| `spore_tropics` | spore-tropics |
 | `tasern_chess_save` | chess |
 | `tasern_olympics_records` | track-n-field |
 | `tasernquest_save` | tasern-quest |
@@ -149,11 +149,11 @@ All 78 games using tasern-engine.js use `TAS.score.load/save` which wraps localS
 
 **Result: INFO - Two-tier architecture (intentional)**
 
-- **78 games** load `tasern-engine.js` (the newer NES-inspired batch using the shared engine)
+- **78 games** load `tasern-engine.js` (the newer retro-inspired batch using the shared engine)
 - **23 games** are standalone (older games with self-contained canvas/audio code)
 
 The 23 standalone games are:
-arcade, spore-breaker, blocks-burg, poop-bomber, bubble-baseling, checkers, chess, dice-roller, golden-axe, jumpy-bros, legend-of-tasern, spore-lemmings, spore-maze, meme-city, poop-drop, poop-out, reactor-force, reactor-rash, rodeo-toad, spore-sprint, streets-of-tasern, ttrpg-notepad, tunnel-bug
+arcade, spore-breaker, blocks-burg, poop-bomber, bubble-baseling, checkers, chess, dice-roller, golden-axe, spore-jumpers, legend-of-tasern, spore-march, spore-maze, meme-city, poop-drop, baseling-boxing, reactor-force, reactor-rash, rodeo-toad, spore-sprint, streets-of-tasern, ttrpg-notepad, tunnel-bug
 
 **Assessment:** Not a security issue. Older games predate the shared engine and work correctly without it. The engine provides convenience wrappers (canvas, audio, input, particles) but is not a security dependency.
 

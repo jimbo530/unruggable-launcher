@@ -36,7 +36,7 @@ const http = require('http');
 const DIR = __dirname;
 const SHOTS_DIR = path.join(DIR, 'qa-shots');
 const REPORT = path.join(DIR, 'qa-report.json');
-const FLAGSHIPS = ['poop-man', 'reactor-jump', 'tunnel-bug'];
+const FLAGSHIPS = ['poop-powers', 'reactor-jump', 'tunnel-bug'];
 
 // ---- args ----
 const argv = process.argv.slice(2);

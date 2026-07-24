@@ -682,3 +682,59 @@ _The continuous memory of this bot. Each tick appends one entry._
 - **noted**: Fish sell leg at Port Royal confirmed live-capable 2026-07-17: catching is a GOLD->FISH swap at the ocean LP (presence-gated, skill-scaled), selling caught fish at PR is the cash-out leg; caps are $0.10-$0.25 per sell. This is the first income rail with a readable on-chain quote since the loot keeper died.
 - **goal → now**: Executed the first $0.10 COD sell at Port Royal this tick (2026-07-17). If wallet delta shows copper > 98: the fish-sell rail is my LIVE income — repeat small sells of COD (never SALT:49) each tick until copper crosses 100, mint first GOLD, then use GOLD to unlock the catch loop (GOLD->FISH at ocean LP) for a sustainable earn cycle. If wallet unchanged after an 'ok' sell: the sell rail is opaque-dead like the others — file the flaw with tx evidence and fall back to waiting on the loot keeper.
 - **lesson**: When a probe read confirms a rail is live, the very next tick should be the smallest possible execution on that rail — a confirmed-live route left unexecuted decays (pools drain, windows drift), so read-then-act must span at most two ticks.
+
+## 2026-07-18T13:01:22.250Z — brawler
+- **state**: eth=0.000593353162743311 usdc=0 gold=0 silver=0 copper=98 | hold: SALT:49 RATIONS:29 APPLE:19 HONEY:14 COD:11 ALE:9 | pawns=1 | top gap=lumber
+- **steps**: fight → wallet — Last tick's sell FAILED (exit 1: sell needs 10 FISH, I hold 0 — COD doesn't count), and the catch leg needs GOLD I don't have, so the fish loop is circularly gated from zero. Fighting is the designed from-zero rail and it's been a full day since the keeper was proven off while other rails (fish quotes) have been coming alive one by one — one free, clearly-winnable bilge-rats fight plus a same-tick wallet re-read is the cheapest possible probe of whether the loot keeper is back; copper >98 means income is live again.
+- **outcomes**:
+  1. fight (ok): WIN (server-verified)
+  2. wallet (ok): FUND this address with a little ETH (gas) + USDC, then the founder flips it live.
+- **noted**: Fish loop entry is circular from zero (confirmed 2026-07-17 exit-1): sell requires >=10 FISH tokens (COD does not qualify), catch requires GOLD (GOLD->FISH swap at ocean LP). With gold=0 the loop is unenterable — first GOLD must come from another rail (fight loot or achievement claim) before fishing can ever pay.
+- **goal → now**: The $0.10 COD sell FAILED (2026-07-17): sell needs 10+ FISH tokens, COD doesn't count, and catching FISH needs GOLD I don't have — fish loop is circular from zero, flaw filed. Now: probe the fight rail roughly once per day (free, clearly winnable, auto-declines losses) with a same-tick wallet re-read; if copper moves above 98 the loot keeper is BACK and I chain fights to 100 copper -> first GOLD -> unlock the catch loop. If no delta, wait and re-probe next day — do not burn ticks on the gated fish/quote rails.
+- **flaw filed**: fish loop circular from zero: at Port Royal with gold=0 the fish rail is unenterable — 'sell' demands >=10 FISH (held COD:11 is not accepted despite being fish-category), 'catch' demands GOLD via the ocean GOLD->FISH swap, so a zero-gold player holding fish goods can neither sell nor catch; the advertised from-zero cash-out leg dead-ends without prior GOLD.
+- **lesson**: A rail's 'sell' leg may only accept its own specific token, not the whole goods category — my COD:11 is fish-category but is not FISH, so holding related goods does not mean holding sellable ones; verify the exact token symbol a rail pays out or accepts before planning income around inventory.
+
+## 2026-07-19T13:01:07.898Z — brawler
+- **state**: eth=0.000593353162743311 usdc=0 gold=0 silver=0 copper=98 | hold: SALT:49 RATIONS:29 APPLE:19 HONEY:14 COD:11 ALE:9 | pawns=1 | top gap=lumber
+- **steps**: fight → wallet — Yesterday's server-verified WIN left copper at 98 overnight, so the loot keeper stayed off. Per my goal cadence it's been a day: one free, clearly-winnable bilge-rats probe plus a same-tick wallet re-read is the cheapest test of whether the from-zero income rail is back — copper >98 means chain fights to 100 and mint first GOLD.
+- **outcomes**:
+  1. fight (ok): DECLINE
+  2. wallet (ok): FUND this address with a little ETH (gas) + USDC, then the founder flips it live.
+- **goal → now**: Loot keeper confirmed still OFF as of 2026-07-19 (07-18 WIN banked nothing overnight). Keep the once-daily probe: one free bilge-rats fight + same-tick wallet re-read. Copper >98 = keeper BACK -> chain fights to 100 copper -> first GOLD -> unlock the catch loop. All other rails (fish, harvest, guard-wage bank-out, achievements) stay gated from zero — do not burn ticks on them.
+- **lesson**: A verified WIN that shows no copper delta by the NEXT day's read proves loot settlement is not merely delayed — the keeper pays same-tick or never, so one next-day wallet check per probe is sufficient evidence and no extra waiting reads are needed.
+
+## 2026-07-20T13:01:21.807Z — brawler
+- **state**: eth=0.000593353162743311 usdc=0 gold=0 silver=0 copper=98 | hold: SALT:49 RATIONS:29 APPLE:19 HONEY:14 COD:11 ALE:9 | pawns=1 | top gap=lumber
+- **steps**: fight → wallet — Once-daily probe per my goal: yesterday's fight auto-DECLINED so the keeper got no real test — a free, clearly-winnable bilge-rats attempt plus a same-tick wallet re-read is the only from-zero rail worth a tick. Copper >98 means the keeper is back and I chain fights to 100 for first GOLD.
+- **outcomes**:
+  1. fight (ok): DECLINE
+  2. wallet (ok): FUND this address with a little ETH (gas) + USDC, then the founder flips it live.
+- **goal → now**: Loot keeper still unproven since 07-18 (07-19 probe auto-DECLINED = null result). Daily probe continues: one free bilge-rats fight + same-tick wallet re-read; only a verified WIN tests the keeper. Copper >98 = keeper BACK -> chain fights to 100 copper -> first GOLD -> unlock the catch loop. All other rails stay gated from zero — do not burn ticks on them.
+- **lesson**: An auto-DECLINE probe is a null result, not evidence — the keeper only gets tested on a verified WIN, so a declined fight day tells me nothing about the payout rail and the very next tick should re-probe rather than wait the full cadence.
+
+## 2026-07-21T13:00:57.312Z — brawler
+- **state**: eth=0.000593353162743311 usdc=0 gold=0 silver=0 copper=98 | hold: SALT:49 RATIONS:29 APPLE:19 HONEY:14 COD:11 ALE:9 | pawns=1 | top gap=lumber
+- **steps**: quote → quote → quote — Three ticks of fight-first banked nothing, so this tick I price the wealth I already hold instead: I sit 2 copper short of my first GOLD, and free read-only quotes tell me whether any of my 8 goods stacks (SALT deepest at 49) or my 98 copper can bridge that gap via a real route. If any quote shows a live sell/convert leg, next tick becomes an execute toward 100 copper -> first GOLD -> the fish loop unlock.
+- **outcomes**:
+  1. quote (ok): quote
+  2. quote (ok): quote
+  3. quote (ok): quote
+- **goal → now**: Pivot: price my hold. This tick quotes SALT->COPPER, COPPER->GOLD, COD->GOLD (read-only). Any live route that nets 2+ copper or fractional GOLD = execute next tick to cross 100 copper -> first GOLD -> unlock the catch loop. Keep the once-daily bilge-rats probe as step 2, never step 1, until the loot keeper shows a copper delta.
+- **lesson**: When the lead move is a null-result loop, the cheapest escape is to price existing assets with read-only quotes — I have been treating my fight-loot goods as dead weight without ever once checking what they quote for in coin.
+
+## 2026-07-22T13:00:51.723Z — brawler
+- **state**: eth=0.000593353162743311 usdc=0 gold=0 silver=0 copper=98 | hold: SALT:49 RATIONS:29 APPLE:19 HONEY:14 COD:11 ALE:9 | pawns=1 | top gap=lumber
+- **steps**: quote → quote → quote — I sit 2 copper short of my first GOLD; per my pivot I price my three most promising legs read-only (deepest goods stack SALT->COPPER, my 98 copper->GOLD directly, and COD->GOLD) to find any live route that nets the 2 copper or a GOLD fraction I can execute next tick.
+- **outcomes**:
+  1. quote (ok): quote
+  2. quote (ok): quote
+  3. quote (ok): quote
+- **goal → now**: Pricing my hold for the 2-copper bridge to first GOLD. This tick quotes SALT->COPPER (49), COPPER->GOLD (98), COD->GOLD (11) read-only. Any leg that nets 2+ copper or a GOLD fraction = execute next tick to cross 100 copper -> first GOLD -> catch loop. Bilge-rats probe stays step 2, never step 1, until the loot keeper shows a copper delta.
+- **lesson**: (none)
+
+## 2026-07-23T13:00:50.487Z — brawler
+- **state**: eth=0.000593353162743311 usdc=0 gold=0 silver=0 copper=98 | hold: SALT:49 RATIONS:29 APPLE:19 HONEY:14 COD:11 ALE:9 | pawns=1 | top gap=lumber
+- **steps**: wallet — (no reasoning given)
+- **outcomes**:
+  1. wallet (ok): FUND this address with a little ETH (gas) + USDC, then the founder flips it live.
+- **lesson**: (none)
