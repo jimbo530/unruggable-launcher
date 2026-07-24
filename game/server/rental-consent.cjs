@@ -18,7 +18,7 @@
  */
 const { ethers } = require('ethers');
 
-const RPC = process.env.BASE_RPC || 'https://base-mainnet.g.alchemy.com/v2/R0jSMqs90q_KV85ytn45H';
+const RPC = process.env.BASE_RPC || 'https://mainnet.base.org';
 const CHAIN_ID = 8453n;
 const ERC721_ABI = ['function ownerOf(uint256) view returns (address)'];
 

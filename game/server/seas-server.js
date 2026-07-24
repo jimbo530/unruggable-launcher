@@ -70,7 +70,7 @@ function rollHash(s) { return require('crypto').createHash('sha256').update(Stri
 const SHIPS_REGISTRY = require('../seas/citizen/lib/ships.json');
 
 // ── config (RPC/CHAIN mirror location-signer.cjs so the gate reads the same chain it signs for) ──
-const RPC = process.env.BASE_RPC || 'https://base-mainnet.g.alchemy.com/v2/R0jSMqs90q_KV85ytn45H';
+const RPC = process.env.BASE_RPC || 'https://mainnet.base.org';
 const CHAIN_ID = 8453;
 const PORT = Number(process.env.SEAS_PORT || 8799);
 // CORS: lock to the game origin in prod. SEAS_CORS_ORIGIN="*" re-opens it for dev only.
@@ -78,6 +78,24 @@ const CORS_ORIGIN = process.env.SEAS_CORS_ORIGIN || 'https://tasern.quest';
 // Light per-IP rate limit (DoS / RPC-budget guard — the rule gate is the real security).
 const RATE_MAX = Number(process.env.SEAS_RATE_MAX || 30);     // requests
 const RATE_WINDOW_MS = Number(process.env.SEAS_RATE_WINDOW_MS || 10_000); // per window
+
+// ── teleport (two tiers, by design) ────────────────────────────────────────────────────────────
+// TELEPORT is a real in-world movement, distinct from a clocked voyage. Two tiers:
+//   • DEV-WIZARD (ops): a specific human pawn we own — the operator character we MOVE to seed/fix
+//     markets. UNLIMITED range + instant. Gated by a shared secret AND a pawn allowlist (SEAS_DEVWIZARDS
+//     = comma-list of "collection:tokenId"; BOTH the secret and the allowlist must match). It is an
+//     operator override; it NEVER forges presence for anyone else, and it is fully
+//     OFF unless SEAS_ADMIN_SECRET is configured. The presence wall is unchanged — teleport only sets
+//     the authoritative hex; /seas/trade-attest still checks it before signing.
+//   • PLAYER (future): a real ability with a RANGE CAP (a short blink, not a free map-wide jump), and
+//     later a CARRY CAP (bags of holding). Shipped OFF (range 0) until the teleport item/spell exists.
+const ADMIN_SECRET = process.env.SEAS_ADMIN_SECRET || '';
+const DEVWIZARDS = new Set(
+  String(process.env.SEAS_DEVWIZARDS || '').split(',').map((s) => s.trim().toLowerCase()).filter(Boolean),
+);
+// Hex range cap for a NON-admin teleport (the future player ability). 0 = players cannot teleport yet.
+// The dev-wizard ignores this entirely (unlimited).
+const TELEPORT_RANGE_HEXES = Number(process.env.SEAS_TELEPORT_RANGE_HEXES || 0);
 const SIGNER_ENV = path.join(os.homedir(), '.seas-location-signer.env');   // VPS-only key file
 const DEPLOY_JSON = path.join(__dirname, '..', '..', 'deploy', 'location-lp-deployed.json');
 const POOL_ABI = ['function location() view returns (uint256)'];
@@ -119,7 +137,7 @@ let state = null;
 function setStoreFile(p) { storeFile = p; state = null; }
 
 function loadState() {
-  if (!fs.existsSync(storeFile)) return { players: {}, cooldowns: {}, orbs: {}, rations: {}, bestiary: { pawns: {} }, aboard: {}, ships: {}, claims: {} };
+  if (!fs.existsSync(storeFile)) return { players: {}, pawns: {}, cooldowns: {}, orbs: {}, rations: {}, bestiary: { pawns: {} }, aboard: {}, ships: {}, claims: {} };
   const raw = fs.readFileSync(storeFile, 'utf8');
   // No silent catch: a corrupt authority file must STOP the operator, never silently reset.
   try {
@@ -130,6 +148,9 @@ function loadState() {
     // forward-compat: an older state file (pre-cooldown/orb) has no cooldowns/orbs maps — seed empties.
     // This is NOT a silent recovery from corruption (the { players } shape above is still enforced); it
     // is an intentional, additive schema migration so the live state file upgrades in place.
+    // per-PAWN location authority (founder 2026-07-23): one player, many pawns, many towns. Additive
+    // schema migration, same rule as the maps below — an older state file upgrades in place, never resets.
+    if (!parsed.pawns || typeof parsed.pawns !== 'object') parsed.pawns = {};
     if (!parsed.cooldowns || typeof parsed.cooldowns !== 'object') parsed.cooldowns = {};
     if (!parsed.orbs || typeof parsed.orbs !== 'object') parsed.orbs = {};
     // universal eating (founder 2026-06-28): the server-authoritative ration store. Additive, same as above.
@@ -256,25 +277,28 @@ function locationName(h) {
 function encodeLoc(h) { return h.q * 1000 + h.r; }
 function decodeLoc(id) { const n = Number(id); return { q: Math.floor(n / 1000), r: n % 1000 }; }
 
-// ── location authority (per wallet) ───────────────────────────────────────────────────────────
-/** Fetch (or default-seed at the hub) a wallet's authority record. Does NOT resolve arrival. */
-function getPlayer(checksummed) {
+// ── location authority (per PAWN) ─────────────────────────────────────────────────────────────
+// A PAWN (collection:tokenId), not a wallet, occupies the world: one player can have many pawns in
+// many towns at once, each with its own hex + voyage. The on-chain swap gate binds to the WALLET
+// (msg.sender), so trade-attest verifies the wallet OWNS a pawn that is genuinely at the pool's
+// location, then signs for the wallet — presence is per-pawn, the signature is per-wallet.
+/** Fetch (or default-seed at the hub) a PAWN's authority record. `key` = pawnKey(collection,tokenId). */
+function getLoc(key) {
   const s = ensureState();
-  const k = addrKey(checksummed);
-  if (!s.players[k]) s.players[k] = { hex: hubHex(), voyage: null };
-  return s.players[k];
+  if (!s.pawns[key]) s.pawns[key] = { hex: hubHex(), voyage: null };
+  return s.pawns[key];
 }
 
-/** Is the wallet mid-voyage right now (server clock)? */
+/** Is this pawn mid-voyage right now (server clock)? */
 function atSea(p) { return !!(p.voyage && _now() < p.voyage.arriveAt); }
 
 /**
- * Resolve a completed voyage: if the server clock has passed arriveAt, LAND the wallet at the
+ * Resolve a completed voyage: if the server clock has passed arriveAt, LAND the pawn at the
  * destination hex and clear the voyage. This is the server's authoritative tryArrive(). Returns
- * the (possibly mutated) player record.
+ * the (possibly mutated) pawn location record. `key` = pawnKey.
  */
-function resolveArrival(checksummed) {
-  const p = getPlayer(checksummed);
+function resolveArrival(key) {
+  const p = getLoc(key);
   if (p.voyage && _now() >= p.voyage.arriveAt) {
     p.hex = { q: p.voyage.toHex.q, r: p.voyage.toHex.r };
     p.voyage = null;
@@ -300,15 +324,15 @@ function voyageView(v) {
   };
 }
 
-/** Authoritative location view for a wallet (resolves arrival first). */
-function locationView(checksummed) {
-  const p = resolveArrival(checksummed);
+/** Authoritative location view for a PAWN (resolves arrival first). `key` = pawnKey. */
+function locationView(key) {
+  const p = resolveArrival(key);
   const sea = atSea(p);
   return {
-    player: checksummed,
+    pawn: key,
     hex: p.hex,
     port: portAtHex(p.hex),     // null = open water
-    location: encodeLoc(p.hex), // on-chain location id of the wallet's current hex
+    location: encodeLoc(p.hex), // on-chain location id of the pawn's current hex
     atSea: sea,
     voyage: sea ? voyageView(p.voyage) : null,
     secsLeft: sea ? voyageView(p.voyage).secsLeft : 0,
@@ -337,6 +361,62 @@ function doSail(checksummed, toHex) {
   p.voyage = { fromHex, toHex: { q: toHex.q, r: toHex.r }, departAt, arriveAt, distance };
   saveState();
   return voyageView(p.voyage);
+}
+
+/**
+ * TELEPORT a pawn to a hex INSTANTLY (no voyage clock). Two tiers (see the ADMIN_SECRET/DEVWIZARDS
+ * config block): dev-wizard = unlimited range + instant; player = range-capped (off until an ability
+ * ships). The presence wall is unchanged — this only sets the authoritative hex; trade-attest still
+ * checks it before signing. `key` = pawnKey. isAdmin is decided by the route (secret + allowlist).
+ */
+function doTeleport(key, toHex, isAdmin) {
+  const m = requireMap();
+  const p = resolveArrival(key);
+  if (!toHex || !Number.isInteger(toHex.q) || !Number.isInteger(toHex.r)) throw new HttpError(400, 'toHex must be { q:int, r:int }');
+  if (!validHex(toHex)) throw new HttpError(400, `destination off the chart (0..${m.GRID_COLS - 1}, 0..${m.GRID_ROWS - 1})`);
+  const fromHex = { q: p.hex.q, r: p.hex.r };
+  const distance = m.hexDistance(fromHex, toHex);
+  if (!isAdmin) {
+    // PLAYER teleport — a short blink, range-capped; OFF until an ability ships (cap 0). A future
+    // bags-of-holding CARRY cap will gate what a teleport may move once inventory weight exists.
+    if (TELEPORT_RANGE_HEXES <= 0) throw new HttpError(403, 'teleport is not yet available to players (no teleport ability shipped)');
+    if (distance > TELEPORT_RANGE_HEXES) throw new HttpError(403, `teleport out of range: ${distance} hexes > your range ${TELEPORT_RANGE_HEXES}`);
+  }
+  p.hex = { q: toHex.q, r: toHex.r };
+  p.voyage = null;
+  saveState();
+  return { ...locationView(key), teleported: true, fromHex, distance, unlimited: !!isAdmin };
+}
+
+// ── pawn-arg helpers (routes accept { collection, tokenId } OR { pawn: "0x..:id" }) ───────────────
+/** Parse a "collection:tokenId" string → the normalized pawnKey. Throws (visibly) on garbage. */
+function pawnKeyFromStr(s) {
+  const str = String(s || '').trim();
+  const i = str.lastIndexOf(':');
+  if (i < 0) throw new HttpError(400, 'pawn must be "<collection>:<tokenId>"');
+  return pawnKey(str.slice(0, i), str.slice(i + 1));
+}
+/** Extract { collection, tokenId, key } from a request body (either shape). Throws HttpError(400). */
+function pawnFromBody(b) {
+  let collection = b.collection, tokenId = b.tokenId;
+  if ((!collection || tokenId === undefined || tokenId === null) && typeof b.pawn === 'string') {
+    const i = b.pawn.lastIndexOf(':');
+    if (i < 0) throw new HttpError(400, 'pawn must be "<collection>:<tokenId>"');
+    collection = b.pawn.slice(0, i); tokenId = b.pawn.slice(i + 1);
+  }
+  if (!collection || tokenId === undefined || tokenId === null || `${tokenId}` === '') {
+    throw new HttpError(400, 'pawn required: pass { collection, tokenId } or { pawn: "0x..:id" }');
+  }
+  return { collection, tokenId, key: pawnKey(collection, tokenId) };
+}
+/** Verify (on-chain) the wallet OWNS the pawn it is moving/trading through. Throws HttpError(403). */
+async function assertOwns(player, collection, tokenId) {
+  let owner;
+  try { owner = await readPawnOwner(collection, tokenId); }
+  catch (e) { throw new HttpError(403, 'that pawn is not a recognized on-chain NFT (needs a wallet-owned pawn you hold)'); }
+  if (String(owner).toLowerCase() !== String(player).toLowerCase()) {
+    throw new HttpError(403, 'this pawn is not owned by the connected wallet — act only with pawns you own');
+  }
 }
 
 // ── THE RULE GATE (pure decision — no RPC, no signing; testable in isolation) ─────────────────
@@ -378,15 +458,30 @@ async function readPoolLocation(poolAddr) {
  * The gated attestation flow: resolve arrival → read pool location → RULE GATE → (only if at the
  * location) sign via location-signer.cjs. Returns { status, body }.
  */
-async function tradeAttest(playerRaw, poolRaw) {
+async function tradeAttest(playerRaw, collectionRaw, tokenId, poolRaw) {
   const player = normalizeAddr(playerRaw);
   const pool = ethers.getAddress(typeof poolRaw === 'string' ? poolRaw : ''); // throws on bad pool
-  const p = resolveArrival(player);
+
+  // Presence key: PER-PAWN when a pawn is given (verify the wallet OWNS it — the swap binds to the
+  // wallet, the presence is the pawn's), else LEGACY wallet-keyed (backward compat during rollout).
+  let key;
+  if (collectionRaw) {
+    let owner;
+    try { owner = await readPawnOwner(collectionRaw, tokenId); }
+    catch (e) { return { status: 403, body: { ok: false, pool, player, reason: 'that pawn is not a recognized on-chain NFT (trade-attest needs a wallet-owned pawn)' } }; }
+    if (String(owner).toLowerCase() !== player.toLowerCase()) {
+      return { status: 403, body: { ok: false, pool, player, reason: 'this pawn is not owned by the connected wallet — attest only with a pawn you own' } };
+    }
+    key = pawnKey(collectionRaw, tokenId);
+  } else {
+    key = addrKey(player); // legacy: wallet-keyed presence
+  }
+  const p = resolveArrival(key);
 
   const poolLocId = await readPoolLocation(pool);
   const gate = evaluateTradeGate(p, poolLocId);
   if (!gate.ok) {
-    return { status: gate.status, body: { ok: false, pool, player, poolLocation: poolLocId, reason: gate.reason } };
+    return { status: gate.status, body: { ok: false, pool, player, pawn: collectionRaw ? key : undefined, poolLocation: poolLocId, reason: gate.reason } };
   }
 
   // Gate passed → request the signature. signSwap RE-READS location() on-chain and signs the exact
@@ -460,7 +555,9 @@ function dockView({ port, player }) {
     locId = Number(port);
     if (!Number.isInteger(locId)) throw new HttpError(400, 'port must be a location id (q*1000+r, e.g. 8003)');
   } else if (player) {
-    const p = resolveArrival(normalizeAddr(player));
+    // legacy wallet-keyed dock lookup (prefer ?port= or ?pawn= under per-pawn). Keyed by addrKey so it
+    // stays consistent with any wallet-level record; pawns are the real location authority now.
+    const p = resolveArrival(addrKey(normalizeAddr(player)));
     if (atSea(p)) {
       const v = voyageView(p.voyage);
       return { ok: true, atSea: true, secsLeft: v.secsLeft, port: null, ships: [],
@@ -501,8 +598,8 @@ async function signOn({ player: playerRaw, collection, tokenId, ship: shipName }
   const pos = shipPos(ship);
   if (!pos.takingHands) return { status: 409, body: { ok: false, ship: ship.name, reason: `${ship.name} is not taking on hands right now` } };
 
-  // PRESENCE — the wallet must be AT the ship's current port (location authority), not mid-voyage.
-  const p = resolveArrival(player);
+  // PRESENCE — wallet-keyed during the per-pawn rollout (migrate to per-pawn with the client update).
+  const p = resolveArrival(addrKey(player));
   if (atSea(p)) {
     const v = voyageView(p.voyage);
     return { status: 403, body: { ok: false, ship: ship.name, reason: `you are at sea — you arrive in ~${v.secsLeft}s; sign on at ${ship.name}'s port` } };
@@ -1158,7 +1255,8 @@ async function harvestCatch({ player: playerRaw, collection: collRaw, tokenId, r
   }
 
   // 3) CO-LOCATION — the SAME rule gate the LocationPool swap uses (403 if not at the grounds / at sea).
-  const p = resolveArrival(player);
+  //    Legacy wallet-keyed during the per-pawn rollout (migrate to per-pawn with the client update).
+  const p = resolveArrival(addrKey(player));
   const gate = evaluateTradeGate(p, Number(g.location));
   if (!gate.ok) {
     return { status: gate.status, body: { ok: false, ground, resource: r.key, groundLocation: Number(g.location),
@@ -1272,15 +1370,16 @@ function deployInfo() {
 const ROUTES = [
   'GET  /                  — service info + route list',
   'GET  /seas/health       — liveness + signer/map status',
-  'GET  /seas/location?player=0x..        — authoritative location + in-progress voyage',
+  'GET  /seas/location?pawn=<coll>:<tid>  — authoritative PAWN location + in-progress voyage (legacy ?player=0x.. still answers)',
   'GET  /seas/dock?port=8003 | ?player=0x..   — DOCKSIDE board: ships "taking on hands" (rowing crews) at a port',
   'GET  /seas/aboard?pawn=<collection>:<tokenId>   — READ-ONLY: which ship a pawn has signed onto (null if none)',
   'POST /seas/sign-on  { player, collection, tokenId, ship } — put an OWNED pawn ABOARD a ship taking hands at YOUR port (403 not there / not owner, 404 unknown ship, 409 not taking hands). Mixed crew ok; job travels with the ship',
   'POST /seas/sign-off { player, collection, tokenId }       — leave the ship (409 if not aboard, 403 if not owner)',
   'POST /seas/forge-title  { player, collection, tokenId } — Rogues Guild gate (1-week rung) -> EXACT forge steps + stipend view',
   'POST /seas/harvest      { player, collection, tokenId, resource } — FREE skill+co-location CATCH (fish/crab/…): co-location gate → skill+live-supply → deterministic catch → on-chain cooldown → signed dispense ticket. 403 not there/not owner, 429 cooling, 503 signer/ground absent. No gold, no gear.',
-  'POST /seas/sail         { player, toHex:{q,r} }   — begin a server-clocked voyage',
-  'POST /seas/trade-attest { player, pool }          — RULE-GATED presence attestation (403 if not there / at sea)',
+  'POST /seas/sail         { player, pawn|collection+tokenId, toHex:{q,r} }   — move a PAWN you own on a server-clocked voyage',
+  'POST /seas/teleport     { player, pawn|collection+tokenId, toHex, secret? } — INSTANT move: dev-wizard (secret+allowlist) unlimited range; players range-capped (off until shipped)',
+  'POST /seas/trade-attest { player, pawn|collection+tokenId, pool } — RULE-GATED attestation: verifies you OWN the pawn AND it is AT the pool (403 if not there / at sea / not owner)',
   'POST /seas/issue-seed   { player, fight, collection?, tokenId? }       — pin a fight RNG seed + nonce (anti-grind); 429 if pawn cooling (cooldown kinds need collection+tokenId)',
   'POST /seas/verify-fight { player, nonce, playerTeam, playerActions }   — REPLAY the engine → authoritative { winner }; starts the server cooldown on a conclusive cooldown-kind run',
   'POST /seas/use-chrono-orb { player, collection, tokenId, action }      — DEBIT 1 server-attributed Chrono Orb → clear a server cooldown (skip the WAIT only; must still RUN+WIN). 402 no orb, 403 not owner, 409 not cooling',
@@ -1355,15 +1454,35 @@ async function handle(req, res) {
   }
 
   if (route === 'GET /seas/location') {
-    const player = normalizeAddr(u.searchParams.get('player'));
-    return sendJSON(res, 200, locationView(player));
+    // per-pawn: ?pawn=<collection>:<tokenId>. Legacy ?player=<addr> still answers (wallet-keyed record).
+    const pawnParam = u.searchParams.get('pawn');
+    const key = pawnParam ? pawnKeyFromStr(pawnParam) : addrKey(normalizeAddr(u.searchParams.get('player')));
+    return sendJSON(res, 200, locationView(key));
   }
 
   if (route === 'POST /seas/sail') {
     const body = await readBody(req);
     const player = normalizeAddr(body.player);
-    const voyage = doSail(player, body.toHex);
+    if (body.pawn || body.collection) {
+      const { collection, tokenId, key } = pawnFromBody(body);
+      await assertOwns(player, collection, tokenId);     // sail only a pawn you own
+      const voyage = doSail(key, body.toHex);
+      return sendJSON(res, 200, { ok: true, player, pawn: key, voyage });
+    }
+    // legacy (pre per-pawn): sail the WALLET's own record. Kept so existing clients don't break.
+    const voyage = doSail(addrKey(player), body.toHex);
     return sendJSON(res, 200, { ok: true, player, voyage });
+  }
+
+  if (route === 'POST /seas/teleport') {
+    const body = await readBody(req);
+    const player = normalizeAddr(body.player);
+    const { collection, tokenId, key } = pawnFromBody(body);
+    await assertOwns(player, collection, tokenId);       // teleport only a pawn you own
+    const isAdmin = !!ADMIN_SECRET && body.secret === ADMIN_SECRET && DEVWIZARDS.has(key);
+    if (body.secret && !isAdmin) return sendJSON(res, 403, { ok: false, reason: 'dev-wizard teleport: bad secret or pawn not on the dev-wizard allowlist' });
+    const view = doTeleport(key, body.toHex, isAdmin);
+    return sendJSON(res, 200, { ok: true, player, ...view });
   }
 
   if (route === 'GET /seas/dock') {
@@ -1388,7 +1507,13 @@ async function handle(req, res) {
 
   if (route === 'POST /seas/trade-attest') {
     const body = await readBody(req);
-    const result = await tradeAttest(body.player, body.pool);
+    if (body.pawn || body.collection) {                   // per-pawn: which pawn's presence authorizes this wallet
+      const { collection, tokenId } = pawnFromBody(body);
+      const result = await tradeAttest(body.player, collection, tokenId, body.pool);
+      return sendJSON(res, result.status, result.body);
+    }
+    // legacy: attest by WALLET location (no pawn). Kept for backward compat during the per-pawn rollout.
+    const result = await tradeAttest(body.player, null, null, body.pool);
     return sendJSON(res, result.status, result.body);
   }
 
@@ -1622,6 +1747,17 @@ async function selftest() {
     // 8) encode/decode round-trip sanity
     assert(encodeLoc({ q: 2, r: 2 }) === 2002, 'encodeLoc(2,2) == 2002');
     const d = decodeLoc(2002); assert(d.q === 2 && d.r === 2, 'decodeLoc(2002) == {2,2}');
+
+    // 8b) TELEPORT — dev-wizard (admin) jumps instantly at unlimited range; a player-tier teleport is
+    //     refused (range cap 0 by default = not shipped). Presence still gates trade afterward.
+    const prHex = { q: m.PORTS.port_royal.q, r: m.PORTS.port_royal.r };
+    const tp = doTeleport(player, prHex, true); // admin tier
+    assert(sameHex(tp.hex, prHex) && tp.atSea === false && tp.teleported === true, 'admin teleport lands instantly at target (unlimited range)');
+    assert(evaluateTradeGate(resolveArrival(player), encodeLoc(prHex)).ok === true, 'trade gate ALLOWS at the teleported-to location (8003)');
+    let tpThrew = false;
+    try { doTeleport(player, { q: m.PORTS.saltmarsh.q, r: m.PORTS.saltmarsh.r }, false); }
+    catch (e) { tpThrew = /not yet available|out of range/.test(e.message); }
+    assert(tpThrew, 'player-tier teleport refused (range cap 0 = not shipped)');
 
     // 9) COMBAT SETTLEMENT — issue-seed pins a server-random seed; verify-fight replays the engine
     console.log('\n[selftest] combat settlement (issue-seed + verify-fight):');
@@ -1867,8 +2003,8 @@ async function selftest() {
 module.exports = {
   // lifecycle
   init, startServer, createServer, setStoreFile, setNow,
-  // authority
-  getPlayer, resolveArrival, locationView, doSail, atSea,
+  // authority (per-pawn)
+  getLoc, resolveArrival, locationView, doSail, doTeleport, atSea,
   // gate + chain
   evaluateTradeGate, readPoolLocation, tradeAttest,
   // dockside sign-on + mixed-crew rowing

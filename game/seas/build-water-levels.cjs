@@ -13,7 +13,7 @@
 const fs = require('fs'); const path = require('path');
 const { ethers } = require('ethers');
 
-const RPC = process.env.KEEPER_RPC || 'https://base-mainnet.g.alchemy.com/v2/R0jSMqs90q_KV85ytn45H';
+const RPC = process.env.KEEPER_RPC || 'https://mainnet.base.org';
 const OUT = process.env.WATER_LEVELS_OUT || path.join(__dirname, 'water-levels.json'); // VPS cron → live web path
 
 // The 4 crew collections (pawns). 100 ids each (FeeShareDistributor).

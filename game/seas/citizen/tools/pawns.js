@@ -26,7 +26,8 @@ const gs = require('../../gap-scan.js');
 function out(o) { process.stdout.write(JSON.stringify(o, null, 2) + '\n'); }
 
 const TREASURY = '0xE2a4A8b9d77080c57799A94BA8eDeb2Dd6e0aC10'; // shared agent treasury — holds the Guard crew
-const ALCHEMY_NFT_BASE = 'https://base-mainnet.g.alchemy.com/nft/v3/R0jSMqs90q_KV85ytn45H';
+const ALCHEMY_NFT_BASE = process.env.ALCHEMY_NFT_BASE
+  || (() => { throw new Error('set ALCHEMY_NFT_BASE env (https://base-mainnet.g.alchemy.com/nft/v3/<key>)'); })();
 
 // The four ship crew distributors (from game/seas/crew/index.html — the live roster source).
 const SHIPS = [

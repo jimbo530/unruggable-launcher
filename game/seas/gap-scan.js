@@ -29,7 +29,7 @@ const fs = require('fs');
 const { ethers } = require('ethers');
 
 // ── chain / contracts ───────────────────────────────────────────────────────────────────────
-const RPC = process.env.CITIZEN_RPC || 'https://base-mainnet.g.alchemy.com/v2/R0jSMqs90q_KV85ytn45H';
+const RPC = process.env.CITIZEN_RPC || 'https://mainnet.base.org';
 const CHAIN_ID = 8453;
 const QUOTER = '0x3d4e44Eb1374240CE5F1B871ab261CD16335B76a'; // Uniswap V3 QuoterV2
 

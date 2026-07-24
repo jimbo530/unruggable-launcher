@@ -21,7 +21,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 
-const RPC = process.env.BASE_RPC || 'https://base-mainnet.g.alchemy.com/v2/R0jSMqs90q_KV85ytn45H';
+const RPC = process.env.BASE_RPC || 'https://mainnet.base.org';
 const CHAIN_ID = 8453n;
 const SIGNER_ENV = path.join(os.homedir(), '.seas-location-signer.env');
 const TTL_SECS = Number(process.env.ATTEST_TTL || 300);   // attestations expire in 5 min by default

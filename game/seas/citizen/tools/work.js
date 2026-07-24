@@ -36,7 +36,8 @@ const jobsLib = require('../lib/jobs.js');
 
 function out(o) { process.stdout.write(JSON.stringify(o, null, 2) + '\n'); }
 
-const ALCHEMY_NFT_BASE = 'https://base-mainnet.g.alchemy.com/nft/v3/R0jSMqs90q_KV85ytn45H';
+const ALCHEMY_NFT_BASE = process.env.ALCHEMY_NFT_BASE
+  || (() => { throw new Error('set ALCHEMY_NFT_BASE env (https://base-mainnet.g.alchemy.com/nft/v3/<key>)'); })();
 
 /** Parse "distributor:tokenId" → { collection, tokenId } (checksummed). Throws on garbage. */
 function parsePawn(s) {
